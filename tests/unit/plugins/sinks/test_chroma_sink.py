@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import create_autospec, patch
 
+import chromadb
 import pytest
+from chromadb.api import ClientAPI
 
 from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.errors import AuditIntegrityError, DuplicateDocumentError
@@ -35,7 +37,21 @@ def _make_config(**overrides: Any) -> dict[str, Any]:
     return config
 
 
-def _make_sink_with_collection(mock_collection: MagicMock, **config_overrides: Any) -> ChromaSink:
+def _telemetry_emit(event: Any) -> None:
+    """Function spec for telemetry emit interactions."""
+
+
+def _make_chroma_collection_double() -> Any:
+    """Create a Chroma collection double specced to the SDK collection API."""
+    return create_autospec(chromadb.Collection, instance=True, spec_set=True)
+
+
+def _make_chroma_client_double() -> Any:
+    """Create a Chroma client double specced to the SDK client API."""
+    return create_autospec(ClientAPI, instance=True, spec_set=True)
+
+
+def _make_sink_with_collection(mock_collection: Any, **config_overrides: Any) -> ChromaSink:
     """Create a ChromaSink with a pre-set mock collection (skips on_start)."""
     sink = inject_write_failure(ChromaSink(_make_config(**config_overrides)))
     sink._collection = mock_collection
@@ -72,13 +88,21 @@ class TestChromaSinkCompletionTelemetry:
 
     def test_telemetry_failure_does_not_fail_completion(self) -> None:
         sink = ChromaSink(_make_config())
-        sink._telemetry_emit = MagicMock(spec_set=lambda *args, **kwargs: None, side_effect=RuntimeError("telemetry transport down"))
+        sink._telemetry_emit = create_autospec(
+            _telemetry_emit,
+            side_effect=RuntimeError("telemetry transport down"),
+            spec_set=True,
+        )
         sink.on_complete(_make_lifecycle_ctx())  # must not raise
         sink._telemetry_emit.assert_called_once()
 
     def test_tier1_error_during_telemetry_propagates(self) -> None:
         sink = ChromaSink(_make_config())
-        sink._telemetry_emit = MagicMock(side_effect=AuditIntegrityError("audit corruption during emit"))
+        sink._telemetry_emit = create_autospec(
+            _telemetry_emit,
+            side_effect=AuditIntegrityError("audit corruption during emit"),
+            spec_set=True,
+        )
         with pytest.raises(AuditIntegrityError):
             sink.on_complete(_make_lifecycle_ctx())
 
@@ -89,9 +113,9 @@ class TestChromaSinkOnStart:
         ctx = _make_lifecycle_ctx()
 
         with patch("elspeth.plugins.sinks.chroma_sink.chromadb") as mock_chromadb:
-            mock_client = MagicMock()
+            mock_client = _make_chroma_client_double()
             mock_chromadb.PersistentClient.return_value = mock_client
-            mock_client.get_or_create_collection.return_value = MagicMock()
+            mock_client.get_or_create_collection.return_value = _make_chroma_collection_double()
 
             sink.on_start(ctx)
 
@@ -118,9 +142,9 @@ class TestChromaSinkOnStart:
         ctx = _make_lifecycle_ctx()
 
         with patch("elspeth.plugins.sinks.chroma_sink.chromadb") as mock_chromadb:
-            mock_client = MagicMock()
+            mock_client = _make_chroma_client_double()
             mock_chromadb.HttpClient.return_value = mock_client
-            mock_client.get_or_create_collection.return_value = MagicMock()
+            mock_client.get_or_create_collection.return_value = _make_chroma_collection_double()
 
             sink.on_start(ctx)
 
@@ -144,7 +168,7 @@ class TestChromaSinkOnStart:
 
 class TestChromaSinkWriteOverwrite:
     def test_upserts_rows_with_correct_mapping(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         ctx = _make_sink_ctx()
@@ -167,7 +191,7 @@ class TestChromaSinkWriteOverwrite:
         assert result is not None
 
     def test_records_audit_call(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         ctx = _make_mock_audit_ctx()
@@ -180,7 +204,7 @@ class TestChromaSinkWriteOverwrite:
         assert call_kwargs["call_type"] is CallType.VECTOR
 
     def test_returns_artifact_with_content_hash(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         ctx = _make_sink_ctx()
@@ -192,7 +216,7 @@ class TestChromaSinkWriteOverwrite:
         assert len(result.artifact.content_hash) == 64  # SHA-256 hex
 
     def test_empty_rows_returns_empty_artifact(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         ctx = _make_sink_ctx()
@@ -206,7 +230,7 @@ class TestChromaSinkWriteOverwrite:
 
 class TestChromaSinkWriteSkip:
     def test_skip_filters_existing_ids(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
 
@@ -224,7 +248,7 @@ class TestChromaSinkWriteSkip:
         assert add_kwargs["documents"] == ["New"]
 
     def test_skip_all_existing_does_not_call_add(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1", "d2"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
 
@@ -240,7 +264,7 @@ class TestChromaSinkWriteSkip:
 
     def test_skip_audit_records_actual_rows_written(self) -> None:
         """Skip mode must record only the rows actually sent to ChromaDB."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
 
@@ -271,7 +295,7 @@ class TestChromaSinkWriteSkip:
 
     def test_skip_content_hash_reflects_actual_payload(self) -> None:
         """Hash must be over the subset actually sent, not the full batch."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
 
@@ -283,7 +307,7 @@ class TestChromaSinkWriteSkip:
         skip_artifact = sink.write(rows, ctx)
 
         # Write only d2 in overwrite mode — should produce the same hash
-        mock_collection2 = MagicMock()
+        mock_collection2 = _make_chroma_collection_double()
         sink2 = _make_sink_with_collection(mock_collection2)
         ctx2 = _make_sink_ctx()
         overwrite_artifact = sink2.write([{"doc_id": "d2", "text": "New", "topic": "t"}], ctx2)
@@ -293,7 +317,7 @@ class TestChromaSinkWriteSkip:
 
 class TestChromaSinkWriteError:
     def test_error_mode_raises_on_duplicates(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1", "d3"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
 
@@ -321,7 +345,7 @@ class TestChromaSinkWriteError:
         sub-batch — that would leave a partial external write with no success
         audit. The full batch is duplicate-checked before any collection.add().
         """
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d2"]}  # d2 already exists
         sink = _make_sink_with_collection(mock_collection, on_duplicate="error", schema={"mode": "observed"})
 
@@ -340,7 +364,7 @@ class TestChromaSinkWriteError:
         mock_collection.add.assert_not_called()
 
     def test_error_mode_succeeds_when_no_duplicates(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": []}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
 
@@ -353,7 +377,7 @@ class TestChromaSinkWriteError:
         assert result is not None
 
     def test_error_mode_records_audit_before_raising(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
 
@@ -372,7 +396,7 @@ class TestChromaSinkWriteError:
 
     def test_duplicate_ids_stored_as_tuple(self) -> None:
         """DuplicateDocumentError.duplicate_ids must be immutable."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": ["d1"]}
         sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
 
@@ -385,7 +409,7 @@ class TestChromaSinkWriteError:
 
 class TestChromaSinkAuditIntegrity:
     def test_audit_recording_failure_raises_audit_integrity_error(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         ctx = _make_sink_ctx()
@@ -415,7 +439,7 @@ class TestChromaSinkAuditIntegrity:
         """
         from elspeth.plugins.sinks.chroma_sink import _ChromaPayloadRejection
 
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.upsert.side_effect = ValueError("Expected str, int, float or bool, got dict")
         sink = _make_sink_with_collection(mock_collection)
 
@@ -435,7 +459,7 @@ class TestChromaSinkAuditIntegrity:
         """If error-path record_call also fails, AuditIntegrityError is raised."""
         import chromadb.errors
 
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.upsert.side_effect = chromadb.errors.ChromaError("write failed")  # type: ignore[abstract]
         sink = _make_sink_with_collection(mock_collection)
 
@@ -456,7 +480,7 @@ class TestChromaSinkAuditIntegrity:
 
 class TestChromaSinkFlush:
     def test_flush_is_noop(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         sink.flush()
@@ -466,9 +490,9 @@ class TestChromaSinkFlush:
 
 class TestChromaSinkClose:
     def test_close_releases_resources(self) -> None:
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
-        mock_client = MagicMock()
+        mock_client = _make_chroma_client_double()
         sink._client = mock_client
 
         sink.close()
@@ -483,7 +507,7 @@ class TestChromaSinkMetadataTypeValidation:
 
     def test_valid_scalar_types_pass(self) -> None:
         """str, int, float, bool metadata values are accepted."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={
                 "document_field": "text",
@@ -513,7 +537,7 @@ class TestChromaSinkMetadataTypeValidation:
 
     def test_none_metadata_value_passes(self) -> None:
         """None is a valid ChromaDB metadata value."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
 
         ctx = _make_sink_ctx()
@@ -524,7 +548,7 @@ class TestChromaSinkMetadataTypeValidation:
 
     def test_invalid_type_filtered_and_diverted(self) -> None:
         """Rows with non-scalar metadata are diverted, not sent to ChromaDB."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -549,7 +573,7 @@ class TestChromaSinkMetadataTypeValidation:
 
     def test_all_rows_rejected_returns_zero_write(self) -> None:
         """When ALL rows have bad metadata, return zero-write artifact with diversions."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -583,7 +607,7 @@ class TestChromaSinkMetadataTypeValidation:
     )
     def test_diversion_reason_includes_type_name(self, bad_value: Any, expected_type_name: str) -> None:
         """Diversion reason records the actual type name for diagnosis."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -597,7 +621,7 @@ class TestChromaSinkMetadataTypeValidation:
 
     def test_no_metadata_fields_skips_validation(self) -> None:
         """When metadata_fields is empty, no validation needed (metadatas=None)."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": []},
         )
@@ -616,7 +640,7 @@ class TestChromaSinkRequiredFieldTypeValidation:
 
     def test_observed_schema_non_string_required_fields_are_diverted(self) -> None:
         """Observed schemas defer typing, so bad id/document values must divert per row."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": []},
             schema={"mode": "observed"},
@@ -651,7 +675,7 @@ class TestChromaSinkDivertRow:
 
     def test_invalid_metadata_diverted(self) -> None:
         """Rows with non-primitive metadata types are diverted via _divert_row()."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -677,7 +701,7 @@ class TestChromaSinkDivertRow:
 
     def test_all_valid_no_diversions(self) -> None:
         """When all rows have valid metadata, no diversions are recorded."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -693,7 +717,7 @@ class TestChromaSinkDivertRow:
 
     def test_all_invalid_all_diverted(self) -> None:
         """When all rows have bad metadata, all are diverted and nothing written."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -724,7 +748,7 @@ class TestChromaSinkNonFiniteMetadata:
     @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
     def test_non_finite_metadata_diverted(self, bad_value: float) -> None:
         """Row with non-finite float metadata is diverted, valid rows still written."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -749,7 +773,7 @@ class TestChromaSinkNonFiniteMetadata:
     @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
     def test_all_non_finite_metadata_returns_zero_write(self, bad_value: float) -> None:
         """When all rows have non-finite metadata, nothing is sent to ChromaDB."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         sink = _make_sink_with_collection(mock_collection)
         sink._on_write_failure = "csv_failsink"
 
@@ -769,7 +793,7 @@ class TestChromaSinkEmptyMetadata:
 
     def test_all_metadata_fields_absent_single_row(self) -> None:
         """A row missing ALL configured metadata fields must not produce {}."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={
                 "document_field": "text",
@@ -802,7 +826,7 @@ class TestChromaSinkEmptyMetadata:
 
     def test_mixed_batch_metadata_present_and_absent(self) -> None:
         """Batch with some rows having metadata and others not — both are written."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={
                 "document_field": "text",
@@ -850,7 +874,7 @@ class TestChromaSinkEmptyMetadata:
         be replayed to verify the actual calls. The faithful aggregate aligns
         metadatas to ids with None for no-metadata rows.
         """
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": ["topic"]},
             schema={"mode": "flexible", "fields": ["doc_id: str", "text: str", "topic: str"]},
@@ -869,7 +893,7 @@ class TestChromaSinkEmptyMetadata:
 
     def test_all_metadata_fields_absent_skip_mode(self) -> None:
         """Skip mode works correctly when metadata fields are absent."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": []}
         config = _make_config(
             field_mapping={
@@ -899,7 +923,7 @@ class TestChromaSinkEmptyMetadata:
 
     def test_all_metadata_fields_absent_error_mode(self) -> None:
         """Error mode works correctly when metadata fields are absent."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         mock_collection.get.return_value = {"ids": []}
         config = _make_config(
             field_mapping={
@@ -928,7 +952,7 @@ class TestChromaSinkEmptyMetadata:
 
     def test_partial_metadata_fields_not_empty(self) -> None:
         """Row with SOME metadata fields present produces a non-empty dict (not affected)."""
-        mock_collection = MagicMock()
+        mock_collection = _make_chroma_collection_double()
         config = _make_config(
             field_mapping={
                 "document_field": "text",

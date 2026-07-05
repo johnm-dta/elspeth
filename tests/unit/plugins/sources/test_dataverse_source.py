@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -96,101 +97,187 @@ def _make_page(
     )
 
 
-def _mock_lifecycle_context(run_id: str = "test-run-123") -> MagicMock:
-    """Build a mock LifecycleContext for on_start()."""
-    ctx = MagicMock()
-    ctx.run_id = run_id
-    ctx.telemetry_emit = MagicMock()
-    ctx.rate_limit_registry = None
-    return ctx
+@dataclass(frozen=True, slots=True)
+class _RecordedCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
 
 
-def _mock_source_context() -> MagicMock:
-    """Build a mock SourceContext for load()."""
-    ctx = MagicMock()
-    ctx.record_call = MagicMock()
-    ctx.record_validation_error = MagicMock()
-    return ctx
+class _CallRecorder:
+    """Minimal callable test double exposing the call assertions used here."""
+
+    def __init__(self, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args=args, kwargs=dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        if callable(self.side_effect):
+            return self.side_effect(*args, **kwargs)
+        result = next(self.side_effect)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        if self.call_count != 1:
+            raise AssertionError(f"Expected 1 call, got {self.call_count}")
+
+    def assert_not_called(self) -> None:
+        if self.call_count != 0:
+            raise AssertionError(f"Expected no calls, got {self.call_count}")
+
+
+@dataclass(slots=True)
+class _LifecycleContextFake:
+    run_id: str = "test-run-123"
+    node_id: str | None = "source-node"
+    operation_id: str | None = "op-001"
+    landscape: Any = None
+    payload_store: Any = None
+    rate_limit_registry: Any = None
+    telemetry_emit: _CallRecorder = field(default_factory=_CallRecorder)
+    concurrency_config: Any = None
+    shutdown_event: Any = None
+
+
+@dataclass(slots=True)
+class _SourceContextFake:
+    run_id: str = "test-run-123"
+    node_id: str | None = "source-node"
+    operation_id: str | None = "op-001"
+    landscape: Any = None
+    telemetry_emit: _CallRecorder = field(default_factory=_CallRecorder)
+    record_call: _CallRecorder = field(default_factory=_CallRecorder)
+    record_validation_error: _CallRecorder = field(default_factory=_CallRecorder)
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedRow:
+    row: dict[str, Any]
+
+    def to_row(self) -> dict[str, Any]:
+        return dict(self.row)
+
+
+@dataclass(frozen=True, slots=True)
+class _CredentialToken:
+    token: str = "test-token"
+
+
+class _CredentialFake:
+    def get_token(self, *_args: Any, **_kwargs: Any) -> _CredentialToken:
+        return _CredentialToken()
+
+
+class _DataverseClientFake:
+    def __init__(
+        self,
+        *,
+        metadata_page: DataversePageResponse | None = None,
+        odata_pages: list[DataversePageResponse] | None = None,
+        fetchxml_pages: list[DataversePageResponse] | None = None,
+    ) -> None:
+        self.get_page = _CallRecorder(return_value=metadata_page or _make_metadata_page("contacts"))
+        self.paginate_odata = _CallRecorder(return_value=iter(odata_pages or []))
+        self.paginate_fetchxml = _CallRecorder(return_value=iter(fetchxml_pages or []))
+        self.get_auth_headers = _CallRecorder(return_value={"Authorization": "Bearer test"})
+        self.reconstruct_credential = _CallRecorder()
+        self.close = _CallRecorder()
+
+
+class _OperationLandscapeFake:
+    def __init__(self) -> None:
+        self.record_operation_call = _CallRecorder(
+            return_value=SimpleNamespace(
+                request_hash="req-hash",
+                response_hash="resp-hash",
+            )
+        )
+
+
+def _make_metadata_page(entity: str, url: str | None = None) -> DataversePageResponse:
+    request_url = url or f"{VALID_ENV_URL}/api/data/v9.2/EntityDefinitions(LogicalName='{entity}')?$select=LogicalName"
+    return DataversePageResponse(
+        status_code=200,
+        rows=[{"LogicalName": entity}],
+        latency_ms=5.0,
+        headers={"content-type": "application/json"},
+        request_headers={"Authorization": "<fingerprint:test-fake>"},
+        request_url=request_url,
+        next_link=None,
+        paging_cookie=None,
+        more_records=None,
+    )
+
+
+def _schema_class(validate: Callable[[dict[str, Any]], Any]) -> type[Any]:
+    class _Schema:
+        @staticmethod
+        def model_validate(row: dict[str, Any]) -> Any:
+            return validate(row)
+
+    return _Schema
+
+
+def _mock_lifecycle_context(run_id: str = "test-run-123") -> _LifecycleContextFake:
+    """Build a LifecycleContext fake for on_start()."""
+    return _LifecycleContextFake(run_id=run_id)
+
+
+def _mock_source_context() -> _SourceContextFake:
+    """Build a SourceContext fake for load()."""
+    return _SourceContextFake()
 
 
 def _plugin_context_for_operation_calls(*, telemetry_emit: Any) -> Any:
     """Build a real PluginContext configured for source operation call recording."""
     from elspeth.contracts.plugin_context import PluginContext
 
-    landscape = MagicMock()
-    landscape.record_operation_call.return_value = SimpleNamespace(
-        request_hash="req-hash",
-        response_hash="resp-hash",
-    )
-
     return PluginContext(
         run_id="test-run-123",
         config={},
-        landscape=landscape,
+        landscape=_OperationLandscapeFake(),
         node_id="source-node",
         operation_id="op-001",
         telemetry_emit=telemetry_emit,
     )
 
 
-def _make_source(config: dict[str, Any]) -> Any:
-    """Create a DataverseSource with patched dependencies.
+def _client_secret_credential_factory(*_args: Any, **_kwargs: Any) -> _CredentialFake:
+    return _CredentialFake()
 
-    The constructor imports ContractBuilder and create_contract_from_config
-    lazily, so we patch them at their origin modules.
-    """
+
+def _dataverse_client_factory(client: _DataverseClientFake) -> Callable[..., _DataverseClientFake]:
+    def factory(*_args: Any, **_kwargs: Any) -> _DataverseClientFake:
+        return client
+
+    return factory
+
+
+def _make_source(config: dict[str, Any]) -> Any:
+    """Create a DataverseSource with real schema and contract collaborators."""
     from elspeth.plugins.sources.dataverse import DataverseSource
 
-    mock_contract = MagicMock()
-    mock_contract.locked = True
-
-    mock_contract_unlocked = MagicMock()
-    mock_contract_unlocked.locked = False
-    mock_contract_unlocked.with_locked.return_value = mock_contract
-
-    with (
-        patch(
-            "elspeth.plugins.sources.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
-        ),
-        patch(
-            "elspeth.contracts.schema_contract_factory.create_contract_from_config",
-            return_value=mock_contract,
-        ),
-    ):
-        return DataverseSource(config)
+    return DataverseSource(config)
 
 
 def _make_source_unlocked(config: dict[str, Any]) -> Any:
     """Create a DataverseSource with an unlocked contract (for contract builder tests)."""
-    from elspeth.plugins.sources.dataverse import DataverseSource
-
-    mock_contract = MagicMock()
-    mock_contract.locked = False
-    mock_contract.with_locked.return_value = MagicMock()
-
-    mock_schema_cls = MagicMock()
-
-    def mock_validate(row: dict[str, Any]) -> MagicMock:
-        m = MagicMock()
-        m.to_row.return_value = dict(row)
-        return m
-
-    mock_schema_cls.model_validate = mock_validate
-
-    with (
-        patch(
-            "elspeth.plugins.sources.dataverse.create_schema_from_config",
-            return_value=mock_schema_cls,
-        ),
-        patch(
-            "elspeth.contracts.schema_contract_factory.create_contract_from_config",
-            return_value=mock_contract,
-        ),
-    ):
-        source = DataverseSource(config)
-
-    return source
+    return _make_source(config)
 
 
 def _make_source_for_load(
@@ -199,61 +286,31 @@ def _make_source_for_load(
     *,
     schema_validate_side_effect: Any = None,
 ) -> Any:
-    """Create DataverseSource for load() tests with mocked client and schema."""
+    """Create DataverseSource for load() tests with a fake client."""
     from elspeth.plugins.sources.dataverse import DataverseSource
 
-    mock_contract = MagicMock()
-    mock_contract.locked = False
-    mock_contract.with_locked.return_value = MagicMock()
-
-    mock_schema_cls = MagicMock()
-
     if schema_validate_side_effect is not None:
-        mock_schema_cls.model_validate = schema_validate_side_effect
-    else:
-
-        def mock_validate(row: dict[str, Any]) -> MagicMock:
-            m = MagicMock()
-            m.to_row.return_value = dict(row)
-            return m
-
-        mock_schema_cls.model_validate = mock_validate
-
-    with (
-        patch(
+        schema_cls = _schema_class(schema_validate_side_effect)
+        with patch(
             "elspeth.plugins.sources.dataverse.create_schema_from_config",
-            return_value=mock_schema_cls,
-        ),
-        patch(
-            "elspeth.contracts.schema_contract_factory.create_contract_from_config",
-            return_value=mock_contract,
-        ),
-    ):
+            return_value=schema_cls,
+        ):
+            source = DataverseSource(config)
+    else:
         source = DataverseSource(config)
 
-    # Inject mock client
-    mock_client = MagicMock()
     if source._entity is not None:
         metadata_url = (
             f"{source._environment_url.rstrip('/')}/api/data/{source._api_version}/"
             f"EntityDefinitions(LogicalName='{source._entity}')?$select=LogicalName"
         )
-        mock_client.get_page.return_value = DataversePageResponse(
-            status_code=200,
-            rows=[{"LogicalName": source._entity}],
-            latency_ms=5.0,
-            headers={"content-type": "application/json"},
-            request_headers={"Authorization": "<fingerprint:test-fake>"},
-            request_url=metadata_url,
-            next_link=None,
-            paging_cookie=None,
-            more_records=None,
+        client = _DataverseClientFake(
+            metadata_page=_make_metadata_page(source._entity, metadata_url),
+            odata_pages=pages,
         )
-        mock_client.paginate_odata.return_value = iter(pages)
     else:
-        mock_client.paginate_fetchxml.return_value = iter(pages)
-    mock_client.get_auth_headers.return_value = {"Authorization": "Bearer test"}
-    source._client = mock_client
+        client = _DataverseClientFake(fetchxml_pages=pages)
+    source._client = client
 
     return source
 
@@ -261,47 +318,28 @@ def _make_source_for_load(
 def _make_source_for_start_and_load(
     config: dict[str, Any],
     *,
-    mock_client: MagicMock,
+    mock_client: _DataverseClientFake,
     schema_validate_side_effect: Any = None,
 ) -> Any:
     """Create DataverseSource for lifecycle + load() tests with a patched client."""
     from elspeth.plugins.sources.dataverse import DataverseSource
 
-    mock_contract = MagicMock()
-    mock_contract.locked = False
-    mock_contract.with_locked.return_value = MagicMock()
-
-    mock_schema_cls = MagicMock()
-
     if schema_validate_side_effect is not None:
-        mock_schema_cls.model_validate = schema_validate_side_effect
-    else:
-
-        def mock_validate(row: dict[str, Any]) -> MagicMock:
-            m = MagicMock()
-            m.to_row.return_value = dict(row)
-            return m
-
-        mock_schema_cls.model_validate = mock_validate
-
-    with (
-        patch(
+        schema_cls = _schema_class(schema_validate_side_effect)
+        with patch(
             "elspeth.plugins.sources.dataverse.create_schema_from_config",
-            return_value=mock_schema_cls,
-        ),
-        patch(
-            "elspeth.contracts.schema_contract_factory.create_contract_from_config",
-            return_value=mock_contract,
-        ),
-    ):
+            return_value=schema_cls,
+        ):
+            source = DataverseSource(config)
+    else:
         source = DataverseSource(config)
 
     lifecycle_ctx = _mock_lifecycle_context()
     with (
-        patch("azure.identity.ClientSecretCredential", return_value=MagicMock()),
+        patch("azure.identity.ClientSecretCredential", new=_client_secret_credential_factory),
         patch(
             "elspeth.plugins.sources.dataverse.DataverseClient",
-            return_value=mock_client,
+            new=_dataverse_client_factory(mock_client),
         ),
     ):
         source.on_start(lifecycle_ctx)
@@ -715,14 +753,15 @@ class TestDataverseSourceConstruction:
         assert source._client is None
 
         lifecycle_ctx = _mock_lifecycle_context()
-        mock_client = MagicMock()
+        mock_client = _DataverseClientFake()
 
         with (
-            patch("azure.identity.ClientSecretCredential") as mock_cred,
-            patch("elspeth.plugins.sources.dataverse.DataverseClient") as mock_client_cls,
+            patch("azure.identity.ClientSecretCredential", new=_client_secret_credential_factory),
+            patch(
+                "elspeth.plugins.sources.dataverse.DataverseClient",
+                new=_dataverse_client_factory(mock_client),
+            ),
         ):
-            mock_cred.return_value = MagicMock()
-            mock_client_cls.return_value = mock_client
             source.on_start(lifecycle_ctx)
 
         assert source._client is not None
@@ -740,7 +779,7 @@ class TestDataverseSourceConstruction:
 
     def test_load_metadata_probe_404_raises_descriptive_error(self) -> None:
         """404 metadata probe is audited and raises a descriptive entity-not-found error."""
-        mock_client = MagicMock()
+        mock_client = _DataverseClientFake()
         mock_client.get_page.side_effect = DataverseClientError(
             "Not Found",
             retryable=False,
@@ -762,13 +801,12 @@ class TestDataverseSourceConstruction:
 
     def test_load_metadata_probe_403_records_error_and_continues(self) -> None:
         """403 metadata probe is audited but remains non-fatal to the load."""
-        mock_client = MagicMock()
+        mock_client = _DataverseClientFake(odata_pages=[_make_page([{"contactid": "1", "fullname": "Alice"}])])
         mock_client.get_page.side_effect = DataverseClientError(
             "Forbidden",
             retryable=False,
             status_code=403,
         )
-        mock_client.paginate_odata.return_value = iter([_make_page([{"contactid": "1", "fullname": "Alice"}])])
         source = _make_source_for_start_and_load(
             _base_config(),
             mock_client=mock_client,
@@ -790,7 +828,7 @@ class TestDataverseSourceConstruction:
             retryable=True,
             status_code=500,
         )
-        mock_client = MagicMock()
+        mock_client = _DataverseClientFake()
         mock_client.get_page.side_effect = original_error
         source = _make_source_for_start_and_load(
             _base_config(),
@@ -996,9 +1034,10 @@ class TestDataverseSourceLoadStructured:
         )
         data_page = _make_page([{"contactid": "1", "fullname": "Alice"}])
 
-        mock_client = MagicMock()
-        mock_client.get_page.return_value = metadata_page
-        mock_client.paginate_odata.return_value = iter([data_page])
+        mock_client = _DataverseClientFake(
+            metadata_page=metadata_page,
+            odata_pages=[data_page],
+        )
 
         source = _make_source_for_start_and_load(
             _base_config(),
@@ -1164,7 +1203,7 @@ class TestDataverseSourceLoadStructured:
 
         call_count = 0
 
-        def sometimes_failing_validate(row: dict[str, Any]) -> MagicMock:
+        def sometimes_failing_validate(row: dict[str, Any]) -> _ValidatedRow:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
@@ -1178,9 +1217,7 @@ class TestDataverseSourceLoadStructured:
                         }
                     ],
                 )
-            m = MagicMock()
-            m.to_row.return_value = dict(row)
-            return m
+            return _ValidatedRow(dict(row))
 
         pages = [
             _make_page(
@@ -1370,17 +1407,9 @@ class TestSchemaContractLocking:
 
         pages = [_make_page([{"a": 1}, {"a": 2, "b": "new"}])]
 
-        with patch(
-            "elspeth.plugins.sources.dataverse.create_schema_from_config",
-            return_value=MagicMock(
-                model_validate=lambda row: MagicMock(to_row=lambda: dict(row)),
-            ),
-        ):
-            source = DataverseSource(_fetchxml_config(schema={"mode": "observed"}))
+        source = DataverseSource(_fetchxml_config(schema={"mode": "observed"}))
 
-        mock_client = MagicMock()
-        mock_client.paginate_fetchxml.return_value = iter(pages)
-        source._client = mock_client
+        source._client = _DataverseClientFake(fetchxml_pages=pages)
 
         rows = list(source.load(_mock_source_context()))
 
@@ -1447,7 +1476,7 @@ class TestDataverseSourceClose:
     def test_close_releases_client(self) -> None:
         """close() calls client.close() and sets client to None."""
         source = _make_source(_base_config())
-        mock_client = MagicMock()
+        mock_client = _DataverseClientFake()
         source._client = mock_client
 
         source.close()
@@ -1472,8 +1501,7 @@ class TestRecordPageCall:
 
     def _make_source_with_client(self) -> Any:
         source = _make_source(_base_config())
-        source._client = MagicMock()
-        source._client.get_auth_headers.return_value = {"Authorization": "Bearer test"}
+        source._client = _DataverseClientFake()
         return source
 
     def test_record_success(self) -> None:
@@ -1610,13 +1638,10 @@ class TestNormalizeFieldQuarantine:
         source = _make_source(_base_config())
         ctx = _mock_source_context()
 
-        # Mock client to return a page with a problematic field
-        mock_client = MagicMock()
-        source._client = mock_client
-
-        # Page with a row that has an unnormalizable field name
+        # Fake client returns a page with a problematic field.
         page = _make_page([{"!!!": "trash-field-name"}])
-        mock_client.paginate_odata.return_value = iter([page])
+        mock_client = _DataverseClientFake(odata_pages=[page])
+        source._client = mock_client
 
         rows = list(source.load(ctx))
 
@@ -1667,8 +1692,7 @@ class TestAuditUrlPerPage:
 
     def _make_source_with_client(self) -> Any:
         source = _make_source(_base_config())
-        source._client = MagicMock()
-        source._client.get_auth_headers.return_value = {"Authorization": "Bearer test"}
+        source._client = _DataverseClientFake()
         return source
 
 

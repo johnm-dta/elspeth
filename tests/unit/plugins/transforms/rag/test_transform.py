@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from elspeth.contracts.errors import RetrievalNotReadyError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
+from elspeth.core.security.web import SSRFSafeRequest
+from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError, RetrievalProvider
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 from elspeth.plugins.transforms.rag.transform import RAGRetrievalTransform
 
@@ -38,26 +40,169 @@ def _make_transform(**overrides: Any) -> RAGRetrievalTransform:
     return RAGRetrievalTransform(config)
 
 
-def _mock_ctx(state_id: str = "state-1", token_id: str = "token-1") -> MagicMock:
-    """Create a mock TransformContext."""
-    ctx = MagicMock()
-    ctx.state_id = state_id
-    ctx.run_id = "run-1"
-    token = MagicMock()
-    token.token_id = token_id
-    ctx.token = token
-    ctx.contract = MagicMock()
-    return ctx
+@dataclass
+class _TokenRecord:
+    token_id: str
 
 
-def _mock_lifecycle_ctx() -> MagicMock:
-    """Create a mock LifecycleContext."""
-    ctx = MagicMock()
-    ctx.run_id = "run-1"
-    ctx.landscape = MagicMock()
-    ctx.telemetry_emit = MagicMock()
-    ctx.rate_limit_registry = None
-    return ctx
+@dataclass
+class _TransformContextFake:
+    state_id: str | None = "state-1"
+    token: _TokenRecord | None = field(default_factory=lambda: _TokenRecord("token-1"))
+    run_id: str = "run-1"
+    contract: SchemaContract | None = None
+    node_id: str | None = None
+    batch_token_ids: tuple[str, ...] | None = None
+    aggregation_batch: Any | None = None
+    shutdown_event: Any | None = None
+
+    def record_call(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+@dataclass
+class _TelemetrySinkFake:
+    payloads: list[Any] = field(default_factory=list)
+
+    def __call__(self, payload: Any) -> None:
+        self.payloads.append(payload)
+
+
+@dataclass
+class _LandscapeRecorderFake:
+    readiness_checks: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_readiness_check(
+        self,
+        run_id: str,
+        *,
+        name: str,
+        collection: str,
+        reachable: bool,
+        count: int | None,
+        message: str,
+    ) -> None:
+        self.readiness_checks.append(
+            {
+                "run_id": run_id,
+                "name": name,
+                "collection": collection,
+                "reachable": reachable,
+                "count": count,
+                "message": message,
+            }
+        )
+
+
+@dataclass
+class _LifecycleContextFake:
+    run_id: str = "run-1"
+    landscape: _LandscapeRecorderFake | None = field(default_factory=_LandscapeRecorderFake)
+    telemetry_emit: _TelemetrySinkFake = field(default_factory=_TelemetrySinkFake)
+    rate_limit_registry: None = None
+    node_id: str | None = None
+    operation_id: str | None = None
+    payload_store: None = None
+    concurrency_config: None = None
+    shutdown_event: None = None
+
+
+class _ProviderConfigFake:
+    def __init__(self, **kwargs: Any) -> None:
+        self.index = kwargs.get("index", "test-index")
+
+
+@dataclass
+class _ProviderFactoryFake:
+    provider: RetrievalProvider | None = None
+    error: RetrievalError | None = None
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(self, provider_config: Any, **kwargs: Any) -> RetrievalProvider:
+        self.calls.append({"provider_config": provider_config, **kwargs})
+        if self.error is not None:
+            raise self.error
+        assert self.provider is not None
+        return self.provider
+
+
+@dataclass
+class _RetrievalProviderFake:
+    chunks: list[RetrievalChunk] = field(default_factory=list)
+    readiness_result: Any | None = None
+    search_error: RetrievalError | None = None
+    readiness_error: RetrievalError | None = None
+    last_skipped_count: int = 0
+    last_skipped_reasons: list[dict[str, Any]] = field(default_factory=list)
+    search_calls: list[dict[str, Any]] = field(default_factory=list)
+    check_readiness_calls: int = 0
+    close_calls: int = 0
+
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        min_score: float,
+        *,
+        state_id: str,
+        token_id: str | None,
+    ) -> list[RetrievalChunk]:
+        self.search_calls.append(
+            {
+                "query": query,
+                "top_k": top_k,
+                "min_score": min_score,
+                "state_id": state_id,
+                "token_id": token_id,
+            }
+        )
+        if self.search_error is not None:
+            raise self.search_error
+        return list(self.chunks)
+
+    def check_readiness(self) -> Any:
+        self.check_readiness_calls += 1
+        if self.readiness_error is not None:
+            raise self.readiness_error
+        return self.readiness_result if self.readiness_result is not None else _ready_provider_result()
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+@dataclass
+class _FailingCredential:
+    error: Exception
+
+    def get_token(self, *_scopes: str) -> object:
+        raise self.error
+
+
+def _mock_ctx(state_id: str | None = "state-1", token_id: str = "token-1") -> _TransformContextFake:
+    """Create a TransformContext fake."""
+    return _TransformContextFake(state_id=state_id, token=_TokenRecord(token_id))
+
+
+def _mock_lifecycle_ctx() -> _LifecycleContextFake:
+    """Create a LifecycleContext fake."""
+    return _LifecycleContextFake()
+
+
+def _assert_readiness_check(ctx: _LifecycleContextFake, **expected: Any) -> None:
+    assert ctx.landscape is not None
+    assert ctx.landscape.readiness_checks == [expected]
+
+
+def _safe_request_fake() -> SSRFSafeRequest:
+    return SSRFSafeRequest(
+        original_url="https://test.search.windows.net/indexes/test-index/docs/search?api-version=2024-07-01",
+        resolved_ip="203.0.113.10",
+        host_header="test.search.windows.net",
+        port=443,
+        path="/indexes/test-index/docs/search?api-version=2024-07-01",
+        scheme="https",
+        bare_hostname="test.search.windows.net",
+    )
 
 
 def _make_row(data: dict[str, Any]) -> PipelineRow:
@@ -119,7 +264,7 @@ class TestTransformLifecycle:
 
     def test_forward_probe_preserves_query_field_and_close_remains_safe(self) -> None:
         transform = RAGRetrievalTransform(RAGRetrievalTransform.probe_config())
-        original_provider = MagicMock()
+        original_provider = _RetrievalProviderFake()
         transform._provider = original_provider
 
         result = transform.execute_forward_invariant_probe(
@@ -138,10 +283,10 @@ class TestTransformLifecycle:
         assert result.row["policy__rag_score"] == 0.95
         assert transform._provider is original_provider
         assert transform._on_start_called is False
-        original_provider.search.assert_not_called()
+        assert original_provider.search_calls == []
 
         transform.close()
-        original_provider.close.assert_called_once()
+        assert original_provider.close_calls == 1
 
 
 def _ready_provider_result():
@@ -162,14 +307,9 @@ def _setup_transform_with_mock_provider(chunks=None, **config_overrides):
     Patches the PROVIDERS registry so on_start() constructs our mock provider
     (which passes the readiness check) instead of a real Azure provider.
     """
-    mock_provider = MagicMock()
-    mock_provider.search.return_value = chunks or []
-    mock_provider.check_readiness.return_value = _ready_provider_result()
-    mock_provider.last_skipped_count = 0
-    mock_provider.last_skipped_reasons = []
-
-    mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-    mock_factory = MagicMock(return_value=mock_provider)
+    mock_provider = _RetrievalProviderFake(chunks=list(chunks or []))
+    mock_config_cls = _ProviderConfigFake
+    mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
     transform = _make_transform(**config_overrides)
     lifecycle_ctx = _mock_lifecycle_ctx()
@@ -287,7 +427,7 @@ class TestProcessFlow:
 
     def test_retryable_error_propagates(self):
         transform, mock_provider = _setup_transform_with_mock_provider()
-        mock_provider.search.side_effect = RetrievalError(
+        mock_provider.search_error = RetrievalError(
             "server error",
             retryable=True,
             status_code=500,
@@ -301,7 +441,7 @@ class TestProcessFlow:
 
     def test_non_retryable_error_returns_error_result(self):
         transform, mock_provider = _setup_transform_with_mock_provider()
-        mock_provider.search.side_effect = RetrievalError(
+        mock_provider.search_error = RetrievalError(
             "bad request",
             retryable=False,
             status_code=400,
@@ -334,22 +474,24 @@ class TestProcessFlow:
                 index="test-index",
                 use_managed_identity=True,
             ),
-            execution=MagicMock(),
+            execution=_LandscapeRecorderFake(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySinkFake(),
         )
         transform._provider = provider
         transform._on_start_called = True
         auth_error = ClientAuthenticationError("DefaultAzureCredential failed")
-        mock_credential = MagicMock()
-        mock_credential.get_token.side_effect = auth_error
+        mock_credential = _FailingCredential(auth_error)
         row = _make_row({"question": "test"})
         ctx = _mock_ctx()
 
         try:
             with (
                 patch("azure.identity.DefaultAzureCredential", return_value=mock_credential),
-                patch("elspeth.plugins.infrastructure.clients.retrieval.azure_search.validate_url_for_ssrf", return_value=MagicMock()),
+                patch(
+                    "elspeth.plugins.infrastructure.clients.retrieval.azure_search.validate_url_for_ssrf",
+                    return_value=_safe_request_fake(),
+                ),
             ):
                 result = transform.process(row, ctx)
         finally:
@@ -397,8 +539,9 @@ class TestOnComplete:
         # The telemetry_emit was set during on_start from the _mock_lifecycle_ctx
         # used inside _setup_transform_with_mock_provider. We need to check the
         # transform's internal reference.
-        transform._telemetry_emit.assert_called_once()
-        payload = transform._telemetry_emit.call_args[0][0]
+        assert isinstance(transform._telemetry_emit, _TelemetrySinkFake)
+        assert len(transform._telemetry_emit.payloads) == 1
+        payload = transform._telemetry_emit.payloads[0]
         assert payload["event"] == "rag_retrieval_complete"
         assert "run_id" in payload
         assert payload["total_queries"] == 0
@@ -440,12 +583,16 @@ class TestNoResultsQuarantineContext:
 class TestRAGTransformReadinessGuard:
     """Tests for the readiness check in on_start()."""
 
-    def _make_mock_provider(self, *, reachable: bool = True, count: int | None = 10, collection: str = "test-index") -> MagicMock:
+    def _make_mock_provider(
+        self,
+        *,
+        reachable: bool = True,
+        count: int | None = 10,
+        collection: str = "test-index",
+    ) -> _RetrievalProviderFake:
         """Build a mock provider with check_readiness pre-configured."""
         from elspeth.contracts.probes import CollectionReadinessResult
 
-        mock_provider = MagicMock()
-        mock_provider.last_skipped_count = 0
         if not reachable:
             message = f"Collection '{collection}' unreachable"
             count = None  # Unreachable → count unknown
@@ -456,18 +603,20 @@ class TestRAGTransformReadinessGuard:
         else:
             message = f"Collection '{collection}' count unknown"
 
-        mock_provider.check_readiness.return_value = CollectionReadinessResult(
-            collection=collection,
-            reachable=reachable,
-            count=count,
-            message=message,
+        mock_provider = _RetrievalProviderFake(
+            readiness_result=CollectionReadinessResult(
+                collection=collection,
+                reachable=reachable,
+                count=count,
+                message=message,
+            )
         )
         return mock_provider
 
-    def _run_on_start_with_mock(self, mock_provider: MagicMock) -> RAGRetrievalTransform:
+    def _run_on_start_with_mock(self, mock_provider: _RetrievalProviderFake) -> RAGRetrievalTransform:
         """Patch PROVIDERS registry and call on_start()."""
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -486,13 +635,13 @@ class TestRAGTransformReadinessGuard:
         transform = self._run_on_start_with_mock(mock_provider)
 
         assert transform._provider is mock_provider
-        mock_provider.check_readiness.assert_called_once()
+        assert mock_provider.check_readiness_calls == 1
 
     def test_readiness_recorded_in_landscape(self) -> None:
         """on_start() records the readiness check outcome in the audit trail."""
         mock_provider = self._make_mock_provider(count=42, collection="my-index")
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -503,7 +652,8 @@ class TestRAGTransformReadinessGuard:
         ):
             transform.on_start(lifecycle_ctx)
 
-        lifecycle_ctx.landscape.record_readiness_check.assert_called_once_with(
+        _assert_readiness_check(
+            lifecycle_ctx,
             run_id="run-1",
             name="rag_retrieval",
             collection="my-index",
@@ -517,8 +667,8 @@ class TestRAGTransformReadinessGuard:
         from elspeth.contracts.errors import RetrievalNotReadyError
 
         mock_provider = self._make_mock_provider(count=0, reachable=True)
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -539,8 +689,8 @@ class TestRAGTransformReadinessGuard:
         from elspeth.contracts.errors import RetrievalNotReadyError
 
         mock_provider = self._make_mock_provider(count=0, reachable=False)
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -562,8 +712,8 @@ class TestRAGTransformReadinessGuard:
         from elspeth.contracts.errors import RetrievalNotReadyError
 
         mock_provider = self._make_mock_provider(count=0, collection="my-vectors")
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -583,8 +733,8 @@ class TestRAGTransformReadinessGuard:
     def test_failed_readiness_still_recorded_in_landscape(self) -> None:
         """record_readiness_check is called even when the check fails (audit before raise)."""
         mock_provider = self._make_mock_provider(count=0, reachable=True, collection="empty-col")
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -600,7 +750,8 @@ class TestRAGTransformReadinessGuard:
 
         # Even though RetrievalNotReadyError was raised, the readiness check
         # must have been recorded BEFORE the raise — audit gap fix.
-        lifecycle_ctx.landscape.record_readiness_check.assert_called_once_with(
+        _assert_readiness_check(
+            lifecycle_ctx,
             run_id="run-1",
             name="rag_retrieval",
             collection="empty-col",
@@ -611,8 +762,8 @@ class TestRAGTransformReadinessGuard:
 
     def test_provider_construction_failure_is_recorded_before_raise(self) -> None:
         """Constructor-time provider failures still emit a failed readiness audit row."""
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(side_effect=RetrievalError("missing collection", retryable=False))
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(error=RetrievalError("missing collection", retryable=False))
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -626,7 +777,8 @@ class TestRAGTransformReadinessGuard:
         ):
             transform.on_start(lifecycle_ctx)
 
-        lifecycle_ctx.landscape.record_readiness_check.assert_called_once_with(
+        _assert_readiness_check(
+            lifecycle_ctx,
             run_id="run-1",
             name="rag_retrieval",
             collection="test-index",
@@ -637,13 +789,14 @@ class TestRAGTransformReadinessGuard:
 
     def test_readiness_retrieval_error_is_recorded_before_raise(self) -> None:
         """Provider readiness RetrievalError still emits a failed readiness audit row."""
-        mock_provider = MagicMock()
-        mock_provider.check_readiness.side_effect = RetrievalError(
-            "Azure managed identity token acquisition failed",
-            retryable=False,
+        mock_provider = _RetrievalProviderFake(
+            readiness_error=RetrievalError(
+                "Azure managed identity token acquisition failed",
+                retryable=False,
+            )
         )
-        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
-        mock_factory = MagicMock(return_value=mock_provider)
+        mock_config_cls = _ProviderConfigFake
+        mock_factory = _ProviderFactoryFake(provider=mock_provider)
 
         transform = _make_transform()
         lifecycle_ctx = _mock_lifecycle_ctx()
@@ -657,7 +810,8 @@ class TestRAGTransformReadinessGuard:
         ):
             transform.on_start(lifecycle_ctx)
 
-        lifecycle_ctx.landscape.record_readiness_check.assert_called_once_with(
+        _assert_readiness_check(
+            lifecycle_ctx,
             run_id="run-1",
             name="rag_retrieval",
             collection="test-index",

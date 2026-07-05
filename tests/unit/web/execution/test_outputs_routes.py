@@ -1,7 +1,7 @@
 """Tests for the /api/runs/{rid}/outputs manifest + content endpoints.
 
 Mirrors the structure of test_routes.py — bypasses real DB setup via
-mocks on app.state.* and dependency_overrides for the auth middleware.
+fakes on app.state.* and dependency_overrides for the auth middleware.
 
 The manifest endpoint is the authoritative full-list of every sink-write
 artefact produced by a run (distinct from the diagnostics endpoint's
@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -37,6 +38,63 @@ from elspeth.web.execution.schemas import (
 _TEST_USER_ID = "test-user-123"
 
 
+@dataclass
+class _FakeSettings:
+    auth_provider: str = "local"
+    data_dir: str = "/tmp/elspeth-test-data"
+
+
+@dataclass
+class _FakeSession:
+    user_id: str = _TEST_USER_ID
+    auth_provider_type: str = "local"
+
+
+@dataclass
+class _FakeRun:
+    session_id: UUID = field(default_factory=uuid4)
+    landscape_run_id: str | None = None
+
+
+@dataclass
+class _FakeSessionService:
+    session: _FakeSession = field(default_factory=_FakeSession)
+    run: _FakeRun = field(default_factory=_FakeRun)
+
+    async def get_session(self, session_id: UUID) -> _FakeSession:
+        return self.session
+
+    async def get_run(self, run_id: UUID) -> _FakeRun:
+        return self.run
+
+
+@dataclass
+class _FakeExecutionService:
+    status: RunStatusResponse | None = None
+    error: Exception | None = None
+
+    async def get_status(
+        self,
+        run_id: UUID,
+        *,
+        accounting: object | None = None,
+        run_record: object | None = None,
+    ) -> RunStatusResponse:
+        if self.error is not None:
+            raise self.error
+        if self.status is None:
+            raise AssertionError("test fake execution service has no status configured")
+        return self.status
+
+
+def _execution_service_for_status(run_id: UUID) -> _FakeExecutionService:
+    return _FakeExecutionService(status=_running_status(run_id))
+
+
+def _request_for_app(app: FastAPI, *, headers: dict[str, str] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(app=app, headers=headers or {})
+
+
 def _route_endpoint(app: FastAPI, name: str) -> Callable[..., Awaitable[Any]]:
     for route in app.routes:
         if isinstance(route, Route) and route.name == name:
@@ -45,30 +103,20 @@ def _route_endpoint(app: FastAPI, name: str) -> Callable[..., Awaitable[Any]]:
 
 
 def _create_test_app(
-    execution_service: MagicMock | None = None,
-    settings: MagicMock | None = None,
+    execution_service: _FakeExecutionService | None = None,
+    settings: _FakeSettings | None = None,
 ) -> FastAPI:
     from elspeth.web.auth.middleware import get_current_user
     from elspeth.web.execution.routes import create_execution_router
 
     app = FastAPI()
-    app.state.execution_service = execution_service or MagicMock()
-    app.state.broadcaster = MagicMock()
-    app.state.auth_provider = MagicMock()
-
-    mock_session_service = MagicMock()
-    mock_session = MagicMock()
-    mock_session.user_id = _TEST_USER_ID
-    mock_session.auth_provider_type = "local"
-    mock_session_service.get_session = AsyncMock(return_value=mock_session)
-    mock_run = MagicMock(session_id=uuid4())
-    mock_run.landscape_run_id = None
-    mock_session_service.get_run = AsyncMock(return_value=mock_run)
-    app.state.session_service = mock_session_service
+    app.state.execution_service = execution_service or _FakeExecutionService(status=_running_status(uuid4()))
+    app.state.broadcaster = object()
+    app.state.auth_provider = object()
+    app.state.session_service = _FakeSessionService()
 
     if settings is None:
-        settings = MagicMock()
-        settings.auth_provider = "local"
+        settings = _FakeSettings()
     app.state.settings = settings
 
     fake_user = UserIdentity(user_id=_TEST_USER_ID, username="testuser")
@@ -102,8 +150,7 @@ class TestRunOutputsManifestEndpoint:
     @pytest.mark.asyncio
     async def test_returns_full_artifact_list_no_preview_cap(self, monkeypatch) -> None:
         run_id = uuid4()
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         artifacts = [
             RunOutputArtifact(
@@ -145,8 +192,7 @@ class TestRunOutputsManifestEndpoint:
     @pytest.mark.asyncio
     async def test_404_when_run_not_found(self, monkeypatch) -> None:
         run_id = uuid4()
-        svc = MagicMock()
-        svc.get_status = AsyncMock(side_effect=ValueError("not found"))
+        svc = _FakeExecutionService(error=ValueError("not found"))
 
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -156,8 +202,7 @@ class TestRunOutputsManifestEndpoint:
     @pytest.mark.asyncio
     async def test_503_when_audit_database_unavailable(self, monkeypatch) -> None:
         run_id = uuid4()
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             raise RunOutputsAuditUnavailableError(landscape_run_id=str(run_id), landscape_url="sqlite:////missing/audit.db")
@@ -195,8 +240,7 @@ class TestRunOutputContentEndpoint:
         sink_bytes = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(sink_bytes)
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -223,9 +267,7 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -247,8 +289,7 @@ class TestRunOutputContentEndpoint:
         decoded_file.write_bytes(audited_bytes)
         raw_percent_file.write_bytes(b"id,name\n2,bob\n")
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(
             monkeypatch,
             artifacts=[
@@ -267,9 +308,7 @@ class TestRunOutputContentEndpoint:
             run_id=run_id,
         )
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -289,8 +328,7 @@ class TestRunOutputContentEndpoint:
         sink_file.write_bytes(original)
         rewritten = b'{"interaction_id":"INT-9999"}\n'
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -330,9 +368,7 @@ class TestRunOutputContentEndpoint:
             fake_copy_artifact_to_temp_snapshot,
         )
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -351,8 +387,7 @@ class TestRunOutputContentEndpoint:
         sink_bytes = b"0123456789"
         sink_file.write_bytes(sink_bytes)
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -379,9 +414,7 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -404,8 +437,7 @@ class TestRunOutputContentEndpoint:
         sink_bytes = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(sink_bytes)
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -444,15 +476,11 @@ class TestRunOutputContentEndpoint:
             fake_copy_artifact_to_temp_snapshot,
         )
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         endpoint = _route_endpoint(app, "get_run_output_content")
-        request = MagicMock()
-        request.app = app
-        request.headers = {}
+        request = _request_for_app(app)
         response = await endpoint(
             run_id=run_id,
             artifact_id="art-1",
@@ -515,8 +543,7 @@ class TestRunOutputContentEndpoint:
         assert len(tampered) == len(original)
         sink_file.write_bytes(tampered)
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -543,14 +570,11 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         endpoint = _route_endpoint(app, "get_run_output_content")
-        request = MagicMock()
-        request.app = app
+        request = _request_for_app(app)
         with pytest.raises(HTTPException) as exc_info:
             await endpoint(
                 run_id=run_id,
@@ -571,8 +595,7 @@ class TestRunOutputContentEndpoint:
         rogue_file = elsewhere / "rogue.csv"
         rogue_file.write_bytes(b"escaped\n")
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -599,11 +622,9 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
         # data_dir does not contain elsewhere/, so rogue_file is outside
         # allowed_sink_directories(data_dir) = (data_dir/outputs, data_dir/blobs).
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -615,8 +636,7 @@ class TestRunOutputContentEndpoint:
     @pytest.mark.asyncio
     async def test_404_when_artifact_id_not_in_run(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -631,9 +651,7 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -651,8 +669,7 @@ class TestRunOutputContentEndpoint:
         sink_file.write_bytes(b"will-purge\n")
         sink_file.unlink()  # File was purged after the run
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
 
         def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
             return RunOutputsResponse(
@@ -679,9 +696,7 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -748,8 +763,7 @@ class TestRunOutputPreviewEndpoint:
         sink_file.write_bytes(original)
         rewritten = b'{"interaction_id":"INT-9999"}\n'
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(
             monkeypatch,
             artifacts=[
@@ -785,9 +799,7 @@ class TestRunOutputPreviewEndpoint:
             fake_read_artifact_preview_head,
         )
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -808,8 +820,7 @@ class TestRunOutputPreviewEndpoint:
         legacy_raw_file.write_bytes(audited_bytes)
         decoded_decoy.write_bytes(b'{"legacy":false}\n')
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(
             monkeypatch,
             artifacts=[
@@ -828,9 +839,7 @@ class TestRunOutputPreviewEndpoint:
             run_id=run_id,
         )
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -855,8 +864,7 @@ class TestRunOutputPreviewEndpoint:
         assert len(tampered) == len(original)
         sink_file.write_bytes(tampered)
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(
             monkeypatch,
             artifacts=[
@@ -875,9 +883,7 @@ class TestRunOutputPreviewEndpoint:
             run_id=run_id,
         )
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -894,13 +900,10 @@ class TestRunOutputPreviewEndpoint:
         sink_file = outputs_dir / "results.csv"
         sink_file.write_text("col1,col2\n1,2\n3,4\n")
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(monkeypatch, artifacts=[_file_artifact_in_outputs(sink_file)], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -922,13 +925,10 @@ class TestRunOutputPreviewEndpoint:
         sink_file = outputs_dir / "log.txt"
         sink_file.write_text("hello world\n")
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(monkeypatch, artifacts=[_file_artifact_in_outputs(sink_file)], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -948,13 +948,10 @@ class TestRunOutputPreviewEndpoint:
         sink_file = outputs_dir / "blob.bin"
         sink_file.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 200)
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(monkeypatch, artifacts=[_file_artifact_in_outputs(sink_file)], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -968,13 +965,10 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_404_when_artifact_id_not_in_run(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         _install_manifest_loader(monkeypatch, artifacts=[], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -991,8 +985,7 @@ class TestRunOutputPreviewEndpoint:
         rogue_file = elsewhere / "rogue.csv"
         rogue_file.write_text("escaped\n")
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         artifact = RunOutputArtifact(
             artifact_id="art-rogue",
             sink_node_id="rogue",
@@ -1006,9 +999,7 @@ class TestRunOutputPreviewEndpoint:
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1026,8 +1017,7 @@ class TestRunOutputPreviewEndpoint:
         sink_file.write_text("data\n")
         sink_file.unlink()
 
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         artifact = RunOutputArtifact(
             artifact_id="art-purged",
             sink_node_id="results",
@@ -1041,9 +1031,7 @@ class TestRunOutputPreviewEndpoint:
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1055,8 +1043,7 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_415_when_artifact_is_object_store_uri(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        svc = MagicMock()
-        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        svc = _execution_service_for_status(run_id)
         artifact = RunOutputArtifact(
             artifact_id="art-azure",
             sink_node_id="cloud",
@@ -1070,9 +1057,7 @@ class TestRunOutputPreviewEndpoint:
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
-        settings = MagicMock()
-        settings.auth_provider = "local"
-        settings.data_dir = str(tmp_path)
+        settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1085,12 +1070,12 @@ class TestRunOutputPreviewEndpoint:
     async def test_404_when_run_not_owned_by_user(self, monkeypatch, tmp_path) -> None:
         # IDOR: a different user's run must look not-found, not 403.
         run_id = uuid4()
-        svc = MagicMock()
+        svc = _FakeExecutionService()
 
         app = _create_test_app(execution_service=svc)
         # Force the session-ownership check to claim the run belongs to
-        # someone else by overriding the session.user_id on the mock.
-        app.state.session_service.get_session.return_value.user_id = "other-user"
+        # someone else by overriding the fake session record.
+        app.state.session_service.session.user_id = "other-user"
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")

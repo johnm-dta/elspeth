@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import UUID
 
 from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
@@ -36,6 +36,28 @@ from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_CHAT_SOLVER_ACOMPLETION = "elspeth.web.composer.guided.chat_solver._litellm_acompletion"
+
+
+@dataclass
+class _ReturningLiteLLMCompletion:
+    response: object
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def __call__(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        return self.response
+
+
+@dataclass
+class _RaisingLiteLLMCompletion:
+    exception: BaseException
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def __call__(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        raise self.exception
 
 
 def _create_session(client: TestClient) -> str:
@@ -225,8 +247,8 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("CSV columns are typically detected from the header row.")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("CSV columns are typically detected from the header row.")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -253,8 +275,8 @@ class TestStepChatSuccess:
         history_before = seeded["guided_session"]["history"]
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("ack")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("ack")),
         ):
             _, body = _post_chat(
                 composer_test_client,
@@ -277,8 +299,8 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("rows look fine")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("rows look fine")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -319,8 +341,8 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("ack")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("ack")),
         ):
             _post_chat(
                 composer_test_client,
@@ -353,8 +375,8 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("acked")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("acked")),
         ):
             _post_chat(
                 composer_test_client,
@@ -388,8 +410,8 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("acked")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("acked")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -418,8 +440,8 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=TimeoutError("upstream timeout")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(TimeoutError("upstream timeout")),
         ):
             _post_chat(
                 composer_test_client,
@@ -444,13 +466,13 @@ class TestStepChatSuccess:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("first reply")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("first reply")),
         ):
             _post_chat(composer_test_client, session_id, message="first", step_index="step_1_source")
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("second reply")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("second reply")),
         ):
             _, body = _post_chat(
                 composer_test_client,
@@ -491,8 +513,8 @@ class TestStep1SourceResolution:
         self._drive_to_step_1_schema_form(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_resolve_source_response_csv()),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_resolve_source_response_csv()),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -550,8 +572,8 @@ class TestStep1SourceResolution:
         assert entry["guided_session"]["step"] == "step_1_source"
         assert entry["next_turn"]["type"] == "single_select"
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_resolve_source_response_csv()),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_resolve_source_response_csv()),
         ):
             status, body = _post_chat(
                 client,
@@ -606,8 +628,8 @@ class TestStep1SourceResolution:
         # catches and maps to the synthetic-unavailable fallback
         # (source_resolution=None, fallback_chat=StepChatResult(synthetic_message)).
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("Try using the wizard plugin picker.")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("Try using the wizard plugin picker.")),
         ):
             status, body = _post_chat(
                 client,
@@ -659,8 +681,8 @@ class TestStep1SourceResolution:
             return _fake_llm_reply("I don't have your file's contents yet — please paste the rows or upload the file.")
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=fake_acompletion),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=fake_acompletion,
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -700,8 +722,8 @@ class TestStep1SourceResolution:
             return _fake_llm_reply("Here is what I can tell you.")
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=fake_acompletion),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=fake_acompletion,
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -906,8 +928,8 @@ class TestStepChatTransientFailure:
         seeded = _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=TimeoutError("upstream LLM timed out")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(TimeoutError("upstream LLM timed out")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -962,8 +984,8 @@ class TestStepChatTransientFailure:
             "What is the category column called?"
         )
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply(scaffold_reply)),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply(scaffold_reply)),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1018,8 +1040,8 @@ class TestStepChatTransientFailure:
             "assistant_message": 'Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.',
         }
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_source_resolution_tool_call(scaffold_args)),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_source_resolution_tool_call(scaffold_args)),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1060,7 +1082,7 @@ class TestStepChatTransientFailure:
         composer_test_client.app.state.settings = settings.model_copy(update={"composer_timeout_seconds": 0.05})
         try:
             with patch(
-                "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+                _CHAT_SOLVER_ACOMPLETION,
                 new=hung_acompletion,
             ):
                 status, body = _post_chat(
@@ -1092,8 +1114,8 @@ class TestStepChatTransientFailure:
         seeded = _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=BudgetExceededError(current_cost=10.0, max_budget=5.0)),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(BudgetExceededError(current_cost=10.0, max_budget=5.0)),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1126,8 +1148,8 @@ class TestStepChatTransientFailure:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=GuardrailRaisedException(guardrail_name="pii", message="blocked")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(GuardrailRaisedException(guardrail_name="pii", message="blocked")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1154,8 +1176,8 @@ class TestStepChatTransientFailure:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=BlockedPiiEntityError(entity_type="email", guardrail_name="pii")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(BlockedPiiEntityError(entity_type="email", guardrail_name="pii")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1185,8 +1207,8 @@ class TestStepChatTransientFailure:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=GuardrailInterventionNormalStringError(message="intervention")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(GuardrailInterventionNormalStringError(message="intervention")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1206,8 +1228,8 @@ class TestStepChatTransientFailure:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=SimpleNamespace(choices=[])),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(SimpleNamespace(choices=[])),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1254,8 +1276,8 @@ class TestStepChatServerInvariants:
 
         with (
             patch(
-                "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-                new=AsyncMock(return_value=_fake_llm_reply("")),
+                _CHAT_SOLVER_ACOMPLETION,
+                new=_ReturningLiteLLMCompletion(_fake_llm_reply("")),
             ),
             capture_logs() as cap_logs,
         ):
@@ -1323,8 +1345,8 @@ class TestStepChatServerInvariants:
         monkeypatch.setattr(composer_module.slog, "error", _raising_only_for_unwind_log)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1344,8 +1366,8 @@ class TestStepChatServerInvariants:
         _seed_persisted_step1(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("   \n\t  ")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("   \n\t  ")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1417,8 +1439,8 @@ class TestStepChatCrossStep:
         # 1. Chat at step_1_source.  This records two ChatTurn entries
         #    (user + assistant, seq 0 + 1, step=step_1_source).
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("step-1 advice")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("step-1 advice")),
         ):
             _post_chat(
                 composer_test_client,
@@ -1456,8 +1478,8 @@ class TestStepChatCrossStep:
         # 4. Chat at step_2_sink.  Two more ChatTurn entries (user +
         #    assistant, seq 2 + 3, step=step_2_sink).
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("step-2 advice")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("step-2 advice")),
         ):
             _post_chat(
                 composer_test_client,
@@ -1502,8 +1524,8 @@ class TestGuidedChatWireDiscriminator:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("Here's some advice.")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("Here's some advice.")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1525,9 +1547,9 @@ class TestGuidedChatWireDiscriminator:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(
-                return_value=_fake_source_resolution_tool_call(
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(
+                _fake_source_resolution_tool_call(
                     {
                         "resolution": "source",
                         "plugin": "csv",
@@ -1558,8 +1580,8 @@ class TestGuidedChatWireDiscriminator:
 
         scaffold_reply = 'Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.'
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply(scaffold_reply)),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply(scaffold_reply)),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1576,8 +1598,8 @@ class TestGuidedChatWireDiscriminator:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=TimeoutError("upstream LLM timed out")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_RaisingLiteLLMCompletion(TimeoutError("upstream LLM timed out")),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1610,8 +1632,8 @@ class TestChatHistoryDiscriminatorPersistence:
 
         scaffold_reply = 'Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.'
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply(scaffold_reply)),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply(scaffold_reply)),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -1637,8 +1659,8 @@ class TestChatHistoryDiscriminatorPersistence:
         _seed_guided_session(composer_test_client, session_id)
 
         with patch(
-            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_llm_reply("Here's some advice.")),
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("Here's some advice.")),
         ):
             status, body = _post_chat(
                 composer_test_client,

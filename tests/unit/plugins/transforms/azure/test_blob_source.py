@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,6 +33,37 @@ TEST_CLIENT_ID = "00000000-0000-0000-0000-000000000002"
 TEST_CLIENT_SECRET = "test-secret-value"
 
 
+class _BlobDownloadDouble:
+    def __init__(self, *, data: bytes | None = None, read_error: BaseException | None = None) -> None:
+        self._data = data
+        self._read_error = read_error
+
+    def readall(self) -> bytes:
+        if self._read_error is not None:
+            raise self._read_error
+        if self._data is None:
+            raise AssertionError("Blob download double has no data")
+        return self._data
+
+
+class _BlobClientDouble:
+    def __init__(
+        self,
+        *,
+        data: bytes | None = None,
+        download_error: BaseException | None = None,
+        read_error: BaseException | None = None,
+    ) -> None:
+        self._data = data
+        self._download_error = download_error
+        self._read_error = read_error
+
+    def download_blob(self) -> _BlobDownloadDouble:
+        if self._download_error is not None:
+            raise self._download_error
+        return _BlobDownloadDouble(data=self._data, read_error=self._read_error)
+
+
 @pytest.fixture
 def ctx() -> PluginContext:
     """Create a plugin context with proper operation records for Azure blob audit trail."""
@@ -40,7 +71,7 @@ def ctx() -> PluginContext:
 
 
 @pytest.fixture
-def mock_blob_client() -> Generator[MagicMock, None, None]:
+def mock_blob_client() -> Generator[Any, None, None]:
     """Create a mock blob client for testing."""
     with patch("elspeth.plugins.sources.azure_blob_source.AzureBlobSource._get_blob_client") as mock:
         yield mock
@@ -109,7 +140,7 @@ def make_config(
 class TestAzureBlobSourceProtocol:
     """Tests for AzureBlobSource protocol compliance."""
 
-    def test_has_required_attributes(self, mock_blob_client: MagicMock) -> None:
+    def test_has_required_attributes(self, mock_blob_client: Any) -> None:
         """AzureBlobSource has name and output_schema."""
         assert AzureBlobSource.name == "azure_blob"
         source = AzureBlobSource(make_config())
@@ -215,12 +246,10 @@ class TestAzureBlobSourceConfigValidation:
 class TestAzureBlobSourceCSV:
     """Tests for CSV loading from Azure Blob."""
 
-    def test_load_csv_from_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_load_csv_from_blob(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Basic CSV loading from blob."""
         csv_data = b"id,name,value\n1,alice,100\n2,bob,200\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config())
         rows = list(source.load(ctx))
@@ -231,12 +260,10 @@ class TestAzureBlobSourceCSV:
         assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
         assert rows[1].row == {"id": "2", "name": "bob", "value": "200"}
 
-    def test_csv_with_custom_delimiter(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_with_custom_delimiter(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """CSV with custom delimiter works correctly."""
         csv_data = b"id;name;value\n1;alice;100\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config(csv_options={"delimiter": ";"}))
         rows = list(source.load(ctx))
@@ -244,12 +271,10 @@ class TestAzureBlobSourceCSV:
         assert len(rows) == 1
         assert rows[0].row["name"] == "alice"
 
-    def test_csv_without_header_with_explicit_columns(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_without_header_with_explicit_columns(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Headerless CSV maps positional values onto explicitly-declared columns."""
         csv_data = b"1,alice,100\n2,bob,200\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config(csv_options={"has_header": False}, columns=["id", "name", "value"]))
         rows = list(source.load(ctx))
@@ -268,12 +293,10 @@ class TestAzureBlobSourceCSV:
         with pytest.raises(PluginConfigError, match="columns"):
             AzureBlobSource(make_config(csv_options={"has_header": False}))
 
-    def test_csv_with_encoding(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_with_encoding(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """CSV with non-UTF8 encoding works correctly."""
         csv_data = b"id,name\n1,caf\xe9\n"  # latin-1 encoded "cafe" with e-acute
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config(csv_options={"encoding": "latin-1"}))
         rows = list(source.load(ctx))
@@ -282,12 +305,10 @@ class TestAzureBlobSourceCSV:
         # \xe9 in latin-1 decodes to U+00E9 (LATIN SMALL LETTER E WITH ACUTE)
         assert rows[0].row["name"] == "caf\u00e9"
 
-    def test_csv_headers_always_normalized(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_headers_always_normalized(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """CSV headers are always normalized to valid identifiers."""
         csv_data = b"User ID,Amount $,Email Address\n1,100,a@b.com\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config())
         rows = list(source.load(ctx))
@@ -302,12 +323,10 @@ class TestAzureBlobSourceCSV:
         assert mapping["Email Address"] == "email_address"
         assert version == NORMALIZATION_ALGORITHM_VERSION
 
-    def test_csv_field_mapping_applies(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_field_mapping_applies(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """field_mapping applies to normalized header names."""
         csv_data = b"User ID,Amount $\n1,100\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config(field_mapping={"amount": "total_amount"}))
         rows = list(source.load(ctx))
@@ -325,12 +344,10 @@ class TestAzureBlobSourceCSV:
 class TestAzureBlobSourceJSON:
     """Tests for JSON loading from Azure Blob."""
 
-    def test_load_json_from_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_load_json_from_blob(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """JSON array loading from blob."""
         json_data = b'[{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(make_config(format="json"))
         rows = list(source.load(ctx))
@@ -341,12 +358,10 @@ class TestAzureBlobSourceJSON:
         assert rows[0].row == {"id": 1, "name": "alice"}
         assert rows[1].row == {"id": 2, "name": "bob"}
 
-    def test_load_json_with_data_key(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_load_json_with_data_key(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """JSON with nested data key extraction."""
         json_data = b'{"results": [{"id": 1, "name": "alice"}], "meta": "ignored"}'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(
             make_config(
@@ -359,12 +374,10 @@ class TestAzureBlobSourceJSON:
         assert len(rows) == 1
         assert rows[0].row == {"id": 1, "name": "alice"}
 
-    def test_json_not_array_quarantined_not_crash(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_json_not_array_quarantined_not_crash(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """JSON that is not an array is quarantined, not raised."""
         json_data = b'{"id": 1, "name": "alice"}'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(make_config(format="json"))
         results = list(source.load(ctx))
@@ -374,12 +387,10 @@ class TestAzureBlobSourceJSON:
         assert results[0].quarantine_error is not None
         assert "Expected JSON array" in results[0].quarantine_error
 
-    def test_json_invalid_quarantined_not_crash(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_json_invalid_quarantined_not_crash(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Invalid JSON is quarantined, not raised."""
         json_data = b'[{"id": 1, "name": "alice"'  # Missing closing brackets
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(make_config(format="json"))
         results = list(source.load(ctx))
@@ -389,12 +400,10 @@ class TestAzureBlobSourceJSON:
         assert results[0].quarantine_error is not None
         assert "Invalid JSON" in results[0].quarantine_error
 
-    def test_json_data_key_missing_quarantined_not_crash(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_json_data_key_missing_quarantined_not_crash(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Missing data_key is quarantined as structure error."""
         json_data = b'{"results": [{"id": 1, "name": "alice"}]}'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(
             make_config(
@@ -411,14 +420,12 @@ class TestAzureBlobSourceJSON:
 
     def test_flexible_infers_extra_field_and_quarantines_type_drift(
         self,
-        mock_blob_client: MagicMock,
+        mock_blob_client: Any,
         ctx: PluginContext,
     ) -> None:
         """First valid row infers extras; subsequent rows with type drift are quarantined."""
         json_data = b'[{"id": 1, "extra": "alpha"}, {"id": 2, "extra": 42}]'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(
             make_config(
@@ -443,14 +450,12 @@ class TestAzureBlobSourceJSON:
 
     def test_flexible_all_invalid_rows_still_publish_locked_declared_contract(
         self,
-        mock_blob_client: MagicMock,
+        mock_blob_client: Any,
         ctx: PluginContext,
     ) -> None:
         """All-invalid FLEXIBLE input keeps declared fields and locks contract."""
         json_data = b'[{"id": "bad"}, {"id": "still_bad"}]'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = json_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=json_data)
 
         source = AzureBlobSource(
             make_config(
@@ -474,12 +479,10 @@ class TestAzureBlobSourceJSON:
 class TestAzureBlobSourceJSONL:
     """Tests for JSONL loading from Azure Blob."""
 
-    def test_load_jsonl_from_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_load_jsonl_from_blob(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """JSONL (newline-delimited) loading from blob."""
         jsonl_data = b'{"id": 1, "name": "alice"}\n{"id": 2, "name": "bob"}\n'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = jsonl_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=jsonl_data)
 
         source = AzureBlobSource(make_config(format="jsonl"))
         rows = list(source.load(ctx))
@@ -490,24 +493,20 @@ class TestAzureBlobSourceJSONL:
         assert rows[0].row == {"id": 1, "name": "alice"}
         assert rows[1].row == {"id": 2, "name": "bob"}
 
-    def test_jsonl_skips_empty_lines(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_jsonl_skips_empty_lines(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """JSONL skips empty lines."""
         jsonl_data = b'{"id": 1}\n\n{"id": 2}\n\n'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = jsonl_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=jsonl_data)
 
         source = AzureBlobSource(make_config(format="jsonl"))
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
 
-    def test_jsonl_malformed_line_quarantined_not_crash(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_jsonl_malformed_line_quarantined_not_crash(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Malformed JSONL line should quarantine, not crash pipeline."""
         jsonl_data = b'{"id": 1, "name": "alice"}\n{invalid json}\n{"id": 3, "name": "carol"}\n'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = jsonl_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=jsonl_data)
 
         source = AzureBlobSource(
             make_config(
@@ -539,12 +538,10 @@ class TestAzureBlobSourceJSONL:
         assert not results[2].is_quarantined
         assert results[2].row == {"id": 3, "name": "carol"}
 
-    def test_jsonl_malformed_line_with_discard_mode(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_jsonl_malformed_line_with_discard_mode(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Malformed JSONL line with discard mode should not yield quarantined row."""
         jsonl_data = b'{"id": 1}\n{invalid}\n{"id": 3}\n'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = jsonl_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=jsonl_data)
 
         source = AzureBlobSource(
             make_config(
@@ -561,12 +558,10 @@ class TestAzureBlobSourceJSONL:
         assert results[0].row == {"id": 1}
         assert results[1].row == {"id": 3}
 
-    def test_jsonl_non_finite_constant_quarantined_not_crash(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_jsonl_non_finite_constant_quarantined_not_crash(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """JSONL NaN/Infinity constants are quarantined at parse boundary."""
         jsonl_data = b'{"id": 1, "value": 42}\n{"id": 2, "value": NaN}\n{"id": 3, "value": Infinity}\n'
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = jsonl_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=jsonl_data)
 
         source = AzureBlobSource(
             make_config(
@@ -587,12 +582,10 @@ class TestAzureBlobSourceJSONL:
 class TestAzureBlobSourceValidation:
     """Tests for schema validation and quarantining."""
 
-    def test_validation_failure_quarantines_row(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_validation_failure_quarantines_row(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Invalid rows are quarantined with error info."""
         csv_data = b"id,name,score\n1,alice,95\n2,bob,bad\n3,carol,92\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(
             make_config(
@@ -624,12 +617,10 @@ class TestAzureBlobSourceValidation:
         assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error
 
-    def test_discard_mode_does_not_yield_invalid_rows(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_discard_mode_does_not_yield_invalid_rows(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """When on_validation_failure='discard', invalid rows are not yielded."""
         csv_data = b"id,name,score\n1,alice,95\n2,bob,bad\n3,carol,92\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(
             make_config(
@@ -651,35 +642,29 @@ class TestAzureBlobSourceValidation:
 class TestAzureBlobSourceErrors:
     """Tests for error handling."""
 
-    def test_blob_not_found_raises(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_blob_not_found_raises(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Missing blob raises appropriate error."""
         # Simulate ResourceNotFoundError from Azure SDK
-        mock_client = MagicMock()
-        mock_client.download_blob.side_effect = Exception("The specified blob does not exist")
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(download_error=Exception("The specified blob does not exist"))
 
         source = AzureBlobSource(make_config())
         with pytest.raises(Exception, match="specified blob does not exist"):
             list(source.load(ctx))
 
-    def test_connection_error_raises(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_connection_error_raises(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Connection failures propagate."""
         # Simulate connection error
-        mock_client = MagicMock()
-        mock_client.download_blob.side_effect = Exception("Connection refused")
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(download_error=Exception("Connection refused"))
 
         source = AzureBlobSource(make_config())
         with pytest.raises(Exception, match="Connection refused"):
             list(source.load(ctx))
 
-    def test_encoding_error_quarantines(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_encoding_error_quarantines(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Invalid encoding quarantines instead of crashing (Tier 3 boundary)."""
         # Invalid UTF-8 bytes
         bad_data = b"\xff\xfe"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = bad_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=bad_data)
 
         source = AzureBlobSource(make_config())
         rows = list(source.load(ctx))
@@ -688,14 +673,12 @@ class TestAzureBlobSourceErrors:
         assert rows[0].quarantine_error is not None
         assert "Failed to decode" in rows[0].quarantine_error
 
-    def test_csv_parse_error_quarantines(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_parse_error_quarantines(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """BUG-BLOB-01: CSV parse errors quarantine instead of crashing."""
         # Severely malformed CSV that pandas can't parse
         # Using delimiter mismatch that causes structural failure
         bad_csv = b"col1;col2;col3\nvalue1,value2,value3\n"  # Headers use ; but data uses ,
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = bad_csv
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=bad_csv)
 
         source = AzureBlobSource(
             make_config(
@@ -718,15 +701,13 @@ class TestAzureBlobSourceErrors:
         assert rows[0].is_quarantined
         assert rows[0].quarantine_destination == QUARANTINE_SINK
 
-    def test_csv_malformed_line_not_silently_dropped(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_malformed_line_not_silently_dropped(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """Malformed CSV with column count mismatch quarantines bad rows individually."""
         # Use a genuine column count mismatch (3 fields where 2 expected)
         # rather than an unclosed quote (which csv.reader treats as valid
         # multi-line quoting per RFC 4180).
         bad_csv = b"id,name\n1,alice,EXTRA_FIELD\n2,bob\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = bad_csv
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=bad_csv)
 
         source = AzureBlobSource(make_config(format="csv", on_validation_failure="quarantine"))
         rows = list(source.load(ctx))
@@ -739,13 +720,11 @@ class TestAzureBlobSourceErrors:
         assert rows[1].is_quarantined is False
         assert rows[1].row["name"] == "bob"
 
-    def test_csv_structural_failure_quarantines_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_structural_failure_quarantines_blob(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """BUG-BLOB-01: Catastrophic CSV structure failure quarantines blob, doesn't crash."""
         # Empty file — no header row to parse
         bad_csv = b""
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = bad_csv
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=bad_csv)
 
         source = AzureBlobSource(
             make_config(
@@ -770,18 +749,16 @@ class TestAzureBlobSourceErrors:
 class TestAzureBlobSourceLifecycle:
     """Tests for source lifecycle methods."""
 
-    def test_close_is_idempotent(self, mock_blob_client: MagicMock) -> None:
+    def test_close_is_idempotent(self, mock_blob_client: Any) -> None:
         """close() can be called multiple times."""
         source = AzureBlobSource(make_config())
         source.close()
         source.close()  # Should not raise
 
-    def test_close_clears_client(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+    def test_close_clears_client(self, mock_blob_client: Any, ctx: PluginContext) -> None:
         """close() clears the blob client reference."""
         csv_data = b"id,name\n1,alice\n"
-        mock_client = MagicMock()
-        mock_client.download_blob.return_value.readall.return_value = csv_data
-        mock_blob_client.return_value = mock_client
+        mock_blob_client.return_value = _BlobClientDouble(data=csv_data)
 
         source = AzureBlobSource(make_config())
         list(source.load(ctx))  # Populate client
@@ -809,13 +786,13 @@ class TestAzureBlobSourceImportError:
 class TestAzureBlobSourceAuthMethods:
     """Tests for Azure authentication methods."""
 
-    def test_auth_connection_string(self, mock_blob_client: MagicMock) -> None:
+    def test_auth_connection_string(self, mock_blob_client: Any) -> None:
         """Connection string auth creates source successfully."""
         source = AzureBlobSource(make_config(connection_string=TEST_CONNECTION_STRING))
         assert source._auth_config.auth_method == "connection_string"
         assert source._auth_config.connection_string == TEST_CONNECTION_STRING
 
-    def test_auth_managed_identity(self, mock_blob_client: MagicMock) -> None:
+    def test_auth_managed_identity(self, mock_blob_client: Any) -> None:
         """Managed identity auth creates source successfully."""
         source = AzureBlobSource(
             make_config(
@@ -828,7 +805,7 @@ class TestAzureBlobSourceAuthMethods:
         assert source._auth_config.use_managed_identity is True
         assert source._auth_config.account_url == TEST_ACCOUNT_URL
 
-    def test_auth_service_principal(self, mock_blob_client: MagicMock) -> None:
+    def test_auth_service_principal(self, mock_blob_client: Any) -> None:
         """Service principal auth creates source successfully."""
         source = AzureBlobSource(
             make_config(
@@ -978,10 +955,10 @@ class TestAzureBlobSourceAuthClientCreation:
             patch("azure.identity.DefaultAzureCredential") as mock_credential_cls,
             patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls,
         ):
-            mock_credential = MagicMock()
-            mock_credential_cls.return_value = mock_credential
-            mock_service_client = MagicMock()
-            mock_service_client_cls.return_value = mock_service_client
+            credential = object()
+            mock_credential_cls.return_value = credential
+            service_client = object()
+            mock_service_client_cls.return_value = service_client
 
             # Trigger client creation
             source._auth_config.create_blob_service_client()
@@ -989,7 +966,7 @@ class TestAzureBlobSourceAuthClientCreation:
             # Verify DefaultAzureCredential was instantiated
             mock_credential_cls.assert_called_once()
             # Verify BlobServiceClient was created with account_url and credential
-            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=mock_credential)
+            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=credential)
 
     def test_service_principal_uses_client_secret_credential(self, ctx: PluginContext) -> None:
         """Service principal auth uses ClientSecretCredential."""
@@ -1008,10 +985,10 @@ class TestAzureBlobSourceAuthClientCreation:
             patch("azure.identity.ClientSecretCredential") as mock_credential_cls,
             patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls,
         ):
-            mock_credential = MagicMock()
-            mock_credential_cls.return_value = mock_credential
-            mock_service_client = MagicMock()
-            mock_service_client_cls.return_value = mock_service_client
+            credential = object()
+            mock_credential_cls.return_value = credential
+            service_client = object()
+            mock_service_client_cls.return_value = service_client
 
             # Trigger client creation
             source._auth_config.create_blob_service_client()
@@ -1023,7 +1000,7 @@ class TestAzureBlobSourceAuthClientCreation:
                 client_secret=TEST_CLIENT_SECRET,
             )
             # Verify BlobServiceClient was created with account_url and credential
-            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=mock_credential)
+            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=credential)
 
     def test_connection_string_uses_from_connection_string(self, ctx: PluginContext) -> None:
         """Connection string auth uses from_connection_string factory."""
@@ -1031,8 +1008,8 @@ class TestAzureBlobSourceAuthClientCreation:
 
         # Mock the azure.storage.blob import
         with patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls:
-            mock_service_client = MagicMock()
-            mock_service_client_cls.from_connection_string.return_value = mock_service_client
+            service_client = object()
+            mock_service_client_cls.from_connection_string.return_value = service_client
 
             # Trigger client creation
             source._auth_config.create_blob_service_client()
@@ -1059,9 +1036,7 @@ class TestBug4_4_RuntimeErrorOnLoadFailure:
                 super().__init__(message)
                 self.status_code = status_code
 
-        mock_blob_client.return_value.download_blob.return_value.readall.side_effect = AzureResourceNotFoundError(
-            "Blob not found", status_code=404
-        )
+        mock_blob_client.return_value = _BlobClientDouble(read_error=AzureResourceNotFoundError("Blob not found", status_code=404))
 
         with pytest.raises(RuntimeError) as exc_info:
             list(source.load(ctx))
@@ -1088,7 +1063,7 @@ class TestBug4_5_UnicodeDecodeErrorInJSONL:
 
         # Binary data that isn't valid UTF-8
         invalid_bytes = b"\xff\xfe\x00\x01Invalid UTF-8 content"
-        mock_blob_client.return_value.download_blob.return_value.readall.return_value = invalid_bytes
+        mock_blob_client.return_value = _BlobClientDouble(data=invalid_bytes)
 
         rows = list(source.load(ctx))
 

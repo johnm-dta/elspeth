@@ -10,8 +10,7 @@ field ordering mistakes during construction or addition.
 """
 
 from dataclasses import FrozenInstanceError
-from types import MappingProxyType
-from unittest.mock import Mock
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -239,15 +238,15 @@ class TestAggNodeEntry:
     def test_attribute_access(self) -> None:
         from elspeth.engine.orchestrator.types import AggNodeEntry
 
-        mock_transform = Mock()
-        entry = AggNodeEntry(transform=mock_transform, node_id=NodeID("agg1"))
-        assert entry.transform is mock_transform
+        transform = object()
+        entry = AggNodeEntry(transform=transform, node_id=NodeID("agg1"))
+        assert entry.transform is transform
         assert entry.node_id == NodeID("agg1")
 
     def test_is_frozen(self) -> None:
         from elspeth.engine.orchestrator.types import AggNodeEntry
 
-        entry = AggNodeEntry(transform=Mock(), node_id=NodeID("agg1"))
+        entry = AggNodeEntry(transform=object(), node_id=NodeID("agg1"))
         with pytest.raises(AttributeError):
             entry.node_id = NodeID("other")  # type: ignore[misc]
 
@@ -259,11 +258,11 @@ class TestRunContext:
         from elspeth.engine.orchestrator.types import AggNodeEntry, RunContext
 
         run_ctx = RunContext(
-            ctx=Mock(),
-            processor=Mock(),
+            ctx=object(),
+            processor=object(),
             coalesce_executor=None,
             coalesce_node_map={CoalesceName("m1"): NodeID("c1")},
-            agg_transform_lookup={"node1": AggNodeEntry(transform=Mock(), node_id=NodeID("agg1"))},
+            agg_transform_lookup={"node1": AggNodeEntry(transform=object(), node_id=NodeID("agg1"))},
         )
         assert isinstance(run_ctx.coalesce_node_map, MappingProxyType)
         assert isinstance(run_ctx.agg_transform_lookup, MappingProxyType)
@@ -278,9 +277,9 @@ class TestLoopContext:
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
             pending_tokens={"output": []},
-            processor=Mock(),
-            ctx=Mock(),
-            config=Mock(),
+            processor=object(),
+            ctx=object(),
+            config=object(),
             agg_transform_lookup={},
             coalesce_executor=None,
             coalesce_node_map={},
@@ -290,7 +289,7 @@ class TestLoopContext:
         assert loop_ctx.counters.rows_processed == 1
 
         # Mutable: pending_tokens can be appended
-        loop_ctx.pending_tokens["output"].append((Mock(), None))
+        loop_ctx.pending_tokens["output"].append((object(), None))
         assert len(loop_ctx.pending_tokens["output"]) == 1
 
 
@@ -320,21 +319,17 @@ class TestPipelineConfig:
 
     def _make_config(self) -> PipelineConfig:
         """Minimal valid PipelineConfig for testing."""
-        source = Mock()
-        source.node_id = None
-        transform = Mock()
-        transform.node_id = None
-        transform.on_error = "discard"
-        sink = Mock()
-        sink.node_id = None
+        source = SimpleNamespace(node_id=None)
+        transform = SimpleNamespace(node_id=None, on_error="discard")
+        sink = SimpleNamespace(node_id=None)
         return PipelineConfig(
             sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
             config={"key": "value"},
-            gates=[Mock()],
-            aggregation_settings={"agg-1": Mock()},
-            coalesce_settings=[Mock()],
+            gates=[object()],
+            aggregation_settings={"agg-1": object()},
+            coalesce_settings=[object()],
         )
 
     def test_list_fields_frozen_to_tuple(self) -> None:
@@ -352,26 +347,24 @@ class TestPipelineConfig:
     def test_tuple_fields_reject_append(self) -> None:
         config = self._make_config()
         with pytest.raises(AttributeError):
-            config.transforms.append(Mock())  # type: ignore[attr-defined]
+            config.transforms.append(object())  # type: ignore[attr-defined]
 
     def test_mapping_proxy_fields_reject_assignment(self) -> None:
         config = self._make_config()
         with pytest.raises(TypeError):
-            config.sinks["new"] = Mock()  # type: ignore[index]
+            config.sinks["new"] = object()  # type: ignore[index]
         with pytest.raises(TypeError):
             config.config["new"] = "value"  # type: ignore[index]
 
     def test_idempotent_with_already_frozen_inputs(self) -> None:
-        source = Mock()
-        source.node_id = None
-        sink = Mock()
-        sink.node_id = None
-        frozen_transforms = (Mock(),)
+        source = SimpleNamespace(node_id=None)
+        sink = SimpleNamespace(node_id=None)
+        frozen_transforms = (SimpleNamespace(node_id=None, on_error="discard"),)
         frozen_sinks = MappingProxyType({"output": sink})
         frozen_config = MappingProxyType({"key": "value"})
-        frozen_gates = (Mock(),)
-        frozen_agg = MappingProxyType({"agg-1": Mock()})
-        frozen_coal = (Mock(),)
+        frozen_gates = (object(),)
+        frozen_agg = MappingProxyType({"agg-1": object()})
+        frozen_coal = (object(),)
 
         config = PipelineConfig(
             sources={"primary": source},

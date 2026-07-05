@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,24 +31,106 @@ from elspeth.mcp.analyzers.reports import (
 from elspeth.mcp.types import ErrorAnalysisReport, ErrorResult, LLMUsageReport
 
 
-def _make_node(node_id: str, plugin_name: str, node_type: NodeType) -> MagicMock:
-    """Create a mock node row."""
-    node = MagicMock()
-    node.node_id = node_id
-    node.plugin_name = plugin_name
-    node.node_type = node_type
-    node.sequence_in_pipeline = 0
-    return node
+class _QueryResult:
+    def __init__(self, *, fetchall_rows: Sequence[Any] = (), scalar_value: Any = None) -> None:
+        self._fetchall_rows = list(fetchall_rows)
+        self._scalar_value = scalar_value
+
+    def fetchall(self) -> list[Any]:
+        return list(self._fetchall_rows)
+
+    def scalar(self) -> Any:
+        return self._scalar_value
 
 
-def _make_edge(from_id: str, to_id: str, label: str = "continue", mode: RoutingMode = RoutingMode.MOVE) -> MagicMock:
-    """Create a mock edge row."""
-    edge = MagicMock()
-    edge.from_node_id = from_id
-    edge.to_node_id = to_id
-    edge.label = label
-    edge.default_mode = mode
-    return edge
+class _Connection:
+    def __init__(self, results: Sequence[_QueryResult]) -> None:
+        self._results = list(results)
+        self.executed: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def execute(self, *args: Any, **kwargs: Any) -> _QueryResult:
+        self.executed.append((args, kwargs))
+        if not self._results:
+            raise AssertionError("unexpected query execution")
+        return self._results.pop(0)
+
+
+class _ConnectionContext:
+    def __init__(self, connection: _Connection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> _Connection:
+        return self._connection
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+        return False
+
+
+class _Db:
+    def __init__(self, connection: _Connection | None = None) -> None:
+        self._connection = connection or _Connection(())
+
+    def connection(self) -> _ConnectionContext:
+        return _ConnectionContext(self._connection)
+
+
+class _IndexedRow:
+    def __init__(self, *values: Any) -> None:
+        self._values = values
+
+    def __getitem__(self, index: int) -> Any:
+        return self._values[index]
+
+
+def _row(**kwargs: object) -> SimpleNamespace:
+    return SimpleNamespace(**kwargs)
+
+
+def _run(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "run_id": "test-run",
+        "started_at": None,
+        "completed_at": None,
+        "status": SimpleNamespace(value="completed"),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _factory(
+    *,
+    run_exists: bool = True,
+    nodes: Sequence[Any] = (),
+    edges: Sequence[Any] = (),
+) -> SimpleNamespace:
+    run = _run() if run_exists else None
+    return SimpleNamespace(
+        run_lifecycle=SimpleNamespace(get_run=lambda _run_id: run),
+        data_flow=SimpleNamespace(
+            get_nodes=lambda _run_id: list(nodes),
+            get_edges=lambda _run_id: list(edges),
+        ),
+    )
+
+
+def _make_node(node_id: str, plugin_name: str, node_type: NodeType) -> SimpleNamespace:
+    """Create a node row."""
+    return _row(
+        node_id=node_id,
+        plugin_name=plugin_name,
+        node_type=node_type,
+        sequence_in_pipeline=0,
+    )
+
+
+def _make_edge(from_id: str, to_id: str, label: str = "continue", mode: RoutingMode = RoutingMode.MOVE) -> SimpleNamespace:
+    """Create an edge row."""
+    return _row(
+        from_node_id=from_id,
+        to_node_id=to_id,
+        label=label,
+        default_mode=mode,
+    )
 
 
 class TestMermaidUniqueNodeIDs:
@@ -73,10 +156,8 @@ class TestMermaidUniqueNodeIDs:
             _make_edge("transform_truncate_jkl012", "sink_output_mno345", "on_success"),
         ]
 
-        db = MagicMock()
-        factory = MagicMock()
-        factory.data_flow.get_nodes.return_value = nodes
-        factory.data_flow.get_edges.return_value = edges
+        db = _Db()
+        factory = _factory(nodes=nodes, edges=edges)
 
         result = get_dag_structure(db, factory, "run-123")
 
@@ -107,34 +188,18 @@ class TestPerformanceReportNodeId:
         """Node IDs in performance report must be the full canonical ID."""
         full_node_id = "transform_llm_classifier_abc123def456"
 
-        # Mock a stats row with full node_id
-        stats_row = MagicMock()
-        stats_row.node_id = full_node_id
-        stats_row.plugin_name = "llm_classifier"
-        stats_row.node_type = "transform"
-        stats_row.executions = 10
-        stats_row.avg_ms = 150.0
-        stats_row.min_ms = 50.0
-        stats_row.max_ms = 500.0
-        stats_row.total_ms = 1500.0
-
-        # Mock database connection and query results
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.side_effect = [
-            [stats_row],  # stats_query
-            [],  # failed_query
-        ]
-
-        db = MagicMock()
-        db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        db.connection.return_value.__exit__ = MagicMock(return_value=False)
-
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock(
-            started_at=None,
-            completed_at=None,
-            status=MagicMock(value="completed"),
+        stats_row = _row(
+            node_id=full_node_id,
+            plugin_name="llm_classifier",
+            node_type="transform",
+            executions=10,
+            avg_ms=150.0,
+            min_ms=50.0,
+            max_ms=500.0,
+            total_ms=1500.0,
         )
+        db = _Db(_Connection([_QueryResult(fetchall_rows=[stats_row]), _QueryResult(fetchall_rows=[])]))
+        factory = _factory()
 
         result = get_performance_report(db, factory, "run-123")
 
@@ -155,55 +220,19 @@ class TestOutcomeAnalysisCompleted:
 
     def test_completed_is_bool_not_int(self) -> None:
         """completed must be a Python bool, not an integer 0/1."""
-        # Mock outcome rows with integer completed (as from SQLite)
-        outcome_row_terminal = MagicMock()
-        outcome_row_terminal.outcome = "success"
-        outcome_row_terminal.path = "default_flow"
-        outcome_row_terminal.completed = 1  # DB integer
-        outcome_row_terminal.count = 10
-
-        outcome_row_non_terminal = MagicMock()
-        outcome_row_non_terminal.outcome = None
-        outcome_row_non_terminal.path = "buffered"
-        outcome_row_non_terminal.completed = 0  # DB integer
-        outcome_row_non_terminal.count = 3
-
-        # Mock sink rows (empty)
-        # Mock fork/join counts
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.side_effect = [
-            [outcome_row_terminal, outcome_row_non_terminal],  # outcome_dist
-            [],  # sink_dist
-        ]
-        mock_conn.execute.return_value.scalar.side_effect = [0, 0]  # fork_count, join_count
-
-        # Need to handle multiple calls to execute() returning different results
-        call_count = 0
-
-        def side_effect_execute(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            result = MagicMock()
-            if call_count == 1:
-                result.fetchall.return_value = [outcome_row_terminal, outcome_row_non_terminal]
-            elif call_count == 2:
-                result.fetchall.return_value = []
-            elif call_count in (3, 4):
-                result.scalar.return_value = 0
-            return result
-
-        mock_conn.execute = side_effect_execute
-
-        db = MagicMock()
-        db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        db.connection.return_value.__exit__ = MagicMock(return_value=False)
-
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock(
-            started_at=None,
-            completed_at=None,
-            status=MagicMock(value="completed"),
+        outcome_row_terminal = _row(outcome="success", path="default_flow", completed=1, count=10)
+        outcome_row_non_terminal = _row(outcome=None, path="buffered", completed=0, count=3)
+        db = _Db(
+            _Connection(
+                [
+                    _QueryResult(fetchall_rows=[outcome_row_terminal, outcome_row_non_terminal]),
+                    _QueryResult(fetchall_rows=[]),
+                    _QueryResult(scalar_value=0),
+                    _QueryResult(scalar_value=0),
+                ]
+            )
         )
+        factory = _factory()
 
         result = get_outcome_analysis(db, factory, "run-123")
 
@@ -227,55 +256,26 @@ class TestOutcomeAnalysisCompleted:
         gate-routed successes have outcome="success", and routed errors have
         outcome="failure" with path="on_error_routed".
         """
-        outcome_row_default = MagicMock()
-        outcome_row_default.outcome = "success"
-        outcome_row_default.path = "default_flow"
-        outcome_row_default.completed = 1
-        outcome_row_default.count = 5
-
-        outcome_row_gate = MagicMock()
-        outcome_row_gate.outcome = "success"
-        outcome_row_gate.path = "gate_routed"
-        outcome_row_gate.completed = 1
-        outcome_row_gate.count = 3
-
-        outcome_row_routed_on_error = MagicMock()
-        outcome_row_routed_on_error.outcome = "failure"
-        outcome_row_routed_on_error.path = "on_error_routed"
-        outcome_row_routed_on_error.completed = 1
-        outcome_row_routed_on_error.count = 2
-
-        mock_conn = MagicMock()
-        call_count = 0
-
-        def side_effect_execute(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            result = MagicMock()
-            if call_count == 1:
-                result.fetchall.return_value = [
-                    outcome_row_default,
-                    outcome_row_gate,
-                    outcome_row_routed_on_error,
+        outcome_row_default = _row(outcome="success", path="default_flow", completed=1, count=5)
+        outcome_row_gate = _row(outcome="success", path="gate_routed", completed=1, count=3)
+        outcome_row_routed_on_error = _row(outcome="failure", path="on_error_routed", completed=1, count=2)
+        db = _Db(
+            _Connection(
+                [
+                    _QueryResult(
+                        fetchall_rows=[
+                            outcome_row_default,
+                            outcome_row_gate,
+                            outcome_row_routed_on_error,
+                        ]
+                    ),
+                    _QueryResult(fetchall_rows=[]),
+                    _QueryResult(scalar_value=0),
+                    _QueryResult(scalar_value=0),
                 ]
-            elif call_count == 2:
-                result.fetchall.return_value = []
-            elif call_count in (3, 4):
-                result.scalar.return_value = 0
-            return result
-
-        mock_conn.execute = side_effect_execute
-
-        db = MagicMock()
-        db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        db.connection.return_value.__exit__ = MagicMock(return_value=False)
-
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock(
-            started_at=None,
-            completed_at=None,
-            status=MagicMock(value="completed"),
+            )
         )
+        factory = _factory()
 
         result = get_outcome_analysis(db, factory, "run-123")
 
@@ -301,32 +301,18 @@ class TestHighVarianceZeroDuration:
 
     def test_zero_avg_ms_included_in_high_variance(self) -> None:
         """Node with avg_ms=0.0 and high max_ms should appear in high_variance."""
-        fast_node = MagicMock()
-        fast_node.node_id = "transform_fast_abc123"
-        fast_node.plugin_name = "fast_transform"
-        fast_node.node_type = "transform"
-        fast_node.executions = 100
-        fast_node.avg_ms = 0.0  # Zero average — the key trigger
-        fast_node.min_ms = 0.0
-        fast_node.max_ms = 100.0  # But max is high — this IS high variance
-        fast_node.total_ms = 5.0
-
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.side_effect = [
-            [fast_node],  # stats_query
-            [],  # failed_query
-        ]
-
-        db = MagicMock()
-        db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        db.connection.return_value.__exit__ = MagicMock(return_value=False)
-
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock(
-            started_at=None,
-            completed_at=None,
-            status=MagicMock(value="completed"),
+        fast_node = _row(
+            node_id="transform_fast_abc123",
+            plugin_name="fast_transform",
+            node_type="transform",
+            executions=100,
+            avg_ms=0.0,  # Zero average — the key trigger
+            min_ms=0.0,
+            max_ms=100.0,  # But max is high — this IS high variance
+            total_ms=5.0,
         )
+        db = _Db(_Connection([_QueryResult(fetchall_rows=[fast_node]), _QueryResult(fetchall_rows=[])]))
+        factory = _factory()
 
         result = get_performance_report(db, factory, "run-123")
 
@@ -339,32 +325,18 @@ class TestHighVarianceZeroDuration:
 
     def test_none_avg_ms_excluded_from_high_variance(self) -> None:
         """Node with avg_ms=None (no timing data) should NOT appear in high_variance."""
-        no_timing_node = MagicMock()
-        no_timing_node.node_id = "transform_notimed_abc123"
-        no_timing_node.plugin_name = "notimed_transform"
-        no_timing_node.node_type = "transform"
-        no_timing_node.executions = 1
-        no_timing_node.avg_ms = None
-        no_timing_node.min_ms = None
-        no_timing_node.max_ms = None
-        no_timing_node.total_ms = None
-
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.side_effect = [
-            [no_timing_node],  # stats_query
-            [],  # failed_query
-        ]
-
-        db = MagicMock()
-        db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        db.connection.return_value.__exit__ = MagicMock(return_value=False)
-
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock(
-            started_at=None,
-            completed_at=None,
-            status=MagicMock(value="completed"),
+        no_timing_node = _row(
+            node_id="transform_notimed_abc123",
+            plugin_name="notimed_transform",
+            node_type="transform",
+            executions=1,
+            avg_ms=None,
+            min_ms=None,
+            max_ms=None,
+            total_ms=None,
         )
+        db = _Db(_Connection([_QueryResult(fetchall_rows=[no_timing_node]), _QueryResult(fetchall_rows=[])]))
+        factory = _factory()
 
         result = get_performance_report(db, factory, "run-123")
 
@@ -378,47 +350,26 @@ class TestHighVarianceZeroDuration:
 # ---------------------------------------------------------------------------
 
 
-def _make_db_and_factory(run_exists: bool = True) -> tuple[MagicMock, MagicMock]:
-    """Create mock db/factory pair for get_error_analysis tests."""
-    db = MagicMock()
-    factory = MagicMock()
-    if run_exists:
-        factory.run_lifecycle.get_run.return_value = MagicMock()
-    else:
-        factory.run_lifecycle.get_run.return_value = None
-    return db, factory
+def _make_db_and_factory(run_exists: bool = True) -> tuple[_Db, SimpleNamespace]:
+    """Create db/factory pair for get_error_analysis tests."""
+    return _Db(), _factory(run_exists=run_exists)
 
 
-def _wire_conn(db: MagicMock, val_rows: list[Any], trans_rows: list[Any], sample_val: list[Any], sample_trans: list[Any]) -> None:
-    """Wire up mock connection with 4 sequential execute().fetchall() calls."""
-    mock_conn = MagicMock()
-    call_count = 0
-
-    def side_effect_execute(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        result = MagicMock()
-        if call_count == 1:
-            result.fetchall.return_value = val_rows
-        elif call_count == 2:
-            result.fetchall.return_value = trans_rows
-        elif call_count == 3:
-            result.fetchall.return_value = sample_val
-        elif call_count == 4:
-            result.fetchall.return_value = sample_trans
-        return result
-
-    mock_conn.execute = side_effect_execute
-    db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-    db.connection.return_value.__exit__ = MagicMock(return_value=False)
+def _wire_conn(db: _Db, val_rows: list[Any], trans_rows: list[Any], sample_val: list[Any], sample_trans: list[Any]) -> None:
+    """Wire connection with 4 sequential execute().fetchall() calls."""
+    db._connection = _Connection(
+        [
+            _QueryResult(fetchall_rows=val_rows),
+            _QueryResult(fetchall_rows=trans_rows),
+            _QueryResult(fetchall_rows=sample_val),
+            _QueryResult(fetchall_rows=sample_trans),
+        ]
+    )
 
 
-def _mock_row(**kwargs: object) -> MagicMock:
-    """Create a mock DB row with named attributes."""
-    row = MagicMock()
-    for k, v in kwargs.items():
-        setattr(row, k, v)
-    return row
+def _mock_row(**kwargs: object) -> SimpleNamespace:
+    """Create a DB row with named attributes."""
+    return _row(**kwargs)
 
 
 class TestErrorAnalysisRunNotFound:
@@ -518,8 +469,7 @@ class TestErrorAnalysisSampleData:
     def test_parses_sample_validation_data(self) -> None:
         db, factory = _make_db_and_factory()
         sample_json = json.dumps({"field": "age", "value": "not_a_number"})
-        sample_row = MagicMock()
-        sample_row.__getitem__ = lambda self, idx: sample_json if idx == 0 else None
+        sample_row = _IndexedRow(sample_json)
         _wire_conn(db, val_rows=[], trans_rows=[], sample_val=[sample_row], sample_trans=[])
 
         result = get_error_analysis(db, factory, "run-sample")
@@ -530,8 +480,7 @@ class TestErrorAnalysisSampleData:
     def test_parses_sample_transform_details(self) -> None:
         db, factory = _make_db_and_factory()
         details_json = json.dumps({"error": "division by zero", "node": "calc"})
-        sample_row = MagicMock()
-        sample_row.__getitem__ = lambda self, idx: details_json if idx == 0 else None
+        sample_row = _IndexedRow(details_json)
         _wire_conn(db, val_rows=[], trans_rows=[], sample_val=[], sample_trans=[sample_row])
 
         result = get_error_analysis(db, factory, "run-sample-trans")
@@ -542,8 +491,7 @@ class TestErrorAnalysisSampleData:
     def test_none_sample_data_preserved_as_none(self) -> None:
         """When row_data_json is NULL/None, the sample entry should be None, not crash."""
         db, factory = _make_db_and_factory()
-        null_row = MagicMock()
-        null_row.__getitem__ = lambda self, idx: None
+        null_row = _IndexedRow(None)
         _wire_conn(db, val_rows=[], trans_rows=[], sample_val=[null_row], sample_trans=[])
 
         result = get_error_analysis(db, factory, "run-null-sample")
@@ -566,66 +514,44 @@ def _make_llm_row(
     min_latency: float,
     max_latency: float,
     total_latency: float,
-) -> MagicMock:
-    """Create a mock aggregated LLM row (result of GROUP BY query)."""
-    row = MagicMock()
-    row.plugin_name = plugin_name
-    row.call_type = call_type
-    row.status = status
-    row.count = count
-    row.avg_latency = avg_latency
-    row.min_latency = min_latency
-    row.max_latency = max_latency
-    row.total_latency = total_latency
-    return row
+) -> SimpleNamespace:
+    """Create an aggregated LLM row (result of GROUP BY query)."""
+    return _row(
+        plugin_name=plugin_name,
+        call_type=call_type,
+        status=status,
+        count=count,
+        avg_latency=avg_latency,
+        min_latency=min_latency,
+        max_latency=max_latency,
+        total_latency=total_latency,
+    )
 
 
-def _make_call_type_row(call_type: str, count: int) -> MagicMock:
-    """Create a mock call type summary row."""
-    row = MagicMock()
-    row.call_type = call_type
-    row.count = count
-    return row
+def _make_call_type_row(call_type: str, count: int) -> SimpleNamespace:
+    """Create a call type summary row."""
+    return _row(call_type=call_type, count=count)
 
 
 def _make_llm_db_and_factory(
     run_exists: bool = True,
-) -> tuple[MagicMock, MagicMock]:
-    """Create db and factory mocks for LLM usage report tests."""
-    db = MagicMock()
-    mock_conn = MagicMock()
-    db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-    db.connection.return_value.__exit__ = MagicMock(return_value=False)
-
-    factory = MagicMock()
-    if run_exists:
-        factory.run_lifecycle.get_run.return_value = MagicMock(run_id="test-run")
-    else:
-        factory.run_lifecycle.get_run.return_value = None
-
-    return db, factory
+) -> tuple[_Db, SimpleNamespace]:
+    """Create db and factory fakes for LLM usage report tests."""
+    return _Db(), _factory(run_exists=run_exists)
 
 
 def _wire_llm_conn(
-    db: MagicMock,
-    llm_rows: list[MagicMock],
-    call_type_rows: list[MagicMock],
+    db: _Db,
+    llm_rows: list[SimpleNamespace],
+    call_type_rows: list[SimpleNamespace],
 ) -> None:
     """Wire mock connection to return llm_rows then call_type_rows on sequential execute calls."""
-    mock_conn = db.connection.return_value.__enter__.return_value
-    call_count = 0
-
-    def side_effect_execute(*args: object, **kwargs: object) -> MagicMock:
-        nonlocal call_count
-        call_count += 1
-        result = MagicMock()
-        if call_count == 1:
-            result.fetchall.return_value = llm_rows
-        elif call_count == 2:
-            result.fetchall.return_value = call_type_rows
-        return result
-
-    mock_conn.execute = side_effect_execute
+    db._connection = _Connection(
+        [
+            _QueryResult(fetchall_rows=llm_rows),
+            _QueryResult(fetchall_rows=call_type_rows),
+        ]
+    )
 
 
 class TestLLMUsageReportRunNotFound:

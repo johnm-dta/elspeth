@@ -19,8 +19,9 @@ from __future__ import annotations
 import hashlib
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, create_autospec, patch
 
 import pytest
 
@@ -31,7 +32,6 @@ from elspeth.contracts.declaration_contracts import _attach_contract_name_from_d
 from elspeth.contracts.enums import (
     BatchStatus,
     NodeStateStatus,
-    RoutingKind,
     TerminalOutcome,
     TerminalPath,
     TriggerType,
@@ -55,9 +55,11 @@ from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.clock import MockClock
-from elspeth.engine.coalesce_executor import CoalesceOutcome
+from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
 from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.executors import GateOutcome
+from elspeth.engine.executors.transform import TransformExecutor
+from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
 from elspeth.engine.processor import (
     MAX_WORK_QUEUE_ITERATIONS,
     SCHEDULER_MAINTENANCE_INTERVAL,
@@ -542,7 +544,7 @@ class TestConstructorErrorEdgeMap:
         transform = _make_mock_transform()
         token = make_token_info(row_id="row-1", token_id="token-1", data={"value": 1})
         ctx = make_context(landscape=factory.plugin_audit_writer())
-        executor = Mock()
+        executor = create_autospec(TransformExecutor, instance=True)
         executor.execute_transform.return_value = (
             TransformResult.success(make_pipeline_row({"value": 1}), success_reason={"action": "test"}),
             token,
@@ -1167,81 +1169,79 @@ class TestGetGateDestinations:
         """Gate routed to a named sink returns that sink name."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        outcome = Mock()
-        outcome.sink_name = "error-sink"
+        outcome = SimpleNamespace(sink_name="error-sink")
         assert processor._get_gate_destinations(outcome) == ("error-sink",)
 
     def test_fork_to_paths(self) -> None:
         """Fork returns branch names of child tokens."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        child_a = Mock()
-        child_a.branch_name = "path_a"
-        child_b = Mock()
-        child_b.branch_name = "path_b"
-        outcome = Mock()
-        outcome.sink_name = None
-        outcome.discarded = False
-        outcome.result.action.kind = RoutingKind.FORK_TO_PATHS
-        outcome.child_tokens = [child_a, child_b]
+        child_a = SimpleNamespace(branch_name="path_a")
+        child_b = SimpleNamespace(branch_name="path_b")
+        outcome = SimpleNamespace(
+            sink_name=None,
+            discarded=False,
+            result=SimpleNamespace(action=RoutingAction.fork_to_paths(["path_a", "path_b"])),
+            child_tokens=[child_a, child_b],
+        )
         assert processor._get_gate_destinations(outcome) == ("path_a", "path_b")
 
     def test_continue_routing(self) -> None:
         """Continue routing returns ("continue",)."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        outcome = Mock()
-        outcome.sink_name = None
-        outcome.discarded = False
-        outcome.result.action.kind = RoutingKind.CONTINUE
-        outcome.next_node_id = None
+        outcome = SimpleNamespace(
+            sink_name=None,
+            discarded=False,
+            result=SimpleNamespace(action=RoutingAction.continue_()),
+            next_node_id=None,
+        )
         assert processor._get_gate_destinations(outcome) == ("continue",)
 
     def test_route_to_processing_uses_route_label(self) -> None:
         """Route-label branch to processing node reports chosen route label."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        outcome = Mock()
-        outcome.sink_name = None
-        outcome.discarded = False
-        outcome.next_node_id = NodeID("transform-2")
-        outcome.result.action.kind = RoutingKind.ROUTE
-        outcome.result.action.destinations = ("high",)
+        outcome = SimpleNamespace(
+            sink_name=None,
+            discarded=False,
+            next_node_id=NodeID("transform-2"),
+            result=SimpleNamespace(action=RoutingAction.route("high")),
+        )
         assert processor._get_gate_destinations(outcome) == ("high",)
 
-    def test_missing_discarded_attr_does_not_mask_fork_to_paths(self) -> None:
-        """GateOutcome-like test doubles without discarded still report fork paths."""
+    def test_gate_outcome_false_discarded_does_not_mask_fork_to_paths(self) -> None:
+        """GateOutcome with discarded=False reports fork paths."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        child_a = Mock()
-        child_a.branch_name = "path_a"
-        child_b = Mock()
-        child_b.branch_name = "path_b"
-        outcome = Mock()
-        outcome.sink_name = None
-        outcome.result.action.kind = RoutingKind.FORK_TO_PATHS
-        outcome.child_tokens = [child_a, child_b]
+        child_a = make_token_info(data={"value": 1}, branch_name="path_a")
+        child_b = make_token_info(data={"value": 2}, branch_name="path_b")
+        outcome = GateOutcome(
+            result=GateResult(row={"value": 1}, action=RoutingAction.fork_to_paths(["path_a", "path_b"])),
+            updated_token=make_token_info(data={"value": 1}),
+            child_tokens=(child_a, child_b),
+        )
         assert processor._get_gate_destinations(outcome) == ("path_a", "path_b")
 
-    def test_missing_discarded_attr_does_not_mask_continue_routing(self) -> None:
-        """GateOutcome-like test doubles without discarded still report continue."""
+    def test_gate_outcome_false_discarded_does_not_mask_continue_routing(self) -> None:
+        """GateOutcome with discarded=False reports continue."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        outcome = Mock()
-        outcome.sink_name = None
-        outcome.result.action.kind = RoutingKind.CONTINUE
-        outcome.next_node_id = None
+        outcome = GateOutcome(
+            result=GateResult(row={"value": 1}, action=RoutingAction.continue_()),
+            updated_token=make_token_info(data={"value": 1}),
+        )
         assert processor._get_gate_destinations(outcome) == ("continue",)
 
-    def test_missing_discarded_attr_does_not_mask_processing_route_label(self) -> None:
-        """GateOutcome-like test doubles without discarded still report route labels."""
+    def test_gate_outcome_false_discarded_does_not_mask_processing_route_label(self) -> None:
+        """GateOutcome with discarded=False reports route labels."""
         _, factory = _make_factory()
         processor = _make_processor(factory)
-        outcome = Mock()
-        outcome.sink_name = None
-        outcome.next_node_id = NodeID("transform-2")
-        outcome.result.action.kind = RoutingKind.ROUTE
-        outcome.result.action.destinations = ("high",)
+        outcome = GateOutcome(
+            next_node_id=NodeID("transform-2"),
+            result=GateResult(row={"value": 1}, action=RoutingAction.route("high")),
+            updated_token=make_token_info(data={"value": 1}),
+        )
         assert processor._get_gate_destinations(outcome) == ("high",)
 
 
@@ -1940,7 +1940,7 @@ class TestProcessRowNoTransforms:
     def test_empty_batch_flush_telemetry_failure_does_not_interrupt_dropped_outcomes(self) -> None:
         """Zero-row batch flush must still terminalize every buffered token if telemetry fails."""
         _db, factory = _make_factory()
-        telemetry_manager = Mock()
+        telemetry_manager = create_autospec(TelemetryManagerProtocol, instance=True)
         telemetry_manager.handle_event.side_effect = RuntimeError("telemetry down")
         processor = _make_processor(factory, telemetry_manager=telemetry_manager)
         transform = _make_mock_transform(node_id="aggregate-1", name="batch-transform")
@@ -2411,10 +2411,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
 
-        bad_result = Mock()
-        bad_result.status = "success"
-        bad_result.is_multi_row = True
-        bad_result.rows = None
+        bad_result = SimpleNamespace(status="success", is_multi_row=True, rows=None)
 
         def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
@@ -5112,8 +5109,8 @@ class TestDurableSchedulerResumeDrain:
             coalesce_node_id=str(coalesce_node),
             coalesce_name="merge",
         )
-        coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=True, merged_token=None)
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.accept.return_value = CoalesceOutcome(held=True, merged_token=None)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6363,7 +6360,7 @@ class TestMaybeCoalesceToken:
     def test_token_without_branch_returns_not_handled(self) -> None:
         """Token without branch_name is not a fork child, skip coalesce."""
         _, factory = _make_factory()
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6392,7 +6389,7 @@ class TestMaybeCoalesceToken:
     def test_current_node_not_coalesce_node_returns_not_handled(self) -> None:
         """Coalesce is only triggered when traversal reaches the coalesce node."""
         _, factory = _make_factory()
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6419,8 +6416,8 @@ class TestMaybeCoalesceToken:
     def test_coalesce_held_returns_handled_with_none(self) -> None:
         """Token accepted but not all branches arrived → handled=True, result=None."""
         _, factory = _make_factory()
-        coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=True, merged_token=None)
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.accept.return_value = CoalesceOutcome(held=True, merged_token=None)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6459,7 +6456,7 @@ class TestMaybeCoalesceToken:
             row_data=make_row({}),
             branch_name="path_a",
         )
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         coalesce.accept.return_value = CoalesceOutcome(
             held=False,
             merged_token=None,
@@ -6520,7 +6517,7 @@ class TestMaybeCoalesceToken:
             row_data=make_row({}),
             branch_name="path_a",
         )
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
@@ -6582,7 +6579,7 @@ class TestMaybeCoalesceToken:
             row_data=make_row({}),
             branch_name="path_a",
         )
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
@@ -6631,7 +6628,7 @@ class TestMaybeCoalesceToken:
             row_data=make_row({}),
             branch_name="path_a",
         )
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
@@ -6671,8 +6668,8 @@ class TestMaybeCoalesceToken:
         the invalid-state invariant fires from the intake pass.
         """
         _db, factory = _make_factory()
-        coalesce = Mock()
-        coalesce.accept.return_value = Mock(
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.accept.return_value = SimpleNamespace(
             held=False,
             merged_token=None,
             failure_reason=None,
@@ -6914,7 +6911,7 @@ class TestNotifyCoalesceOfLostBranch:
     def test_token_without_branch_returns_empty(self) -> None:
         """Non-forked token → no coalesce notification needed."""
         _, factory = _make_factory()
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         processor = _make_processor(factory, coalesce_executor=coalesce)
         token = TokenInfo(
             row_id="row-1",
@@ -6934,7 +6931,7 @@ class TestNotifyCoalesceOfLostBranch:
     def test_branch_not_in_coalesce_map_returns_empty(self) -> None:
         """Branch without coalesce mapping → no notification."""
         _, factory = _make_factory()
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6958,12 +6955,13 @@ class TestNotifyCoalesceOfLostBranch:
     def test_lost_branch_with_failure_returns_sibling_results(self) -> None:
         """Branch loss causing coalesce failure returns FAILED sibling results."""
         _, factory = _make_factory()
-        coalesce = Mock()
         sibling_token = make_token_info(data={"value": 99})
-        coalesce.notify_branch_lost.return_value = Mock(
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.notify_branch_lost.return_value = CoalesceOutcome(
+            held=False,
             merged_token=None,
             failure_reason="not enough branches",
-            consumed_tokens=[sibling_token],
+            consumed_tokens=(sibling_token,),
         )
         processor = _make_processor(
             factory,
@@ -7001,11 +6999,12 @@ class TestNotifyCoalesceOfLostBranch:
         """Branch loss triggers merge at terminal coalesce → COALESCED result."""
         _, factory = _make_factory()
         merged_token = make_token_info(data={"merged": True})
-        coalesce = Mock()
-        coalesce.notify_branch_lost.return_value = Mock(
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.notify_branch_lost.return_value = CoalesceOutcome(
+            held=False,
             merged_token=merged_token,
             failure_reason=None,
-            consumed_tokens=[],
+            consumed_tokens=(),
         )
         processor = _make_processor(
             factory,
@@ -7036,11 +7035,12 @@ class TestNotifyCoalesceOfLostBranch:
         """Terminal coalesce merge from branch loss must have sink mapping."""
         _, factory = _make_factory()
         merged_token = make_token_info(data={"merged": True})
-        coalesce = Mock()
-        coalesce.notify_branch_lost.return_value = Mock(
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.notify_branch_lost.return_value = CoalesceOutcome(
+            held=False,
             merged_token=merged_token,
             failure_reason=None,
-            consumed_tokens=[],
+            consumed_tokens=(),
         )
         processor = _make_processor(
             factory,
@@ -7091,11 +7091,12 @@ class TestNotifyCoalesceOfLostBranch:
         )
         merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
         factory.data_flow.create_token(row.row_id, token_id="merged-1")
-        coalesce = Mock()
-        coalesce.notify_branch_lost.return_value = Mock(
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.notify_branch_lost.return_value = CoalesceOutcome(
+            held=False,
             merged_token=merged_token,
             failure_reason=None,
-            consumed_tokens=[],
+            consumed_tokens=(),
         )
         child_items: list[WorkItem] = []
         processor = _make_processor(
@@ -7297,7 +7298,7 @@ class TestAggregationFacades:
         from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
 
         _, factory = _make_factory()
-        coalesce_executor = Mock()
+        coalesce_executor = create_autospec(CoalesceExecutor, instance=True)
         pending_scalars = CoalescePendingScalars(lost_branches={"branch_b": "transform_failed"})
         coalesce_executor.get_barrier_scalars.return_value = {("merge", "row-1"): pending_scalars}
         processor = _make_processor(factory, coalesce_executor=coalesce_executor)
@@ -7327,16 +7328,16 @@ class TestTelemetryEmission:
         _, factory = _make_factory()
         processor = _make_processor(factory)
         # Should not raise
-        processor._emit_telemetry(Mock())
+        processor._emit_telemetry(SimpleNamespace())
 
     def test_telemetry_manager_receives_events(self) -> None:
         """With telemetry_manager, events are forwarded."""
         _, factory = _make_factory()
 
-        telemetry = Mock()
+        telemetry = create_autospec(TelemetryManagerProtocol, instance=True)
         processor = _make_processor(factory, telemetry_manager=telemetry)
 
-        event = Mock()
+        event = SimpleNamespace()
         processor._emit_telemetry(event)
         telemetry.handle_event.assert_called_once_with(event)
 
@@ -7696,7 +7697,7 @@ class TestGateSinkRoutingNotifiesCoalesce:
             routes={"true": "error_sink", "false": "default"},
         )
 
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
         # notify_branch_lost returns None = no immediate consequence
         coalesce.notify_branch_lost.return_value = None
 
@@ -7787,11 +7788,12 @@ class TestGateSinkRoutingNotifiesCoalesce:
         )
 
         sibling_token = make_token_info(data={"value": 99})
-        coalesce = Mock()
-        coalesce.notify_branch_lost.return_value = Mock(
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
+        coalesce.notify_branch_lost.return_value = CoalesceOutcome(
+            held=False,
             merged_token=None,
             failure_reason="require_all policy violated",
-            consumed_tokens=[sibling_token],
+            consumed_tokens=(sibling_token,),
         )
 
         processor = _make_processor(
@@ -7879,7 +7881,7 @@ class TestGateSinkRoutingNotifiesCoalesce:
             routes={"true": "error_sink", "false": "default"},
         )
 
-        coalesce = Mock()
+        coalesce = create_autospec(CoalesceExecutor, instance=True)
 
         processor = _make_processor(
             factory,
@@ -7959,7 +7961,7 @@ class TestGateSinkRoutingNotifiesCoalesce:
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
             node_to_plugin={gate_node: gate_config},
-            coalesce_executor=Mock(),
+            coalesce_executor=create_autospec(CoalesceExecutor, instance=True),
         )
         token = TokenInfo(
             row_id="row-1",
@@ -8133,12 +8135,8 @@ class TestGateJumpPastCoalesceInvariant:
             ),
         )
 
-        coalesce_exec = Mock()
-        coalesce_exec.accept.return_value = Mock(
-            held=True,
-            merged_token=None,
-            failure_reason=None,
-        )
+        coalesce_exec = create_autospec(CoalesceExecutor, instance=True)
+        coalesce_exec.accept.return_value = CoalesceOutcome(held=True, merged_token=None)
 
         processor = _make_processor(
             factory,
@@ -8241,8 +8239,14 @@ class TestFlushContextImmutability:
 
         fctx = _FlushContext(
             node_id=NodeID("node-1"),
-            transform=Mock(),
-            settings=Mock(),
+            transform=SimpleNamespace(node_id="node-1"),
+            settings=AggregationSettings(
+                name="agg",
+                plugin="batch-plugin",
+                input="source",
+                on_error="discard",
+                trigger={"count": 1},
+            ),
             buffered_tokens=tuple(original_list),
             batch_id="batch-1",
             error_msg="test",

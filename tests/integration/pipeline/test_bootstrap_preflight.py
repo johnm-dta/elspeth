@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -34,6 +34,55 @@ class _GraphStub:
 
     def get_aggregation_id_map(self) -> dict[str, str]:
         return {}
+
+
+class _CloseableDouble:
+    def __init__(self, *, close_error: BaseException | None = None) -> None:
+        self.close_error = close_error
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _OrchestratorDouble:
+    def __init__(self, *, run_result: object | None = None, run_error: BaseException | None = None) -> None:
+        self.run_result = run_result if run_result is not None else object()
+        self.run_error = run_error
+
+    def run(self, *args: Any, **kwargs: Any) -> object:
+        del args, kwargs
+        if self.run_error is not None:
+            raise self.run_error
+        return self.run_result
+
+
+class _OrchestratorContextManagerDouble:
+    def __init__(self, *, run_result: object | None = None, run_error: BaseException | None = None) -> None:
+        self.ctx = SimpleNamespace(
+            pipeline_config=object(),
+            orchestrator=_OrchestratorDouble(run_result=run_result, run_error=run_error),
+        )
+
+    def __enter__(self) -> SimpleNamespace:
+        return self.ctx
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        del exc_type, exc, tb
+        return False
+
+
+def _make_plugin_bundle() -> PluginBundle:
+    source = object()
+    return PluginBundle(
+        sources={"source": source},
+        source_settings_map={"source": object()},
+        transforms=[],
+        sinks={},
+        aggregations={},
+    )
 
 
 def _make_bootstrap_config() -> SimpleNamespace:
@@ -90,15 +139,11 @@ class TestBootstrapDependencyDispatch:
             patch("elspeth.engine.dependency_resolver.detect_cycles") as mock_detect,
             patch("elspeth.engine.dependency_resolver.resolve_dependencies") as mock_resolve,
         ):
-            mock_plugins.return_value = MagicMock(spec=PluginBundle)
+            mock_plugins.return_value = _make_plugin_bundle()
             mock_graph = _GraphStub()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 
-            mock_run_result = MagicMock()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = mock_run_result
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble()
 
             from elspeth.cli import bootstrap_and_run
 
@@ -114,13 +159,13 @@ class TestBootstrapProgrammaticExecution:
     def test_successful_run_propagates_db_close_failure(self) -> None:
         """close() failure after successful execution is not a false success."""
         mock_config = _make_bootstrap_config()
-        mock_db = MagicMock()
-        mock_db.close.side_effect = RuntimeError("close failed")
+        mock_db = _CloseableDouble(close_error=RuntimeError("close failed"))
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
             patch(
-                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config",
+                return_value=_make_plugin_bundle(),
             ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
@@ -131,10 +176,7 @@ class TestBootstrapProgrammaticExecution:
         ):
             mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_db_cls.from_url.return_value = mock_db
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = MagicMock()
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble()
 
             from elspeth.cli import bootstrap_and_run
 
@@ -144,13 +186,13 @@ class TestBootstrapProgrammaticExecution:
     def test_pipeline_failure_is_not_masked_by_db_close_failure(self) -> None:
         """close() failure during exception cleanup preserves the pipeline error."""
         mock_config = _make_bootstrap_config()
-        mock_db = MagicMock()
-        mock_db.close.side_effect = RuntimeError("close failed")
+        mock_db = _CloseableDouble(close_error=RuntimeError("close failed"))
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
             patch(
-                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config",
+                return_value=_make_plugin_bundle(),
             ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
@@ -161,10 +203,7 @@ class TestBootstrapProgrammaticExecution:
         ):
             mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_db_cls.from_url.return_value = mock_db
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.side_effect = ValueError("pipeline failed")
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble(run_error=ValueError("pipeline failed"))
 
             from elspeth.cli import bootstrap_and_run
 
@@ -174,12 +213,13 @@ class TestBootstrapProgrammaticExecution:
     def test_dependency_runner_requests_silent_orchestrator_output(self) -> None:
         """bootstrap_and_run is programmatic and must not attach CLI formatters."""
         mock_config = _make_bootstrap_config()
-        mock_db = MagicMock()
+        mock_db = _CloseableDouble()
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
             patch(
-                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config",
+                return_value=_make_plugin_bundle(),
             ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
@@ -190,10 +230,7 @@ class TestBootstrapProgrammaticExecution:
         ):
             mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_db_cls.from_url.return_value = mock_db
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = MagicMock()
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble()
 
             from elspeth.cli import bootstrap_and_run
 
@@ -210,7 +247,8 @@ class TestBootstrapProgrammaticExecution:
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
             patch(
-                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config",
+                return_value=_make_plugin_bundle(),
             ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB"),
@@ -220,10 +258,7 @@ class TestBootstrapProgrammaticExecution:
             patch("elspeth.engine.bootstrap.resolve_preflight", return_value=[]),
         ):
             mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = MagicMock()
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble()
 
             from elspeth.cli import bootstrap_and_run
 
@@ -249,20 +284,21 @@ class TestBootstrapProgrammaticExecution:
             source_settings_map={},
             sinks={"out": object()},
         )
-        mock_db = MagicMock()
+        mock_db = _CloseableDouble()
 
         with (
-            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=MagicMock(spec=None)),
-            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=SimpleNamespace()),
+            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=SimpleNamespace()),
             patch(
-                "elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings", return_value=MagicMock(spec=None, enabled=False)
+                "elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings",
+                return_value=SimpleNamespace(enabled=False),
             ),
-            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=SimpleNamespace()),
             patch("elspeth.core.rate_limit.RateLimitRegistry") as mock_rate_limit_registry,
-            patch("elspeth.telemetry.create_telemetry_manager", return_value=MagicMock(spec=None)),
+            patch("elspeth.telemetry.create_telemetry_manager", return_value=_CloseableDouble()),
             patch("elspeth.engine.Orchestrator") as mock_orchestrator,
         ):
-            mock_rate_limit_registry.return_value = MagicMock(spec=None)
+            mock_rate_limit_registry.return_value = _CloseableDouble()
             with _orchestrator_context(mock_config, mock_graph, mock_plugins, db=mock_db, output_format="none"):
                 pass
 
@@ -275,27 +311,27 @@ class TestBootstrapProgrammaticExecution:
 
         mock_config = _make_bootstrap_config()
         mock_config.checkpoint.enabled = False
-        mock_graph = MagicMock(spec=None)
-        mock_graph.get_aggregation_id_map.return_value = {}
-        mock_plugins = MagicMock(spec=PluginBundle)
-        mock_plugins.transforms = []
-        mock_plugins.aggregations = {}
-        first_source = MagicMock(spec=None)
-        second_source = MagicMock(spec=None)
-        mock_plugins.source = first_source
-        mock_plugins.sources = {"orders": first_source, "refunds": second_source}
-        mock_plugins.sinks = {"out": MagicMock(spec=None)}
-        mock_db = MagicMock(spec=None)
+        mock_graph = _GraphStub()
+        first_source = object()
+        second_source = object()
+        mock_plugins = SimpleNamespace(
+            transforms=[],
+            aggregations={},
+            sources={"orders": first_source, "refunds": second_source},
+            sinks={"out": object()},
+        )
+        mock_db = _CloseableDouble()
 
         with (
-            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=MagicMock(spec=None)),
-            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=SimpleNamespace()),
+            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=SimpleNamespace()),
             patch(
-                "elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings", return_value=MagicMock(spec=None, enabled=False)
+                "elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings",
+                return_value=SimpleNamespace(enabled=False),
             ),
-            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=MagicMock(spec=None)),
-            patch("elspeth.core.rate_limit.RateLimitRegistry", return_value=MagicMock(spec=None)),
-            patch("elspeth.telemetry.create_telemetry_manager", return_value=MagicMock(spec=None)),
+            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=SimpleNamespace()),
+            patch("elspeth.core.rate_limit.RateLimitRegistry", return_value=_CloseableDouble()),
+            patch("elspeth.telemetry.create_telemetry_manager", return_value=_CloseableDouble()),
             patch("elspeth.engine.Orchestrator"),
             _orchestrator_context(mock_config, mock_graph, mock_plugins, db=mock_db, output_format="none") as ctx,
         ):
@@ -332,7 +368,8 @@ class TestBootstrapDependencyResultsFlow:
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
             patch(
-                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config",
+                return_value=_make_plugin_bundle(),
             ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB"),
@@ -344,10 +381,7 @@ class TestBootstrapDependencyResultsFlow:
             patch("elspeth.engine.commencement.evaluate_commencement_gates", side_effect=capture_gate_context),
         ):
             mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = MagicMock()
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble()
 
             from elspeth.cli import bootstrap_and_run
 
@@ -376,15 +410,11 @@ class TestBootstrapCommencementGateDispatch:
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.engine.commencement.evaluate_commencement_gates") as mock_eval_gates,
         ):
-            mock_plugins.return_value = MagicMock(spec=PluginBundle)
+            mock_plugins.return_value = _make_plugin_bundle()
             mock_graph = _GraphStub()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 
-            mock_run_result = MagicMock()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = mock_run_result
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_orch_ctx.return_value = _OrchestratorContextManagerDouble()
 
             from elspeth.cli import bootstrap_and_run
 
@@ -412,7 +442,7 @@ class TestBootstrapCommencementGateDispatch:
                 ),
             ),
         ):
-            mock_plugins.return_value = MagicMock(spec=PluginBundle)
+            mock_plugins.return_value = _make_plugin_bundle()
             mock_graph = _GraphStub()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 

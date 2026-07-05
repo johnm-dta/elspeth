@@ -25,25 +25,27 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from elspeth.contracts.enums import RunStatus
+from elspeth.contracts.enums import CreationModality, RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.run_result import RunResult
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
     RateLimitSettings,
     TelemetrySettings,
 )
+from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
-from elspeth.web.blobs.protocol import BlobFinalizationResult
+from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobRecord, BlobServiceProtocol
 from elspeth.web.execution.errors import PipelineValidationError
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
@@ -65,8 +67,8 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
-    RunRecord,
     SessionRunStatus,
+    SessionServiceProtocol,
 )
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
 
@@ -74,6 +76,154 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_va
 
 _TEST_PIPELINE_YAML = "source:\n  plugin: csv\n  options: {}\n"
 _RESOLVED_TEST_PIPELINE_YAML = "source:\n  options: {}\n  plugin: csv\n"
+
+
+class _WebSettingsStub:
+    """Settings collaborator for execution-service tests."""
+
+    def __init__(self) -> None:
+        self.landscape_url = "sqlite:///test_audit.db"
+        self.payload_store_path = Path("/tmp/test_payloads")
+        self.landscape_passphrase = None
+        self.data_dir: str | Path = "/tmp/data"
+
+    def get_landscape_url(self) -> str:
+        return self.landscape_url
+
+    def get_payload_store_path(self) -> Path:
+        return self.payload_store_path
+
+
+class _YamlGeneratorStub:
+    def __init__(self, result: Any = _TEST_PIPELINE_YAML) -> None:
+        self.result = result
+
+    def generate_yaml(self, _state: Any) -> Any:
+        return self.result
+
+
+def _run_record_stub(**overrides: Any) -> SimpleNamespace:
+    values = {
+        "id": uuid4(),
+        "session_id": uuid4(),
+        "state_id": uuid4(),
+        "status": "pending",
+        "started_at": datetime.now(tz=UTC),
+        "finished_at": None,
+        "rows_processed": 0,
+        "rows_succeeded": 0,
+        "rows_failed": 0,
+        "rows_routed_success": 0,
+        "rows_routed_failure": 0,
+        "rows_quarantined": 0,
+        "error": None,
+        "landscape_run_id": None,
+        "pipeline_yaml": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _orchestrator_result_stub(
+    *,
+    run_id: str = "r1",
+    status: RunStatus = RunStatus.COMPLETED,
+    rows_processed: int = 10,
+    rows_succeeded: int = 10,
+    rows_failed: int = 0,
+    rows_routed_success: int = 0,
+    rows_routed_failure: int = 0,
+    rows_quarantined: int = 0,
+) -> RunResult:
+    return RunResult(
+        run_id=run_id,
+        status=status,
+        rows_processed=rows_processed,
+        rows_succeeded=rows_succeeded,
+        rows_failed=rows_failed,
+        rows_routed_success=rows_routed_success,
+        rows_routed_failure=rows_routed_failure,
+        rows_quarantined=rows_quarantined,
+    )
+
+
+def _blob_record_stub(
+    *,
+    blob_id: UUID | None = None,
+    session_id: UUID | None = None,
+    filename: str = "blob.txt",
+    mime_type: str = "text/plain",
+    size_bytes: int = 0,
+    content_hash: str | None = None,
+    storage_path: str = "/tmp/data/blobs/blob.txt",
+    status: str = "ready",
+) -> BlobRecord:
+    return BlobRecord(
+        id=blob_id or uuid4(),
+        session_id=session_id or uuid4(),
+        filename=filename,
+        mime_type=cast(Any, mime_type),
+        size_bytes=size_bytes,
+        content_hash=content_hash,
+        storage_path=storage_path,
+        created_at=datetime.now(UTC),
+        created_by="user",
+        source_description=None,
+        status=cast(Any, status),
+        creation_modality=CreationModality.VERBATIM,
+        created_from_message_id=None,
+        creating_model_identifier=None,
+        creating_model_version=None,
+        creating_provider=None,
+        creating_composer_skill_hash=None,
+        creating_arguments_hash=None,
+    )
+
+
+def _plugin_bundle_stub() -> SimpleNamespace:
+    source = object()
+    return SimpleNamespace(
+        source=source,
+        sources={"source": source},
+        source_settings=object(),
+        source_settings_map={"source": object()},
+        transforms=(),
+        sinks={"primary": object()},
+        aggregations={},
+    )
+
+
+def _blob_service_stub() -> Any:
+    return create_autospec(BlobServiceProtocol, instance=True, spec_set=True)
+
+
+def _execution_graph_stub() -> Any:
+    return create_autospec(ExecutionGraph, instance=True)
+
+
+def _orchestrator_stub(result: RunResult | None = None) -> MagicMock:
+    mock_orch = MagicMock(spec=["run"])
+    mock_orch.run.return_value = result or _orchestrator_result_stub()
+    return mock_orch
+
+
+def _configure_runtime_success(
+    *,
+    mock_load: MagicMock,
+    mock_instantiate: MagicMock,
+    mock_graph_cls: MagicMock,
+    mock_orch_cls: MagicMock | None = None,
+    result: RunResult | None = None,
+) -> MagicMock | None:
+    mock_load.return_value = _mock_pipeline_settings()
+    mock_instantiate.return_value = _plugin_bundle_stub()
+    mock_graph = _execution_graph_stub()
+    mock_graph_cls.from_plugin_instances.return_value = mock_graph
+    if mock_orch_cls is None:
+        return None
+    mock_orch = _orchestrator_stub(result)
+    mock_orch_cls.return_value = mock_orch
+    return mock_orch
 
 
 @pytest.fixture
@@ -89,7 +239,7 @@ def mock_pipeline_config_assembly() -> Iterator[MagicMock]:
     """
     with patch(
         "elspeth.web.execution.service.assemble_and_validate_pipeline_config",
-        return_value=MagicMock(),
+        return_value=SimpleNamespace(),
     ) as mock_assemble:
         yield mock_assemble
 
@@ -105,34 +255,26 @@ def broadcaster(mock_loop: MagicMock) -> ProgressBroadcaster:
 
 
 @pytest.fixture
-def mock_settings() -> MagicMock:
-    settings = MagicMock()
-    settings.get_landscape_url.return_value = "sqlite:///test_audit.db"
-    settings.get_payload_store_path.return_value = Path("/tmp/test_payloads")
-    settings.landscape_passphrase = None
-    # data_dir is consumed by the source/sink path allowlist and the
-    # blob source-path read guard.  Pin it to a known string so tests
-    # that exercise blob-backed sources can compute matching canonical
-    # paths (elspeth-07089fbaa3).
-    settings.data_dir = "/tmp/data"
-    return settings
+def mock_settings() -> _WebSettingsStub:
+    return _WebSettingsStub()
 
 
-def _mock_pipeline_settings() -> MagicMock:
+def _mock_pipeline_settings() -> SimpleNamespace:
     """Return settings-shaped test data for patched pipeline loading.
 
     _run_pipeline() now builds the same runtime infrastructure as the CLI path,
     so tests that patch YAML loading must still provide real config-contract
     objects for the runtime conversion boundary.
     """
-    settings = MagicMock()
-    settings.gates = []
-    settings.coalesce = []
-    settings.rate_limit = RateLimitSettings(enabled=False)
-    settings.concurrency = ConcurrencySettings()
-    settings.checkpoint = CheckpointSettings(enabled=False)
-    settings.telemetry = TelemetrySettings(enabled=False)
-    return settings
+    return SimpleNamespace(
+        gates=[],
+        coalesce=[],
+        queues={},
+        rate_limit=RateLimitSettings(enabled=False),
+        concurrency=ConcurrencySettings(),
+        checkpoint=CheckpointSettings(enabled=False),
+        telemetry=TelemetrySettings(enabled=False),
+    )
 
 
 def _run_accounting_for_status(status: RunStatus) -> RunAccounting:
@@ -241,31 +383,36 @@ def _composition_state_record(
         validation_errors=None,
         created_at=datetime.now(UTC),
         derived_from_state_id=None,
+        composer_meta=None,
     )
 
 
 @pytest.fixture
 def mock_session_service() -> MagicMock:
-    svc = MagicMock()
-    state = MagicMock()
-    state.yaml_content = "source:\n  plugin: csv_source"
-    # SessionService methods are async — use AsyncMock for awaitable returns
+    svc = create_autospec(SessionServiceProtocol, instance=True)
     # state_record needs fields that state_from_record() accesses
-    state.id = uuid4()
-    state.session_id = uuid4()
-    state.version = 1
-    state.source = None  # No source → path allowlist check skips
-    state.sources = None
-    state.nodes = None
-    state.edges = None
-    state.outputs = None
-    state.metadata_ = {"name": "Test", "description": ""}
-    svc.get_state = AsyncMock(return_value=state)
-    svc.get_current_state = AsyncMock(return_value=state)
-    svc.get_active_run = AsyncMock(return_value=None)
-    svc.create_run = AsyncMock(return_value=MagicMock(id=uuid4()))
-    svc.get_run = AsyncMock(return_value=MagicMock(status="pending"))
-    svc.update_run_status = AsyncMock()
+    state = SimpleNamespace(
+        id=uuid4(),
+        session_id=uuid4(),
+        version=1,
+        source=None,  # No source -> path allowlist check skips
+        sources=None,
+        nodes=None,
+        edges=None,
+        outputs=None,
+        metadata_={"name": "Test", "description": ""},
+        is_valid=True,
+        validation_errors=None,
+        created_at=datetime.now(UTC),
+        derived_from_state_id=None,
+        composer_meta=None,
+    )
+    svc.get_state.return_value = state
+    svc.get_current_state.return_value = state
+    svc.get_active_run.return_value = None
+    svc.create_run.return_value = _run_record_stub(id=uuid4())
+    svc.get_run.return_value = _run_record_stub(status="pending")
+    svc.update_run_status.return_value = None
     next_event_sequence = 0
 
     async def append_run_event(**_kwargs: Any) -> SimpleNamespace:
@@ -273,8 +420,9 @@ def mock_session_service() -> MagicMock:
         next_event_sequence += 1
         return SimpleNamespace(sequence=next_event_sequence)
 
-    svc.append_run_event = AsyncMock(side_effect=append_run_event)
-    svc.list_run_events = AsyncMock(return_value=[])
+    svc.append_run_event.side_effect = append_run_event
+    svc.list_run_events.return_value = []
+    svc.record_blob_inline_resolutions.return_value = None
     return svc
 
 
@@ -286,14 +434,13 @@ def service(
     mock_session_service: MagicMock,
 ) -> Iterator[ExecutionServiceImpl]:
     # AC #17: All Run CRUD goes through SessionService — no direct DB access.
-    mock_yaml_generator = MagicMock()
-    mock_yaml_generator.generate_yaml.return_value = _TEST_PIPELINE_YAML
+    yaml_generator = _YamlGeneratorStub()
     svc = ExecutionServiceImpl(
         loop=mock_loop,
         broadcaster=broadcaster,
         settings=mock_settings,
         session_service=mock_session_service,
-        yaml_generator=mock_yaml_generator,
+        yaml_generator=yaml_generator,
         telemetry=build_sessions_telemetry(),
     )
     # Patch _call_async for tests that call _run_pipeline directly (sync).
@@ -348,10 +495,7 @@ class TestExecutionFlow:
     @pytest.mark.asyncio
     async def test_execute_rejects_non_string_yaml_generator_output(self, service: ExecutionServiceImpl) -> None:
         """YamlGenerator contract violations must fail fast, not spin in PyYAML."""
-        # _yaml_generator is a MagicMock in the fixture (see service fixture
-        # above); the production type is Callable[[CompositionState], str]
-        # which has no .return_value attribute.  Cast for mypy.
-        cast(MagicMock, service._yaml_generator).generate_yaml.return_value = MagicMock()
+        cast(_YamlGeneratorStub, service._yaml_generator).result = object()
 
         with pytest.raises(TypeError, match="must return str"):
             await service.execute(session_id=uuid4())
@@ -484,7 +628,7 @@ class TestExecutionFlow:
                 blockers=[],
             ),
         )
-        validate_state = AsyncMock(return_value=expected)
+        validate_state = AsyncMock(spec=service.validate_state, return_value=expected)
         service.validate_state = validate_state  # type: ignore[method-assign]
 
         result = await service.validate(session_id, user_id="alice")
@@ -542,7 +686,7 @@ class TestExecutionFlow:
     @pytest.mark.asyncio
     async def test_get_status_returns_run_status(self, service: ExecutionServiceImpl, mock_session_service: MagicMock) -> None:
         run_id = uuid4()
-        mock_session_service.get_run.return_value = MagicMock(
+        mock_session_service.get_run.return_value = _run_record_stub(
             id=run_id,  # B7: RunRecord uses `id`, not `run_id`
             status="running",
             started_at=datetime.now(tz=UTC),
@@ -686,7 +830,7 @@ class TestExecutionFanoutGuard:
             await service.execute(session_id=session_id)
 
         run_id = uuid4()
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
         await service.execute(
             session_id=session_id,
             fanout_ack_token=raised.value.guard.ack_token,
@@ -833,8 +977,8 @@ class TestWebRuntimeInfrastructure:
         source_path.write_text("alpha\n", encoding="utf-8")
         output_path = tmp_path / "out.jsonl"
         run_id = str(uuid4())
-        mock_settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_settings.get_payload_store_path.return_value = tmp_path / "payloads"
+        mock_settings.landscape_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_settings.payload_store_path = tmp_path / "payloads"
 
         pipeline_yaml = f"""
 sources:
@@ -869,7 +1013,7 @@ sinks:
             auth_provider_type="local",
         )
 
-        db = LandscapeDB.from_url(mock_settings.get_landscape_url.return_value, create_tables=False)
+        db = LandscapeDB.from_url(mock_settings.landscape_url, create_tables=False)
         try:
             with db.read_only_connection() as conn:
                 attribution_row = conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == run_id)).one()
@@ -907,8 +1051,8 @@ sinks:
         source_path = tmp_path / "input.txt"
         source_path.write_text("https://example.com/page\n", encoding="utf-8")
         output_path = tmp_path / "out.jsonl"
-        mock_settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_settings.get_payload_store_path.return_value = tmp_path / "payloads"
+        mock_settings.landscape_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_settings.payload_store_path = tmp_path / "payloads"
 
         def fake_getaddrinfo(
             host: str,
@@ -1048,32 +1192,15 @@ class TestB2ShutdownEvent:
         mock_session_service: MagicMock,
     ) -> None:
         mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock(spec=object)
-        mock_bundle.source = MagicMock(spec=object)
-        mock_bundle.sources = {"source": mock_bundle.source}
-        mock_bundle.source_settings = MagicMock(spec=object)
-        mock_bundle.source_settings_map = {"source": mock_bundle.source_settings}
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock(spec=object)}
-        mock_bundle.aggregations = {}
+        mock_bundle = _plugin_bundle_stub()
         mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
+        mock_graph = _execution_graph_stub()
         mock_graph_cls.from_plugin_instances.return_value = mock_graph
         shutdown_event = threading.Event()
         run_id = uuid4()
 
-        mock_orch = MagicMock(spec=["run"])
+        mock_orch = _orchestrator_stub(_orchestrator_result_stub(run_id=str(run_id)))
         mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock(spec=object)
-        mock_result.run_id = str(run_id)
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.rows_processed = 10
-        mock_result.rows_succeeded = 10
-        mock_result.rows_failed = 0
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_orch.run.return_value = mock_result
 
         with patch(
             "elspeth.web.execution.service.load_run_accounting_from_db",
@@ -1123,26 +1250,11 @@ class TestB3Construction:
         service: ExecutionServiceImpl,
         mock_settings: MagicMock,
     ) -> None:
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_orch.run.return_value = MagicMock(
-            run_id="r1",
-            status=RunStatus.COMPLETED,
-            rows_processed=10,
-            rows_succeeded=10,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
         )
 
         with patch(
@@ -1194,14 +1306,13 @@ class TestInlineBlobRuntimePreflight:
         order: list[str] = []
         # The valid same-session path: run and blob share an owning session, so
         # the cross-session guard added for elspeth-195ecb1d58 passes through.
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
-
-        blob_record = MagicMock(spec=object)
-        blob_record.session_id = owner_session
-        blob_record.status = "ready"
-        blob_record.content_hash = sha256
-        blob_record.mime_type = "text/plain"
-        blob_record.size_bytes = len(content)
+        mock_session_service.get_run.return_value = _run_record_stub(status="running", session_id=owner_session)
+        blob_record = _blob_record_stub(
+            blob_id=blob_id,
+            session_id=owner_session,
+            content_hash=sha256,
+            size_bytes=len(content),
+        )
 
         async def link_blob_to_run(*_args: Any, **_kwargs: Any) -> None:
             order.append("link")
@@ -1217,15 +1328,15 @@ class TestInlineBlobRuntimePreflight:
         async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:
             order.append("record")
 
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(side_effect=link_blob_to_run)
-        blob_service.read_blob_content = AsyncMock(side_effect=read_blob_content)
-        blob_service.get_blob = AsyncMock(side_effect=get_blob)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_service = _blob_service_stub()
+        blob_service.link_blob_to_run.side_effect = link_blob_to_run
+        blob_service.read_blob_content.side_effect = read_blob_content
+        blob_service.get_blob.side_effect = get_blob
+        blob_service.finalize_run_output_blobs.return_value = BlobFinalizationResult(finalized=(), errors=())
         cast(Any, service)._blob_service = blob_service
-        mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
+        mock_session_service.record_blob_inline_resolutions.side_effect = record_blob_inline_resolutions
 
-        def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> MagicMock:
+        def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> SimpleNamespace:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
             # Inline blobs were substituted -> env expansion must be disabled so
             # the smuggled ${VAR} stays literal and the host secret never resolves.
@@ -1239,29 +1350,19 @@ class TestInlineBlobRuntimePreflight:
 
         mock_load.side_effect = load_settings
 
-        mock_bundle = MagicMock(spec=object)
-        mock_bundle.source = MagicMock(spec=object)
-        mock_bundle.sources = {"source": mock_bundle.source}
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock(spec=object)}
-        mock_bundle.aggregations = {}
-        mock_runtime = MagicMock(spec=object)
-        mock_runtime.plugin_bundle = mock_bundle
-        mock_runtime.graph = MagicMock(spec=object)
-        mock_runtime_graph.return_value = mock_runtime
+        mock_runtime_graph.return_value = SimpleNamespace(
+            plugin_bundle=_plugin_bundle_stub(),
+            graph=_execution_graph_stub(),
+        )
 
-        mock_orch = MagicMock()
+        mock_orch = _orchestrator_stub(
+            _orchestrator_result_stub(
+                run_id=str(run_id),
+                rows_processed=1,
+                rows_succeeded=1,
+            )
+        )
         mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.run_id = str(run_id)
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.rows_processed = 1
-        mock_result.rows_succeeded = 1
-        mock_result.rows_failed = 0
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_orch.run.return_value = mock_result
 
         pipeline_yaml = f"""
 source:
@@ -1320,22 +1421,21 @@ sinks:
         run_id = uuid4()
         owner_session = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
+        mock_session_service.get_run.return_value = _run_record_stub(status="running", session_id=owner_session)
+        blob_record = _blob_record_stub(
+            blob_id=blob_id,
+            session_id=owner_session,
+            content_hash=sha256,
+            size_bytes=len(content),
+        )
 
-        blob_record = MagicMock(spec=object)
-        blob_record.session_id = owner_session
-        blob_record.status = "ready"
-        blob_record.content_hash = sha256
-        blob_record.mime_type = "text/plain"
-        blob_record.size_bytes = len(content)
-
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=content)
-        blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_service = _blob_service_stub()
+        blob_service.link_blob_to_run.return_value = None
+        blob_service.read_blob_content.return_value = content
+        blob_service.get_blob.return_value = blob_record
+        blob_service.finalize_run_output_blobs.return_value = BlobFinalizationResult(finalized=(), errors=())
         cast(Any, service)._blob_service = blob_service
-        mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=AuditIntegrityError("audit write refused"))
+        mock_session_service.record_blob_inline_resolutions.side_effect = AuditIntegrityError("audit write refused")
 
         pipeline_yaml = f"""
 source:
@@ -1385,22 +1485,21 @@ sinks:
         run_id = uuid4()
         owner_session = uuid4()
         sha256 = hashlib.sha256(b"small prompt").hexdigest()
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
+        mock_session_service.get_run.return_value = _run_record_stub(status="running", session_id=owner_session)
+        blob_record = _blob_record_stub(
+            blob_id=blob_id,
+            session_id=owner_session,
+            content_hash=sha256,
+            size_bytes=256 * 1024 + 1,
+        )
 
-        blob_record = MagicMock(spec=object)
-        blob_record.session_id = owner_session
-        blob_record.status = "ready"
-        blob_record.content_hash = sha256
-        blob_record.mime_type = "text/plain"
-        blob_record.size_bytes = 256 * 1024 + 1
-
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=b"small prompt")
-        blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_service = _blob_service_stub()
+        blob_service.link_blob_to_run.return_value = None
+        blob_service.read_blob_content.return_value = b"small prompt"
+        blob_service.get_blob.return_value = blob_record
+        blob_service.finalize_run_output_blobs.return_value = BlobFinalizationResult(finalized=(), errors=())
         cast(Any, service)._blob_service = blob_service
-        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+        mock_session_service.record_blob_inline_resolutions.return_value = None
 
         pipeline_yaml = f"""
 source:
@@ -1454,30 +1553,29 @@ sinks:
         run_id = uuid4()
         owner_session = uuid4()
         hashes = [hashlib.sha256(f"blob-{index}".encode()).hexdigest() for index in range(5)]
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
+        mock_session_service.get_run.return_value = _run_record_stub(status="running", session_id=owner_session)
 
         records_by_id: dict[UUID, Any] = {}
         for blob_id, blob_hash in zip(blob_ids, hashes, strict=True):
-            record = MagicMock(spec=object)
-            record.session_id = owner_session
-            record.status = "ready"
-            record.content_hash = blob_hash
-            record.mime_type = "text/plain"
-            record.size_bytes = 220 * 1024
-            records_by_id[blob_id] = record
+            records_by_id[blob_id] = _blob_record_stub(
+                blob_id=blob_id,
+                session_id=owner_session,
+                content_hash=blob_hash,
+                size_bytes=220 * 1024,
+            )
 
         async def get_blob(blob_id: UUID) -> Any:
             if blob_id in records_by_id:
                 return records_by_id[blob_id]
             raise AssertionError(f"unexpected blob_id {blob_id}")
 
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=b"content")
-        blob_service.get_blob = AsyncMock(side_effect=get_blob)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_service = _blob_service_stub()
+        blob_service.link_blob_to_run.return_value = None
+        blob_service.read_blob_content.return_value = b"content"
+        blob_service.get_blob.side_effect = get_blob
+        blob_service.finalize_run_output_blobs.return_value = BlobFinalizationResult(finalized=(), errors=())
         cast(Any, service)._blob_service = blob_service
-        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+        mock_session_service.record_blob_inline_resolutions.return_value = None
 
         inline_options = "\n".join(
             f"""      prompt_{index}:
@@ -1537,22 +1635,22 @@ sinks:
         blob_id = uuid4()
         run_id = uuid4()
         owner_session = uuid4()
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
+        mock_session_service.get_run.return_value = _run_record_stub(status="running", session_id=owner_session)
         hash_counter = MagicMock(spec=["add"])
         monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
 
-        blob_record = MagicMock(spec=object)
-        blob_record.session_id = owner_session
-        blob_record.status = "ready"
-        blob_record.content_hash = hashlib.sha256(content).hexdigest()
-        blob_record.mime_type = "text/plain"
-        blob_record.size_bytes = len(content)
+        blob_record = _blob_record_stub(
+            blob_id=blob_id,
+            session_id=owner_session,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+        )
 
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=content)
-        blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_service = _blob_service_stub()
+        blob_service.link_blob_to_run.return_value = None
+        blob_service.read_blob_content.return_value = content
+        blob_service.get_blob.return_value = blob_record
+        blob_service.finalize_run_output_blobs.return_value = BlobFinalizationResult(finalized=(), errors=())
         cast(Any, service)._blob_service = blob_service
 
         pipeline_yaml = f"""
@@ -1629,29 +1727,29 @@ sinks:
         run_id = uuid4()
 
         # The run is owned by ``owner_session``.
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
-        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+        mock_session_service.get_run.return_value = _run_record_stub(status="running", session_id=owner_session)
+        mock_session_service.record_blob_inline_resolutions.return_value = None
 
         if case == "missing":
             # get_blob raises for a genuinely-missing blob (the control surface).
             async def get_blob(_blob_id: UUID) -> Any:
                 raise BlobNotFoundError(str(_blob_id))
 
-            blob_service = MagicMock(spec=object)
-            blob_service.get_blob = AsyncMock(side_effect=get_blob)
+            blob_service = _blob_service_stub()
+            blob_service.get_blob.side_effect = get_blob
         else:
-            blob_record = MagicMock(spec=object)
-            blob_record.session_id = other_session  # owned by a DIFFERENT session
-            blob_record.status = "ready"
-            blob_record.mime_type = "text/plain"
-            blob_record.size_bytes = len(content)
-            blob_record.content_hash = marker_sha if case == "cross_session_ready_hash_match" else "b" * 64
-            blob_service = MagicMock(spec=object)
-            blob_service.get_blob = AsyncMock(return_value=blob_record)
+            blob_record = _blob_record_stub(
+                blob_id=blob_id,
+                session_id=other_session,  # owned by a DIFFERENT session
+                content_hash=marker_sha if case == "cross_session_ready_hash_match" else "b" * 64,
+                size_bytes=len(content),
+            )
+            blob_service = _blob_service_stub()
+            blob_service.get_blob.return_value = blob_record
 
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=content)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_service.link_blob_to_run.return_value = None
+        blob_service.read_blob_content.return_value = content
+        blob_service.finalize_run_output_blobs.return_value = BlobFinalizationResult(finalized=(), errors=())
         cast(Any, service)._blob_service = blob_service
 
         pipeline_yaml = f"""
@@ -1883,7 +1981,7 @@ class TestB7ExceptionHandling:
             raise AssertionError("expected SchemaContractProbe() to raise")
 
         run_id = str(uuid4())
-        mock_session_service.get_run.return_value = MagicMock(status="running")
+        mock_session_service.get_run.return_value = _run_record_stub(status="running")
 
         with (
             patch(
@@ -1934,7 +2032,7 @@ class TestCancelMechanism:
         event = threading.Event()
         event.set()
         service._shutdown_events[str(run_id)] = event
-        mock_session_service.get_run.return_value = MagicMock(
+        mock_session_service.get_run.return_value = _run_record_stub(
             id=run_id,
             status="running",
             started_at=datetime.now(UTC),
@@ -1970,7 +2068,7 @@ class TestCancelMechanism:
     ) -> None:
         """Cancelling any terminal run does nothing."""
         run_id = uuid4()
-        mock_session_service.get_run.return_value = MagicMock(status=terminal_status)
+        mock_session_service.get_run.return_value = _run_record_stub(status=terminal_status)
         await service.cancel(run_id)
         mock_session_service.update_run_status.assert_not_called()
 
@@ -2007,17 +2105,13 @@ class TestCancelMechanism:
         broadcasts 'cancelled' and updates status accordingly."""
         from elspeth.contracts.errors import GracefulShutdownError
 
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
+        mock_orch = _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+        )
+        assert mock_orch is not None
         # Orchestrator raises GracefulShutdownError on actual cancellation
         mock_orch.run.side_effect = GracefulShutdownError(
             rows_processed=50,
@@ -2071,17 +2165,13 @@ class TestCancelMechanism:
         """
         from elspeth.contracts.errors import GracefulShutdownError
 
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
+        mock_orch = _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+        )
+        assert mock_orch is not None
         mock_orch.run.side_effect = GracefulShutdownError(
             rows_processed=50,
             run_id="test-run-gse",
@@ -2134,27 +2224,21 @@ class TestCancelMechanism:
         """Race guard: if shutdown_event is set AFTER orchestrator completes
         (returns normally), the run must still be classified as 'completed',
         not 'cancelled'."""
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
-        mock_result.rows_processed = 50
-        mock_result.rows_succeeded = 48
-        mock_result.rows_failed = 2
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-late-cancel"
-        mock_orch.run.return_value = mock_result
+        run_result = _orchestrator_result_stub(
+            run_id="landscape-late-cancel",
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=50,
+            rows_succeeded=48,
+            rows_failed=2,
+        )
+        mock_orch = _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=run_result,
+        )
+        assert mock_orch is not None
 
         # Simulate late cancel: event is set DURING orchestrator.run()
         # (after it returns its result), not before _run_pipeline starts.
@@ -2162,9 +2246,9 @@ class TestCancelMechanism:
         # finishes but before status is persisted.
         shutdown_event = threading.Event()
 
-        original_return = mock_result
+        original_return = run_result
 
-        def set_event_on_run(*args: object, **kwargs: object) -> MagicMock:
+        def set_event_on_run(*args: object, **kwargs: object) -> SimpleNamespace:
             shutdown_event.set()
             return original_return
 
@@ -2200,7 +2284,7 @@ class TestCancelMechanism:
 
         # Simulate: update_run_status("running") raises because status is "cancelled"
         mock_session_service.update_run_status.side_effect = IllegalRunTransitionError("cancelled", "running", frozenset())
-        mock_session_service.get_run.return_value = MagicMock(status="cancelled")
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         # Should NOT raise — graceful exit
         service._run_pipeline(run_id, "yaml", threading.Event())
@@ -2253,7 +2337,7 @@ class TestCancelMechanism:
         run_id = str(uuid4())
 
         mock_session_service.update_run_status.side_effect = IllegalRunTransitionError("completed", "running", frozenset())
-        mock_session_service.get_run.return_value = MagicMock(status="completed")
+        mock_session_service.get_run.return_value = _run_record_stub(status="completed")
 
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "yaml", threading.Event())
@@ -2293,7 +2377,7 @@ class TestCancelMechanism:
 
         sentinel_message = "landscape_run_id already set to 'sentinel-existing-id'; cannot overwrite"
         mock_session_service.update_run_status.side_effect = ValueError(sentinel_message)
-        mock_session_service.get_run.return_value = MagicMock(status="cancelled")
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         broadcast_calls: list[tuple[str, Any]] = []
         original_broadcast = service._broadcaster.broadcast
@@ -2327,16 +2411,16 @@ class TestCancelMechanism:
         run_id = uuid4()
         blob_ref = str(uuid4())
         canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
 
         async def tracking_link(*args: Any, **kwargs: Any) -> None:
             # At the time blob linkage runs, the event MUST already exist
             assert str(run_id) in service._shutdown_events, "RACE: _shutdown_events not registered before blob linkage"
 
-        blob_service.link_blob_to_run = AsyncMock(side_effect=tracking_link)
+        blob_service.link_blob_to_run.side_effect = tracking_link
         cast(Any, service)._blob_service = blob_service
 
         # Set up state record with a source containing a blob_ref.
@@ -2366,11 +2450,11 @@ class TestCancelMechanism:
         run_id = uuid4()
         blob_ref = str(uuid4())
         canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
-        blob_service.link_blob_to_run = AsyncMock(side_effect=RuntimeError("blob storage unavailable"))
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
+        blob_service.link_blob_to_run.side_effect = RuntimeError("blob storage unavailable")
         cast(Any, service)._blob_service = blob_service
 
         # Use a real dict so state_from_record → deep_thaw works correctly.
@@ -2417,7 +2501,7 @@ class TestP2aCleanupCatchNarrowing:
 
         session_id = uuid4()
         run_id = uuid4()
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
 
         # First update_run_status call (in cleanup) raises OperationalError.
         mock_session_service.update_run_status.side_effect = OperationalError(
@@ -2428,7 +2512,10 @@ class TestP2aCleanupCatchNarrowing:
 
         # Force the setup path to fail so the cleanup catch fires.
         # _executor.submit raising is the simplest route.
-        service._executor.submit = MagicMock(side_effect=RuntimeError("pool shutdown"))  # type: ignore[method-assign]
+        def submit_raises(*_args: Any, **_kwargs: Any) -> Future[Any]:
+            raise RuntimeError("pool shutdown")
+
+        service._executor.submit = submit_raises  # type: ignore[method-assign]
 
         with (
             patch("elspeth.web.execution.service.slog") as mock_slog,
@@ -2462,14 +2549,17 @@ class TestP2aCleanupCatchNarrowing:
         ``except Exception`` masked such bugs."""
         session_id = uuid4()
         run_id = uuid4()
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
 
         # First update_run_status (in cleanup) raises RuntimeError — outside
         # the narrow (SQLAlchemyError, OSError) catch. It must escape.
         mock_session_service.update_run_status.side_effect = RuntimeError("dataclass contract violated inside update_run_status")
 
         # Force setup to fail so cleanup fires.
-        service._executor.submit = MagicMock(side_effect=RuntimeError("pool shutdown"))  # type: ignore[method-assign]
+        def submit_raises(*_args: Any, **_kwargs: Any) -> Future[Any]:
+            raise RuntimeError("pool shutdown")
+
+        service._executor.submit = submit_raises  # type: ignore[method-assign]
 
         # The RuntimeError from update_run_status escapes the narrow catch.
         # The outer `raise` is bypassed — the cleanup RuntimeError wins
@@ -2509,23 +2599,19 @@ class TestCompletionPathExternalCancellation:
     ) -> None:
         """Pipeline completes, but orphan cleanup already set DB to 'cancelled'.
         _run_pipeline must detect this and return cleanly."""
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
-        mock_result.rows_processed = 100
-        mock_result.rows_succeeded = 95
-        mock_result.rows_failed = 5
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-run-123"
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(
+                run_id="landscape-run-123",
+                status=RunStatus.COMPLETED_WITH_FAILURES,
+                rows_processed=100,
+                rows_succeeded=95,
+                rows_failed=5,
+            ),
+        )
 
         run_id = str(uuid4())
 
@@ -2540,8 +2626,8 @@ class TestCompletionPathExternalCancellation:
             if call_count == 2:
                 raise IllegalRunTransitionError("cancelled", "completed", frozenset())
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
-        mock_session_service.get_run.return_value = MagicMock(status="cancelled")
+        mock_session_service.update_run_status.side_effect = status_side_effect
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         # Should NOT raise — graceful exit
         service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
@@ -2572,23 +2658,19 @@ class TestCompletionPathExternalCancellation:
         terminal event must be broadcast: 'cancelled' (the DB is authoritative).
         No 'completed' event should be emitted — finalize-first ordering
         ensures the terminal broadcast reflects the actual DB state."""
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
-        mock_result.rows_processed = 100
-        mock_result.rows_succeeded = 95
-        mock_result.rows_failed = 5
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-run-789"
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(
+                run_id="landscape-run-789",
+                status=RunStatus.COMPLETED_WITH_FAILURES,
+                rows_processed=100,
+                rows_succeeded=95,
+                rows_failed=5,
+            ),
+        )
 
         run_id = str(uuid4())
 
@@ -2600,8 +2682,8 @@ class TestCompletionPathExternalCancellation:
             if call_count == 2:
                 raise IllegalRunTransitionError("cancelled", "completed", frozenset())
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
-        mock_session_service.get_run.return_value = MagicMock(status="cancelled")
+        mock_session_service.update_run_status.side_effect = status_side_effect
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         broadcast_calls: list[tuple[str, Any]] = []
         original_broadcast = service._broadcaster.broadcast
@@ -2638,23 +2720,17 @@ class TestCompletionPathExternalCancellation:
         """Cancelled runs must not leave output blobs finalized as ready."""
         from elspeth.web.blobs.protocol import BlobFinalizationResult
 
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.rows_processed = 7
-        mock_result.rows_succeeded = 7
-        mock_result.rows_failed = 0
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-run-blob-cancel"
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(
+                run_id="landscape-run-blob-cancel",
+                rows_processed=7,
+                rows_succeeded=7,
+            ),
+        )
 
         blob_state = {"status": "pending"}
         blob_calls: list[bool] = []
@@ -2666,16 +2742,16 @@ class TestCompletionPathExternalCancellation:
                 blob_state["status"] = "ready" if success else "error"
             return BlobFinalizationResult(finalized=[], errors=[])
 
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(side_effect=finalize_run_output_blobs)
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = finalize_run_output_blobs
         cast(Any, service)._blob_service = blob_service
 
         async def status_side_effect(*args: Any, **kwargs: Any) -> None:
             if kwargs.get("status") == "completed":
                 raise IllegalRunTransitionError("cancelled", "completed", frozenset())
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
-        mock_session_service.get_run.return_value = MagicMock(status="cancelled")
+        mock_session_service.update_run_status.side_effect = status_side_effect
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         with patch(
             "elspeth.web.execution.service.load_run_accounting_from_db",
@@ -2705,23 +2781,13 @@ class TestCompletionPathExternalCancellation:
     ) -> None:
         """If update_run_status('completed') raises ValueError for a reason
         other than 'already cancelled', the error must propagate (offensive)."""
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.rows_processed = 10
-        mock_result.rows_succeeded = 10
-        mock_result.rows_failed = 0
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-run-456"
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(run_id="landscape-run-456"),
+        )
 
         run_id = str(uuid4())
 
@@ -2733,9 +2799,9 @@ class TestCompletionPathExternalCancellation:
             if call_count == 2:
                 raise IllegalRunTransitionError("completed", "completed", frozenset())
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
+        mock_session_service.update_run_status.side_effect = status_side_effect
         # DB says "completed" (not "cancelled") — this should re-raise
-        mock_session_service.get_run.return_value = MagicMock(status="completed")
+        mock_session_service.get_run.return_value = _run_record_stub(status="completed")
 
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
@@ -2781,23 +2847,13 @@ class TestCompletionPathExternalCancellation:
         silently re-open the masking window identified by silent-failure-hunter
         (H1) — and the existing recovery-path tests would still pass.
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.rows_processed = 10
-        mock_result.rows_succeeded = 10
-        mock_result.rows_failed = 0
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-run-sentinel"
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(run_id="landscape-run-sentinel"),
+        )
 
         run_id = str(uuid4())
         call_count = 0
@@ -2811,8 +2867,8 @@ class TestCompletionPathExternalCancellation:
                 # invariant breaches in update_run_status.
                 raise ValueError(sentinel_message)
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="cancelled"))
+        mock_session_service.update_run_status.side_effect = status_side_effect
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         broadcast_calls: list[tuple[str, Any]] = []
         original_broadcast = service._broadcaster.broadcast
@@ -2866,33 +2922,31 @@ class TestPostCompletionExceptionRecovery:
         indicator; EMPTY requires zero rows; COMPLETED requires success only;
         FAILED tolerates any shape.
         """
-        mock_orch = MagicMock()
-        mock_result = MagicMock()
-        mock_result.status = status
         if status == RunStatus.COMPLETED_WITH_FAILURES:
-            mock_result.rows_processed = 10
-            mock_result.rows_succeeded = 8
-            mock_result.rows_failed = 2
-            mock_result.rows_routed_success = 0
-            mock_result.rows_routed_failure = 0
-            mock_result.rows_quarantined = 0
+            result = _orchestrator_result_stub(
+                run_id="landscape-run-postcompletion",
+                status=status,
+                rows_processed=10,
+                rows_succeeded=8,
+                rows_failed=2,
+            )
         elif status == RunStatus.EMPTY:
-            mock_result.rows_processed = 0
-            mock_result.rows_succeeded = 0
-            mock_result.rows_failed = 0
-            mock_result.rows_routed_success = 0
-            mock_result.rows_routed_failure = 0
-            mock_result.rows_quarantined = 0
+            result = _orchestrator_result_stub(
+                run_id="landscape-run-postcompletion",
+                status=status,
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+            )
         else:
-            mock_result.rows_processed = 10
-            mock_result.rows_succeeded = 10
-            mock_result.rows_failed = 0
-            mock_result.rows_routed_success = 0
-            mock_result.rows_routed_failure = 0
-            mock_result.rows_quarantined = 0
-        mock_result.run_id = "landscape-run-postcompletion"
-        mock_orch.run.return_value = mock_result
-        return mock_orch
+            result = _orchestrator_result_stub(
+                run_id="landscape-run-postcompletion",
+                status=status,
+                rows_processed=10,
+                rows_succeeded=10,
+                rows_failed=0,
+            )
+        return _orchestrator_stub(result)
 
     @staticmethod
     def _wrap_broadcaster_to_raise(
@@ -2941,17 +2995,18 @@ class TestPostCompletionExceptionRecovery:
         ``update_run_status(status="failed", ...)`` because the audit row is
         already ``completed`` (illegal terminal→failed transition).
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=self._make_completed_orchestrator(RunStatus.COMPLETED).run.return_value,
+        )
 
         # update_run_status is permissive (just records calls); the audit row
         # is conceptually "completed" after the second call.  The recovery's
         # third call (with status="failed") MUST NOT happen.
-        mock_session_service.get_run.return_value = MagicMock(status="completed")
+        mock_session_service.get_run.return_value = _run_record_stub(status="completed")
 
         broadcast_calls = self._wrap_broadcaster_to_raise(
             service,
@@ -3032,14 +3087,15 @@ class TestPostCompletionExceptionRecovery:
         fires for ``completed_with_failures`` — a state the partial tuple
         would miss.
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED_WITH_FAILURES)
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=self._make_completed_orchestrator(RunStatus.COMPLETED_WITH_FAILURES).run.return_value,
+        )
 
-        mock_session_service.get_run.return_value = MagicMock(status="completed_with_failures")
+        mock_session_service.get_run.return_value = _run_record_stub(status="completed_with_failures")
 
         self._wrap_broadcaster_to_raise(
             service,
@@ -3101,12 +3157,13 @@ class TestPostCompletionExceptionRecovery:
         change (fail-closed on probe failure, or post-hoc reconcile of the
         ValueError) and is out of scope for elspeth-879f6de6bd.
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=self._make_completed_orchestrator(RunStatus.COMPLETED).run.return_value,
+        )
 
         # Probe raises a generic SQLAlchemy-family-ish error.  Use the actual
         # SQLAlchemyError to match the recovery's narrow catch.
@@ -3193,12 +3250,13 @@ class TestPostCompletionExceptionRecovery:
         the ``IllegalRunTransitionError`` is an artefact of a recovery attempt
         that should never have been made against an already-terminal row.
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=self._make_completed_orchestrator(RunStatus.COMPLETED).run.return_value,
+        )
 
         # Stateful mock that mirrors SessionService.update_run_status's
         # transition validation (sessions/service.py:665-667). Driven by the
@@ -3303,12 +3361,13 @@ class TestPostCompletionExceptionRecovery:
         This test pins that contract so future re-widening of the catch is
         caught at review time.
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=self._make_completed_orchestrator(RunStatus.COMPLETED).run.return_value,
+        )
 
         # Probe raises ValueError — the canonical Tier 1 signal from get_run
         # ("Run not found", malformed UUID, or non-UTC datetime).  All three
@@ -3381,18 +3440,18 @@ class TestPostCompletionExceptionRecovery:
         recovery must still land — the new guard MUST NOT short-circuit
         non-terminal states.
         """
-        mock_bundle = MagicMock()
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_orch = MagicMock()
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+        )
+        mock_orch = mock_orch_cls.return_value
         mock_orch.run.side_effect = RuntimeError("orchestrator blew up mid-run")
-        mock_orch_cls.return_value = mock_orch
 
         # DB still holds "running" because we never reached the terminal
         # transition.
-        mock_session_service.get_run.return_value = MagicMock(status="running")
+        mock_session_service.get_run.return_value = _run_record_stub(status="running")
 
         run_id = str(uuid4())
         with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError, match="orchestrator blew up"):
@@ -3490,7 +3549,7 @@ class TestBlobRefPreValidation:
             "on_validation_failure": "quarantine",
         }
 
-        blob_service = MagicMock()
+        blob_service = _blob_service_stub()
         cast(Any, service)._blob_service = blob_service
 
         with pytest.raises(MalformedBlobRefError):
@@ -3511,12 +3570,11 @@ class TestBlobRefPreValidation:
         run_id = uuid4()
         blob_ref = str(uuid4())
         canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
 
-        blob_service = MagicMock()
-        blob_service.link_blob_to_run = AsyncMock()
+        blob_service = _blob_service_stub()
         # get_blob returns a record matching the executing session
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
         cast(Any, service)._blob_service = blob_service
 
         # path must equal blob.storage_path to satisfy the Tier 1 read
@@ -3564,8 +3622,7 @@ class TestBlobRefPreValidation:
             },
         }
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock()
+        blob_service = _blob_service_stub()
         cast(Any, service)._blob_service = blob_service
 
         with pytest.raises(MalformedBlobRefError, match=r"sources\.refunds\.blob_ref"):
@@ -3587,19 +3644,16 @@ class TestBlobRefPreValidation:
         refunds_blob = str(uuid4())
         orders_path = f"/tmp/data/blobs/{session_id}/{orders_blob}_orders.csv"
         refunds_path = f"/tmp/data/blobs/{session_id}/{refunds_blob}_refunds.csv"
-        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(
-            side_effect=lambda blob_id: MagicMock(
-                session_id=session_id,
-                storage_path={
-                    orders_blob: orders_path,
-                    refunds_blob: refunds_path,
-                }[str(blob_id)],
-            )
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.side_effect = lambda blob_id: SimpleNamespace(
+            session_id=session_id,
+            storage_path={
+                orders_blob: orders_path,
+                refunds_blob: refunds_path,
+            }[str(blob_id)],
         )
-        blob_service.link_blob_to_run = AsyncMock()
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3663,9 +3717,9 @@ class TestBlobOwnership:
         other_session_id = uuid4()
         blob_ref = str(uuid4())
 
-        blob_service = MagicMock()
+        blob_service = _blob_service_stub()
         # Blob belongs to other_session_id, not executing_session_id
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=other_session_id))
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=other_session_id)
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3698,14 +3752,11 @@ class TestBlobOwnership:
         orders_path = f"/tmp/data/blobs/{executing_session_id}/{orders_blob}_orders.csv"
         refunds_path = f"/tmp/data/blobs/{other_session_id}/{refunds_blob}_refunds.csv"
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(
-            side_effect=lambda blob_id: MagicMock(
-                session_id=executing_session_id if str(blob_id) == orders_blob else other_session_id,
-                storage_path=orders_path if str(blob_id) == orders_blob else refunds_path,
-            )
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.side_effect = lambda blob_id: SimpleNamespace(
+            session_id=executing_session_id if str(blob_id) == orders_blob else other_session_id,
+            storage_path=orders_path if str(blob_id) == orders_blob else refunds_path,
         )
-        blob_service.link_blob_to_run = AsyncMock()
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3742,9 +3793,8 @@ class TestBlobOwnership:
         blob_ref = str(uuid4())
         canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
-        blob_service.link_blob_to_run = AsyncMock()
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
         cast(Any, service)._blob_service = blob_service
 
         # path must equal blob.storage_path to satisfy the Tier 1 read
@@ -3813,9 +3863,8 @@ class TestBlobSourcePathReadGuard:
         # canonical_path — the divergence the read guard targets.
         diverging_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_OTHER.csv"
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
-        blob_service.link_blob_to_run = AsyncMock()
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3861,8 +3910,8 @@ class TestBlobSourcePathReadGuard:
         blob_ref = str(uuid4())
         canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3894,9 +3943,8 @@ class TestBlobSourcePathReadGuard:
         canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_orders.csv"
         diverging_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_OTHER.csv"
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
-        blob_service.link_blob_to_run = AsyncMock()
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.return_value = SimpleNamespace(session_id=session_id, storage_path=canonical_path)
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3934,14 +3982,11 @@ class TestBlobSourcePathReadGuard:
         refunds_canonical_path = f"/tmp/data/blobs/{session_id}/{refunds_blob}_refunds.csv"
         refunds_diverging_path = f"/tmp/data/blobs/{session_id}/{refunds_blob}_OTHER.csv"
 
-        blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(
-            side_effect=lambda blob_id: MagicMock(
-                session_id=session_id,
-                storage_path=orders_path if str(blob_id) == orders_blob else refunds_canonical_path,
-            )
+        blob_service = _blob_service_stub()
+        blob_service.get_blob.side_effect = lambda blob_id: SimpleNamespace(
+            session_id=session_id,
+            storage_path=orders_path if str(blob_id) == orders_blob else refunds_canonical_path,
         )
-        blob_service.link_blob_to_run = AsyncMock()
         cast(Any, service)._blob_service = blob_service
 
         state = mock_session_service.get_current_state.return_value
@@ -3983,7 +4028,7 @@ class TestOneActiveRun:
     ) -> None:
         """B6: Only one pending/running run per session."""
         session_id = uuid4()
-        mock_session_service.get_active_run.return_value = MagicMock(status="running")
+        mock_session_service.get_active_run.return_value = _run_record_stub(status="running")
 
         with pytest.raises(RunAlreadyActiveError):
             await service.execute(session_id=session_id)
@@ -4128,10 +4173,10 @@ class TestB8AsyncBridging:
             broadcaster=broadcaster,
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
         )
-        mock_future = MagicMock()
+        mock_future = MagicMock(spec=Future)
         mock_future.result.return_value = "test_result"
 
         async def dummy_coro() -> str:
@@ -4157,10 +4202,10 @@ class TestB8AsyncBridging:
             broadcaster=broadcaster,
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
         )
-        mock_future = MagicMock()
+        mock_future = MagicMock(spec=Future)
         mock_future.result.side_effect = ValueError("db error")
 
         async def failing_coro() -> None:
@@ -4184,10 +4229,10 @@ class TestB8AsyncBridging:
             broadcaster=broadcaster,
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
         )
-        mock_future = MagicMock()
+        mock_future = MagicMock(spec=Future)
         mock_future.result.side_effect = concurrent.futures.TimeoutError()
 
         async def hanging_coro() -> None:
@@ -4215,7 +4260,7 @@ class TestAsyncShutdown:
             broadcaster=ProgressBroadcaster(loop),
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
         )
 
@@ -4229,7 +4274,7 @@ class TestAsyncShutdown:
         async def update_run_status(*args: Any, **kwargs: Any) -> None:
             cleanup_applied.set()
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=update_run_status)
+        mock_session_service.update_run_status.side_effect = update_run_status
 
         def short_call_async(coro: Coroutine[Any, Any, Any]) -> Any:
             future = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -4315,20 +4360,20 @@ class TestVerifyRunOwnership:
         self,
         mock_loop: MagicMock,
         broadcaster: ProgressBroadcaster,
-    ) -> tuple[ExecutionServiceImpl, MagicMock]:
+    ) -> tuple[ExecutionServiceImpl, Any]:
         """ExecutionServiceImpl with controllable session service."""
-        session_svc = MagicMock()
-        settings = MagicMock()
+        session_svc = create_autospec(SessionServiceProtocol, instance=True)
+        settings = _WebSettingsStub()
         settings.auth_provider = "local"
-        settings.get_landscape_url.return_value = "sqlite:///test.db"
-        settings.get_payload_store_path.return_value = Path("/tmp/test")
+        settings.landscape_url = "sqlite:///test.db"
+        settings.payload_store_path = Path("/tmp/test")
 
         svc = ExecutionServiceImpl(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=settings,
             session_service=session_svc,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
         )
         return svc, session_svc
@@ -4338,24 +4383,24 @@ class TestVerifyRunOwnership:
         """Correct user + correct provider → access granted."""
         svc, session_svc = idor_service
         session_id = uuid4()
-        run = MagicMock(session_id=session_id)
-        session = MagicMock(user_id="alice", auth_provider_type="local")
-        session_svc.get_run = AsyncMock(return_value=run)
-        session_svc.get_session = AsyncMock(return_value=session)
+        run = SimpleNamespace(session_id=session_id)
+        session = SimpleNamespace(user_id="alice", auth_provider_type="local")
+        session_svc.get_run.return_value = run
+        session_svc.get_session.return_value = session
 
-        user = MagicMock(user_id="alice")
+        user = SimpleNamespace(user_id="alice")
         assert await svc.verify_run_ownership(user, str(uuid4())) is True
 
     @pytest.mark.asyncio
     async def test_wrong_user_returns_false(self, idor_service) -> None:
         """Wrong user_id → access denied."""
         svc, session_svc = idor_service
-        run = MagicMock(session_id=uuid4())
-        session = MagicMock(user_id="alice", auth_provider_type="local")
-        session_svc.get_run = AsyncMock(return_value=run)
-        session_svc.get_session = AsyncMock(return_value=session)
+        run = SimpleNamespace(session_id=uuid4())
+        session = SimpleNamespace(user_id="alice", auth_provider_type="local")
+        session_svc.get_run.return_value = run
+        session_svc.get_session.return_value = session
 
-        user = MagicMock(user_id="eve")
+        user = SimpleNamespace(user_id="eve")
         assert await svc.verify_run_ownership(user, str(uuid4())) is False
 
     @pytest.mark.asyncio
@@ -4367,22 +4412,22 @@ class TestVerifyRunOwnership:
         non-obvious IDOR vector.
         """
         svc, session_svc = idor_service
-        run = MagicMock(session_id=uuid4())
+        run = SimpleNamespace(session_id=uuid4())
         # Session was created under OIDC, but server is now configured for "local"
-        session = MagicMock(user_id="alice", auth_provider_type="oidc")
-        session_svc.get_run = AsyncMock(return_value=run)
-        session_svc.get_session = AsyncMock(return_value=session)
+        session = SimpleNamespace(user_id="alice", auth_provider_type="oidc")
+        session_svc.get_run.return_value = run
+        session_svc.get_session.return_value = session
 
-        user = MagicMock(user_id="alice")
+        user = SimpleNamespace(user_id="alice")
         assert await svc.verify_run_ownership(user, str(uuid4())) is False
 
     @pytest.mark.asyncio
     async def test_nonexistent_run_raises(self, idor_service) -> None:
         """Run not found → ValueError propagates (caller handles)."""
         svc, session_svc = idor_service
-        session_svc.get_run = AsyncMock(side_effect=ValueError("Run not found"))
+        session_svc.get_run.side_effect = ValueError("Run not found")
 
-        user = MagicMock(user_id="alice")
+        user = SimpleNamespace(user_id="alice")
         with pytest.raises(ValueError, match="Run not found"):
             await svc.verify_run_ownership(user, str(uuid4()))
 
@@ -4404,11 +4449,11 @@ class TestVerifyRunOwnership:
 
         svc, session_svc = idor_service
         dangling_session_id = uuid4()
-        run = MagicMock(session_id=dangling_session_id)
-        session_svc.get_run = AsyncMock(return_value=run)
-        session_svc.get_session = AsyncMock(side_effect=SessionNotFoundError(dangling_session_id))
+        run = SimpleNamespace(session_id=dangling_session_id)
+        session_svc.get_run.return_value = run
+        session_svc.get_session.side_effect = SessionNotFoundError(dangling_session_id)
 
-        user = MagicMock(user_id="alice")
+        user = SimpleNamespace(user_id="alice")
         with pytest.raises(RunSessionIntegrityError) as exc_info:
             await svc.verify_run_ownership(user, str(uuid4()))
         # It must NOT be catchable as the benign Tier-3 not-found path even
@@ -4420,13 +4465,13 @@ class TestVerifyRunOwnership:
     async def test_str_vs_non_str_user_id_rejects(self, idor_service) -> None:
         """Regression: if session.user_id were stored as UUID, str comparison must reject."""
         svc, session_svc = idor_service
-        run = MagicMock(session_id=uuid4())
+        run = SimpleNamespace(session_id=uuid4())
         user_uuid = uuid4()
-        session = MagicMock(user_id=user_uuid, auth_provider_type="local")
-        session_svc.get_run = AsyncMock(return_value=run)
-        session_svc.get_session = AsyncMock(return_value=session)
+        session = SimpleNamespace(user_id=user_uuid, auth_provider_type="local")
+        session_svc.get_run.return_value = run
+        session_svc.get_session.return_value = session
 
-        user = MagicMock(user_id=str(user_uuid))
+        user = SimpleNamespace(user_id=str(user_uuid))
         assert await svc.verify_run_ownership(user, str(uuid4())) is False
 
 
@@ -5604,28 +5649,14 @@ class TestEdgeCompatibility:
     ) -> None:
         """_run_pipeline must call graph.validate_edge_compatibility()
         after graph.validate() to catch schema mismatches."""
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
-        mock_graph_cls.from_plugin_instances.return_value = mock_graph
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_orch.run.return_value = MagicMock(
-            run_id="r1",
-            status=RunStatus.COMPLETED,
-            rows_processed=10,
-            rows_succeeded=10,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
+        mock_orch = _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
         )
+        mock_graph = mock_graph_cls.from_plugin_instances.return_value
+        assert mock_orch is not None
 
         with patch(
             "elspeth.web.execution.service.load_run_accounting_from_db",
@@ -5654,14 +5685,8 @@ class TestEdgeCompatibility:
         from elspeth.core.dag.models import GraphValidationError
 
         mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
+        mock_instantiate.return_value = _plugin_bundle_stub()
+        mock_graph = _execution_graph_stub()
         mock_graph_cls.from_plugin_instances.return_value = mock_graph
         mock_graph.validate_edge_compatibility.side_effect = GraphValidationError(
             "Schema mismatch: source outputs str but transform expects int"
@@ -5711,14 +5736,14 @@ class TestFinalizeOutputBlobsCatchWidening:
             loop.close()
 
     def _make_service_with_blob(
-        self, blob_service: MagicMock, mock_settings: MagicMock, mock_session_service: MagicMock
+        self, blob_service: BlobServiceProtocol, mock_settings: MagicMock, mock_session_service: MagicMock
     ) -> ExecutionServiceImpl:
         svc = ExecutionServiceImpl(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=MagicMock(spec=ProgressBroadcaster),
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
             blob_service=blob_service,
         )
@@ -5730,8 +5755,8 @@ class TestFinalizeOutputBlobsCatchWidening:
     def test_suppresses_blob_not_found_error(self, mock_settings: MagicMock, mock_session_service: MagicMock) -> None:
         from elspeth.web.blobs.protocol import BlobNotFoundError
 
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(side_effect=BlobNotFoundError("missing-blob"))
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = BlobNotFoundError("missing-blob")
         svc = self._make_service_with_blob(blob_service, mock_settings, mock_session_service)
         svc._finalize_output_blobs(str(uuid4()), success=True)
 
@@ -5740,10 +5765,8 @@ class TestFinalizeOutputBlobsCatchWidening:
         catch Tier 1 anomaly signals.  Blob lifecycle errors should use
         BlobStateError or BlobNotFoundError instead.
         """
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(
-            side_effect=RuntimeError("Cannot finalize — status is 'ready', expected 'pending'")
-        )
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = RuntimeError("Cannot finalize — status is 'ready', expected 'pending'")
         svc = self._make_service_with_blob(blob_service, mock_settings, mock_session_service)
         with pytest.raises(RuntimeError, match="Cannot finalize"):
             svc._finalize_output_blobs(str(uuid4()), success=True)
@@ -5751,23 +5774,23 @@ class TestFinalizeOutputBlobsCatchWidening:
     def test_suppresses_blob_quota_exceeded_error(self, mock_settings: MagicMock, mock_session_service: MagicMock) -> None:
         from elspeth.web.blobs.protocol import BlobQuotaExceededError
 
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(side_effect=BlobQuotaExceededError("sess-1", current_bytes=100, limit_bytes=50))
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = BlobQuotaExceededError("sess-1", current_bytes=100, limit_bytes=50)
         svc = self._make_service_with_blob(blob_service, mock_settings, mock_session_service)
         svc._finalize_output_blobs(str(uuid4()), success=True)
 
     def test_propagates_type_error(self, mock_settings: MagicMock, mock_session_service: MagicMock) -> None:
         """Programmer bugs (TypeError, AttributeError, etc.) must still crash."""
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(side_effect=TypeError("unexpected keyword argument"))
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = TypeError("unexpected keyword argument")
         svc = self._make_service_with_blob(blob_service, mock_settings, mock_session_service)
         with pytest.raises(TypeError, match="unexpected keyword argument"):
             svc._finalize_output_blobs(str(uuid4()), success=True)
 
     def test_propagates_attribute_error(self, mock_settings: MagicMock, mock_session_service: MagicMock) -> None:
         """AttributeError is a programmer bug — must crash."""
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(side_effect=AttributeError("'NoneType' object has no attribute 'id'"))
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = AttributeError("'NoneType' object has no attribute 'id'")
         svc = self._make_service_with_blob(blob_service, mock_settings, mock_session_service)
         with pytest.raises(AttributeError):
             svc._finalize_output_blobs(str(uuid4()), success=True)
@@ -5817,38 +5840,30 @@ class TestTerminalOrderingInvariant:
         be broadcast — not completed-then-failed."""
         from elspeth.web.blobs.protocol import BlobNotFoundError
 
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.run_id = "landscape-run-1"
-        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
-        mock_result.rows_processed = 10
-        mock_result.rows_succeeded = 9
-        mock_result.rows_failed = 1
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(
+                run_id="landscape-run-1",
+                status=RunStatus.COMPLETED_WITH_FAILURES,
+                rows_processed=10,
+                rows_succeeded=9,
+                rows_failed=1,
+            ),
+        )
 
         mock_broadcaster = MagicMock(spec=ProgressBroadcaster)
-        blob_service = MagicMock()
-        blob_service.finalize_run_output_blobs = AsyncMock(side_effect=BlobNotFoundError("blob-vanished"))
+        blob_service = _blob_service_stub()
+        blob_service.finalize_run_output_blobs.side_effect = BlobNotFoundError("blob-vanished")
 
         svc = ExecutionServiceImpl(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=mock_broadcaster,
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
             blob_service=blob_service,
         )
@@ -5886,27 +5901,17 @@ class TestTerminalOrderingInvariant:
         """When a run completes but the DB status is already 'cancelled'
         (external orphan cleanup raced), exactly one terminal event must
         be emitted — not completed-then-cancelled."""
-        mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
-        mock_instantiate.return_value = mock_bundle
-        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
-        mock_result.run_id = "landscape-run-2"
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.rows_processed = 5
-        mock_result.rows_succeeded = 5
-        mock_result.rows_failed = 0
-        mock_result.rows_routed_success = 0
-        mock_result.rows_routed_failure = 0
-        mock_result.rows_quarantined = 0
-        mock_orch.run.return_value = mock_result
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+            result=_orchestrator_result_stub(
+                run_id="landscape-run-2",
+                rows_processed=5,
+                rows_succeeded=5,
+            ),
+        )
 
         mock_broadcaster = MagicMock(spec=ProgressBroadcaster)
 
@@ -5918,15 +5923,15 @@ class TestTerminalOrderingInvariant:
                 raise IllegalRunTransitionError("cancelled", "completed", frozenset())
             return None
 
-        mock_session_service.update_run_status = AsyncMock(side_effect=_selective_update)
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="cancelled"))
+        mock_session_service.update_run_status.side_effect = _selective_update
+        mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         svc = ExecutionServiceImpl(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=mock_broadcaster,
             settings=mock_settings,
             session_service=mock_session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=_YamlGeneratorStub(),
             telemetry=build_sessions_telemetry(),
         )
         _real_loop = asyncio.new_event_loop()

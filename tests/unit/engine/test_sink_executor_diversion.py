@@ -8,12 +8,15 @@ diverted rows to the failsink (or record discard).
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, PluginSchema, TokenInfo
+from elspeth.contracts.audit import Artifact
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
@@ -23,22 +26,135 @@ from elspeth.contracts.errors import (
     PluginContractViolation,
     SinkRequiredFieldsViolation,
 )
-from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
 
 
-def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = None) -> MagicMock:
-    """Create a minimal TokenInfo mock."""
-    token = MagicMock(spec=TokenInfo)
-    token.token_id = token_id
-    token.row_id = f"row-{token_id}"
-    mock_row = MagicMock()
-    mock_row.to_dict.return_value = row_data or {"field": "value"}
-    mock_row.contract = MagicMock()
-    mock_row.contract.merge_for_batch.return_value = mock_row.contract
-    token.row_data = mock_row
-    return token
+class _PermissiveSchema(PluginSchema):
+    """Accept arbitrary sink rows for executor plumbing tests."""
+
+
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+        effect = self.side_effect
+        if isinstance(effect, list):
+            effect = effect.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
+class _ContractDouble:
+    def merge_for_batch(self, other: object) -> _ContractDouble:
+        del other
+        return self
+
+
+class _RowDouble:
+    def __init__(self, data: dict[str, object]) -> None:
+        self._data = data
+        self.contract = _ContractDouble()
+
+    def to_dict(self) -> dict[str, object]:
+        return dict(self._data)
+
+
+class _TokenDouble:
+    def __init__(self, token_id: str, row_data: dict[str, object] | None = None) -> None:
+        self.token_id = token_id
+        self.row_id = f"row-{token_id}"
+        self.row_data = _RowDouble(row_data or {"field": "value"})
+        self.resume_attempt_offset = 0
+        self.resume_checkpoint_id = None
+
+
+class _SinkDouble:
+    def __init__(
+        self,
+        *,
+        name: str,
+        node_id: str,
+        diversions: tuple[RowDiversion, ...] = (),
+        on_write_failure: str = "discard",
+        artifact_path: str = "/tmp/test",
+    ) -> None:
+        self.name = name
+        self.node_id = node_id
+        self.input_schema = _PermissiveSchema
+        self.declared_guaranteed_fields = frozenset()
+        self.declared_required_fields = frozenset()
+        self.write = _CallRecorder(
+            return_value=SinkWriteResult(
+                artifact=_make_artifact(artifact_path),
+                diversions=diversions,
+            )
+        )
+        self.flush = _CallRecorder()
+        self._on_write_failure = on_write_failure
+        self._reset_diversion_log = _CallRecorder()
+
+
+class _SpanContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+
+class _SpanFactoryDouble:
+    def __init__(self) -> None:
+        self.sink_span = _CallRecorder(return_value=_SpanContext())
+
+
+def _make_context(run_id: str = "run-1") -> SimpleNamespace:
+    return SimpleNamespace(run_id=run_id, operation_id=None)
+
+
+def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = None) -> TokenInfo:
+    """Create a minimal token double."""
+    return _TokenDouble(token_id, row_data)  # type: ignore[return-value]
 
 
 def _make_artifact(path: str = "/tmp/test") -> ArtifactDescriptor:
@@ -54,49 +170,51 @@ def _make_sink(
     node_id: str = "node-primary",
     diversions: tuple[RowDiversion, ...] = (),
     on_write_failure: str = "discard",
-) -> MagicMock:
-    sink = MagicMock()
-    sink.name = name
-    sink.node_id = node_id
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink.write.return_value = SinkWriteResult(
-        artifact=_make_artifact(),
-        diversions=diversions,
-    )
-    sink._on_write_failure = on_write_failure
-    sink._reset_diversion_log = MagicMock()
-    return sink
+) -> _SinkDouble:
+    return _SinkDouble(name=name, node_id=node_id, diversions=diversions, on_write_failure=on_write_failure)
 
 
-def _make_failsink(name: str = "csv_failsink", node_id: str = "node-failsink") -> MagicMock:
-    failsink = MagicMock()
-    failsink.name = name
-    failsink.node_id = node_id
-    failsink.declared_guaranteed_fields = frozenset()
-    failsink.declared_required_fields = frozenset()
-    failsink.write.return_value = SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
-    failsink._reset_diversion_log = MagicMock()
-    return failsink
+def _make_failsink(name: str = "csv_failsink", node_id: str = "node-failsink") -> _SinkDouble:
+    return _SinkDouble(name=name, node_id=node_id, artifact_path="/tmp/failsink")
 
 
-def _make_executor() -> tuple[SinkExecutor, MagicMock, MagicMock]:
-    execution = MagicMock()
-    data_flow = MagicMock()
+def _make_executor() -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
+    execution = SimpleNamespace()
+    execution.begin_node_state = _CallRecorder()
+    execution.complete_node_state = _CallRecorder()
+    execution.register_artifact = _CallRecorder()
+    execution.record_routing_event = _CallRecorder()
+    execution.begin_operation = _CallRecorder(return_value=SimpleNamespace(operation_id="op-1"))
+    execution.complete_operation = _CallRecorder()
+    data_flow = SimpleNamespace()
+    data_flow.record_token_outcome = _CallRecorder()
     state_counter = [0]
+    artifact_counter = [0]
 
-    def _begin_state(**kwargs: Any) -> MagicMock:
+    def _begin_state(**kwargs: Any) -> SimpleNamespace:
         state_counter[0] += 1
-        state = MagicMock()
-        state.state_id = f"state-{state_counter[0]}"
-        return state
+        return SimpleNamespace(state_id=f"state-{state_counter[0]}")
+
+    def _register_artifact(**kwargs: Any) -> Artifact:
+        artifact_counter[0] += 1
+        return Artifact(
+            artifact_id=f"artifact-{artifact_counter[0]}",
+            run_id=kwargs["run_id"],
+            produced_by_state_id=kwargs["state_id"],
+            sink_node_id=kwargs["sink_node_id"],
+            artifact_type=kwargs["artifact_type"],
+            path_or_uri=kwargs["path"],
+            content_hash=kwargs["content_hash"],
+            size_bytes=kwargs["size_bytes"],
+            created_at=datetime.now(UTC),
+            idempotency_key=kwargs.get("idempotency_key"),
+        )
 
     execution.begin_node_state.side_effect = _begin_state
-    spans = MagicMock()
-    spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
-    spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
+    execution.register_artifact.side_effect = _register_artifact
+    spans = _SpanFactoryDouble()
     executor = SinkExecutor(execution, data_flow, spans, "run-1")
-    return executor, execution, data_flow
+    return executor, execution, data_flow  # type: ignore[return-value]
 
 
 def _unique_completion_kwargs_by_state(completions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -108,12 +226,12 @@ def _unique_completion_kwargs_by_state(completions: list[dict[str, Any]]) -> dic
     return by_state
 
 
-def _complete_node_state_kwargs_by_state(execution: MagicMock) -> dict[str, dict[str, Any]]:
+def _complete_node_state_kwargs_by_state(execution: SimpleNamespace) -> dict[str, dict[str, Any]]:
     return _unique_completion_kwargs_by_state([call.kwargs for call in execution.complete_node_state.call_args_list])
 
 
 def _assert_single_primary_divert_cleanup(
-    execution: MagicMock,
+    execution: SimpleNamespace,
     *,
     phase: str,
     exception_type: str,
@@ -147,7 +265,7 @@ class TestNoDiversions:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -167,7 +285,7 @@ class TestNoDiversions:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -182,7 +300,7 @@ class TestNoDiversions:
         artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -202,7 +320,7 @@ class TestDiscardMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -230,7 +348,7 @@ class TestDiscardMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -258,7 +376,7 @@ class TestDiscardMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -275,7 +393,7 @@ class TestDiscardMode:
         artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -334,7 +452,7 @@ class TestFailsinkMode:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -360,7 +478,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -386,7 +504,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -404,7 +522,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -421,7 +539,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -442,7 +560,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -487,7 +605,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -538,7 +656,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -568,7 +686,7 @@ class TestFailsinkErrorHandling:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -609,12 +727,10 @@ class TestFailsinkStateOrdering:
         execution.begin_node_state.side_effect = _begin
         failsink.write.side_effect = _write
 
-        from elspeth.contracts.plugin_context import PluginContext
-
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -648,7 +764,7 @@ class TestFailsinkCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -687,7 +803,7 @@ class TestFailsinkCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -722,7 +838,7 @@ class TestFailsinkCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -748,7 +864,7 @@ class TestFailsinkCleanupEnvelope:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -784,7 +900,7 @@ class TestFailsinkCleanupEnvelope:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -810,8 +926,7 @@ class TestFailsinkOperationAndSpanRecording:
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
-        ctx = MagicMock(run_id="run-1")
-        ctx.operation_id = None
+        ctx = _make_context()
 
         executor.write(
             sink=sink,
@@ -855,7 +970,7 @@ class TestNonContiguousDiversions:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -881,7 +996,7 @@ class TestEmptyBatch:
         artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=[],
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -909,11 +1024,11 @@ class TestOnTokenWrittenWithDiversions:
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
-        callback = MagicMock()
+        callback = _CallRecorder()
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -931,11 +1046,11 @@ class TestOnTokenWrittenWithDiversions:
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0"), _make_token("t1")]
-        callback = MagicMock()
+        callback = _CallRecorder()
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -955,11 +1070,11 @@ class TestOnTokenWrittenWithDiversions:
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
-        callback = MagicMock()
+        callback = _CallRecorder()
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -1009,7 +1124,7 @@ class TestMidLoopAuditRecordingCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1072,7 +1187,7 @@ class TestSystemErrorStateCleanup:
         call_count = [0]
         original_side_effect = execution.begin_node_state.side_effect
 
-        def begin_state_with_error(**kwargs: Any) -> MagicMock:
+        def begin_state_with_error(**kwargs: Any) -> SimpleNamespace:
             call_count[0] += 1
             # Calls 1-2: primary divert states (OK)
             # Call 3: first failsink state (OK)
@@ -1087,7 +1202,7 @@ class TestSystemErrorStateCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1151,7 +1266,7 @@ class TestSystemErrorStateCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1208,8 +1323,8 @@ class TestDiversionIndexValidation:
         with pytest.raises(PluginContractViolation, match=r"row_index=5.*batch has only 2 rows"):
             executor.write(
                 sink,
-                tokens,  # type: ignore[arg-type]  # MagicMock(spec=TokenInfo) satisfies runtime checks
-                MagicMock(),
+                tokens,  # type: ignore[arg-type]
+                _make_context(),
                 step_in_pipeline=0,
                 sink_name="out",
                 pending_outcome=pending,
@@ -1259,7 +1374,7 @@ class TestUncoveredExceptArmCharacterization:
         call_count = [0]
         original_side_effect = execution.begin_node_state.side_effect
 
-        def begin_state_with_error(**kwargs: Any) -> MagicMock:
+        def begin_state_with_error(**kwargs: Any) -> SimpleNamespace:
             call_count[0] += 1
             if call_count[0] == 4:
                 raise RuntimeError("transient failsink begin failure")
@@ -1271,7 +1386,7 @@ class TestUncoveredExceptArmCharacterization:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1301,7 +1416,7 @@ class TestUncoveredExceptArmCharacterization:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1329,7 +1444,7 @@ class TestUncoveredExceptArmCharacterization:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),

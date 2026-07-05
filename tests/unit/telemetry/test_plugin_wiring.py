@@ -14,48 +14,203 @@ forgets to pass telemetry_emit, these tests fail.
 from __future__ import annotations
 
 import ast
+import itertools
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
 
-from elspeth.contracts import CallType
+from elspeth.contracts import Call, CallStatus, CallType
 from elspeth.contracts.events import ExternalCallCompleted
+from elspeth.core.rate_limit.registry import NoOpLimiter
 from elspeth.testing import make_pipeline_row
 
 
-def _make_lifecycle_ctx(events: list[Any]) -> Mock:
-    """Create a mock LifecycleContext that captures telemetry events."""
-    recorder = Mock()
-    recorder.allocate_call_index = Mock(return_value=0)
-    recorder.record_call = Mock()
+class _ExecutionRepositoryDouble:
+    def __init__(self) -> None:
+        self._call_counter = itertools.count()
+        self._operation_call_counter = itertools.count()
+        self.recorded_calls: list[dict[str, Any]] = []
 
-    ctx = Mock()
-    ctx.run_id = "test-run"
-    ctx.node_id = "node-001"
-    ctx.landscape = recorder
-    ctx.rate_limit_registry = None
-    ctx.telemetry_emit = events.append
-    ctx.concurrency_config = None
-    return ctx
+    def allocate_call_index(self, state_id: str) -> int:
+        return next(self._call_counter)
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return next(self._operation_call_counter)
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        call_kwargs = {
+            "state_id": state_id,
+            "call_index": call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        self.recorded_calls.append(call_kwargs)
+        return self._recorded_call(call_kwargs)
+
+    def record_operation_call(
+        self,
+        operation_id: str,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        call_index: int | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        actual_call_index = call_index if call_index is not None else self.allocate_operation_call_index(operation_id)
+        call_kwargs = {
+            "operation_id": operation_id,
+            "call_index": actual_call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        self.recorded_calls.append(call_kwargs)
+        return self._recorded_call(call_kwargs)
+
+    def _recorded_call(self, call_kwargs: dict[str, Any]) -> Call:
+        return Call(
+            call_id=f"call_{len(self.recorded_calls)}",
+            call_index=call_kwargs["call_index"],
+            call_type=call_kwargs["call_type"],
+            status=call_kwargs["status"],
+            request_hash="req_hash_123",
+            response_hash="resp_hash_456" if call_kwargs["response_data"] is not None else None,
+            created_at=datetime.now(UTC),
+            state_id=call_kwargs.get("state_id"),
+            operation_id=call_kwargs.get("operation_id"),
+            request_ref=call_kwargs["request_ref"] or "request_payload_ref",
+            response_ref=call_kwargs["response_ref"] or ("response_payload_ref" if call_kwargs["response_data"] is not None else None),
+            latency_ms=call_kwargs["latency_ms"],
+            resolved_prompt_template_hash=call_kwargs["resolved_prompt_template_hash"],
+        )
 
 
-def _make_transform_ctx(recorder: Mock) -> Mock:
-    """Create a mock TransformContext for _process_row calls."""
-    ctx = Mock()
-    ctx.run_id = "test-run"
-    ctx.state_id = "state-001"
-    ctx.node_id = "node-001"
-    ctx.token = Mock(token_id="token-001")
-    ctx.batch_token_ids = None
-    ctx.schema_contract = None
-    ctx.landscape = recorder
-    ctx.landscape.allocate_call_index = Mock(return_value=0)
-    ctx.landscape.record_call = Mock()
-    return ctx
+class _RateLimitRegistryDouble:
+    def __init__(self) -> None:
+        self.limiter = NoOpLimiter()
+
+    def get_limiter(self, service_name: str) -> NoOpLimiter:
+        return self.limiter
+
+
+class _FakeOpenAICompletionCreator:
+    def __init__(self) -> None:
+        message = SimpleNamespace(content='{"score": 85}')
+        choice = SimpleNamespace(message=message)
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+        self.response = SimpleNamespace(
+            choices=[choice],
+            model="gpt-4o",
+            usage=usage,
+            model_dump=lambda: {},
+        )
+        self.call_count = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_count += 1
+        return self.response
+
+
+class _FakeOpenAIClient:
+    def __init__(self) -> None:
+        self.create_completion = _FakeOpenAICompletionCreator()
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create_completion))
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _HTTPClientDouble:
+    def __init__(self, response: httpx.Response) -> None:
+        self.response = response
+        self.post_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.stream_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.closed = False
+
+    def __enter__(self) -> _HTTPClientDouble:
+        return self
+
+    def __exit__(self, *_args: Any) -> bool:
+        return False
+
+    def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        self.post_calls.append((args, kwargs))
+        return self.response
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        self.stream_calls.append((args, kwargs))
+        return nullcontext(self.response)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _make_lifecycle_ctx(events: list[Any]) -> SimpleNamespace:
+    """Create a LifecycleContext double that captures telemetry events."""
+    return SimpleNamespace(
+        run_id="test-run",
+        node_id="node-001",
+        landscape=_ExecutionRepositoryDouble(),
+        rate_limit_registry=None,
+        telemetry_emit=events.append,
+        concurrency_config=None,
+        payload_store=SimpleNamespace(store=lambda data: "payload_hash"),
+        shutdown_event=None,
+    )
+
+
+def _make_transform_ctx(recorder: _ExecutionRepositoryDouble) -> SimpleNamespace:
+    """Create a TransformContext double for _process_row calls."""
+    return SimpleNamespace(
+        run_id="test-run",
+        state_id="state-001",
+        node_id="node-001",
+        token=SimpleNamespace(token_id="token-001"),
+        batch_token_ids=None,
+        schema_contract=None,
+        landscape=recorder,
+        shutdown_event=None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +227,9 @@ class TestLLMTransformTelemetryWiring:
     @pytest.fixture(autouse=True)
     def mock_azure_openai(self):
         with patch("openai.AzureOpenAI") as mock_cls:
-            mock_client = Mock()
-            mock_response = Mock()
-            mock_response.choices = [Mock(message=Mock(content='{"score": 85}'))]
-            mock_response.model = "gpt-4o"
-            mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-            mock_response.model_dump = Mock(return_value={})
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_cls.return_value = mock_client
-            yield mock_client
+            client = _FakeOpenAIClient()
+            mock_cls.return_value = client
+            yield client
 
     def test_telemetry_emitted_on_llm_call(self) -> None:
         """After on_start + _process_row, telemetry_emit receives ExternalCallCompleted."""
@@ -161,9 +310,8 @@ class TestAzureSafetyTelemetryWiring:
             request=httpx.Request("POST", "https://test.cognitiveservices.azure.com/contentsafety/text:analyze"),
         )
 
-        with patch("httpx.Client") as mock_httpx_cls:
-            mock_httpx = mock_httpx_cls.return_value
-            mock_httpx.post.return_value = mock_response
+        httpx_client = _HTTPClientDouble(mock_response)
+        with patch("httpx.Client", return_value=httpx_client):
             transform._process_row(row, process_ctx)
 
         # telemetry_emit must have been invoked with an HTTP call event
@@ -204,11 +352,7 @@ class TestWebScrapeTelemetryWiring:
         events: list[Any] = []
         lifecycle_ctx = _make_lifecycle_ctx(events)
         # WebScrapeTransform requires rate_limit_registry
-        mock_limiter = Mock()
-        mock_limiter.try_acquire = Mock(return_value=True)
-        mock_registry = Mock()
-        mock_registry.get_limiter = Mock(return_value=mock_limiter)
-        lifecycle_ctx.rate_limit_registry = mock_registry
+        lifecycle_ctx.rate_limit_registry = _RateLimitRegistryDouble()
 
         transform.on_start(lifecycle_ctx)
 
@@ -239,14 +383,8 @@ class TestWebScrapeTelemetryWiring:
                 "elspeth.plugins.transforms.web_scrape.validate_url_for_ssrf",
                 return_value=safe_request,
             ),
-            patch("httpx.Client") as mock_httpx_cls,
+            patch("httpx.Client", return_value=_HTTPClientDouble(mock_response)),
         ):
-            mock_httpx = mock_httpx_cls.return_value
-            # httpx.Client is used as a context manager in get_ssrf_safe(), then
-            # the audited client streams because WebScrapeTransform sets a body cap.
-            mock_httpx.__enter__ = Mock(return_value=mock_httpx)
-            mock_httpx.__exit__ = Mock(return_value=False)
-            mock_httpx.stream.return_value = nullcontext(mock_response)
             transform.process(row, process_ctx)
 
         # telemetry_emit must have been invoked with an HTTP call event

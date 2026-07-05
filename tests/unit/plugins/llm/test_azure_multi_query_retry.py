@@ -7,14 +7,16 @@ Uses row-level pipelining API (BatchTransformMixin).
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import Mock
 
+import httpx
 import pytest
 
-from elspeth.contracts import TransformResult
+from elspeth.contracts import Call, CallStatus, CallType, TransformResult
 from elspeth.engine.batch_adapter import ExceptionResult
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
 from elspeth.plugins.transforms.llm.transform import LLMTransform
@@ -26,6 +28,114 @@ from .conftest import (
     chaosllm_azure_openai_sequence,
     make_token,
 )
+
+
+class _CallRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.calls.append((args, kwargs))
+
+
+class _ExecutionRepositoryDouble:
+    def __init__(self) -> None:
+        self._call_counter = itertools.count()
+        self._operation_call_counter = itertools.count()
+        self.recorded_calls: list[dict[str, Any]] = []
+
+    def allocate_call_index(self, state_id: str) -> int:
+        return next(self._call_counter)
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return next(self._operation_call_counter)
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        call_kwargs = {
+            "state_id": state_id,
+            "call_index": call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        self.recorded_calls.append(call_kwargs)
+        return self._recorded_call(call_kwargs)
+
+    def record_operation_call(
+        self,
+        operation_id: str,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        call_index: int | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        actual_call_index = call_index if call_index is not None else self.allocate_operation_call_index(operation_id)
+        call_kwargs = {
+            "operation_id": operation_id,
+            "call_index": actual_call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        self.recorded_calls.append(call_kwargs)
+        return self._recorded_call(call_kwargs)
+
+    def _recorded_call(self, call_kwargs: dict[str, Any]) -> Call:
+        return Call(
+            call_id=f"call_{len(self.recorded_calls)}",
+            call_index=call_kwargs["call_index"],
+            call_type=call_kwargs["call_type"],
+            status=call_kwargs["status"],
+            request_hash="req_hash_123",
+            response_hash="resp_hash_456" if call_kwargs["response_data"] is not None else None,
+            created_at=datetime.now(UTC),
+            state_id=call_kwargs.get("state_id"),
+            operation_id=call_kwargs.get("operation_id"),
+            latency_ms=call_kwargs["latency_ms"],
+            resolved_prompt_template_hash=call_kwargs["resolved_prompt_template_hash"],
+        )
+
+
+def _openai_response(status_code: int) -> httpx.Response:
+    request = httpx.Request("POST", "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions")
+    return httpx.Response(status_code=status_code, request=request)
+
+
+def _openai_request() -> httpx.Request:
+    return httpx.Request("POST", "https://test.openai.azure.com/openai/deployments/gpt-4o/chat/completions")
 
 
 def _make_config(**overrides: Any) -> dict[str, Any]:
@@ -93,7 +203,7 @@ def mock_azure_openai_with_counter(
     chaosllm_server,
     success_response: dict[str, Any],
     failure_condition: Any | None = None,
-) -> Generator[tuple[Mock, list[int]], None, None]:
+) -> Generator[tuple[Any, list[int]], None, None]:
     """Mock Azure OpenAI with thread-safe call counter.
 
     Args:
@@ -130,11 +240,9 @@ class TestRetryBehavior:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_recorder(self) -> _ExecutionRepositoryDouble:
+        """Create ExecutionRepository double."""
+        return _ExecutionRepositoryDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -143,7 +251,7 @@ class TestRetryBehavior:
 
     def test_capacity_error_triggers_retry(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -161,7 +269,7 @@ class TestRetryBehavior:
             if count <= 2:
                 return OpenAIRateLimitError(
                     message="Rate limit exceeded",
-                    response=Mock(status_code=429),
+                    response=_openai_response(429),
                     body=None,
                 )
             return None
@@ -202,7 +310,7 @@ class TestRetryBehavior:
 
     def test_capacity_retry_timeout(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -217,7 +325,7 @@ class TestRetryBehavior:
         def always_fail(count: int) -> OpenAIRateLimitError:
             return OpenAIRateLimitError(
                 message="Rate limit exceeded - never succeeds",
-                response=Mock(status_code=429),
+                response=_openai_response(429),
                 body=None,
             )
 
@@ -256,7 +364,7 @@ class TestRetryBehavior:
 
     def test_mixed_success_and_failure(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -273,7 +381,7 @@ class TestRetryBehavior:
             if count == 3:
                 return OpenAIRateLimitError(
                     message="Rate limit",
-                    response=Mock(status_code=429),
+                    response=_openai_response(429),
                     body=None,
                 )
             return None
@@ -319,11 +427,9 @@ class TestConcurrentRowProcessing:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_recorder(self) -> _ExecutionRepositoryDouble:
+        """Create ExecutionRepository double."""
+        return _ExecutionRepositoryDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -332,7 +438,7 @@ class TestConcurrentRowProcessing:
 
     def test_multiple_rows_processed_via_pipelining(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -384,7 +490,7 @@ class TestConcurrentRowProcessing:
 
     def test_atomicity_with_failures_in_sequential_mode(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -399,7 +505,7 @@ class TestConcurrentRowProcessing:
             if count % 7 == 0:
                 return OpenAIRateLimitError(
                     message="Rate limit",
-                    response=Mock(status_code=429),
+                    response=_openai_response(429),
                     body=None,
                 )
             return None
@@ -458,7 +564,7 @@ class TestConcurrentRowProcessing:
 
     def test_sequential_query_execution(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -507,11 +613,9 @@ class TestSequentialFallback:
     """Tests for sequential processing — unified LLMTransform always uses sequential queries."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_recorder(self) -> _ExecutionRepositoryDouble:
+        """Create ExecutionRepository double."""
+        return _ExecutionRepositoryDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -520,7 +624,7 @@ class TestSequentialFallback:
 
     def test_sequential_mode_retryable_error_absorbed_by_bounded_retry(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -536,7 +640,7 @@ class TestSequentialFallback:
             if count == 1:
                 return OpenAIRateLimitError(
                     message="Rate limit",
-                    response=Mock(status_code=429),
+                    response=_openai_response(429),
                     body=None,
                 )
             return None
@@ -579,11 +683,9 @@ class TestProviderClientLifecycle:
     """Test that provider clients are properly managed."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_recorder(self) -> _ExecutionRepositoryDouble:
+        """Create ExecutionRepository double."""
+        return _ExecutionRepositoryDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -592,7 +694,7 @@ class TestProviderClientLifecycle:
 
     def test_provider_close_called_on_transform_close(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -641,11 +743,9 @@ class TestLLMErrorRetry:
     """Test that retryable LLM errors are propagated for engine retry."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_recorder(self) -> _ExecutionRepositoryDouble:
+        """Create ExecutionRepository double."""
+        return _ExecutionRepositoryDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -654,7 +754,7 @@ class TestLLMErrorRetry:
 
     def test_network_error_absorbed_by_bounded_retry(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -668,7 +768,7 @@ class TestLLMErrorRetry:
 
         def first_two_fail(count: int) -> APITimeoutError | None:
             if count <= 2:
-                return APITimeoutError(request=Mock())
+                return APITimeoutError(request=_openai_request())
             return None
 
         with mock_azure_openai_with_counter(
@@ -705,7 +805,7 @@ class TestLLMErrorRetry:
 
     def test_content_policy_error_not_retried(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -719,7 +819,7 @@ class TestLLMErrorRetry:
         def always_fail_content_policy(count: int) -> BadRequestError:
             return BadRequestError(
                 message="Content violates safety policy",
-                response=Mock(status_code=400),
+                response=_openai_response(400),
                 body={"error": {"code": "content_filter", "message": "Content violates safety policy"}},
             )
 
@@ -766,11 +866,9 @@ class TestSequentialBoundedLocalRetry:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_recorder(self) -> _ExecutionRepositoryDouble:
+        """Create ExecutionRepository double."""
+        return _ExecutionRepositoryDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -779,7 +877,7 @@ class TestSequentialBoundedLocalRetry:
 
     def test_sequential_transient_then_success_does_not_divert(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -810,7 +908,7 @@ class TestSequentialBoundedLocalRetry:
             if count == 2:
                 return OpenAIRateLimitError(
                     message="Rate limit exceeded",
-                    response=Mock(status_code=429),
+                    response=_openai_response(429),
                     body=None,
                 )
             return None
@@ -864,7 +962,7 @@ class TestSequentialBoundedLocalRetry:
 
     def test_sequential_bounded_retry_timeout_diverts_with_audited_result(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRepositoryDouble,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -886,7 +984,7 @@ class TestSequentialBoundedLocalRetry:
         def always_fail(count: int) -> OpenAIRateLimitError:
             return OpenAIRateLimitError(
                 message="Rate limit exceeded - never recovers",
-                response=Mock(status_code=429),
+                response=_openai_response(429),
                 body=None,
             )
 

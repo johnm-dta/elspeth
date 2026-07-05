@@ -12,9 +12,10 @@ Tests cover:
 from __future__ import annotations
 
 from collections import defaultdict as collections_defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -356,10 +357,117 @@ _TRANSFORM_ERROR = TransformErrorRecord(
 )
 
 
+_DEFAULT_RUN = object()
+
+
+@dataclass(slots=True)
+class _RunLifecycleRecorder:
+    run: Run | None
+    run_attribution: tuple[str, str] | None
+    secret_resolutions: list[Any]
+
+    def get_run(self, run_id: str) -> Run | None:
+        return self.run
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
+        return self.run_attribution
+
+    def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
+        return self.secret_resolutions
+
+
+@dataclass(slots=True)
+class _DataFlowRecorder:
+    nodes: list[Any]
+    edges: list[Any]
+    validation_errors: list[Any]
+    transform_errors: list[Any]
+
+    def get_nodes(self, run_id: str) -> list[Any]:
+        return self.nodes
+
+    def get_edges(self, run_id: str) -> list[Any]:
+        return self.edges
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[Any]:
+        return self.validation_errors
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[Any]:
+        return self.transform_errors
+
+
+@dataclass(slots=True)
+class _ExecutionRecorder:
+    operations: list[Any]
+    operation_calls: list[Any]
+    batches: list[Any]
+    batch_members: list[Any]
+    artifacts: list[Any]
+
+    def get_operations_for_run(self, run_id: str) -> list[Any]:
+        return self.operations
+
+    def get_all_operation_calls_for_run(self, run_id: str) -> list[Any]:
+        return self.operation_calls
+
+    def get_batches(self, run_id: str) -> list[Any]:
+        return self.batches
+
+    def get_all_batch_members_for_run(self, run_id: str) -> list[Any]:
+        return self.batch_members
+
+    def get_artifacts(self, run_id: str) -> list[Any]:
+        return self.artifacts
+
+
+@dataclass(slots=True)
+class _QueryRecorder:
+    rows: list[Any]
+    tokens: list[Any]
+    token_parents: list[Any]
+    token_outcomes: list[Any]
+    scheduler_events: list[Any]
+    node_states: list[Any]
+    routing_events: list[Any]
+    state_calls: list[Any]
+
+    def get_rows(self, run_id: str) -> list[Any]:
+        return self.rows
+
+    def get_all_tokens_for_run(self, run_id: str) -> list[Any]:
+        return self.tokens
+
+    def get_all_token_parents_for_run(self, run_id: str) -> list[Any]:
+        return self.token_parents
+
+    def get_all_token_outcomes_for_run(self, run_id: str) -> list[Any]:
+        return self.token_outcomes
+
+    def get_scheduler_events(self, *, run_id: str) -> list[Any]:
+        return self.scheduler_events
+
+    def get_all_node_states_for_run(self, run_id: str) -> list[Any]:
+        return self.node_states
+
+    def get_all_routing_events_for_run(self, run_id: str) -> list[Any]:
+        return self.routing_events
+
+    def get_all_calls_for_run(self, run_id: str) -> list[Any]:
+        return self.state_calls
+
+
+@dataclass(slots=True)
+class _RecorderFactory:
+    run_lifecycle: _RunLifecycleRecorder
+    data_flow: _DataFlowRecorder
+    execution: _ExecutionRecorder
+    query: _QueryRecorder
+
+
 def _make_exporter(
     *,
     signing_key: bytes | None = None,
-    run: Run | None = None,
+    run: Run | None | object = _DEFAULT_RUN,
     run_attribution: tuple[str, str] | None = None,
     secret_resolutions: list[Any] | None = None,
     nodes: list[Any] | None = None,
@@ -381,44 +489,41 @@ def _make_exporter(
     artifacts: list[Any] | None = None,
     include_raw_error_rows: bool = False,
 ) -> LandscapeExporter:
-    """Create an exporter with mocked database and factory."""
-    mock_db = Mock()
+    """Create an exporter with in-memory recorder fakes."""
     exporter = LandscapeExporter.__new__(LandscapeExporter)
-    exporter._db = mock_db
-    exporter._factory = Mock()
+    exporter._db = object()
+    exporter._factory = _RecorderFactory(
+        run_lifecycle=_RunLifecycleRecorder(
+            run=_RUN if run is _DEFAULT_RUN else run,
+            run_attribution=run_attribution,
+            secret_resolutions=secret_resolutions or [],
+        ),
+        data_flow=_DataFlowRecorder(
+            nodes=nodes or [],
+            edges=edges or [],
+            validation_errors=validation_errors or [],
+            transform_errors=transform_errors or [],
+        ),
+        execution=_ExecutionRecorder(
+            operations=operations or [],
+            operation_calls=operation_calls or [],
+            batches=batches or [],
+            batch_members=batch_members or [],
+            artifacts=artifacts or [],
+        ),
+        query=_QueryRecorder(
+            rows=rows or [],
+            tokens=tokens or [],
+            token_parents=token_parents or [],
+            token_outcomes=token_outcomes or [],
+            scheduler_events=scheduler_events or [],
+            node_states=node_states or [],
+            routing_events=routing_events or [],
+            state_calls=state_calls or [],
+        ),
+    )
     exporter._signing_key = signing_key
     exporter._include_raw_error_rows = include_raw_error_rows
-
-    # Mock all factory sub-repository methods used by _iter_records
-    factory = exporter._factory
-
-    # run_lifecycle repository
-    object.__setattr__(factory.run_lifecycle, "get_run", Mock(return_value=run if run is not None else _RUN))
-    object.__setattr__(factory.run_lifecycle, "get_run_attribution", Mock(return_value=run_attribution))
-    object.__setattr__(factory.run_lifecycle, "get_secret_resolutions_for_run", Mock(return_value=secret_resolutions or []))
-
-    # data_flow repository
-    object.__setattr__(factory.data_flow, "get_nodes", Mock(return_value=nodes or []))
-    object.__setattr__(factory.data_flow, "get_edges", Mock(return_value=edges or []))
-    object.__setattr__(factory.data_flow, "get_validation_errors_for_run", Mock(return_value=validation_errors or []))
-    object.__setattr__(factory.data_flow, "get_transform_errors_for_run", Mock(return_value=transform_errors or []))
-
-    # execution repository
-    object.__setattr__(factory.execution, "get_operations_for_run", Mock(return_value=operations or []))
-    object.__setattr__(factory.execution, "get_all_operation_calls_for_run", Mock(return_value=operation_calls or []))
-    object.__setattr__(factory.execution, "get_batches", Mock(return_value=batches or []))
-    object.__setattr__(factory.execution, "get_all_batch_members_for_run", Mock(return_value=batch_members or []))
-    object.__setattr__(factory.execution, "get_artifacts", Mock(return_value=artifacts or []))
-
-    # query repository
-    object.__setattr__(factory.query, "get_rows", Mock(return_value=rows or []))
-    object.__setattr__(factory.query, "get_all_tokens_for_run", Mock(return_value=tokens or []))
-    object.__setattr__(factory.query, "get_all_token_parents_for_run", Mock(return_value=token_parents or []))
-    object.__setattr__(factory.query, "get_all_token_outcomes_for_run", Mock(return_value=token_outcomes or []))
-    object.__setattr__(factory.query, "get_scheduler_events", Mock(return_value=scheduler_events or []))
-    object.__setattr__(factory.query, "get_all_node_states_for_run", Mock(return_value=node_states or []))
-    object.__setattr__(factory.query, "get_all_routing_events_for_run", Mock(return_value=routing_events or []))
-    object.__setattr__(factory.query, "get_all_calls_for_run", Mock(return_value=state_calls or []))
 
     return exporter
 
@@ -432,17 +537,22 @@ class TestConstructor:
     """Tests for exporter initialization."""
 
     def test_creates_factory_from_db(self) -> None:
-        db = Mock()
-        with patch("elspeth.core.landscape.exporter.RecorderFactory", return_value=Mock()):
+        db = object()
+        factory = object()
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", autospec=True, return_value=factory) as recorder_factory:
             exporter = LandscapeExporter(db)
         assert exporter._db is db
+        assert exporter._factory is factory
+        recorder_factory.assert_called_once_with(db)
         assert exporter._signing_key is None
 
     def test_accepts_signing_key(self) -> None:
-        db = Mock()
+        db = object()
+        factory = object()
         key = b"secret-key"
-        with patch("elspeth.core.landscape.exporter.RecorderFactory", return_value=Mock()):
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", autospec=True, return_value=factory):
             exporter = LandscapeExporter(db, signing_key=key)
+        assert exporter._factory is factory
         assert exporter._signing_key == key
 
 
@@ -491,7 +601,6 @@ class TestExportRunUnsigned:
 
     def test_unknown_run_raises(self) -> None:
         exporter = _make_exporter(run=None)
-        object.__setattr__(exporter._factory.run_lifecycle, "get_run", Mock(return_value=None))
         with pytest.raises(ValueError, match="Run not found"):
             list(exporter.export_run("unknown-run"))
 
@@ -1157,7 +1266,7 @@ class TestErrorRecords:
 
     def test_constructor_defaults_to_redacted_error_rows(self) -> None:
         db: Any = object()
-        with patch("elspeth.core.landscape.exporter.RecorderFactory"):
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", autospec=True):
             exporter = LandscapeExporter(db)
         assert exporter._include_raw_error_rows is False
 

@@ -55,8 +55,9 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -182,6 +183,67 @@ def _make_token(
 _JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 
 
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+
+        effect = self.side_effect
+        if isinstance(effect, list):
+            effect = effect.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def called(self) -> bool:
+        return bool(self.call_args_list)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        self.assert_called_once()
+        assert self.call_args.args == args
+        assert self.call_args.kwargs == kwargs
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
 def _journal_payload(data: dict[str, Any], contract: SchemaContract | None = None) -> str:
     """Build a REAL journal row payload via the serializer mark_blocked rows carry.
 
@@ -234,20 +296,21 @@ def _blocked_item(
 def _make_factory() -> MagicMock:
     """Create a mock RecorderFactory with sensible defaults."""
     factory = MagicMock(spec=RecorderFactory)
-    state = Mock(state_id="state_001")
+    state = SimpleNamespace(state_id="state_001")
     factory.execution.begin_node_state.return_value = state
-    factory.execution.register_artifact.return_value = Mock(artifact_id="art_001")
-    factory.execution.begin_operation.return_value = Mock(operation_id="op_001")
+    factory.execution.register_artifact.return_value = SimpleNamespace(artifact_id="art_001")
+    factory.execution.begin_operation.return_value = SimpleNamespace(operation_id="op_001")
 
     batch_counter = 0
     batch_nodes: dict[str, str] = {}
-    batch_members: dict[str, list[Mock]] = {}
+    batch_members: dict[str, list[SimpleNamespace]] = {}
 
-    def create_batch_side_effect(*, run_id: str, aggregation_node_id: str) -> Mock:
+    def create_batch_side_effect(*, run_id: str, aggregation_node_id: str) -> SimpleNamespace:
         nonlocal batch_counter
+        del run_id
         batch_counter += 1
         batch_id = f"batch_{batch_counter:03d}"
-        batch = Mock(
+        batch = SimpleNamespace(
             batch_id=batch_id,
             aggregation_node_id=str(aggregation_node_id),
             status=BatchStatus.DRAFT,
@@ -257,18 +320,18 @@ def _make_factory() -> MagicMock:
         batch_members.setdefault(batch_id, [])
         return batch
 
-    def add_batch_member_side_effect(*, batch_id: str, token_id: str, ordinal: int) -> Mock:
-        member = Mock(batch_id=batch_id, token_id=token_id, ordinal=ordinal)
+    def add_batch_member_side_effect(*, batch_id: str, token_id: str, ordinal: int) -> SimpleNamespace:
+        member = SimpleNamespace(batch_id=batch_id, token_id=token_id, ordinal=ordinal)
         batch_members.setdefault(batch_id, []).append(member)
         return member
 
-    def get_batch_side_effect(batch_id: str) -> Mock | None:
+    def get_batch_side_effect(batch_id: str) -> SimpleNamespace | None:
         node_id = batch_nodes.get(batch_id)
         if node_id is None:
             return None
-        return Mock(batch_id=batch_id, aggregation_node_id=node_id)
+        return SimpleNamespace(batch_id=batch_id, aggregation_node_id=node_id)
 
-    def get_batch_members_side_effect(batch_id: str) -> list[Mock]:
+    def get_batch_members_side_effect(batch_id: str) -> list[SimpleNamespace]:
         return sorted(batch_members.get(batch_id, []), key=lambda member: member.ordinal)
 
     factory.execution.create_batch.side_effect = create_batch_side_effect
@@ -337,27 +400,62 @@ def _make_transform(
     return t
 
 
+class _SinkDouble:
+    def __init__(self, *, name: str, node_id: str | None) -> None:
+        self.name = name
+        self.node_id = node_id
+        self.input_schema = _PermissiveSchema
+        self.declared_guaranteed_fields = frozenset()
+        self.declared_required_fields = frozenset()
+        self._on_write_failure = "discard"
+        self._reset_diversion_log = _CallRecorder()
+        self.write = _CallRecorder(
+            return_value=SinkWriteResult(
+                artifact=ArtifactDescriptor(
+                    artifact_type="file",
+                    path_or_uri="file:///output/test.csv",
+                    content_hash="abc123",
+                    size_bytes=100,
+                )
+            )
+        )
+        self.flush = _CallRecorder()
+
+
 def _make_sink(
     name: str = "test_sink",
     node_id: str | None = "sink_1",
-) -> MagicMock:
-    """Create a mock sink."""
-    sink = MagicMock()
-    sink.name = name
-    sink.node_id = node_id
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink._on_write_failure = "discard"
-    sink._reset_diversion_log = MagicMock()
-    sink.write.return_value = SinkWriteResult(
-        artifact=ArtifactDescriptor(
-            artifact_type="file",
-            path_or_uri="file:///output/test.csv",
-            content_hash="abc123",
-            size_bytes=100,
-        )
-    )
-    return sink
+) -> _SinkDouble:
+    """Create an explicit sink test double."""
+    return _SinkDouble(name=name, node_id=node_id)
+
+
+class _AggregationTransformDouble:
+    def __init__(self, *, name: str = "agg_transform") -> None:
+        self.name = name
+        self.process = _CallRecorder()
+
+
+def _make_aggregation_transform(name: str = "agg_transform") -> _AggregationTransformDouble:
+    return _AggregationTransformDouble(name=name)
+
+
+class _BatchWaiterDouble:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.wait = _CallRecorder(return_value=return_value, side_effect=side_effect)
+
+
+class _BatchAdapterDouble:
+    def __init__(self, waiter: _BatchWaiterDouble) -> None:
+        self.register = _CallRecorder(return_value=waiter)
+
+
+def _install_batch_adapter(executor: TransformExecutor, adapter: _BatchAdapterDouble) -> None:
+    executor._get_batch_adapter = lambda _transform: adapter  # type: ignore[method-assign]
+
+
+def _make_token_manager(children: list[TokenInfo], fork_group_id: str) -> SimpleNamespace:
+    return SimpleNamespace(fork_token=_CallRecorder(return_value=(children, fork_group_id)))
 
 
 def _default_pending() -> PendingOutcome:
@@ -924,7 +1022,7 @@ class TestTransformExecutor:
         )
         token = _make_token()
         ctx = make_context()
-        ctx.record_transform_error = MagicMock()  # type: ignore[method-assign]
+        ctx.record_transform_error = _CallRecorder()  # type: ignore[method-assign]
 
         executor.execute_transform(transform, token, ctx)
 
@@ -1109,7 +1207,7 @@ class TestTransformExecutor:
         )
         token = _make_token()
         ctx = make_context()
-        ctx.record_transform_error = MagicMock()  # type: ignore[method-assign]
+        ctx.record_transform_error = _CallRecorder()  # type: ignore[method-assign]
 
         executor.execute_transform(transform, token, ctx)
 
@@ -1629,8 +1727,7 @@ class TestGateExecutor:
 
         child_a = _make_token(token_id="child_a")
         child_b = _make_token(token_id="child_b")
-        token_manager = MagicMock()
-        token_manager.fork_token.return_value = ([child_a, child_b], "fg_001")
+        token_manager = _make_token_manager([child_a, child_b], "fg_001")
 
         contract = _make_contract()
         token = _make_token(contract=contract)
@@ -2006,8 +2103,7 @@ class TestDispatchResolvedDestinationPerVariant:
 
         child_a = _make_token(token_id="child_a")
         child_b = _make_token(token_id="child_b")
-        token_manager = MagicMock()
-        token_manager.fork_token.return_value = ([child_a, child_b], "fg_001")
+        token_manager = _make_token_manager([child_a, child_b], "fg_001")
 
         outcome = executor._dispatch_resolved_destination(
             state_id="state_001",
@@ -2044,7 +2140,7 @@ class TestDispatchResolvedDestinationPerVariant:
                 destination=RouteDestination.fork(),
                 token=token,
                 ctx=ctx,
-                token_manager=MagicMock(),
+                token_manager=_make_token_manager([], "fg_unused"),
                 reason=None,
                 mode=RoutingMode.COPY,
                 fork_branches=None,
@@ -2221,8 +2317,7 @@ class TestDispatchResolvedDestinationPerVariant:
 
         child_x = _make_token(token_id="child_x")
         child_y = _make_token(token_id="child_y")
-        tm = MagicMock()
-        tm.fork_token.return_value = ([child_x, child_y], "fg_002")
+        tm = _make_token_manager([child_x, child_y], "fg_002")
 
         outcome = executor._dispatch_resolved_destination(
             state_id="state_001",
@@ -2457,7 +2552,7 @@ class TestAggregationExecutor:
     def test_execute_flush_no_batch_raises_orchestration_invariant_error(self) -> None:
         """Flushing without a batch raises OrchestrationInvariantError."""
         executor, _, nid = self._make_agg_executor()
-        transform = MagicMock()
+        transform = _make_aggregation_transform()
         ctx = make_context()
 
         with pytest.raises(OrchestrationInvariantError, match="No batch exists"):
@@ -2486,8 +2581,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
         # Mock batch transform
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -2521,8 +2615,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
         # Mock batch transform
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -2556,8 +2649,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.error(
             reason={"reason": "test_error"},
         )
@@ -2584,8 +2676,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.side_effect = RuntimeError("transform crash")
         ctx = make_context()
 
@@ -2610,8 +2701,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg"
+        transform = _make_aggregation_transform("agg")
         transform.process.side_effect = RuntimeError("boom")
         ctx = make_context()
 
@@ -2705,8 +2795,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg"
+        transform = _make_aggregation_transform("agg")
         transform.process.side_effect = RuntimeError("boom")
         ctx = make_context()
 
@@ -2742,8 +2831,7 @@ class TestAggregationExecutor:
         for i, label in enumerate(("a", "b", "c"), start=1):
             executor_a.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
 
-        transform_a = MagicMock()
-        transform_a.name = "agg"
+        transform_a = _make_aggregation_transform("agg")
         transform_a.process.return_value = TransformResult.success(
             make_row({"v": "agg1"}, contract=contract),
             success_reason={"action": "agg"},
@@ -2816,8 +2904,7 @@ class TestAggregationExecutor:
 
         executor.buffer_row(nid, _make_token(token_id="t1", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg"
+        transform = _make_aggregation_transform("agg")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "agg"}, contract=contract),
             success_reason={"action": "agg"},
@@ -3511,17 +3598,17 @@ class TestSinkExecutor:
 
         factory = _make_factory()
 
-        def _begin_node_state(**kwargs: Any) -> Mock:
-            return Mock(state_id=f"state_{kwargs['token_id']}")
+        def _begin_node_state(**kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(state_id=f"state_{kwargs['token_id']}")
 
         completed_state_ids: set[str] = set()
 
-        def _complete_node_state(**kwargs: Any) -> Mock:
+        def _complete_node_state(**kwargs: Any) -> SimpleNamespace:
             state_id = kwargs["state_id"]
             if state_id in completed_state_ids:
                 raise LandscapeRecordError(f"Cannot complete node state {state_id}: current status 'FAILED' is already terminal.")
             completed_state_ids.add(state_id)
-            return Mock(state_id=state_id, status=kwargs["status"])
+            return SimpleNamespace(state_id=state_id, status=kwargs["status"])
 
         factory.execution.begin_node_state.side_effect = _begin_node_state
         factory.execution.complete_node_state.side_effect = _complete_node_state
@@ -3983,7 +4070,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         ctx = make_context()
         pending = _default_pending()
-        callback = MagicMock()
+        callback = _CallRecorder()
 
         executor.write(
             sink,
@@ -4014,7 +4101,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         ctx = make_context()
         pending = _default_pending()
-        callback = MagicMock(side_effect=RuntimeError("checkpoint failed"))
+        callback = _CallRecorder(side_effect=RuntimeError("checkpoint failed"))
 
         with pytest.raises(AuditIntegrityError, match="checkpoint") as exc_info:
             executor.write(
@@ -4063,7 +4150,7 @@ class TestSinkExecutor:
         """Artifact is registered linked to the first token's state."""
         factory = _make_factory()
         # Make begin_node_state return different state_ids per call
-        states = [Mock(state_id="state_001"), Mock(state_id="state_002")]
+        states = [SimpleNamespace(state_id="state_001"), SimpleNamespace(state_id="state_002")]
         factory.execution.begin_node_state.side_effect = states
 
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
@@ -5298,8 +5385,7 @@ class TestAggregationExecutorTerminality:
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -5353,8 +5439,7 @@ class TestAggregationExecutorTerminality:
 
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         # Transform crashes — inner except completes guard, then outer except tries cleanup
         transform.process.side_effect = RuntimeError("plugin crash")
         ctx = make_context()
@@ -5372,8 +5457,7 @@ class TestAggregationExecutorTerminality:
 
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -5413,7 +5497,7 @@ class TestSinkExecutorTerminality:
         factory = _make_factory()
 
         # First call succeeds, second raises
-        state_1 = Mock(state_id="state_001")
+        state_1 = SimpleNamespace(state_id="state_001")
         factory.execution.begin_node_state.side_effect = [state_1, RuntimeError("DB connection lost")]
 
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
@@ -5481,8 +5565,8 @@ class TestSinkExecutorTerminality:
         """
         factory = _make_factory()
 
-        state_1 = Mock(state_id="state_001")
-        state_2 = Mock(state_id="state_002")
+        state_1 = SimpleNamespace(state_id="state_001")
+        state_2 = SimpleNamespace(state_id="state_002")
         factory.execution.begin_node_state.side_effect = [state_1, state_2, RuntimeError("out of IDs")]
 
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
@@ -5521,7 +5605,7 @@ class TestSinkExecutorTerminality:
         """
         factory = _make_factory()
 
-        state_1 = Mock(state_id="state_001")
+        state_1 = SimpleNamespace(state_id="state_001")
         factory.execution.begin_node_state.side_effect = [state_1, RuntimeError("DB down")]
         # Make cleanup also fail
         factory.execution.complete_node_state.side_effect = RuntimeError("cleanup also broken")
@@ -5846,10 +5930,10 @@ class TestTransformExecutorBatchPath:
                 self.passes_through_input = False
                 self.can_drop_rows = False
                 self._output_schema_config = None
-                self.accept = MagicMock()
-                self.connect_output = MagicMock()
-                self.evict_submission = MagicMock(return_value=True)
-                self.effective_static_contract = MagicMock(return_value=frozenset())
+                self.accept = _CallRecorder()
+                self.connect_output = _CallRecorder()
+                self.evict_submission = _CallRecorder(return_value=True)
+                self.effective_static_contract = _CallRecorder(return_value=frozenset())
 
         t = _FakeBatchTransform()
         return t
@@ -5858,8 +5942,6 @@ class TestTransformExecutorBatchPath:
 
     def test_batch_path_invoked_for_mixin_transform(self) -> None:
         """When transform implements batch runtime protocol, accept() is called instead of process()."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -5872,11 +5954,9 @@ class TestTransformExecutorBatchPath:
         )
 
         # Mock _get_batch_adapter to return a controlled adapter
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = success_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=success_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -5991,8 +6071,6 @@ class TestTransformExecutorBatchPath:
 
     def test_register_called_before_accept(self) -> None:
         """register() is called before accept() for correct waiter ordering."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -6002,11 +6080,9 @@ class TestTransformExecutorBatchPath:
             make_row({"value": "out"}, contract=contract),
             success_reason={"action": "test"},
         )
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = success_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=success_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -6026,18 +6102,14 @@ class TestTransformExecutorBatchPath:
 
     def test_timeout_triggers_evict_submission(self) -> None:
         """TimeoutError from waiter.wait() calls evict_submission() on the batch runtime."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.side_effect = TimeoutError("timed out")
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(side_effect=TimeoutError("timed out"))
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -6055,18 +6127,14 @@ class TestTransformExecutorBatchPath:
 
     def test_eviction_failure_wraps_in_runtime_error(self) -> None:
         """If evict_submission() fails, the error is wrapped in RuntimeError."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.side_effect = TimeoutError("timed out")
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(side_effect=TimeoutError("timed out"))
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         # Make evict_submission raise
         transform.evict_submission.side_effect = KeyError("buffer gone")
@@ -6079,18 +6147,14 @@ class TestTransformExecutorBatchPath:
 
     def test_non_timeout_exception_does_not_evict(self) -> None:
         """Non-TimeoutError exceptions do NOT trigger eviction."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.side_effect = ValueError("not a timeout")
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(side_effect=ValueError("not a timeout"))
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -6104,19 +6168,15 @@ class TestTransformExecutorBatchPath:
 
     def test_batch_error_result_routes_to_error_sink(self) -> None:
         """Batch transform returning TransformResult.error() routes via on_error."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         transform = self._make_batch_transform(on_error="discard")
 
         error_result = TransformResult.error(reason={"reason": "batch_failed"})
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = error_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=error_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token()
         ctx = make_context(landscape=factory.execution)
@@ -6129,8 +6189,6 @@ class TestTransformExecutorBatchPath:
 
     def test_batch_result_hashes_bind_to_input_and_output_payloads(self) -> None:
         """Batch transform hashes bind to the exact input batch and output payload."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -6141,11 +6199,9 @@ class TestTransformExecutorBatchPath:
             output_row,
             success_reason={"action": "batched"},
         )
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = success_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=success_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()

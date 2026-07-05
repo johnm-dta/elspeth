@@ -1,15 +1,16 @@
 # tests/plugins/clients/test_audited_llm_client.py
 """Tests for AuditedLLMClient."""
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from typing import Any
 
 import pytest
 
 from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.contracts.token_usage import TokenUsage
-from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.plugins.infrastructure.clients.llm import (
     AuditedLLMClient,
     ContentPolicyError,
@@ -17,6 +18,141 @@ from elspeth.plugins.infrastructure.clients.llm import (
     LLMResponse,
     RateLimitError,
 )
+
+_DEFAULT_USAGE = object()
+
+
+@dataclass
+class ProviderMessage:
+    content: object
+
+
+class MessageWithoutContent:
+    pass
+
+
+@dataclass
+class ProviderChoice:
+    message: object
+    finish_reason: str = "stop"
+
+
+@dataclass
+class ProviderUsage:
+    prompt_tokens: object | None = None
+    completion_tokens: object | None = None
+    total_tokens: object | None = None
+
+
+@dataclass
+class ProviderResponse:
+    choices: list[ProviderChoice]
+    model: object = "gpt-4"
+    usage: object | None = None
+    raw_response: Mapping[str, Any] = field(default_factory=lambda: {"id": "resp_123"})
+    model_dump_error: Exception | None = None
+
+    def model_dump(self) -> Mapping[str, Any]:
+        if self.model_dump_error is not None:
+            raise self.model_dump_error
+        return self.raw_response
+
+
+@dataclass
+class ProviderResponseWithoutUsage:
+    choices: list[ProviderChoice]
+    model: object = "gpt-4"
+    raw_response: Mapping[str, Any] = field(default_factory=lambda: {"id": "resp_123"})
+
+    def model_dump(self) -> Mapping[str, Any]:
+        return self.raw_response
+
+
+class FakeOpenAICompletions:
+    def __init__(self, *, response: object | None = None, exception: Exception | None = None) -> None:
+        self._response = response
+        self._exception = exception
+        self.create_calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.create_calls.append(kwargs)
+        if self._exception is not None:
+            raise self._exception
+        return self._response
+
+
+class FakeOpenAIClient:
+    def __init__(self, *, response: object | None = None, exception: Exception | None = None) -> None:
+        self._completions = FakeOpenAICompletions(response=response, exception=exception)
+        self.chat = SimpleNamespace(completions=self._completions)
+
+    @property
+    def create_calls(self) -> list[dict[str, Any]]:
+        return self._completions.create_calls
+
+    def single_create_kwargs(self) -> dict[str, Any]:
+        assert len(self.create_calls) == 1
+        return self.create_calls[0]
+
+
+class FakeExecutionRepository:
+    def __init__(self) -> None:
+        self._next_index = 0
+        self.recorded_calls: list[dict[str, Any]] = []
+
+    def allocate_call_index(self, _state_id: str) -> int:
+        call_index = self._next_index
+        self._next_index += 1
+        return call_index
+
+    def record_call(self, **kwargs: Any) -> SimpleNamespace:
+        self.recorded_calls.append(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    def assert_recorded_once(self) -> None:
+        assert len(self.recorded_calls) == 1
+
+    @property
+    def last_record_call_kwargs(self) -> dict[str, Any]:
+        assert self.recorded_calls
+        return self.recorded_calls[-1]
+
+
+def provider_response(
+    *,
+    content: object = "Hello!",
+    model: object = "gpt-4",
+    prompt_tokens: object | None = 10,
+    completion_tokens: object | None = 5,
+    usage: object = _DEFAULT_USAGE,
+    finish_reason: str = "stop",
+    raw_response: Mapping[str, Any] | None = None,
+    model_dump_error: Exception | None = None,
+    message: object | None = None,
+) -> ProviderResponse:
+    response_message = ProviderMessage(content) if message is None else message
+    response_usage = ProviderUsage(prompt_tokens, completion_tokens) if usage is _DEFAULT_USAGE else usage
+    return ProviderResponse(
+        choices=[ProviderChoice(message=response_message, finish_reason=finish_reason)],
+        model=model,
+        usage=response_usage,
+        raw_response={"id": "resp_123"} if raw_response is None else raw_response,
+        model_dump_error=model_dump_error,
+    )
+
+
+def empty_choices_response(
+    *,
+    model: object = "gpt-4",
+    usage: object | None = None,
+    raw_response: Mapping[str, Any] | None = None,
+) -> ProviderResponse:
+    return ProviderResponse(
+        choices=[],
+        model=model,
+        usage=TokenUsage.unknown() if usage is None else usage,
+        raw_response={"id": "resp_empty"} if raw_response is None else raw_response,
+    )
 
 
 class TestLLMResponse:
@@ -92,15 +228,9 @@ class TestLLMClientErrors:
 class TestAuditedLLMClient:
     """Tests for AuditedLLMClient."""
 
-    def _create_mock_execution(self) -> MagicMock:
-        """Create a mock ExecutionRepository."""
-        import itertools
-
-        execution = MagicMock(spec=ExecutionRepository)
-        execution.record_call = MagicMock()
-        counter = itertools.count()
-        execution.allocate_call_index.side_effect = lambda _: next(counter)
-        return execution
+    def _create_mock_execution(self) -> FakeExecutionRepository:
+        """Create an execution recorder fake."""
+        return FakeExecutionRepository()
 
     def _create_mock_openai_client(
         self,
@@ -109,29 +239,16 @@ class TestAuditedLLMClient:
         model: str = "gpt-4",
         prompt_tokens: int = 10,
         completion_tokens: int = 5,
-    ) -> MagicMock:
-        """Create a mock OpenAI client."""
-        # Build the nested response structure
-        message = Mock()
-        message.content = content
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = prompt_tokens
-        usage.completion_tokens = completion_tokens
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = model
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_123"})
-
-        client = MagicMock()
-        client.chat.completions.create.return_value = response
-
-        return client
+    ) -> FakeOpenAIClient:
+        """Create an OpenAI-compatible client fake."""
+        return FakeOpenAIClient(
+            response=provider_response(
+                content=content,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        )
 
     def test_successful_call_records_to_audit_trail(self) -> None:
         """Successful LLM call is recorded to audit trail."""
@@ -159,8 +276,8 @@ class TestAuditedLLMClient:
         assert response.latency_ms > 0
 
         # Verify audit record
-        execution.record_call.assert_called_once()
-        call_kwargs = execution.record_call.call_args[1]
+        execution.assert_recorded_once()
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["state_id"] == "state_123"
         assert call_kwargs["call_index"] == 0
         assert call_kwargs["call_type"] == CallType.LLM
@@ -239,16 +356,15 @@ class TestAuditedLLMClient:
         )
 
         # Check call indices
-        calls = execution.record_call.call_args_list
+        calls = execution.recorded_calls
         assert len(calls) == 2
-        assert calls[0][1]["call_index"] == 0
-        assert calls[1][1]["call_index"] == 1
+        assert calls[0]["call_index"] == 0
+        assert calls[1]["call_index"] == 1
 
     def test_failed_call_records_error(self) -> None:
         """Failed LLM call records error details."""
         execution = self._create_mock_execution()
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception("API connection failed")
+        openai_client = FakeOpenAIClient(exception=Exception("API connection failed"))
 
         client = AuditedLLMClient(
             execution=execution,
@@ -265,8 +381,8 @@ class TestAuditedLLMClient:
             )
 
         # Verify error was recorded
-        execution.record_call.assert_called_once()
-        call_kwargs = execution.record_call.call_args[1]
+        execution.assert_recorded_once()
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "Exception"
         assert "API connection failed" in call_kwargs["error"].message
@@ -281,12 +397,12 @@ class TestAuditedLLMClient:
         violates the file's own policy (plugins review Batch 4 item 1).
         """
         execution = self._create_mock_execution()
-        response = Mock(spec=["choices", "model", "model_dump"])  # no .usage attribute
-        response.choices = [Mock()]
-        response.model = "gpt-4"
-        response.model_dump = Mock(return_value={"id": "resp_123"})
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        response = ProviderResponseWithoutUsage(
+            choices=[ProviderChoice(message=ProviderMessage("Hello!"))],
+            model="gpt-4",
+            raw_response={"id": "resp_123"},
+        )
+        openai_client = FakeOpenAIClient(response=response)
 
         client = AuditedLLMClient(
             execution=execution,
@@ -299,14 +415,13 @@ class TestAuditedLLMClient:
         with pytest.raises(LLMClientError):
             client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Hi"}])
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args[1]["status"] == CallStatus.ERROR
+        execution.assert_recorded_once()
+        assert execution.last_record_call_kwargs["status"] == CallStatus.ERROR
 
     def test_rate_limit_error_marked_retryable(self) -> None:
         """Rate limit errors are marked as retryable."""
         execution = self._create_mock_execution()
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception("Rate limit exceeded (429)")
+        openai_client = FakeOpenAIClient(exception=Exception("Rate limit exceeded (429)"))
 
         client = AuditedLLMClient(
             execution=execution,
@@ -323,14 +438,13 @@ class TestAuditedLLMClient:
             )
 
         # Verify error was recorded with retryable=True
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["error"].retryable is True
 
     def test_rate_limit_detected_by_keyword(self) -> None:
         """Rate limit is detected by 'rate' keyword in error."""
         execution = self._create_mock_execution()
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception("You have exceeded your rate limit")
+        openai_client = FakeOpenAIClient(exception=Exception("You have exceeded your rate limit"))
 
         client = AuditedLLMClient(
             execution=execution,
@@ -349,8 +463,7 @@ class TestAuditedLLMClient:
     def test_non_rate_substring_does_not_raise_rate_limit_error(self) -> None:
         """Errors like 'enumerate' should not be misclassified as rate limit."""
         execution = self._create_mock_execution()
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception("400 Bad Request: enumerate at least one item")
+        openai_client = FakeOpenAIClient(exception=Exception("400 Bad Request: enumerate at least one item"))
 
         client = AuditedLLMClient(
             execution=execution,
@@ -368,7 +481,7 @@ class TestAuditedLLMClient:
 
         assert type(exc_info.value) is LLMClientError
         assert exc_info.value.retryable is False
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["error"].retryable is False
 
     def test_temperature_and_max_tokens_recorded(self) -> None:
@@ -391,7 +504,7 @@ class TestAuditedLLMClient:
             max_tokens=100,
         )
 
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["request_data"].to_dict()["temperature"] == 0.7
         assert call_kwargs["request_data"].to_dict()["max_tokens"] == 100
 
@@ -414,7 +527,7 @@ class TestAuditedLLMClient:
             messages=[{"role": "user", "content": "Hello"}],
         )
 
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["request_data"].to_dict()["provider"] == "azure"
 
     def test_extra_kwargs_passed_to_client(self) -> None:
@@ -438,13 +551,12 @@ class TestAuditedLLMClient:
         )
 
         # Verify extra kwargs were passed to underlying client
-        openai_client.chat.completions.create.assert_called_once()
-        create_kwargs = openai_client.chat.completions.create.call_args[1]
+        create_kwargs = openai_client.single_create_kwargs()
         assert create_kwargs["top_p"] == 0.9
         assert create_kwargs["presence_penalty"] == 0.5
 
         # Verify extra kwargs were recorded
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["request_data"].to_dict()["top_p"] == 0.9
         assert call_kwargs["request_data"].to_dict()["presence_penalty"] == 0.5
 
@@ -461,25 +573,14 @@ class TestAuditedLLMClient:
         """
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = None  # Content-filtered response
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "content_filter"
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 0
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content=None,
+                completion_tokens=0,
+                finish_reason="content_filter",
+                raw_response={},
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -529,24 +630,15 @@ class TestAuditedLLMClient:
             },
         }
 
-        message = Mock()
-        message.content = "Hello!"
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4-0613"
-        response.usage = usage
-        response.model_dump = Mock(return_value=full_response)
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Hello!",
+                model="gpt-4-0613",
+                prompt_tokens=10,
+                completion_tokens=5,
+                raw_response=full_response,
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -562,7 +654,7 @@ class TestAuditedLLMClient:
         )
 
         # Verify raw_response is recorded in audit trail
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         response_data = call_kwargs["response_data"].to_dict()
 
         # Summary fields still present for convenience
@@ -604,24 +696,14 @@ class TestAuditedLLMClient:
             "usage": {"prompt_tokens": 10, "completion_tokens": 30, "total_tokens": 40},
         }
 
-        message = Mock()
-        message.content = "Option A"  # First choice extracted
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 30
-
-        response = Mock()
-        response.choices = [choice]  # Only first choice for content extraction
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value=full_response)
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Option A",
+                prompt_tokens=10,
+                completion_tokens=30,
+                raw_response=full_response,
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -637,7 +719,7 @@ class TestAuditedLLMClient:
         )
 
         # Verify all choices are preserved in raw_response
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         raw_response = call_kwargs["response_data"].to_dict()["raw_response"]
 
         assert len(raw_response["choices"]) == 3
@@ -682,25 +764,15 @@ class TestAuditedLLMClient:
             "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
         }
 
-        message = Mock()
-        message.content = None
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "tool_calls"
-
-        usage = Mock()
-        usage.prompt_tokens = 50
-        usage.completion_tokens = 20
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value=full_response)
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content=None,
+                prompt_tokens=50,
+                completion_tokens=20,
+                finish_reason="tool_calls",
+                raw_response=full_response,
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -717,7 +789,7 @@ class TestAuditedLLMClient:
             )
 
         # Verify ERROR call recorded in audit trail (not dropped)
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "UnsupportedResponseError"
 
@@ -741,20 +813,13 @@ class TestAuditedLLMClient:
         """
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = "Hello, I'm working!"
-
-        choice = Mock()
-        choice.message = message
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = None  # Provider omits usage data
-        response.model_dump = Mock(return_value={"id": "resp_no_usage"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Hello, I'm working!",
+                usage=None,
+                raw_response={"id": "resp_no_usage"},
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -775,8 +840,8 @@ class TestAuditedLLMClient:
         assert result.usage == TokenUsage.unknown()  # Unknown, not crash
 
         # Audit trail should record SUCCESS with empty usage
-        execution.record_call.assert_called_once()
-        call_kwargs = execution.record_call.call_args[1]
+        execution.assert_recorded_once()
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.SUCCESS
         assert call_kwargs["response_data"].to_dict()["content"] == "Hello, I'm working!"
         assert call_kwargs["response_data"].to_dict()["usage"] == {}
@@ -785,21 +850,13 @@ class TestAuditedLLMClient:
         """Aggregate-only provider usage must not crash before audit recording."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = "Hello, aggregate usage!"
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "stop"
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = SimpleNamespace(total_tokens=15)
-        response.model_dump = Mock(return_value={"id": "resp_total_only", "usage": {"total_tokens": 15}})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Hello, aggregate usage!",
+                usage=SimpleNamespace(total_tokens=15),
+                raw_response={"id": "resp_total_only", "usage": {"total_tokens": 15}},
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -819,7 +876,7 @@ class TestAuditedLLMClient:
         assert result.usage.completion_tokens is None
         assert result.usage.total_tokens == 15
 
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.SUCCESS
         assert call_kwargs["response_data"].to_dict()["usage"] == {"total_tokens": 15}
 
@@ -827,14 +884,12 @@ class TestAuditedLLMClient:
         """Malformed responses with total-only usage must still record the call."""
         execution = self._create_mock_execution()
 
-        response = Mock()
-        response.choices = []
-        response.model = "gpt-4"
-        response.usage = SimpleNamespace(total_tokens=15)
-        response.model_dump = Mock(return_value={"id": "resp_empty_total_only", "usage": {"total_tokens": 15}})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=empty_choices_response(
+                usage=SimpleNamespace(total_tokens=15),
+                raw_response={"id": "resp_empty_total_only", "usage": {"total_tokens": 15}},
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -850,7 +905,7 @@ class TestAuditedLLMClient:
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["response_data"].to_dict()["usage"] == {"total_tokens": 15}
 
@@ -858,25 +913,13 @@ class TestAuditedLLMClient:
         """Missing provider model must be rejected before success is recorded."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = "Hello!"
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "stop"
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = None
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_bad_model", "model": None})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Hello!",
+                model=None,
+                raw_response={"id": "resp_bad_model", "model": None},
+            )
+        )
 
         emitted_events: list[ExternalCallCompleted] = []
         client = AuditedLLMClient(
@@ -893,7 +936,7 @@ class TestAuditedLLMClient:
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "MalformedResponseError"
         assert "model" in call_kwargs["error"].message.lower()
@@ -907,30 +950,17 @@ class TestAuditedLLMClient:
         """Non-string content must preserve the provider payload for audit."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = ["part1", "part2"]
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "stop"
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-
         raw_response = {
             "id": "resp_non_string_content",
             "choices": [{"message": {"content": ["part1", "part2"]}, "finish_reason": "stop"}],
         }
 
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value=raw_response)
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content=["part1", "part2"],
+                raw_response=raw_response,
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -946,7 +976,7 @@ class TestAuditedLLMClient:
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["response_data"] is not None
         assert call_kwargs["response_data"].to_dict()["choices"][0]["message"]["content"] == ["part1", "part2"]
@@ -968,11 +998,8 @@ class TestBug4_1_ContentExtractionRecordsBeforeReraising:
     """
 
     @staticmethod
-    def _create_mock_execution() -> Mock:
-        execution = Mock(spec=ExecutionRepository)
-        execution.allocate_call_index = Mock(return_value=0)
-        execution.record_call = Mock()
-        return execution
+    def _create_mock_execution() -> FakeExecutionRepository:
+        return FakeExecutionRepository()
 
     def test_content_extraction_failure_records_call_before_raising(self) -> None:
         """Missing .content on success path: call recorded as ERROR, LLMClientError raised.
@@ -989,22 +1016,12 @@ class TestBug4_1_ContentExtractionRecordsBeforeReraising:
         """
         execution = self._create_mock_execution()
 
-        # Create a response where .choices[0].message.content raises AttributeError.
-        # Mock(spec=[]) has no attributes, so any attribute access raises AttributeError.
-        message = Mock(spec=[])  # Empty spec -- no attributes at all
-        choice = Mock()
-        choice.message = message  # message.content will raise AttributeError
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = Mock()
-        response.usage.prompt_tokens = 10
-        response.usage.completion_tokens = 5
-        response.model_dump = Mock(return_value={"id": "resp_test"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                message=MessageWithoutContent(),
+                raw_response={"id": "resp_test"},
+            )
+        )
 
         emitted_events: list[ExternalCallCompleted] = []
         client = AuditedLLMClient(
@@ -1023,8 +1040,8 @@ class TestBug4_1_ContentExtractionRecordsBeforeReraising:
             )
 
         # The call MUST be recorded despite the AttributeError -- audit integrity
-        execution.record_call.assert_called_once()
-        call_kwargs = execution.record_call.call_args[1]
+        execution.assert_recorded_once()
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["call_type"] == CallType.LLM
         assert call_kwargs["state_id"] == "state_b41"
@@ -1044,20 +1061,12 @@ class TestBug4_1_ContentExtractionRecordsBeforeReraising:
         """
         execution = self._create_mock_execution()
 
-        message = Mock(spec=[])  # No attributes -- .content raises AttributeError
-        choice = Mock()
-        choice.message = message
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = Mock()
-        response.usage.prompt_tokens = 10
-        response.usage.completion_tokens = 5
-        response.model_dump = Mock(return_value={"id": "resp_telemetry_b41"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                message=MessageWithoutContent(),
+                raw_response={"id": "resp_telemetry_b41"},
+            )
+        )
 
         emitted_events: list[ExternalCallCompleted] = []
         client = AuditedLLMClient(
@@ -1092,14 +1101,11 @@ class TestContentFabrication:
     """
 
     @staticmethod
-    def _create_mock_execution() -> Mock:
-        execution = Mock(spec=ExecutionRepository)
-        execution.allocate_call_index = Mock(return_value=0)
-        execution.record_call = Mock()
-        return execution
+    def _create_mock_execution() -> FakeExecutionRepository:
+        return FakeExecutionRepository()
 
     @staticmethod
-    def _create_client(execution: Mock, openai_client: MagicMock) -> AuditedLLMClient:
+    def _create_client(execution: FakeExecutionRepository, openai_client: FakeOpenAIClient) -> AuditedLLMClient:
         return AuditedLLMClient(
             execution=execution,
             state_id="state_fab",
@@ -1112,25 +1118,14 @@ class TestContentFabrication:
         """content=None from LLM must raise ContentPolicyError, not fabricate ""."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = None  # Content-filtered response
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "content_filter"
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 0
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_null"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content=None,
+                completion_tokens=0,
+                finish_reason="content_filter",
+                raw_response={"id": "resp_null"},
+            )
+        )
 
         client = self._create_client(execution, openai_client)
 
@@ -1149,25 +1144,14 @@ class TestContentFabrication:
         """
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = None
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "content_filter"
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 0
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_null", "choices": [{"finish_reason": "content_filter"}]})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content=None,
+                completion_tokens=0,
+                finish_reason="content_filter",
+                raw_response={"id": "resp_null", "choices": [{"finish_reason": "content_filter"}]},
+            )
+        )
 
         client = self._create_client(execution, openai_client)
 
@@ -1178,8 +1162,8 @@ class TestContentFabrication:
             )
 
         # The call MUST be recorded despite raising ContentPolicyError
-        execution.record_call.assert_called_once()
-        call_kwargs = execution.record_call.call_args[1]
+        execution.assert_recorded_once()
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["state_id"] == "state_fab"
         assert call_kwargs["call_type"] == CallType.LLM
@@ -1198,25 +1182,14 @@ class TestContentFabrication:
         """
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = None
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "content_filter"
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 0
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_null", "choices": [{"finish_reason": "content_filter"}]})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content=None,
+                completion_tokens=0,
+                finish_reason="content_filter",
+                raw_response={"id": "resp_null", "choices": [{"finish_reason": "content_filter"}]},
+            )
+        )
 
         emitted_events: list[ExternalCallCompleted] = []
         client = AuditedLLMClient(
@@ -1253,14 +1226,12 @@ class TestContentFabrication:
         """
         execution = self._create_mock_execution()
 
-        response = Mock()
-        response.choices = []  # No choices at all
-        response.model = "gpt-4"
-        response.usage = Mock(prompt_tokens=10, completion_tokens=0)
-        response.model_dump = Mock(return_value={"id": "resp_empty"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=empty_choices_response(
+                usage=ProviderUsage(prompt_tokens=10, completion_tokens=0),
+                raw_response={"id": "resp_empty"},
+            )
+        )
 
         client = self._create_client(execution, openai_client)
 
@@ -1271,7 +1242,7 @@ class TestContentFabrication:
             )
 
         # Verify ERROR call recorded in audit trail (not dropped)
-        call_kwargs = execution.record_call.call_args[1]
+        call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "EmptyChoicesError"
 
@@ -1279,24 +1250,13 @@ class TestContentFabrication:
         """content="" is a legitimate response — must NOT raise."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = ""  # Legitimately empty, not None
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 0
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_empty_str"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="",
+                completion_tokens=0,
+                raw_response={"id": "resp_empty_str"},
+            )
+        )
 
         client = self._create_client(execution, openai_client)
 
@@ -1316,34 +1276,19 @@ class TestModelDumpFailureRecordsCall:
     """
 
     @staticmethod
-    def _create_mock_execution() -> Mock:
-        execution = Mock(spec=ExecutionRepository)
-        execution.allocate_call_index = Mock(return_value=0)
-        execution.record_call = Mock()
-        return execution
+    def _create_mock_execution() -> FakeExecutionRepository:
+        return FakeExecutionRepository()
 
     def test_model_dump_failure_records_error_call(self) -> None:
         """When model_dump() raises, an ERROR call must be recorded."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = "Hello!"
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(side_effect=TypeError("Unserializable field"))
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Hello!",
+                model_dump_error=TypeError("Unserializable field"),
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -1360,9 +1305,8 @@ class TestModelDumpFailureRecordsCall:
             )
 
         # The critical assertion: record_call was invoked despite the failure
-        execution.record_call.assert_called_once()
-        call_kwargs = execution.record_call.call_args
-        assert call_kwargs.kwargs["status"] == CallStatus.ERROR
+        execution.assert_recorded_once()
+        assert execution.last_record_call_kwargs["status"] == CallStatus.ERROR
 
 
 class TestTier3UsageBoundary:
@@ -1375,35 +1319,21 @@ class TestTier3UsageBoundary:
     """
 
     @staticmethod
-    def _create_mock_execution() -> Mock:
-        execution = Mock(spec=ExecutionRepository)
-        execution.allocate_call_index = Mock(return_value=0)
-        execution.record_call = Mock()
-        return execution
+    def _create_mock_execution() -> FakeExecutionRepository:
+        return FakeExecutionRepository()
 
     def test_float_usage_values_coerced_via_from_dict(self) -> None:
         """Float token counts from provider must be coerced to None, not crash."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = "Response text"
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "stop"
-
-        usage = Mock()
-        usage.prompt_tokens = 10.5  # Float — not int
-        usage.completion_tokens = 20.7  # Float — not int
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_float_usage"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Response text",
+                prompt_tokens=10.5,
+                completion_tokens=20.7,
+                raw_response={"id": "resp_float_usage"},
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,
@@ -1426,25 +1356,14 @@ class TestTier3UsageBoundary:
         """Bool token counts must be rejected as invalid (bool is subclass of int but not a valid count)."""
         execution = self._create_mock_execution()
 
-        message = Mock()
-        message.content = "Response text"
-
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = "stop"
-
-        usage = Mock()
-        usage.prompt_tokens = True  # bool — technically int subclass
-        usage.completion_tokens = False
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_bool_usage"})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        openai_client = FakeOpenAIClient(
+            response=provider_response(
+                content="Response text",
+                prompt_tokens=True,
+                completion_tokens=False,
+                raw_response={"id": "resp_bool_usage"},
+            )
+        )
 
         client = AuditedLLMClient(
             execution=execution,

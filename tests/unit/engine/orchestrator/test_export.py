@@ -16,8 +16,9 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -35,14 +36,75 @@ from elspeth.engine.orchestrator.export import (
 @contextmanager
 def _noop_track_operation(*_args: Any, **_kwargs: Any) -> Any:
     """Stub for track_operation that wires ctx.operation_id without touching the DB."""
-    yield Mock()
+    yield SimpleNamespace(operation_id="op-export")
 
 
-def _make_sink_and_factory(*, config: dict[str, Any] | None = None, **overrides: Any) -> tuple[Mock, Any]:
-    """Create a mock sink and a factory that returns it."""
-    sink = Mock()
-    sink.config = config or {}
-    sink.node_id = None
+class _CallRecorder:
+    def __init__(self, return_value: Any = None, side_effect: BaseException | None = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    @property
+    def call_args(self) -> SimpleNamespace:
+        assert self.calls
+        args, kwargs = self.calls[-1]
+        return SimpleNamespace(args=args, kwargs=kwargs)
+
+    def assert_called_once(self) -> None:
+        assert len(self.calls) == 1
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+    def assert_not_called(self) -> None:
+        assert self.calls == []
+
+
+class _SinkDouble:
+    name = "export_sink"
+    plugin_version = "test"
+    source_file_hash = "0" * 64
+
+    def __init__(self, *, config: dict[str, Any] | None = None, **overrides: Any) -> None:
+        self.config = config or {}
+        self.node_id = None
+        self.on_start = _CallRecorder()
+        self.write = _CallRecorder()
+        self.flush = _CallRecorder()
+        self.on_complete = _CallRecorder()
+        self.close = _CallRecorder()
+        for k, v in overrides.items():
+            setattr(self, k, v)
+
+
+class _ExporterDouble:
+    def __init__(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
+        self.export_run_grouped = _CallRecorder(return_value=grouped)
+
+
+def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
+    return SimpleNamespace(
+        landscape=SimpleNamespace(
+            export=SimpleNamespace(
+                format=fmt,
+                sign=sign,
+                sink=sink,
+                include_raw_error_rows=include_raw_error_rows,
+            )
+        )
+    )
+
+
+def _make_sink_and_factory(*, config: dict[str, Any] | None = None, **overrides: Any) -> tuple[_SinkDouble, Any]:
+    """Create a sink double and a factory that returns it."""
+    sink = _SinkDouble(config=config, **overrides)
     for k, v in overrides.items():
         setattr(sink, k, v)
     return sink, lambda name: sink
@@ -63,17 +125,12 @@ def _mock_recorder_factory():
 class TestExportLandscapeJSON:
     """Tests for export_landscape with JSON format."""
 
-    def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Mock:
-        settings = Mock()
-        settings.landscape.export.format = fmt
-        settings.landscape.export.sign = sign
-        settings.landscape.export.sink = sink
-        settings.landscape.export.include_raw_error_rows = include_raw_error_rows
-        return settings
+    def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
+        return _make_settings(fmt=fmt, sign=sign, sink=sink, include_raw_error_rows=include_raw_error_rows)
 
     def test_json_export_writes_records_to_sink(self) -> None:
         """JSON format exports all records through sink.write()."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
 
@@ -94,7 +151,7 @@ class TestExportLandscapeJSON:
 
     def test_json_export_skips_write_when_no_records(self) -> None:
         """Empty export produces no sink.write() call."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
 
@@ -114,7 +171,7 @@ class TestExportLandscapeJSON:
 
     def test_missing_sink_raises_valueerror(self) -> None:
         """Referencing non-existent sink raises clear error."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sink="nonexistent")
 
         def bad_factory(name: str) -> Any:
@@ -131,7 +188,7 @@ class TestExportLandscapeJSON:
 
     def test_signing_reads_env_key(self) -> None:
         """Signing enabled reads ELSPETH_SIGNING_KEY from env."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sign=True)
         _sink, factory = _make_sink_and_factory()
 
@@ -168,7 +225,7 @@ class TestExportLandscapeJSON:
 
     def test_signing_without_env_key_raises(self) -> None:
         """Signing enabled without ELSPETH_SIGNING_KEY raises ValueError."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sign=True)
         _sink, factory = _make_sink_and_factory()
 
@@ -181,7 +238,7 @@ class TestExportLandscapeJSON:
     @pytest.mark.parametrize("key_value", ["", "   "])
     def test_signing_with_empty_env_key_raises(self, key_value: str) -> None:
         """Signing enabled with an empty ELSPETH_SIGNING_KEY raises ValueError."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sign=True)
         _sink, factory = _make_sink_and_factory()
 
@@ -193,7 +250,7 @@ class TestExportLandscapeJSON:
 
     def test_sink_close_called_when_write_raises(self) -> None:
         """sink.close() must be called even when sink.write() raises."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
         sink.write.side_effect = RuntimeError("write failed")
@@ -213,7 +270,7 @@ class TestExportLandscapeJSON:
 
     def test_sink_close_called_when_flush_raises(self) -> None:
         """sink.close() must be called even when sink.flush() raises."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
         sink.flush.side_effect = RuntimeError("flush failed")
@@ -241,16 +298,12 @@ class TestExportLandscapeJSON:
 class TestExportLandscapeCSV:
     """Tests for export_landscape with CSV format."""
 
-    def _make_settings(self, *, sink: str = "output", sign: bool = False) -> Mock:
-        settings = Mock()
-        settings.landscape.export.format = "csv"
-        settings.landscape.export.sign = sign
-        settings.landscape.export.sink = sink
-        return settings
+    def _make_settings(self, *, sink: str = "output", sign: bool = False) -> Any:
+        return _make_settings(fmt="csv", sign=sign, sink=sink)
 
     def test_csv_export_requires_path_in_sink_config(self) -> None:
         """CSV export needs file-based sink with 'path' config."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         _sink, factory = _make_sink_and_factory()
 
@@ -262,7 +315,7 @@ class TestExportLandscapeCSV:
 
     def test_csv_export_calls_multifile(self, tmp_path: Path) -> None:
         """CSV format delegates to _export_csv_multifile."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         _sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
 
@@ -288,8 +341,7 @@ class TestExportCSVMultifile:
     def test_creates_export_directory(self, tmp_path: Path) -> None:
         """Export creates the target directory."""
         export_dir = tmp_path / "audit_export"
-        exporter = Mock()
-        exporter.export_run_grouped.return_value = {}
+        exporter = _ExporterDouble({})
         _export_csv_multifile(
             exporter=exporter,
             run_id="run-1",
@@ -302,8 +354,7 @@ class TestExportCSVMultifile:
     def test_strips_file_extension_from_path(self, tmp_path: Path) -> None:
         """If path has an extension, it's stripped (treated as directory name)."""
         export_path = tmp_path / "output.csv"
-        exporter = Mock()
-        exporter.export_run_grouped.return_value = {}
+        exporter = _ExporterDouble({})
         _export_csv_multifile(
             exporter=exporter,
             run_id="run-1",
@@ -320,25 +371,21 @@ class TestExportCSVMultifile:
         """Each record type gets its own CSV file."""
         export_dir = tmp_path / "export"
 
-        # Mock formatter to pass through dicts
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r  # Pass through
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "runs": [{"run_id": "r1", "status": "completed"}],
                 "nodes": [
                     {"node_id": "n1", "type": "source"},
                     {"node_id": "n2", "type": "sink"},
                 ],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         # Check files exist
         assert (export_dir / "runs.csv").exists()
@@ -361,21 +408,18 @@ class TestExportCSVMultifile:
         """Record types with empty lists don't produce files."""
         export_dir = tmp_path / "export"
 
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "runs": [{"run_id": "r1"}],
                 "empty_type": [],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         assert (export_dir / "runs.csv").exists()
         assert not (export_dir / "empty_type.csv").exists()
@@ -384,20 +428,17 @@ class TestExportCSVMultifile:
         """CSV headers are sorted alphabetically for deterministic output."""
         export_dir = tmp_path / "export"
 
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "data": [{"zebra": "z", "alpha": "a", "mid": "m"}],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         with open(export_dir / "data.csv") as f:
             reader = csv.reader(f)
@@ -408,23 +449,20 @@ class TestExportCSVMultifile:
         """Records with different keys produce union of all keys as headers."""
         export_dir = tmp_path / "export"
 
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "mixed": [
                     {"common": "c1", "only_a": "a1"},
                     {"common": "c2", "only_b": "b1"},
                 ],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         with open(export_dir / "mixed.csv") as f:
             reader = csv.reader(f)

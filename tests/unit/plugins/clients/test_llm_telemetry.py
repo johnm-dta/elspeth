@@ -2,19 +2,210 @@
 """Tests for AuditedLLMClient telemetry integration."""
 
 import itertools
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from elspeth.contracts import CallStatus, CallType, TokenUsage
+from elspeth.contracts import Call, CallStatus, CallType, TokenUsage
 from elspeth.contracts.call_data import LLMCallRequest, LLMCallResponse
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.plugins.infrastructure.clients.llm import (
     AuditedLLMClient,
     LLMClientError,
 )
+
+
+@dataclass(slots=True)
+class ProviderUsage:
+    prompt_tokens: int = 10
+    completion_tokens: int = 5
+    total_tokens: int | None = None
+
+
+@dataclass(slots=True)
+class ProviderMessage:
+    content: Any
+
+
+@dataclass(slots=True)
+class ProviderChoice:
+    message: ProviderMessage
+    finish_reason: str = "stop"
+
+
+@dataclass(slots=True)
+class ProviderResponse:
+    choices: list[ProviderChoice]
+    model: str = "gpt-4"
+    usage: ProviderUsage | None = field(default_factory=ProviderUsage)
+    raw_response: dict[str, Any] = field(default_factory=lambda: {"id": "resp_123"})
+    model_dump_error: Exception | None = None
+
+    def model_dump(self) -> dict[str, Any]:
+        if self.model_dump_error is not None:
+            raise self.model_dump_error
+        return self.raw_response
+
+
+def provider_response(
+    *,
+    content: Any = "Hello!",
+    finish_reason: str = "stop",
+    choices_empty: bool = False,
+    model: str = "gpt-4",
+    prompt_tokens: int = 10,
+    completion_tokens: int = 5,
+    include_usage: bool = True,
+    raw_response: dict[str, Any] | None = None,
+    model_dump_error: Exception | None = None,
+) -> ProviderResponse:
+    choices = [] if choices_empty else [ProviderChoice(message=ProviderMessage(content), finish_reason=finish_reason)]
+    usage = ProviderUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens) if include_usage else None
+    return ProviderResponse(
+        choices=choices,
+        model=model,
+        usage=usage,
+        raw_response=raw_response if raw_response is not None else {"id": "resp_123"},
+        model_dump_error=model_dump_error,
+    )
+
+
+@dataclass(slots=True)
+class FakeChatCompletions:
+    response: ProviderResponse | None = None
+    error: Exception | None = None
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def create(self, **kwargs: Any) -> ProviderResponse:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        if self.response is None:
+            raise AssertionError("FakeChatCompletions requires a response or error")
+        return self.response
+
+
+@dataclass(slots=True)
+class FakeChat:
+    completions: FakeChatCompletions
+
+
+@dataclass(slots=True)
+class FakeOpenAIClient:
+    chat: FakeChat
+
+
+def fake_openai_client(
+    *,
+    response: ProviderResponse | None = None,
+    error: Exception | None = None,
+) -> FakeOpenAIClient:
+    completions = FakeChatCompletions(response=response if response is not None else provider_response(), error=error)
+    return FakeOpenAIClient(chat=FakeChat(completions=completions))
+
+
+class FakeCallRecorder:
+    def __init__(self) -> None:
+        self._call_counter = itertools.count()
+        self._operation_call_counter = itertools.count()
+        self.recorded_calls: list[dict[str, Any]] = []
+        self.record_call_error: Exception | None = None
+        self.record_call_observer: Callable[[dict[str, Any]], None] | None = None
+
+    def allocate_call_index(self, state_id: str) -> int:
+        return next(self._call_counter)
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return next(self._operation_call_counter)
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        call_kwargs = {
+            "state_id": state_id,
+            "call_index": call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        if self.record_call_observer is not None:
+            self.record_call_observer(call_kwargs)
+        if self.record_call_error is not None:
+            raise self.record_call_error
+        self.recorded_calls.append(call_kwargs)
+        return self._recorded_call(call_kwargs)
+
+    def record_operation_call(
+        self,
+        operation_id: str,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        call_index: int | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        actual_call_index = call_index if call_index is not None else self.allocate_operation_call_index(operation_id)
+        call_kwargs = {
+            "operation_id": operation_id,
+            "call_index": actual_call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        if self.record_call_observer is not None:
+            self.record_call_observer(call_kwargs)
+        if self.record_call_error is not None:
+            raise self.record_call_error
+        self.recorded_calls.append(call_kwargs)
+        return self._recorded_call(call_kwargs)
+
+    def _recorded_call(self, call_kwargs: dict[str, Any]) -> Call:
+        return Call(
+            call_id=f"call_{len(self.recorded_calls)}",
+            call_index=call_kwargs["call_index"],
+            call_type=call_kwargs["call_type"],
+            status=call_kwargs["status"],
+            request_hash="req_hash_123",
+            response_hash="resp_hash_456" if call_kwargs["response_data"] is not None else None,
+            created_at=datetime.now(UTC),
+            state_id=call_kwargs.get("state_id"),
+            operation_id=call_kwargs.get("operation_id"),
+            latency_ms=call_kwargs["latency_ms"],
+            resolved_prompt_template_hash=call_kwargs["resolved_prompt_template_hash"],
+        )
 
 
 class TestLLMClientErrorBranchTelemetry:
@@ -27,16 +218,6 @@ class TestLLMClientErrorBranchTelemetry:
     audit primacy was preserved.
     """
 
-    def _execution(self) -> MagicMock:
-        execution = MagicMock()
-        counter = itertools.count()
-        execution.allocate_call_index.side_effect = lambda _: next(counter)
-        recorded = MagicMock()
-        recorded.request_hash = "req"
-        recorded.response_hash = "resp"
-        execution.record_call.return_value = recorded
-        return execution
-
     def _response(
         self,
         *,
@@ -44,33 +225,20 @@ class TestLLMClientErrorBranchTelemetry:
         finish_reason: str = "stop",
         choices_empty: bool = False,
         model_dump_fails: bool = False,
-    ) -> Mock:
-        message = Mock()
-        message.content = content
-        choice = Mock()
-        choice.message = message
-        choice.finish_reason = finish_reason
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-        response = Mock()
-        response.choices = [] if choices_empty else [choice]
-        response.model = "gpt-4"
-        response.usage = usage
-        if model_dump_fails:
-            response.model_dump = Mock(side_effect=TypeError("unserializable response"))
-        else:
-            response.model_dump = Mock(return_value={"id": "resp_123"})
-        return response
+    ) -> ProviderResponse:
+        return provider_response(
+            content=content,
+            finish_reason=finish_reason,
+            choices_empty=choices_empty,
+            model_dump_error=TypeError("unserializable response") if model_dump_fails else None,
+        )
 
-    def _run_expecting_error(self, response: Mock) -> list[ExternalCallCompleted]:
+    def _run_expecting_error(self, response: ProviderResponse) -> list[ExternalCallCompleted]:
         events: list[ExternalCallCompleted] = []
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
         client = AuditedLLMClient(
-            execution=self._execution(),
+            execution=FakeCallRecorder(),
             state_id="state_123",
-            underlying_client=openai_client,
+            underlying_client=fake_openai_client(response=response),
             provider="azure",
             run_id="run_abc",
             telemetry_emit=events.append,
@@ -103,54 +271,32 @@ class TestLLMClientErrorBranchTelemetry:
 class TestLLMClientTelemetry:
     """Tests for telemetry emission from AuditedLLMClient."""
 
-    def _create_mock_execution(self) -> MagicMock:
-        """Create a mock ExecutionRepository that returns recorded calls."""
-        execution = MagicMock()
-        counter = itertools.count()
-        execution.allocate_call_index.side_effect = lambda _: next(counter)
+    def _create_execution(self) -> FakeCallRecorder:
+        """Create a fake call recorder that returns real Call contracts."""
+        return FakeCallRecorder()
 
-        # record_call returns a Call object with hashes
-        recorded_call = MagicMock()
-        recorded_call.request_hash = "req_hash_123"
-        recorded_call.response_hash = "resp_hash_456"
-        execution.record_call.return_value = recorded_call
-
-        return execution
-
-    def _create_mock_openai_client(
+    def _create_openai_client(
         self,
         *,
         content: str = "Hello!",
         model: str = "gpt-4",
         prompt_tokens: int = 10,
         completion_tokens: int = 5,
-    ) -> MagicMock:
-        """Create a mock OpenAI client."""
-        message = Mock()
-        message.content = content
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = prompt_tokens
-        usage.completion_tokens = completion_tokens
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = model
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_123"})
-
-        client = MagicMock()
-        client.chat.completions.create.return_value = response
-
-        return client
+    ) -> FakeOpenAIClient:
+        """Create a fake OpenAI client."""
+        return fake_openai_client(
+            response=provider_response(
+                content=content,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        )
 
     def test_successful_call_emits_telemetry(self) -> None:
         """Successful LLM call emits ExternalCallCompleted event."""
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution()
+        openai_client = self._create_openai_client()
 
         # Track emitted events
         emitted_events: list[ExternalCallCompleted] = []
@@ -205,9 +351,8 @@ class TestLLMClientTelemetry:
 
     def test_failed_call_emits_telemetry_with_error_status(self) -> None:
         """Failed LLM call emits ExternalCallCompleted with ERROR status."""
-        execution = self._create_mock_execution()
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception("API error")
+        execution = self._create_execution()
+        openai_client = fake_openai_client(error=Exception("API error"))
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -252,8 +397,8 @@ class TestLLMClientTelemetry:
 
     def test_noop_callback_works(self) -> None:
         """No-op callback (telemetry disabled) works without error."""
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution()
+        openai_client = self._create_openai_client()
 
         # No-op callback (simulates telemetry disabled)
         def noop_callback(event: Any) -> None:
@@ -276,23 +421,19 @@ class TestLLMClientTelemetry:
         # Call succeeds without error
         assert response.content == "Hello!"
         # Audit trail is still recorded
-        execution.record_call.assert_called_once()
+        assert len(execution.recorded_calls) == 1
 
     def test_telemetry_emitted_after_landscape_recording(self) -> None:
         """Telemetry is emitted AFTER Landscape recording succeeds."""
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution()
+        openai_client = self._create_openai_client()
 
         call_order: list[str] = []
 
-        def mock_record_call(**kwargs):
+        def observe_record_call(_call_kwargs: dict[str, Any]) -> None:
             call_order.append("landscape")
-            recorded_call = MagicMock()
-            recorded_call.request_hash = "req_hash"
-            recorded_call.response_hash = "resp_hash"
-            return recorded_call
 
-        execution.record_call.side_effect = mock_record_call
+        execution.record_call_observer = observe_record_call
 
         def telemetry_emit(event: ExternalCallCompleted) -> None:
             call_order.append("telemetry")
@@ -316,21 +457,9 @@ class TestLLMClientTelemetry:
 
     def test_telemetry_handles_empty_usage(self) -> None:
         """Telemetry emits None token_usage when provider omits usage data."""
-        execution = self._create_mock_execution()
-
-        # Create response without usage
-        message = Mock()
-        message.content = "Hello!"
-        choice = Mock()
-        choice.message = message
-        response = Mock()
-        response.choices = [choice]
-        response.model = "gpt-4"
-        response.usage = None  # Provider omits usage
-        response.model_dump = Mock(return_value={})
-
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.return_value = response
+        execution = self._create_execution()
+        response = provider_response(content="Hello!", include_usage=False, raw_response={})
+        openai_client = fake_openai_client(response=response)
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -358,8 +487,8 @@ class TestLLMClientTelemetry:
 
     def test_multiple_calls_emit_multiple_events(self) -> None:
         """Each LLM call emits a separate telemetry event."""
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution()
+        openai_client = self._create_openai_client()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -400,8 +529,8 @@ class TestLLMClientTelemetry:
 
         The fix isolates telemetry emission in its own try/except.
         """
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution()
+        openai_client = self._create_openai_client()
 
         def failing_telemetry_emit(event: ExternalCallCompleted) -> None:
             raise RuntimeError("Telemetry exporter failed!")
@@ -425,8 +554,8 @@ class TestLLMClientTelemetry:
         assert response.content == "Hello!"
 
         # CRITICAL: Only ONE audit record, with SUCCESS status
-        assert execution.record_call.call_count == 1
-        call_kwargs = execution.record_call.call_args.kwargs
+        assert len(execution.recorded_calls) == 1
+        call_kwargs = execution.recorded_calls[0]
         assert call_kwargs["status"] == CallStatus.SUCCESS
 
     def test_no_telemetry_when_landscape_recording_fails(self) -> None:
@@ -436,11 +565,11 @@ class TestLLMClientTelemetry:
         If audit recording fails, telemetry should NOT be emitted because
         the event was never properly recorded.
         """
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution()
+        openai_client = self._create_openai_client()
 
         # Make record_call raise an exception (simulating DB failure)
-        execution.record_call.side_effect = Exception("Database connection failed")
+        execution.record_call_error = Exception("Database connection failed")
 
         emitted_events: list[ExternalCallCompleted] = []
 

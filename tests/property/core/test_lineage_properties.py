@@ -26,15 +26,47 @@ LineageResult Structure Properties:
 
 from __future__ import annotations
 
-from dataclasses import fields
-from unittest.mock import MagicMock
+from dataclasses import dataclass, fields
+from unittest.mock import create_autospec
 
 import pytest
 from hypothesis import given, settings
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.lineage import LineageResult, explain
+from elspeth.core.landscape.query_repository import QueryRepository
 from tests.strategies.ids import id_strings, sink_names
+
+
+@dataclass(slots=True)
+class _TokenRecord:
+    token_id: str
+    row_id: str
+    run_id: str
+    fork_group_id: str | None = None
+    join_group_id: str | None = None
+    expand_group_id: str | None = None
+
+
+@dataclass(slots=True)
+class _SourceRowRecord:
+    row_id: str
+    run_id: str
+    source_data_hash: str = "source-hash-1"
+
+
+@dataclass(slots=True)
+class _TokenOutcomeRecord:
+    completed: bool
+    token_id: str = "token-1"
+    sink_name: str | None = None
+
+
+@dataclass(slots=True)
+class _TokenParentRecord:
+    parent_token_id: str
+
 
 # =============================================================================
 # explain() Input Validation Property Tests
@@ -52,8 +84,8 @@ class TestExplainInputValidationProperties:
         Calling explain() without any row/token identifier is a
         programming error that should fail fast.
         """
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         with pytest.raises(ValueError, match="Must provide either token_id or row_id"):
             explain(query, data_flow, run_id)
@@ -62,8 +94,8 @@ class TestExplainInputValidationProperties:
     @settings(max_examples=50)
     def test_none_token_and_none_row_raises(self, run_id: str) -> None:
         """Property: Explicit None values also raise ValueError."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         with pytest.raises(ValueError, match="Must provide either token_id or row_id"):
             explain(query, data_flow, run_id, token_id=None, row_id=None)
@@ -72,8 +104,8 @@ class TestExplainInputValidationProperties:
     @settings(max_examples=50)
     def test_token_id_alone_is_valid(self, run_id: str, token_id: str) -> None:
         """Property: Providing only token_id is valid input."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
         query.get_token.return_value = None  # Token not found
 
         # Should not raise - returns None for not found
@@ -86,8 +118,8 @@ class TestExplainInputValidationProperties:
     @settings(max_examples=50)
     def test_row_id_alone_is_valid(self, run_id: str, row_id: str) -> None:
         """Property: Providing only row_id is valid input."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
         data_flow.get_token_outcomes_for_row.return_value = []  # No outcomes
 
         # Should not raise - returns None for not found
@@ -102,8 +134,8 @@ class TestExplainInputValidationProperties:
 
         When both are provided, token_id takes precedence (more specific).
         """
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
         query.get_token.return_value = None  # Token not found
 
         # Should use token_id path
@@ -127,8 +159,8 @@ class TestExplainRowResolutionProperties:
     @settings(max_examples=50)
     def test_no_outcomes_returns_none(self, run_id: str, row_id: str) -> None:
         """Property: No outcomes for row_id returns None."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
         data_flow.get_token_outcomes_for_row.return_value = []
 
         result = explain(query, data_flow, run_id, row_id=row_id)
@@ -143,12 +175,11 @@ class TestExplainRowResolutionProperties:
         If all tokens are still processing (e.g., BUFFERED), there's
         no complete lineage to return yet.
         """
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         # Create mock non-terminal outcome
-        non_terminal = MagicMock()
-        non_terminal.completed = False
+        non_terminal = _TokenOutcomeRecord(completed=False)
 
         data_flow.get_token_outcomes_for_row.return_value = [non_terminal]
 
@@ -160,13 +191,11 @@ class TestExplainRowResolutionProperties:
     @settings(max_examples=50)
     def test_sink_filter_no_match_returns_none(self, run_id: str, row_id: str, sink: str) -> None:
         """Property: Specified sink with no matching tokens returns None."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         # Terminal outcome at different sink
-        terminal = MagicMock()
-        terminal.completed = True
-        terminal.sink_name = "other_sink"
+        terminal = _TokenOutcomeRecord(completed=True, sink_name="other_sink")
 
         data_flow.get_token_outcomes_for_row.return_value = [terminal]
 
@@ -191,17 +220,12 @@ class TestExplainAmbiguityProperties:
         This is a DAG scenario - fork paths created multiple terminal
         tokens. User must specify which sink to query.
         """
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         # Two terminal outcomes at different sinks
-        terminal1 = MagicMock()
-        terminal1.completed = True
-        terminal1.sink_name = "sink_a"
-
-        terminal2 = MagicMock()
-        terminal2.completed = True
-        terminal2.sink_name = "sink_b"
+        terminal1 = _TokenOutcomeRecord(completed=True, sink_name="sink_a")
+        terminal2 = _TokenOutcomeRecord(completed=True, sink_name="sink_b")
 
         data_flow.get_token_outcomes_for_row.return_value = [terminal1, terminal2]
 
@@ -216,19 +240,12 @@ class TestExplainAmbiguityProperties:
         This indicates a pipeline configuration issue - fork paths
         should not converge to the same sink without coalescing.
         """
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         # Two terminal outcomes at SAME sink
-        terminal1 = MagicMock()
-        terminal1.completed = True
-        terminal1.sink_name = sink
-        terminal1.token_id = "token_1"
-
-        terminal2 = MagicMock()
-        terminal2.completed = True
-        terminal2.sink_name = sink
-        terminal2.token_id = "token_2"
+        terminal1 = _TokenOutcomeRecord(completed=True, sink_name=sink, token_id="token_1")
+        terminal2 = _TokenOutcomeRecord(completed=True, sink_name=sink, token_id="token_2")
 
         data_flow.get_token_outcomes_for_row.return_value = [terminal1, terminal2]
 
@@ -275,12 +292,8 @@ class TestLineageResultStructureProperties:
     def test_error_tuples_default_to_empty(self) -> None:
         """Property: Error tuples default to empty (not None)."""
         # Create minimal valid LineageResult with matching row and run ownership.
-        token = MagicMock()
-        token.row_id = "row-1"
-        token.run_id = "run-1"
-        source_row = MagicMock()
-        source_row.row_id = "row-1"
-        source_row.run_id = "run-1"
+        token = _TokenRecord(token_id="token-1", row_id="row-1", run_id="run-1")
+        source_row = _SourceRowRecord(row_id="row-1", run_id="run-1")
         result = LineageResult(
             token=token,
             source_row=source_row,
@@ -311,23 +324,20 @@ class TestExplainTierOneTrustProperties:
         If token_parents references a non-existent parent, that's audit
         database corruption. We crash rather than silently skipping.
         """
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
         # Token exists with a fork group ID (required for parent consistency)
-        token = MagicMock()
-        token.token_id = token_id
-        token.row_id = "row_123"
-        token.run_id = run_id
-        token.fork_group_id = "some-fork-group"
-        token.join_group_id = None
-        token.expand_group_id = None
+        token = _TokenRecord(
+            token_id=token_id,
+            row_id="row_123",
+            run_id=run_id,
+            fork_group_id="some-fork-group",
+        )
         query.get_token.return_value = token
 
         # Source row exists
-        source_row = MagicMock()
-        source_row.row_id = "row_123"
-        source_row.run_id = run_id
+        source_row = _SourceRowRecord(row_id="row_123", run_id=run_id)
         query.explain_row.return_value = source_row
 
         # Node states exist
@@ -338,8 +348,7 @@ class TestExplainTierOneTrustProperties:
         query.get_calls_for_states.return_value = []
 
         # Parent reference exists but parent doesn't
-        parent_ref = MagicMock()
-        parent_ref.parent_token_id = "missing_parent_id"
+        parent_ref = _TokenParentRecord(parent_token_id="missing_parent_id")
         query.get_token_parents.return_value = [parent_ref]
         query.get_token.side_effect = lambda tid: token if tid == token_id else None
 
@@ -359,8 +368,8 @@ class TestExplainReturnValueProperties:
     @settings(max_examples=30)
     def test_token_not_found_returns_none(self, run_id: str, token_id: str) -> None:
         """Property: Non-existent token returns None (not exception)."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
         query.get_token.return_value = None
 
         result = explain(query, data_flow, run_id, token_id=token_id)
@@ -371,12 +380,10 @@ class TestExplainReturnValueProperties:
     @settings(max_examples=30)
     def test_source_row_not_found_raises_audit_integrity(self, run_id: str, token_id: str) -> None:
         """Property: Token exists but source row missing is Tier 1 corruption — crash."""
-        query = MagicMock()
-        data_flow = MagicMock()
+        query = create_autospec(QueryRepository, instance=True)
+        data_flow = create_autospec(DataFlowRepository, instance=True)
 
-        token = MagicMock()
-        token.row_id = "row_123"
-        token.token_id = token_id
+        token = _TokenRecord(token_id=token_id, row_id="row_123", run_id=run_id)
         query.get_token.return_value = token
         query.explain_row.return_value = None
 

@@ -20,6 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.blobs import BlobServiceProtocol
 from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolStatus,
@@ -41,11 +42,12 @@ from elspeth.core.landscape.schema import (
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep, TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.progress import ComposerProgressRegistry
-from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult
+from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult, ComposerService
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
 from elspeth.web.config import WebSettings
@@ -87,6 +89,39 @@ _EMPTY_STATE = CompositionState(
     metadata=PipelineMetadata(),
     version=1,
 )
+
+
+class _RecordedSyncCall:
+    def __init__(self, side_effect: Any | None = None) -> None:
+        self.side_effect = side_effect
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, dict(kwargs)))
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return None
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+
+class _ExecutionServiceStub:
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self.cleanup_session_lock = _RecordedSyncCall()
+
+    def get_session_lock(self, session_id: str) -> asyncio.Lock:
+        if session_id not in self._locks:
+            self._locks[session_id] = asyncio.Lock()
+        return self._locks[session_id]
+
+
+def _async_return(value: Any):
+    async def _return_value(*_args: Any, **_kwargs: Any) -> Any:
+        return value
+
+    return _return_value
 
 
 def _ready_readiness() -> ValidationReadiness:
@@ -131,10 +166,11 @@ def test_summarize_guided_response_rejects_unhandled_turn_type() -> None:
 def _make_composer_mock(
     response_text: str = "Sure, I can help.",
     state: CompositionState | None = None,
-) -> AsyncMock:
+) -> SimpleNamespace:
     """Create a mock ComposerServiceImpl.compose that returns a fixed result."""
-    mock = AsyncMock()
+    mock = SimpleNamespace()
     mock.compose = AsyncMock(
+        spec=ComposerService.compose,
         return_value=ComposerResult(
             message=response_text,
             state=state or _EMPTY_STATE,
@@ -429,7 +465,7 @@ def _make_progress_route_app(
     app.state.payload_store = FilesystemPayloadStore(app.state.settings.get_payload_store_path())
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
-    app.state.execution_service = AsyncMock()
+    app.state.execution_service = _ExecutionServiceStub()
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
     app.include_router(create_session_router())
@@ -497,18 +533,9 @@ def _make_app(
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
 
-    # Minimal mock for execution service — delete_session coordinates with
+    # Minimal stub for execution service — delete_session coordinates with
     # the per-session execution lock and then cleans it up after archiving.
-    execution_service = MagicMock()
-    execution_locks: dict[str, asyncio.Lock] = {}
-
-    def _get_execution_lock(session_id: str) -> asyncio.Lock:
-        if session_id not in execution_locks:
-            execution_locks[session_id] = asyncio.Lock()
-        return execution_locks[session_id]
-
-    execution_service.get_session_lock.side_effect = _get_execution_lock
-    app.state.execution_service = execution_service
+    app.state.execution_service = _ExecutionServiceStub()
 
     router = create_session_router()
     app.include_router(router)
@@ -571,7 +598,7 @@ def test_send_message_response_includes_empty_proposals_array(tmp_path) -> None:
 
 def test_send_message_response_includes_pending_proposals_created_during_compose(tmp_path) -> None:
     app, service = _make_app(tmp_path)
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
 
     async def _compose_with_pending_proposal(*args: object, **kwargs: object) -> ComposerResult:
         del args
@@ -590,7 +617,7 @@ def test_send_message_response_includes_pending_proposals_created_during_compose
         )
         return ComposerResult(message="Needs approval.", state=_EMPTY_STATE)
 
-    mock_composer.compose = AsyncMock(side_effect=_compose_with_pending_proposal)
+    mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=_compose_with_pending_proposal)
     app.state.composer_service = mock_composer
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Atomic proposals"}).json()
@@ -620,7 +647,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
 
     app, service = _make_app(tmp_path)
     app.state.session_engine = service._engine
-    catalog = MagicMock(spec=["list_sources", "list_transforms", "list_sinks", "get_schema"])
+    catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
         PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
     ]
@@ -640,7 +667,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
     app.state.catalog_service = catalog
     monkeypatch.setattr(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
-        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+        _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     input_path = tmp_path / "blobs" / "input.csv"
     input_path.parent.mkdir(parents=True, exist_ok=True)
@@ -734,7 +761,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
 
     app, service = _make_app(tmp_path)
     app.state.session_engine = service._engine
-    catalog = MagicMock(spec=["get_schema"])
+    catalog = MagicMock(spec=CatalogService)
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",
         plugin_type="source",
@@ -745,7 +772,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
     app.state.catalog_service = catalog
     monkeypatch.setattr(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
-        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+        _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Accept inline blob"}).json()
@@ -829,7 +856,7 @@ def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tm
 
     app, service = _make_app(tmp_path)
     app.state.session_engine = service._engine
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",
         plugin_type="source",
@@ -840,7 +867,7 @@ def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tm
     app.state.catalog_service = catalog
     monkeypatch.setattr(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
-        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+        _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Legacy inline blob proposal"}).json()
@@ -902,7 +929,7 @@ def test_accept_empty_inline_blob_proposal_without_composer_provenance_fails_clo
 
     app, service = _make_app(tmp_path)
     app.state.session_engine = service._engine
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="text",
         plugin_type="source",
@@ -913,7 +940,7 @@ def test_accept_empty_inline_blob_proposal_without_composer_provenance_fails_clo
     app.state.catalog_service = catalog
     monkeypatch.setattr(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
-        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+        _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Legacy empty inline blob proposal"}).json()
@@ -2674,8 +2701,10 @@ class TestMessageRoutes:
             _llm_call(provider_request_id="chatcmpl-a", prompt_tokens=13, completion_tokens=8, total_tokens=21, reasoning_tokens=12),
             _llm_call(provider_request_id="chatcmpl-b", prompt_tokens=5, completion_tokens=16, total_tokens=21),
         )
-        composer = AsyncMock()
-        composer.compose = AsyncMock(return_value=ComposerResult(message="Saved with audit.", state=_EMPTY_STATE, llm_calls=llm_calls))
+        composer = SimpleNamespace()
+        composer.compose = AsyncMock(
+            spec=ComposerService.compose, return_value=ComposerResult(message="Saved with audit.", state=_EMPTY_STATE, llm_calls=llm_calls)
+        )
         app.state.composer_service = composer
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -2843,13 +2872,14 @@ class TestMessageRoutes:
         acceptable answer for any output").
         """
         app, service = _make_app(tmp_path)
-        composer = AsyncMock()
+        composer = SimpleNamespace()
         composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             return_value=ComposerResult(
                 message="Assistant still saved.",
                 state=_EMPTY_STATE,
                 llm_calls=(_llm_call(provider_request_id="chatcmpl-fail-persist"),),
-            )
+            ),
         )
         app.state.composer_service = composer
         client = TestClient(app, raise_server_exceptions=False)
@@ -2905,13 +2935,14 @@ class TestMessageRoutes:
             latency_ms=1,
             actor="composer-web:user-test",
         )
-        composer = AsyncMock()
+        composer = SimpleNamespace()
         composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             return_value=ComposerResult(
                 message="Assistant still saved.",
                 state=_EMPTY_STATE,
                 tool_invocations=(invocation,),
-            )
+            ),
         )
         app.state.composer_service = composer
         client = TestClient(app, raise_server_exceptions=False)
@@ -2936,7 +2967,7 @@ class TestMessageRoutes:
     def test_guided_respond_tool_invocation_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
         """Guided turn audit sidecar failures must not be swallowed after a successful state write."""
         app, service = _make_app(tmp_path)
-        catalog = MagicMock()
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = []
         app.state.catalog_service = catalog
         app.state.session_engine = service._engine
@@ -2969,7 +3000,7 @@ class TestMessageRoutes:
     def test_guided_chat_turn_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
         """Guided chat audit rows must not disappear after chat_history is persisted."""
         app, service = _make_app(tmp_path)
-        catalog = MagicMock()
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = []
         app.state.catalog_service = catalog
         client = TestClient(app, raise_server_exceptions=False)
@@ -2993,8 +3024,8 @@ class TestMessageRoutes:
 
         with patch(
             "elspeth.web.sessions.routes.composer.guided.solve_step_chat_with_auto_drop",
-            new=AsyncMock(
-                return_value=StepChatResult(
+            new=_async_return(
+                StepChatResult(
                     assistant_message="Use the source form first.",
                     status=ComposerChatTurnStatus.SUCCESS,
                     latency_ms=7,
@@ -3018,7 +3049,7 @@ class TestMessageRoutes:
         from elspeth.web.composer.tools import ToolResult
 
         app, _ = _make_app(tmp_path)
-        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = [
             PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
         ]
@@ -3031,29 +3062,27 @@ class TestMessageRoutes:
             knob_schema={"fields": []},
         )
         app.state.catalog_service = catalog
-        app.state.blob_service = MagicMock()
-        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
-        app.state.blob_service.create_blob = AsyncMock(
-            return_value=BlobRecord(
-                id=uuid.uuid4(),
-                session_id=uuid.uuid4(),
-                filename="source.csv",
-                mime_type="text/csv",
-                size_bytes=18,
-                content_hash="0" * 64,
-                storage_path="sessions/raw-secret-source.csv",
-                created_at=datetime.now(UTC),
-                created_by="assistant",
-                source_description="test",
-                status="ready",
-                creation_modality=CreationModality.VERBATIM,
-                created_from_message_id=None,
-                creating_model_identifier=None,
-                creating_model_version=None,
-                creating_provider=None,
-                creating_composer_skill_hash=None,
-                creating_arguments_hash=None,
-            )
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.list_blobs.return_value = []
+        app.state.blob_service.create_blob.return_value = BlobRecord(
+            id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            filename="source.csv",
+            mime_type="text/csv",
+            size_bytes=18,
+            content_hash="0" * 64,
+            storage_path="sessions/raw-secret-source.csv",
+            created_at=datetime.now(UTC),
+            created_by="assistant",
+            source_description="test",
+            status="ready",
+            creation_modality=CreationModality.VERBATIM,
+            created_from_message_id=None,
+            creating_model_identifier=None,
+            creating_model_version=None,
+            creating_provider=None,
+            creating_composer_skill_hash=None,
+            creating_arguments_hash=None,
         )
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -3081,8 +3110,8 @@ class TestMessageRoutes:
         with (
             patch(
                 "elspeth.web.sessions.routes.composer.guided.solve_step_chat_with_auto_drop",
-                new=AsyncMock(
-                    return_value=StepChatResult(
+                new=_async_return(
+                    StepChatResult(
                         assistant_message="I can use that source.",
                         status=ComposerChatTurnStatus.SUCCESS,
                         latency_ms=5,
@@ -3092,8 +3121,8 @@ class TestMessageRoutes:
             ),
             patch(
                 "elspeth.web.sessions.routes.composer.guided.resolve_step_1_source_chat_with_auto_drop",
-                new=AsyncMock(
-                    return_value=Step1SourceChatResult(
+                new=_async_return(
+                    Step1SourceChatResult(
                         source_resolution=Step1SourceChatResolution(
                             assistant_message="I created the source.",
                             plugin="csv",
@@ -3111,7 +3140,7 @@ class TestMessageRoutes:
             ),
             patch(
                 "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",
-                return_value=MagicMock(tool_result=failing_tool_result),
+                return_value=SimpleNamespace(tool_result=failing_tool_result),
             ),
         ):
             send_resp = client.post(
@@ -3143,7 +3172,7 @@ class TestMessageRoutes:
         from elspeth.web.composer.tools import ToolResult
 
         app, _ = _make_app(tmp_path)
-        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = [
             PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
         ]
@@ -3156,8 +3185,8 @@ class TestMessageRoutes:
             knob_schema={"fields": []},
         )
         app.state.catalog_service = catalog
-        app.state.blob_service = MagicMock()
-        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.list_blobs.return_value = []
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post("/api/sessions", json={"title": "Guided respond source failure"})
@@ -3178,7 +3207,7 @@ class TestMessageRoutes:
         )
         with patch(
             "elspeth.web.sessions.routes._helpers.handle_step_1_source",
-            return_value=MagicMock(tool_result=failing_tool_result),
+            return_value=SimpleNamespace(tool_result=failing_tool_result),
         ):
             commit = client.post(
                 f"/api/sessions/{session_id}/guided/respond",
@@ -3207,7 +3236,7 @@ class TestMessageRoutes:
         from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
 
         app, service = _make_app(tmp_path)
-        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = [
             PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
         ]
@@ -3220,9 +3249,8 @@ class TestMessageRoutes:
             knob_schema={"fields": []},
         )
         app.state.catalog_service = catalog
-        app.state.blob_service = MagicMock()
-        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
-        app.state.blob_service.create_blob = AsyncMock()
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.list_blobs.return_value = []
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post("/api/sessions", json={"title": "Guided malformed source tool args"})
@@ -3254,7 +3282,7 @@ class TestMessageRoutes:
 
         with patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=malformed_tool_response),
+            new=_async_return(malformed_tool_response),
         ):
             send_resp = client.post(
                 f"/api/sessions/{session_id}/guided/chat",
@@ -3284,7 +3312,7 @@ class TestMessageRoutes:
         from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
 
         app, service = _make_app(tmp_path)
-        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = [
             PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
         ]
@@ -3297,9 +3325,8 @@ class TestMessageRoutes:
             knob_schema={"fields": []},
         )
         app.state.catalog_service = catalog
-        app.state.blob_service = MagicMock()
-        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
-        app.state.blob_service.create_blob = AsyncMock()
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.list_blobs.return_value = []
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post("/api/sessions", json={"title": "Guided source plugin mismatch"})
@@ -3343,7 +3370,7 @@ class TestMessageRoutes:
 
         with patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=mismatched_tool_response),
+            new=_async_return(mismatched_tool_response),
         ):
             send_resp = client.post(
                 f"/api/sessions/{session_id}/guided/chat",
@@ -3542,8 +3569,8 @@ class TestLiteLLMErrorRedaction:
 
     def test_send_message_auth_error_body_carries_class_name_only(self, tmp_path) -> None:
         """LiteLLMAuthError from compose() → 502 with class-name-only detail."""
-        mock_composer = AsyncMock()
-        mock_composer.compose = AsyncMock(side_effect=self._make_auth_error())
+        mock_composer = SimpleNamespace()
+        mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=self._make_auth_error())
 
         app, _ = _make_app(tmp_path)
         app.state.composer_service = mock_composer
@@ -3560,8 +3587,8 @@ class TestLiteLLMErrorRedaction:
 
     def test_send_message_api_error_body_carries_class_name_only(self, tmp_path) -> None:
         """LiteLLMAPIError from compose() → 502 with class-name-only detail."""
-        mock_composer = AsyncMock()
-        mock_composer.compose = AsyncMock(side_effect=self._make_api_error())
+        mock_composer = SimpleNamespace()
+        mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=self._make_api_error())
 
         app, _ = _make_app(tmp_path)
         app.state.composer_service = mock_composer
@@ -3578,8 +3605,8 @@ class TestLiteLLMErrorRedaction:
 
     def test_send_message_bad_request_provider_detail_is_exposed_when_enabled(self, tmp_path) -> None:
         """_BadRequestLLMError must use its dedicated provider-detail carrier at the route layer."""
-        mock_composer = AsyncMock()
-        mock_composer.compose = AsyncMock(side_effect=self._make_bad_request_error())
+        mock_composer = SimpleNamespace()
+        mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=self._make_bad_request_error())
 
         app, _ = _make_app(tmp_path)
         app.state.settings = app.state.settings.model_copy(update={"composer_expose_provider_errors": True})
@@ -3719,8 +3746,8 @@ class TestLiteLLMErrorRedaction:
         """recompose path must mirror send_message's redaction."""
         import asyncio
 
-        mock_composer = AsyncMock()
-        mock_composer.compose = AsyncMock(side_effect=self._make_auth_error())
+        mock_composer = SimpleNamespace()
+        mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=self._make_auth_error())
 
         app, service = _make_app(tmp_path)
         app.state.composer_service = mock_composer
@@ -3743,8 +3770,8 @@ class TestLiteLLMErrorRedaction:
         """recompose path must mirror send_message's redaction for APIError too."""
         import asyncio
 
-        mock_composer = AsyncMock()
-        mock_composer.compose = AsyncMock(side_effect=self._make_api_error())
+        mock_composer = SimpleNamespace()
+        mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=self._make_api_error())
 
         app, service = _make_app(tmp_path)
         app.state.composer_service = mock_composer
@@ -3766,8 +3793,8 @@ class TestLiteLLMErrorRedaction:
         """recompose must mirror send_message for _BadRequestLLMError provider detail."""
         import asyncio
 
-        mock_composer = AsyncMock()
-        mock_composer.compose = AsyncMock(side_effect=self._make_bad_request_error())
+        mock_composer = SimpleNamespace()
+        mock_composer.compose = AsyncMock(spec=ComposerService.compose, side_effect=self._make_bad_request_error())
 
         app, service = _make_app(tmp_path)
         app.state.settings = app.state.settings.model_copy(update={"composer_expose_provider_errors": True})
@@ -3812,8 +3839,9 @@ class TestRecomposeConvergencePartialState:
             version=2,  # > initial (1), so it's a real mutation
         )
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=5,
                 budget_exhausted="composition",
@@ -3855,8 +3883,9 @@ class TestRecomposeConvergencePartialState:
 
         from elspeth.web.composer.protocol import ComposerConvergenceError
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=3,
                 budget_exhausted="discovery",
@@ -3898,8 +3927,9 @@ class TestRecomposeConvergencePartialState:
         }
 
         for budget, (expected_reason, recovery_keyword) in budgets_to_codes.items():
-            mock_composer = AsyncMock()
+            mock_composer = SimpleNamespace()
             mock_composer.compose = AsyncMock(
+                spec=ComposerService.compose,
                 side_effect=ComposerConvergenceError(
                     max_turns=5,
                     budget_exhausted=budget,  # type: ignore[arg-type]
@@ -3969,8 +3999,9 @@ class TestRecomposeConvergencePartialState:
             version=2,
         )
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=5,
                 budget_exhausted="composition",
@@ -4043,8 +4074,9 @@ class TestRecomposeConvergencePartialState:
             version=2,
         )
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=5,
                 budget_exhausted="composition",
@@ -4113,8 +4145,9 @@ class TestRecomposeConvergencePartialState:
             version=2,
         )
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=5,
                 budget_exhausted="composition",
@@ -4198,8 +4231,9 @@ class TestRecomposeConvergencePartialState:
             version=2,
         )
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=5,
                 budget_exhausted="composition",
@@ -4271,8 +4305,9 @@ class TestRecomposeConvergencePartialState:
             version=2,
         )
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerConvergenceError(
                 max_turns=5,
                 budget_exhausted="composition",
@@ -4360,7 +4395,7 @@ class TestGuidedBootstrapStateVersions:
         submits an actual guided response.
         """
         app, service = _make_app(tmp_path)
-        catalog = MagicMock()
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = []
         app.state.catalog_service = catalog
         app.state.session_engine = service._engine
@@ -4641,14 +4676,11 @@ sinks:
         blob_path = tmp_path / "blobs" / str(session.id) / f"{blob_id}_input.csv"
         blob_path.parent.mkdir(parents=True)
         blob_path.write_text("id\n1\n")
-        app.state.blob_service = SimpleNamespace(
-            get_blob=AsyncMock(
-                return_value=SimpleNamespace(
-                    id=blob_id,
-                    session_id=session.id,
-                    storage_path=str(blob_path),
-                )
-            )
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.get_blob.return_value = SimpleNamespace(
+            id=blob_id,
+            session_id=session.id,
+            storage_path=str(blob_path),
         )
         old_blob_path = tmp_path / "blobs" / "old-session" / "old.csv"
         yaml_text = f"""
@@ -4718,7 +4750,7 @@ sinks:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Replay", "local")
-        app.state.blob_service = SimpleNamespace(get_blob=AsyncMock())
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
         yaml_text = """
 sources:
   source:
@@ -4751,14 +4783,11 @@ sinks:
         session = await service.create_session("alice", "Replay", "local")
         other_session_id = uuid.uuid4()
         blob_id = uuid.uuid4()
-        app.state.blob_service = SimpleNamespace(
-            get_blob=AsyncMock(
-                return_value=SimpleNamespace(
-                    id=blob_id,
-                    session_id=other_session_id,
-                    storage_path=str(tmp_path / "blobs" / str(other_session_id) / "input.csv"),
-                )
-            )
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.get_blob.return_value = SimpleNamespace(
+            id=blob_id,
+            session_id=other_session_id,
+            storage_path=str(tmp_path / "blobs" / str(other_session_id) / "input.csv"),
         )
         yaml_text = """
 sources:
@@ -6274,8 +6303,9 @@ class TestComposePluginCrashResponse:
 
     def test_compose_plugin_value_error_returns_structured_500(self, tmp_path) -> None:
         original = ValueError(f"plugin bug: {self.SECRET_PATH}")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=None),
         )
 
@@ -6308,8 +6338,9 @@ class TestComposePluginCrashResponse:
         import asyncio
 
         original = TypeError(f"plugin bug: NoneType has no attribute 'read' from {self.SECRET_PATH}")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=None),
         )
 
@@ -6362,8 +6393,9 @@ class TestComposePluginCrashResponse:
             version=5,
         )
         original = ValueError(f"plugin bug after mutation: {self.SECRET_PATH}")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=partial),
         )
 
@@ -6403,8 +6435,9 @@ class TestComposePluginCrashResponse:
         import asyncio
 
         original = ValueError("plugin bug on first call")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=None),
         )
 
@@ -6437,8 +6470,9 @@ class TestComposePluginCrashResponse:
         URLs, filesystem paths, or secret fragments.
         """
         original = ValueError(f"plugin bug with secret {self.SECRET_PATH}")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=None),
         )
 
@@ -6486,8 +6520,9 @@ class TestComposePluginCrashResponse:
         original = RuntimeError(f"upstream failure: {message_secret}")
         original.__cause__ = FileNotFoundError(cause_secret)
 
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=None),
         )
 
@@ -6541,8 +6576,9 @@ class TestComposePluginCrashResponse:
             version=3,
         )
         original = ValueError(f"plugin bug: {self.SECRET_PATH}")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=partial),
         )
 
@@ -6607,8 +6643,9 @@ class TestComposePluginCrashResponse:
             version=3,
         )
         original = ValueError("plugin bug")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=partial),
         )
 
@@ -6654,8 +6691,9 @@ class TestComposePluginCrashResponse:
             version=3,
         )
         original = ValueError("plugin bug")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=partial),
         )
 
@@ -6696,8 +6734,9 @@ class TestComposePluginCrashResponse:
             version=3,
         )
         original = ValueError("plugin bug")
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=ComposerPluginCrashError(original, partial_state=partial),
         )
 
@@ -6733,8 +6772,9 @@ class TestComposePluginCrashResponse:
         default 500 response; the critical invariant is that the structured
         composer_plugin_error body is NOT produced for unknown classes.
         """
-        mock_composer = AsyncMock()
+        mock_composer = SimpleNamespace()
         mock_composer.compose = AsyncMock(
+            spec=ComposerService.compose,
             side_effect=RuntimeError("unknown failure class"),
         )
 
@@ -7089,7 +7129,6 @@ def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback
     state's ``validation_errors`` row — the actual diagnostic surface.
     """
     import asyncio
-    from unittest.mock import AsyncMock
     from uuid import UUID as _UUID
 
     from elspeth.web.composer.protocol import ComposerRuntimePreflightError
@@ -7099,7 +7138,7 @@ def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback
         original_exc=RuntimeError("boom"),
         partial_state=None,
     )
-    service = AsyncMock()
+    service = SimpleNamespace()
 
     body = asyncio.run(
         _handle_runtime_preflight_failure(
@@ -7274,8 +7313,9 @@ def test_recompose_success_persists_runtime_invalid_state(tmp_path) -> None:
         version=_EMPTY_STATE.version + 1,
     )
     runtime_preflight = _runtime_preflight_failed_result("runtime failure from recompose")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         return_value=ComposerResult(
             message="I cannot mark this pipeline complete yet.",
             state=changed_state,
@@ -7285,7 +7325,7 @@ def test_recompose_success_persists_runtime_invalid_state(tmp_path) -> None:
             # can recover what the LLM actually said before the synthetic
             # replacement was substituted into ``message``.
             raw_assistant_content="The pipeline is complete and valid.",
-        )
+        ),
     )
     app.state.composer_service = mock_composer
 
@@ -7326,13 +7366,14 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
         metadata=PipelineMetadata(name="partial-after-convergence"),
         version=2,
     )
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerConvergenceError(
             max_turns=5,
             budget_exhausted="composition",
             partial_state=partial,
-        )
+        ),
     )
 
     app, service = _make_app(tmp_path)
@@ -7351,7 +7392,7 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
     runtime_preflight = _runtime_preflight_failed_result("runtime failure from convergence")
     with patch(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
-        new=AsyncMock(return_value=runtime_preflight),
+        new=_async_return(runtime_preflight),
     ):
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
 
@@ -7389,8 +7430,9 @@ def test_compose_plugin_crash_persists_runtime_invalid_partial_state(tmp_path) -
         version=5,
     )
     original = ValueError("plugin bug after mutation")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerPluginCrashError(original, partial_state=partial),
     )
 
@@ -7404,7 +7446,7 @@ def test_compose_plugin_crash_persists_runtime_invalid_partial_state(tmp_path) -
     runtime_preflight = _runtime_preflight_failed_result("runtime failure from plugin crash")
     with patch(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
-        new=AsyncMock(return_value=runtime_preflight),
+        new=_async_return(runtime_preflight),
     ):
         response = client.post(
             f"/api/sessions/{session_id}/messages",
@@ -7474,8 +7516,9 @@ def test_compose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     accumulated in result.state are silently dropped from the audit trail.
     """
     partial = _make_authoring_valid_partial("partial-after-runtime-preflight")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         return_value=ComposerResult(
             message="The composer mutated state but preflight then failed.",
             state=partial,
@@ -7539,8 +7582,9 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     is part of the contract, not a per-route concern.
     """
     partial = _make_authoring_valid_partial("partial-after-recompose-preflight")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         return_value=ComposerResult(
             message="Recompose mutated state but preflight then failed.",
             state=partial,
@@ -7604,8 +7648,9 @@ def test_compose_cached_runtime_preflight_persists_partial_state(tmp_path) -> No
 
     partial = _make_authoring_valid_partial("partial-from-cached-preflight")
     original = RuntimeError("cached preflight failure from composer.compose")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerRuntimePreflightError(original_exc=original, partial_state=partial),
     )
 
@@ -7657,8 +7702,9 @@ def test_runtime_preflight_handler_records_exception_telemetry(tmp_path, monkeyp
     monkeypatch.setattr(routes, "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER", FakeCounter())
 
     partial = _make_authoring_valid_partial("telemetry-runtime-preflight")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         return_value=ComposerResult(
             message="ok",
             state=partial,
@@ -7766,8 +7812,9 @@ def test_compose_cached_runtime_preflight_no_partial_state_records_telemetry(tmp
     monkeypatch.setattr(routes, "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER", FakeCounter())
 
     original = RuntimeError("cached preflight failure with no LLM mutation")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerRuntimePreflightError(
             original_exc=original,
             partial_state=None,
@@ -7841,8 +7888,9 @@ def test_recompose_cached_runtime_preflight_no_partial_state_records_telemetry(t
     monkeypatch.setattr(routes, "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER", FakeCounter())
 
     original = RuntimeError("cached preflight failure with no LLM mutation on recompose")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerRuntimePreflightError(
             original_exc=original,
             partial_state=None,
@@ -7963,8 +8011,9 @@ def test_runtime_preflight_handler_save_failure_sets_partial_state_save_failed_f
     from sqlalchemy.exc import OperationalError
 
     partial = _make_authoring_valid_partial("save-fail-runtime-preflight")
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         return_value=ComposerResult(
             message="ok",
             state=partial,
@@ -8049,8 +8098,8 @@ def test_assistant_raw_content_is_persisted_but_not_returned(tmp_path) -> None:
         ),
         raw_assistant_content="The pipeline is complete and valid.",
     )
-    composer = AsyncMock()
-    composer.compose = AsyncMock(return_value=composer_result)
+    composer = SimpleNamespace()
+    composer.compose = AsyncMock(spec=ComposerService.compose, return_value=composer_result)
     app.state.composer_service = composer
 
     resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "build it"})
@@ -8469,8 +8518,9 @@ def test_handle_convergence_error_persists_convergence_persist_provenance(tmp_pa
         metadata=PipelineMetadata(name="convergence-partial"),
         version=2,
     )
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerConvergenceError(
             max_turns=15,
             budget_exhausted="composition",
@@ -8508,8 +8558,9 @@ def test_handle_plugin_crash_persists_plugin_crash_persist_provenance(tmp_path: 
         metadata=PipelineMetadata(name="plugin-crash-partial"),
         version=3,
     )
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerPluginCrashError(
             ValueError("plugin bug"),
             partial_state=partial,
@@ -8564,7 +8615,7 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
         metadata=PipelineMetadata(name="advanced"),
         version=2,
     )
-    mock_composer = AsyncMock()
+    mock_composer = SimpleNamespace()
     # Compose succeeds (state advanced) but the post-compose
     # ``_state_data_from_composer_state`` call with
     # ``preflight_exception_policy="raise"`` would raise
@@ -8572,6 +8623,7 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
     # via the cleaner top-level raise path that routes.py's path-1
     # ``_handle_runtime_preflight_failure`` invocation also reaches.
     mock_composer.compose = AsyncMock(
+        spec=ComposerService.compose,
         side_effect=ComposerRuntimePreflightError(
             original_exc=ValueError("preflight rejected"),
             partial_state=partial,

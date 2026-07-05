@@ -9,9 +9,11 @@ W18 fix: Only typed exceptions are caught — no bare except Exception.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import yaml
@@ -20,6 +22,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
@@ -139,6 +142,140 @@ def _check(result, name: str):
     return next(c for c in result.checks if c.name == name)
 
 
+@dataclass
+class _FakeYamlGenerator:
+    """Small YamlGenerator test double that records the state it rendered."""
+
+    yaml_text: str = "source:\n  plugin: csv_source\n  options: {}"
+    rendered_states: list[CompositionState] = field(default_factory=list)
+
+    def generate_yaml(self, state: CompositionState) -> str:
+        self.rendered_states.append(state)
+        return self.yaml_text
+
+
+@dataclass
+class _FakeSettings:
+    gates: tuple[Any, ...] = ()
+    coalesce: tuple[Any, ...] = ()
+
+    def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
+        assert mode == "json"
+        return {}
+
+
+@dataclass
+class _FakeSourcePlugin:
+    name: str = "source"
+    _on_validation_failure: str = "discard"
+
+
+@dataclass
+class _FakeSinkPlugin:
+    name: str = "csv"
+    _on_write_failure: str = "discard"
+
+
+@dataclass
+class _FakeRuntimeBundle:
+    """Runtime bundle shape consumed by validation after plugin instantiation."""
+
+    sources: dict[str, Any] = field(default_factory=lambda: {"source": _FakeSourcePlugin()})
+    source_settings_map: dict[str, Any] = field(default_factory=lambda: {"source": object()})
+    transforms: tuple[Any, ...] = ()
+    sinks: dict[str, Any] = field(default_factory=lambda: {"primary": _FakeSinkPlugin()})
+    aggregations: dict[str, Any] = field(default_factory=dict)
+
+
+def _fake_settings() -> _FakeSettings:
+    return _FakeSettings()
+
+
+def _fake_pipeline_config() -> SimpleNamespace:
+    return SimpleNamespace()
+
+
+def _runtime_graph_mock(
+    *,
+    validation_warnings: tuple[GraphValidationWarning, ...] = (),
+    validate_side_effect: Exception | None = None,
+    edge_validation_side_effect: Exception | None = None,
+) -> MagicMock:
+    graph = create_autospec(ExecutionGraph, instance=True)
+    graph.validation_warnings = validation_warnings
+    graph.validate.side_effect = validate_side_effect
+    graph.validate_edge_compatibility.side_effect = edge_validation_side_effect
+    graph.get_route_resolution_map.return_value = {}
+    graph.get_transform_id_map.return_value = {}
+    graph.get_config_gate_id_map.return_value = {}
+    graph.get_aggregation_id_map.return_value = {}
+    graph.get_coalesce_id_map.return_value = {}
+    return graph
+
+
+@dataclass(frozen=True)
+class _FakeNodeInfo:
+    config: dict[str, Any]
+
+
+class _ForbiddenExactSourceLookup:
+    def __init__(self, message: str) -> None:
+        self._message = message
+        self.called = False
+
+    def __call__(self) -> None:
+        self.called = True
+        raise AssertionError(self._message)
+
+    def assert_not_called(self) -> None:
+        assert self.called is False
+
+
+class _EdgeSuggestionGraph:
+    """Graph fake for mapping runtime DAG IDs back to composer patch targets."""
+
+    def __init__(
+        self,
+        *,
+        sources: tuple[str, ...],
+        node_configs: dict[str, dict[str, Any]],
+        transform_id_map: dict[int, str],
+        sink_id_map: dict[str, str],
+        config_gate_id_map: dict[str, str] | None = None,
+        aggregation_id_map: dict[str, str] | None = None,
+        coalesce_id_map: dict[str, str] | None = None,
+    ) -> None:
+        self._sources = sources
+        self._node_configs = node_configs
+        self._transform_id_map = transform_id_map
+        self._sink_id_map = sink_id_map
+        self._config_gate_id_map = config_gate_id_map or {}
+        self._aggregation_id_map = aggregation_id_map or {}
+        self._coalesce_id_map = coalesce_id_map or {}
+        self.get_source = _ForbiddenExactSourceLookup("exact-one source API must not be called")
+
+    def get_sources(self) -> list[str]:
+        return list(self._sources)
+
+    def get_node_info(self, node_id: str) -> _FakeNodeInfo:
+        return _FakeNodeInfo(config=self._node_configs[node_id])
+
+    def get_transform_id_map(self) -> dict[int, str]:
+        return self._transform_id_map
+
+    def get_config_gate_id_map(self) -> dict[str, str]:
+        return self._config_gate_id_map
+
+    def get_aggregation_id_map(self) -> dict[str, str]:
+        return self._aggregation_id_map
+
+    def get_coalesce_id_map(self) -> dict[str, str]:
+        return self._coalesce_id_map
+
+    def get_sink_id_map(self) -> dict[str, str]:
+        return self._sink_id_map
+
+
 class TestValidatePipelineEmptyComposition:
     """Empty-composition short-circuit at the top of validate_pipeline.
 
@@ -157,7 +294,7 @@ class TestValidatePipelineEmptyComposition:
         state = _make_state(source_options=None)
         settings = _make_settings()
 
-        result = validate_pipeline(state, settings, MagicMock())
+        result = validate_pipeline(state, settings, _FakeYamlGenerator())
 
         assert result.is_valid is False
         assert len(result.errors) == 1
@@ -176,7 +313,7 @@ class TestValidatePipelineEmptyComposition:
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             state = _make_state(source_options=None)
             settings = _make_settings()
-            result = validate_pipeline(state, settings, MagicMock())
+            result = validate_pipeline(state, settings, _FakeYamlGenerator())
 
         assert result.is_valid is False
         assert result.errors[0].error_code == "empty_pipeline"
@@ -370,7 +507,7 @@ class TestValidatePipelinePathAllowlist:
             version=1,
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = _FakeYamlGenerator()
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -1142,7 +1279,7 @@ class TestValidatePipelineSinkPathAllowlist:
             version=1,
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = _FakeYamlGenerator()
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -1781,22 +1918,15 @@ class TestValidatePipelineSuccess:
     ) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_settings = MagicMock()
+        mock_settings = _fake_settings()
         mock_load.return_value = mock_settings
 
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.sources = {"source": mock_bundle.source}
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
 
-        mock_graph = MagicMock()
-        mock_graph.validation_warnings = ()
+        mock_graph = _runtime_graph_mock()
         mock_build_graph.return_value = mock_graph
-        mock_assemble.return_value = MagicMock()
+        mock_assemble.return_value = _fake_pipeline_config()
 
         state = _make_state()
         settings = _make_settings()
@@ -1845,28 +1975,23 @@ class TestValidatePipelineSuccess:
     ) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_settings = MagicMock()
+        mock_settings = _fake_settings()
         mock_load.return_value = mock_settings
 
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.sources = {"source": mock_bundle.source}
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
 
-        mock_graph = MagicMock()
-        mock_graph.validation_warnings = (
-            GraphValidationWarning(
-                code="DIVERT_COALESCE_REQUIRE_ALL",
-                message="Transform 't_a' has on_error routing and feeds require_all coalesce 'join'.",
-                node_ids=("t_a", "join"),
-            ),
+        mock_graph = _runtime_graph_mock(
+            validation_warnings=(
+                GraphValidationWarning(
+                    code="DIVERT_COALESCE_REQUIRE_ALL",
+                    message="Transform 't_a' has on_error routing and feeds require_all coalesce 'join'.",
+                    node_ids=("t_a", "join"),
+                ),
+            )
         )
         mock_build_graph.return_value = mock_graph
-        mock_assemble.return_value = MagicMock()
+        mock_assemble.return_value = _fake_pipeline_config()
 
         state = _make_state()
         settings = _make_settings()
@@ -2118,7 +2243,7 @@ class TestValidatePipelinePluginFailure:
     ) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: unknown\n  options: {}"
-        mock_load.return_value = MagicMock()
+        mock_load.return_value = _fake_settings()
         from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 
         mock_instantiate.side_effect = PluginNotFoundError("Unknown source plugin: 'unknown'")
@@ -2197,18 +2322,12 @@ class TestValidatePipelineGraphFailure:
     ) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_load.return_value = MagicMock()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_load.return_value = _fake_settings()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
 
-        mock_graph = MagicMock()
+        mock_graph = _runtime_graph_mock(validate_side_effect=GraphValidationError("Route destination 'nonexistent' in gate_1 not found"))
         mock_build_graph.return_value = mock_graph
-        mock_graph.validate.side_effect = GraphValidationError("Route destination 'nonexistent' in gate_1 not found")
 
         state = _make_state()
         settings = _make_settings()
@@ -2229,19 +2348,14 @@ class TestValidatePipelineGraphFailure:
     ) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_load.return_value = MagicMock()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_load.return_value = _fake_settings()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
 
-        mock_graph = MagicMock()
+        mock_graph = _runtime_graph_mock(
+            edge_validation_side_effect=GraphValidationError("Schema mismatch on edge transform_1 -> sink_primary")
+        )
         mock_build_graph.return_value = mock_graph
-        mock_graph.validate.return_value = None  # structural check passes
-        mock_graph.validate_edge_compatibility.side_effect = GraphValidationError("Schema mismatch on edge transform_1 -> sink_primary")
 
         state = _make_state()
         settings = _make_settings()
@@ -2286,16 +2400,11 @@ class TestValidatePipelineInMemoryLoading:
         """Settings are loaded via load_settings_from_yaml_string, not file-based."""
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_settings = MagicMock()
+        mock_settings = _fake_settings()
         mock_load.return_value = mock_settings
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
+        mock_graph = _runtime_graph_mock()
         mock_build_graph.return_value = mock_graph
 
         state = _make_state()
@@ -2422,7 +2531,7 @@ class TestValidatePipelineSecretRefs:
             version=1,
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = _FakeYamlGenerator()
         secret_svc = FakeSecretService(available_refs={"ORDERS_KEY"})
 
         result = validate_pipeline(
@@ -3059,11 +3168,11 @@ class TestSecretRefResolutionBeforeSettingsLoad:
         )
         secret_svc = FakeSecretService(available_refs={"MY_KEY"})
 
-        mock_settings = MagicMock()
+        mock_settings = _fake_settings()
         mock_load_string.return_value = mock_settings
-        mock_bundle = MagicMock()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
+        mock_graph = _runtime_graph_mock()
         mock_build_graph.return_value = mock_graph
 
         result = validate_pipeline(
@@ -3105,11 +3214,11 @@ class TestSecretRefResolutionBeforeSettingsLoad:
         )
         secret_svc = FakeSecretService(available_refs={"OPENROUTER_API_KEY"})
 
-        mock_settings = MagicMock()
+        mock_settings = _fake_settings()
         mock_load_string.return_value = mock_settings
-        mock_bundle = MagicMock()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
+        mock_graph = _runtime_graph_mock()
         mock_build_graph.return_value = mock_graph
 
         result = validate_pipeline(
@@ -3149,11 +3258,11 @@ class TestSecretRefResolutionBeforeSettingsLoad:
             "    url: https://example.com/data\n"
         )
 
-        mock_settings = MagicMock()
+        mock_settings = _fake_settings()
         mock_load_string.return_value = mock_settings
-        mock_bundle = MagicMock()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
-        mock_graph = MagicMock()
+        mock_graph = _runtime_graph_mock()
         mock_build_graph.return_value = mock_graph
 
         result = validate_pipeline(
@@ -3356,13 +3465,13 @@ sinks:
     options:
       path: /tmp/test_data/outputs/out.csv
 """
-        fake_graph = MagicMock()
+        fake_graph = _runtime_graph_mock()
 
         with (
-            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
-            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=MagicMock()) as mock_instantiate,
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=_fake_settings()),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=_FakeRuntimeBundle()) as mock_instantiate,
             patch("elspeth.web.execution.validation.build_runtime_graph", return_value=fake_graph),
-            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=_fake_pipeline_config()),
         ):
             result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -3391,12 +3500,12 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
-        fake_graph = MagicMock()
+        fake_graph = _runtime_graph_mock()
         with (
-            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
-            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=_fake_settings()),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=_FakeRuntimeBundle()),
             patch("elspeth.web.execution.validation.build_runtime_graph", return_value=fake_graph),
-            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=_fake_pipeline_config()),
         ):
             result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -3439,11 +3548,10 @@ sinks:
     options:
       path: /tmp/test_data/outputs/out.csv
 """
-        fake_settings = MagicMock()
-        fake_graph = MagicMock()
-        fake_graph.validate.side_effect = GraphValidationError("bad graph")
+        fake_settings = _fake_settings()
+        fake_graph = _runtime_graph_mock(validate_side_effect=GraphValidationError("bad graph"))
         mock_load.return_value = fake_settings
-        mock_instantiate.return_value = MagicMock()
+        mock_instantiate.return_value = _FakeRuntimeBundle()
         mock_build_graph.return_value = fake_graph
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
@@ -3484,13 +3592,12 @@ sinks:
     options:
       path: /tmp/test_data/outputs/out.csv
 """
-        fake_settings = MagicMock()
-        fake_graph = MagicMock()
-        fake_graph.validate_edge_compatibility.side_effect = GraphValidationError("schema mismatch")
+        fake_settings = _fake_settings()
+        fake_graph = _runtime_graph_mock(edge_validation_side_effect=GraphValidationError("schema mismatch"))
         mock_load.return_value = fake_settings
-        mock_instantiate.return_value = MagicMock()
+        mock_instantiate.return_value = _FakeRuntimeBundle()
         mock_build_graph.return_value = fake_graph
-        mock_assemble.return_value = MagicMock()
+        mock_assemble.return_value = _fake_pipeline_config()
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -3634,15 +3741,12 @@ class TestEdgeContractFailureFormatting:
             ),
             outputs=(_make_output(name="results"),),
         )
-        graph = MagicMock()
-        graph.get_source.side_effect = AssertionError("exact-one source API must not be called")
-        graph.get_sources.return_value = ["source_csv_a1b2c3"]
-        graph.get_node_info.return_value = MagicMock(config={"source_name": "source"})
-        graph.get_transform_id_map.return_value = {0: "transform_split_lines_d4e5f6"}
-        graph.get_config_gate_id_map.return_value = {}
-        graph.get_aggregation_id_map.return_value = {}
-        graph.get_coalesce_id_map.return_value = {}
-        graph.get_sink_id_map.return_value = {"results": "sink_results_f7g8h9"}
+        graph = _EdgeSuggestionGraph(
+            sources=("source_csv_a1b2c3",),
+            node_configs={"source_csv_a1b2c3": {"source_name": "source"}},
+            transform_id_map={0: "transform_split_lines_d4e5f6"},
+            sink_id_map={"results": "sink_results_f7g8h9"},
+        )
 
         suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
 
@@ -3688,20 +3792,15 @@ class TestEdgeContractFailureFormatting:
             metadata=PipelineMetadata(),
             version=1,
         )
-        graph = MagicMock()
-        graph.get_source.side_effect = GraphValidationError("Expected exactly 1 source node, found 2")
-        graph.get_sources.return_value = ["source_csv_orders_z9y8x7", "source_csv_refunds_a1b2c3"]
-
-        def node_info(node_id: str) -> MagicMock:
-            source_name = "orders" if node_id == "source_csv_orders_z9y8x7" else "refunds"
-            return MagicMock(config={"source_name": source_name})
-
-        graph.get_node_info.side_effect = node_info
-        graph.get_transform_id_map.return_value = {0: "transform_normalize_d4e5f6"}
-        graph.get_config_gate_id_map.return_value = {}
-        graph.get_aggregation_id_map.return_value = {}
-        graph.get_coalesce_id_map.return_value = {}
-        graph.get_sink_id_map.return_value = {"results": "sink_results_f7g8h9"}
+        graph = _EdgeSuggestionGraph(
+            sources=("source_csv_orders_z9y8x7", "source_csv_refunds_a1b2c3"),
+            node_configs={
+                "source_csv_orders_z9y8x7": {"source_name": "orders"},
+                "source_csv_refunds_a1b2c3": {"source_name": "refunds"},
+            },
+            transform_id_map={0: "transform_normalize_d4e5f6"},
+            sink_id_map={"results": "sink_results_f7g8h9"},
+        )
 
         suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
 
@@ -3738,15 +3837,12 @@ class TestEdgeContractFailureFormatting:
             ),
             outputs=(_make_output(name="results"),),
         )
-        graph = MagicMock()
-        graph.get_source.side_effect = AssertionError("exact-one source API must not be called")
-        graph.get_sources.return_value = ["source_csv_z9y8x7"]
-        graph.get_node_info.return_value = MagicMock(config={"source_name": "source"})
-        graph.get_transform_id_map.return_value = {0: "transform_clean_text_a1b2c3"}
-        graph.get_config_gate_id_map.return_value = {}
-        graph.get_aggregation_id_map.return_value = {}
-        graph.get_coalesce_id_map.return_value = {}
-        graph.get_sink_id_map.return_value = {"results": "sink_results_d4e5f6"}
+        graph = _EdgeSuggestionGraph(
+            sources=("source_csv_z9y8x7",),
+            node_configs={"source_csv_z9y8x7": {"source_name": "source"}},
+            transform_id_map={0: "transform_clean_text_a1b2c3"},
+            sink_id_map={"results": "sink_results_d4e5f6"},
+        )
 
         suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
 
@@ -3830,24 +3926,16 @@ class TestEdgeContractFailureFormatting:
         graph.validate_edge_compatibility() raises EdgeContractError."""
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_load.return_value = MagicMock()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_load.return_value = _fake_settings()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
-
-        mock_graph = MagicMock()
-        mock_build_graph.return_value = mock_graph
-        mock_graph.validate.return_value = None
-        mock_assemble.return_value = MagicMock()
 
         edge_exc = self._make_edge_error(
             type_mismatches=(("fetch_status", "str | None", "int"),),
         )
-        mock_graph.validate_edge_compatibility.side_effect = edge_exc
+        mock_graph = _runtime_graph_mock(edge_validation_side_effect=edge_exc)
+        mock_build_graph.return_value = mock_graph
+        mock_assemble.return_value = _fake_pipeline_config()
 
         # source_options=None: the test exercises the rich-suggestion fall-back
         # path (``_edge_patch_target_for_node_id`` returns
@@ -3895,26 +3983,20 @@ class TestEdgeContractFailureFormatting:
         structured per-field detail to enrich from)."""
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-        mock_load.return_value = MagicMock()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        mock_load.return_value = _fake_settings()
+        mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
 
-        mock_graph = MagicMock()
-        mock_build_graph.return_value = mock_graph
-        mock_graph.validate.return_value = None
-        mock_assemble.return_value = MagicMock()
-
         # Plain GraphValidationError — not the EdgeContractError subclass.
-        mock_graph.validate_edge_compatibility.side_effect = GraphValidationError(
-            "some other graph problem",
-            component_id="node_x",
-            component_type="transform",
+        mock_graph = _runtime_graph_mock(
+            edge_validation_side_effect=GraphValidationError(
+                "some other graph problem",
+                component_id="node_x",
+                component_type="transform",
+            )
         )
+        mock_build_graph.return_value = mock_graph
+        mock_assemble.return_value = _fake_pipeline_config()
 
         state = _make_state()
         settings = _make_settings()

@@ -7,12 +7,44 @@ Tests the four mutually exclusive authentication methods:
 4. Service Principal (tenant_id + client_id + client_secret + account_url)
 """
 
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
+
+
+class _CallRecorder:
+    def __init__(self, return_value: Any = None) -> None:
+        self.return_value = return_value
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self.calls) == 1
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+
+class _BlobServiceClientConstructor:
+    def __init__(self, return_value: Any = None) -> None:
+        self.return_value = object() if return_value is None else return_value
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.from_connection_string = _CallRecorder(return_value=self.return_value)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return self.return_value
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
 
 
 class TestAzureAuthConfigValid:
@@ -236,15 +268,14 @@ class TestAzureAuthConfigCreateClient:
             connection_string="DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key;EndpointSuffix=core.windows.net"
         )
 
-        mock_client = MagicMock()
-        mock_blob_service_client = MagicMock()
-        mock_blob_service_client.from_connection_string.return_value = mock_client
+        client = object()
+        blob_service_client = _BlobServiceClientConstructor(return_value=client)
 
-        with patch.dict("sys.modules", {"azure.storage.blob": MagicMock(BlobServiceClient=mock_blob_service_client)}):
-            client = config.create_blob_service_client()
+        with patch.dict("sys.modules", {"azure.storage.blob": SimpleNamespace(BlobServiceClient=blob_service_client)}):
+            created_client = config.create_blob_service_client()
 
-            mock_blob_service_client.from_connection_string.assert_called_once_with(config.connection_string)
-            assert client is mock_client
+            blob_service_client.from_connection_string.assert_called_once_with(config.connection_string)
+            assert created_client is client
 
     def test_sas_token_creates_client_with_url(self) -> None:
         """SAS token auth creates client with SAS appended to URL."""
@@ -253,16 +284,16 @@ class TestAzureAuthConfigCreateClient:
             account_url="https://mystorageaccount.blob.core.windows.net",
         )
 
-        mock_client = MagicMock()
-        mock_blob_service_client = MagicMock(return_value=mock_client)
+        client = object()
+        blob_service_client = _BlobServiceClientConstructor(return_value=client)
 
-        with patch.dict("sys.modules", {"azure.storage.blob": MagicMock(BlobServiceClient=mock_blob_service_client)}):
-            client = config.create_blob_service_client()
+        with patch.dict("sys.modules", {"azure.storage.blob": SimpleNamespace(BlobServiceClient=blob_service_client)}):
+            created_client = config.create_blob_service_client()
 
             # SAS token should be appended with ? prefix
             expected_url = "https://mystorageaccount.blob.core.windows.net?sv=2022-11-02&ss=b"
-            mock_blob_service_client.assert_called_once_with(expected_url)
-            assert client is mock_client
+            blob_service_client.assert_called_once_with(expected_url)
+            assert created_client is client
 
     def test_sas_token_with_question_mark_creates_client(self) -> None:
         """SAS token with ? prefix doesn't get double ?."""
@@ -271,16 +302,16 @@ class TestAzureAuthConfigCreateClient:
             account_url="https://mystorageaccount.blob.core.windows.net",
         )
 
-        mock_client = MagicMock()
-        mock_blob_service_client = MagicMock(return_value=mock_client)
+        client = object()
+        blob_service_client = _BlobServiceClientConstructor(return_value=client)
 
-        with patch.dict("sys.modules", {"azure.storage.blob": MagicMock(BlobServiceClient=mock_blob_service_client)}):
-            client = config.create_blob_service_client()
+        with patch.dict("sys.modules", {"azure.storage.blob": SimpleNamespace(BlobServiceClient=blob_service_client)}):
+            created_client = config.create_blob_service_client()
 
             # Should NOT have double ?
             expected_url = "https://mystorageaccount.blob.core.windows.net?sv=2022-11-02&ss=b"
-            mock_blob_service_client.assert_called_once_with(expected_url)
-            assert client is mock_client
+            blob_service_client.assert_called_once_with(expected_url)
+            assert created_client is client
 
     def test_sas_token_strips_trailing_slash_from_url(self) -> None:
         """SAS token auth strips trailing slash from account_url."""
@@ -289,14 +320,14 @@ class TestAzureAuthConfigCreateClient:
             account_url="https://mystorageaccount.blob.core.windows.net/",
         )
 
-        mock_blob_service_client = MagicMock()
+        blob_service_client = _BlobServiceClientConstructor()
 
-        with patch.dict("sys.modules", {"azure.storage.blob": MagicMock(BlobServiceClient=mock_blob_service_client)}):
+        with patch.dict("sys.modules", {"azure.storage.blob": SimpleNamespace(BlobServiceClient=blob_service_client)}):
             config.create_blob_service_client()
 
             # Should NOT have double slash before ?
             expected_url = "https://mystorageaccount.blob.core.windows.net?sv=2022-11-02"
-            mock_blob_service_client.assert_called_once_with(expected_url)
+            blob_service_client.assert_called_once_with(expected_url)
 
     def test_managed_identity_creates_client_with_credential(self) -> None:
         """Managed Identity auth creates client with DefaultAzureCredential."""
@@ -305,20 +336,20 @@ class TestAzureAuthConfigCreateClient:
             account_url="https://mystorageaccount.blob.core.windows.net",
         )
 
-        mock_client = MagicMock()
-        mock_blob_service_client = MagicMock(return_value=mock_client)
-        mock_credential = MagicMock()
-        mock_default_azure_credential = MagicMock(return_value=mock_credential)
+        client = object()
+        blob_service_client = _BlobServiceClientConstructor(return_value=client)
+        credential = object()
+        default_azure_credential = _CallRecorder(return_value=credential)
 
         with (
-            patch.dict("sys.modules", {"azure.storage.blob": MagicMock(BlobServiceClient=mock_blob_service_client)}),
-            patch.dict("sys.modules", {"azure.identity": MagicMock(DefaultAzureCredential=mock_default_azure_credential)}),
+            patch.dict("sys.modules", {"azure.storage.blob": SimpleNamespace(BlobServiceClient=blob_service_client)}),
+            patch.dict("sys.modules", {"azure.identity": SimpleNamespace(DefaultAzureCredential=default_azure_credential)}),
         ):
-            client = config.create_blob_service_client()
+            created_client = config.create_blob_service_client()
 
-            mock_default_azure_credential.assert_called_once()
-            mock_blob_service_client.assert_called_once_with(config.account_url, credential=mock_credential)
-            assert client is mock_client
+            default_azure_credential.assert_called_once()
+            blob_service_client.assert_called_once_with(config.account_url, credential=credential)
+            assert created_client is client
 
     def test_service_principal_creates_client_with_credential(self) -> None:
         """Service Principal auth creates client with ClientSecretCredential."""
@@ -329,24 +360,24 @@ class TestAzureAuthConfigCreateClient:
             account_url="https://mystorageaccount.blob.core.windows.net",
         )
 
-        mock_client = MagicMock()
-        mock_blob_service_client = MagicMock(return_value=mock_client)
-        mock_credential = MagicMock()
-        mock_client_secret_credential = MagicMock(return_value=mock_credential)
+        client = object()
+        blob_service_client = _BlobServiceClientConstructor(return_value=client)
+        credential = object()
+        client_secret_credential = _CallRecorder(return_value=credential)
 
         with (
-            patch.dict("sys.modules", {"azure.storage.blob": MagicMock(BlobServiceClient=mock_blob_service_client)}),
-            patch.dict("sys.modules", {"azure.identity": MagicMock(ClientSecretCredential=mock_client_secret_credential)}),
+            patch.dict("sys.modules", {"azure.storage.blob": SimpleNamespace(BlobServiceClient=blob_service_client)}),
+            patch.dict("sys.modules", {"azure.identity": SimpleNamespace(ClientSecretCredential=client_secret_credential)}),
         ):
-            client = config.create_blob_service_client()
+            created_client = config.create_blob_service_client()
 
-            mock_client_secret_credential.assert_called_once_with(
+            client_secret_credential.assert_called_once_with(
                 tenant_id="tenant-id",
                 client_id="client-id",
                 client_secret="client-secret",
             )
-            mock_blob_service_client.assert_called_once_with(config.account_url, credential=mock_credential)
-            assert client is mock_client
+            blob_service_client.assert_called_once_with(config.account_url, credential=credential)
+            assert created_client is client
 
     def test_connection_string_with_partial_service_principal_raises(self) -> None:
         """Partial service principal fields are invalid even with connection string."""

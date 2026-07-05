@@ -10,7 +10,7 @@ import socket
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -22,6 +22,113 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.transforms.web_scrape import WebScrapeTransform
 from elspeth.testing import make_pipeline_row
+
+
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> Any:
+        return (self.args, self.kwargs)[index]
+
+
+class _RecordCallRecorder:
+    def __init__(self) -> None:
+        self.calls: list[_RecordedCall] = []
+
+    @property
+    def call_args(self) -> _RecordedCall | None:
+        return self.calls[-1] if self.calls else None
+
+    def __call__(
+        self,
+        *,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        kwargs = {
+            "state_id": state_id,
+            "call_index": call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+            "request_ref": request_ref,
+            "response_ref": response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
+        }
+        self.calls.append(_RecordedCall((), kwargs))
+        return Call(
+            call_id=f"test-call-{len(self.calls)}",
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_hash="test-request-hash",
+            created_at=datetime.now(UTC),
+            state_id=state_id,
+            request_ref=request_ref or "test-request-ref-hash",
+            response_hash="test-response-hash" if response_data is not None else None,
+            response_ref=response_ref or ("test-response-ref-hash" if response_data is not None else None),
+            latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
+        )
+
+
+class _AuditWriterDouble:
+    def __init__(self) -> None:
+        self._call_index = 0
+        self.record_call = _RecordCallRecorder()
+
+    def allocate_call_index(self, state_id: str) -> int:
+        call_index = self._call_index
+        self._call_index += 1
+        return call_index
+
+    def store_payload(self, data: bytes) -> str:
+        return "test-processed-hash"
+
+
+class _RateLimitRegistryDouble:
+    def get_limiter(self, service_name: str) -> None:
+        return None
+
+
+class _PayloadStoreDouble:
+    def store(self, data: bytes) -> str:
+        return "test-processed-hash"
+
+
+class _HTTPClientDouble:
+    def __init__(self, response: httpx.Response | None = None) -> None:
+        self.response = response
+        self.closed = False
+        self.stream_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __enter__(self) -> "_HTTPClientDouble":
+        return self
+
+    def __exit__(self, *_args: Any) -> bool:
+        return False
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        self.stream_calls.append((args, kwargs))
+        assert self.response is not None
+        return nullcontext(self.response)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _mock_getaddrinfo(ip: str) -> Any:
@@ -64,39 +171,12 @@ def transform(mock_ctx):
 @pytest.fixture
 def mock_ctx():
     """Create PluginContext with required attributes for security testing."""
-    landscape = Mock()
-
-    # Configure record_call to return a proper Call object so process() can
-    # read call.request_ref and call.response_ref without FrameworkBugError.
-    mock_call = Call(
-        call_id="test-call-id",
-        call_index=0,
-        call_type=CallType.HTTP,
-        status=CallStatus.SUCCESS,
-        request_hash="test-request-hash",
-        created_at=datetime.now(UTC),
-        state_id="state-123",
-        request_ref="test-request-ref-hash",
-        response_hash="test-response-hash",
-        response_ref="test-response-ref-hash",
-        latency_ms=100.0,
-    )
-    landscape.record_call.return_value = mock_call
-    landscape.allocate_call_index.return_value = 0
-    landscape.store_payload.return_value = "test-processed-hash"
-
-    rate_limit_registry = Mock()
-    rate_limit_registry.get_limiter.return_value = None
-
-    payload_store = Mock()
-    payload_store.store.return_value = "test-processed-hash"
-
     ctx = PluginContext(
         run_id="test-run-456",
         config={},
-        landscape=landscape,
-        payload_store=payload_store,
-        rate_limit_registry=rate_limit_registry,
+        landscape=_AuditWriterDouble(),
+        payload_store=_PayloadStoreDouble(),
+        rate_limit_registry=_RateLimitRegistryDouble(),
         state_id="state-123",
     )
 
@@ -425,29 +505,23 @@ class TestRedirectAllowedRangesBehavior:
                 "elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf",
                 return_value=redirect_safe,
             ),
-            patch("httpx.Client") as MockClient,
+            patch("httpx.Client") as httpx_client_factory,
         ):
-            shared_client = Mock()
-            shared_client.close = Mock()
-            initial_client = Mock()
-            initial_client.__enter__ = Mock(return_value=initial_client)
-            initial_client.__exit__ = Mock(return_value=False)
             initial_response = httpx.Response(
                 301,
                 headers={"location": "http://localhost/redirected"},
                 request=httpx.Request("GET", "http://93.184.216.34:80/start"),
             )
-            initial_client.stream.return_value = nullcontext(initial_response)
-            hop_client = Mock()
-            hop_client.__enter__ = Mock(return_value=hop_client)
-            hop_client.__exit__ = Mock(return_value=False)
             hop_response = httpx.Response(
                 200,
                 text="<html>Local content</html>",
                 request=httpx.Request("GET", "http://127.0.0.1:80/redirected"),
             )
-            hop_client.stream.return_value = nullcontext(hop_response)
-            MockClient.side_effect = [shared_client, initial_client, hop_client]
+            httpx_client_factory.side_effect = [
+                _HTTPClientDouble(),
+                _HTTPClientDouble(initial_response),
+                _HTTPClientDouble(hop_response),
+            ]
 
             result = allowed_loopback_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)
 
@@ -478,18 +552,14 @@ class TestRedirectAllowedRangesBehavior:
                 "elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf",
                 side_effect=SSRFBlockedError("Blocked IP range: 192.168.1.1"),
             ),
-            patch("httpx.Client") as MockClient,
+            patch("httpx.Client") as httpx_client_factory,
         ):
-            initial_client = Mock()
-            initial_client.__enter__ = Mock(return_value=initial_client)
-            initial_client.__exit__ = Mock(return_value=False)
             initial_response = httpx.Response(
                 301,
                 headers={"location": "http://192.168.1.1/internal"},
                 request=httpx.Request("GET", "http://93.184.216.34:80/start"),
             )
-            initial_client.stream.return_value = nullcontext(initial_response)
-            MockClient.return_value = initial_client
+            httpx_client_factory.side_effect = [_HTTPClientDouble(), _HTTPClientDouble(initial_response)]
 
             result = allowed_loopback_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)
 
@@ -519,18 +589,14 @@ class TestRedirectAllowedRangesBehavior:
                 "elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf",
                 side_effect=SSRFBlockedError("Always-blocked IP range: 169.254.169.254"),
             ),
-            patch("httpx.Client") as MockClient,
+            patch("httpx.Client") as httpx_client_factory,
         ):
-            initial_client = Mock()
-            initial_client.__enter__ = Mock(return_value=initial_client)
-            initial_client.__exit__ = Mock(return_value=False)
             initial_response = httpx.Response(
                 301,
                 headers={"location": "http://169.254.169.254/latest/meta-data/"},
                 request=httpx.Request("GET", "http://93.184.216.34:80/start"),
             )
-            initial_client.stream.return_value = nullcontext(initial_response)
-            MockClient.return_value = initial_client
+            httpx_client_factory.side_effect = [_HTTPClientDouble(), _HTTPClientDouble(initial_response)]
 
             result = allow_private_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)
 

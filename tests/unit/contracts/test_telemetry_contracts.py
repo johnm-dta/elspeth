@@ -24,9 +24,11 @@ Each test verifies:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import create_autospec, patch
 
+import httpx
 import pytest
 
 from elspeth.contracts import (
@@ -34,6 +36,7 @@ from elspeth.contracts import (
     CallType,
     Determinism,
 )
+from elspeth.contracts.audit_protocols import CallRecorder
 from elspeth.contracts.enums import RunStatus, TelemetryGranularity
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.core.landscape import LandscapeDB
@@ -50,6 +53,99 @@ from tests.fixtures.telemetry import MockTelemetryConfig, TelemetryTestExporter
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class _RecordedCall:
+    request_hash: str = "req_hash_123"
+    response_hash: str = "resp_hash_456"
+
+
+@dataclass(frozen=True)
+class _OpenAIMessage:
+    content: str
+
+
+@dataclass(frozen=True)
+class _OpenAIChoice:
+    message: _OpenAIMessage
+    finish_reason: str = "stop"
+
+
+@dataclass(frozen=True)
+class _OpenAIUsage:
+    prompt_tokens: int = 10
+    completion_tokens: int = 5
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class _OpenAIResponse:
+    choices: list[_OpenAIChoice]
+    model: str
+    usage: _OpenAIUsage = field(default_factory=_OpenAIUsage)
+    raw_response: dict[str, Any] = field(default_factory=lambda: {"id": "resp_123"})
+
+    def model_dump(self) -> dict[str, Any]:
+        return dict(self.raw_response)
+
+
+class _OpenAICompletions:
+    def __init__(self, *, response: _OpenAIResponse | None = None, error: Exception | None = None) -> None:
+        self._response = response
+        self._error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> _OpenAIResponse:
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+        if self._response is None:
+            raise RuntimeError("OpenAI fake requires a response or error")
+        return self._response
+
+
+class _OpenAIChat:
+    def __init__(self, completions: _OpenAICompletions) -> None:
+        self.completions = completions
+
+
+class _OpenAIClient:
+    def __init__(self, *, response: _OpenAIResponse | None = None, error: Exception | None = None) -> None:
+        self.chat = _OpenAIChat(_OpenAICompletions(response=response, error=error))
+
+
+def _make_execution_recorder(
+    *,
+    request_hash: str = "req_hash_123",
+    response_hash: str = "resp_hash_456",
+) -> Any:
+    execution = create_autospec(CallRecorder, instance=True)
+    execution.allocate_call_index.return_value = 0
+    execution.allocate_operation_call_index.return_value = 0
+    execution.record_call.return_value = _RecordedCall(request_hash=request_hash, response_hash=response_hash)
+    return execution
+
+
+def _make_openai_response(*, content: str = "Hello!", model: str = "gpt-4") -> _OpenAIResponse:
+    return _OpenAIResponse(
+        choices=[_OpenAIChoice(message=_OpenAIMessage(content=content))],
+        model=model,
+    )
+
+
+def _make_openai_client(
+    *,
+    content: str = "Hello!",
+    model: str = "gpt-4",
+    error: Exception | None = None,
+) -> _OpenAIClient:
+    response = None if error is not None else _make_openai_response(content=content, model=model)
+    return _OpenAIClient(response=response, error=error)
+
+
+def _json_response(status_code: int, body: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(status_code, json=body, headers={"content-type": "application/json"})
+
+
 class TestAuditedLLMClientTelemetryContract:
     """Verify AuditedLLMClient emits ExternalCallCompleted events.
 
@@ -57,48 +153,24 @@ class TestAuditedLLMClientTelemetryContract:
     ExternalCallCompleted with call_type=LLM on every call.
     """
 
-    def _create_mock_execution(self) -> MagicMock:
-        """Create a mock ExecutionRepository."""
-        execution = MagicMock()
-        recorded_call = MagicMock()
-        recorded_call.request_hash = "req_hash_123"
-        recorded_call.response_hash = "resp_hash_456"
-        execution.record_call.return_value = recorded_call
-        return execution
+    def _create_execution_recorder(self) -> Any:
+        """Create an autospecced call recorder."""
+        return _make_execution_recorder()
 
-    def _create_mock_openai_client(
+    def _create_openai_client(
         self,
         content: str = "Hello!",
         model: str = "gpt-4",
-    ) -> MagicMock:
-        """Create a mock OpenAI client."""
-        message = Mock()
-        message.content = content
-
-        choice = Mock()
-        choice.message = message
-
-        usage = Mock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-
-        response = Mock()
-        response.choices = [choice]
-        response.model = model
-        response.usage = usage
-        response.model_dump = Mock(return_value={"id": "resp_123"})
-
-        client = MagicMock()
-        client.chat.completions.create.return_value = response
-
-        return client
+    ) -> _OpenAIClient:
+        """Create an OpenAI-compatible fake client."""
+        return _make_openai_client(content=content, model=model)
 
     def test_llm_client_emits_external_call_completed_on_success(self) -> None:
         """AuditedLLMClient emits ExternalCallCompleted on successful call."""
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        execution = self._create_mock_execution()
-        openai_client = self._create_mock_openai_client()
+        execution = self._create_execution_recorder()
+        openai_client = self._create_openai_client()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -146,9 +218,8 @@ class TestAuditedLLMClientTelemetryContract:
         """AuditedLLMClient emits ExternalCallCompleted on failed call."""
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient, LLMClientError
 
-        execution = self._create_mock_execution()
-        openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception("API error")
+        execution = self._create_execution_recorder()
+        openai_client = _make_openai_client(error=Exception("API error"))
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -193,34 +264,24 @@ class TestAuditedHTTPClientTelemetryContract:
     ExternalCallCompleted with call_type=HTTP on every call.
     """
 
-    def _create_mock_execution(self) -> MagicMock:
-        """Create a mock ExecutionRepository."""
-        execution = MagicMock()
-        recorded_call = MagicMock()
-        recorded_call.request_hash = "req_hash_123"
-        recorded_call.response_hash = "resp_hash_456"
-        execution.record_call.return_value = recorded_call
-        return execution
+    def _create_execution_recorder(self) -> Any:
+        """Create an autospecced call recorder."""
+        return _make_execution_recorder()
 
     def test_http_client_emits_external_call_completed_on_success(self) -> None:
         """AuditedHTTPClient emits ExternalCallCompleted on successful POST."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        execution = self._create_mock_execution()
+        execution = self._create_execution_recorder()
 
         emitted_events: list[ExternalCallCompleted] = []
 
         def telemetry_emit(event: ExternalCallCompleted) -> None:
             emitted_events.append(event)
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"result": "success"}
-        mock_response.text = '{"result": "success"}'
-        mock_response.content = b'{"result": "success"}'
-        mock_response.headers = {"content-type": "application/json"}
+        http_response = _json_response(200, {"result": "success"})
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("httpx.Client", autospec=True) as mock_client_class:
             client = AuditedHTTPClient(
                 execution=execution,
                 state_id="state_123",
@@ -229,7 +290,7 @@ class TestAuditedHTTPClientTelemetryContract:
                 telemetry_emit=telemetry_emit,
             )
             mock_client_instance = mock_client_class.return_value
-            mock_client_instance.post.return_value = mock_response
+            mock_client_instance.post.return_value = http_response
 
             client.post("/endpoint", json={"input": "test"})
 
@@ -251,18 +312,16 @@ class TestAuditedHTTPClientTelemetryContract:
 
     def test_http_client_emits_external_call_completed_on_error(self) -> None:
         """AuditedHTTPClient emits ExternalCallCompleted on network error."""
-        import httpx
-
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        execution = self._create_mock_execution()
+        execution = self._create_execution_recorder()
 
         emitted_events: list[ExternalCallCompleted] = []
 
         def telemetry_emit(event: ExternalCallCompleted) -> None:
             emitted_events.append(event)
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("httpx.Client", autospec=True) as mock_client_class:
             client = AuditedHTTPClient(
                 execution=execution,
                 state_id="state_123",
@@ -290,21 +349,16 @@ class TestAuditedHTTPClientTelemetryContract:
         """AuditedHTTPClient emits ExternalCallCompleted on GET request."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        execution = self._create_mock_execution()
+        execution = self._create_execution_recorder()
 
         emitted_events: list[ExternalCallCompleted] = []
 
         def telemetry_emit(event: ExternalCallCompleted) -> None:
             emitted_events.append(event)
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"data": "value"}
-        mock_response.text = '{"data": "value"}'
-        mock_response.content = b'{"data": "value"}'
-        mock_response.headers = {"content-type": "application/json"}
+        http_response = _json_response(200, {"data": "value"})
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("httpx.Client", autospec=True) as mock_client_class:
             client = AuditedHTTPClient(
                 execution=execution,
                 state_id="state_123",
@@ -313,7 +367,7 @@ class TestAuditedHTTPClientTelemetryContract:
                 telemetry_emit=telemetry_emit,
             )
             mock_client_instance = mock_client_class.return_value
-            mock_client_instance.get.return_value = mock_response
+            mock_client_instance.get.return_value = http_response
 
             client.get("/endpoint")
 
@@ -500,11 +554,7 @@ class TestPluginTelemetryThroughAuditedClients:
         """
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        execution = MagicMock()
-        execution.record_call.return_value = MagicMock(
-            request_hash="hash1",
-            response_hash="hash2",
-        )
+        execution = _make_execution_recorder(request_hash="hash1", response_hash="hash2")
 
         # Simulate the telemetry callback that would come from Orchestrator
         exporter = TelemetryTestExporter()
@@ -512,22 +562,12 @@ class TestPluginTelemetryThroughAuditedClients:
         def telemetry_emit(event: Any) -> None:
             exporter.export(event)
 
-        # Mock OpenAI client
-        mock_response = Mock()
-        mock_response.choices = [Mock(message=Mock(content="Hello!"))]
-        mock_response.model = "gpt-4"
-        mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-        mock_response.model_dump = Mock(return_value={})
-
-        mock_openai = MagicMock()
-        mock_openai.chat.completions.create.return_value = mock_response
-
         client = AuditedLLMClient(
             execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=telemetry_emit,
-            underlying_client=mock_openai,
+            underlying_client=_make_openai_client(),
             provider="azure",
         )
 
@@ -551,11 +591,7 @@ class TestPluginTelemetryThroughAuditedClients:
         """
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        execution = MagicMock()
-        execution.record_call.return_value = MagicMock(
-            request_hash="hash1",
-            response_hash="hash2",
-        )
+        execution = _make_execution_recorder(request_hash="hash1", response_hash="hash2")
 
         # Simulate the telemetry callback that would come from Orchestrator
         exporter = TelemetryTestExporter()
@@ -563,14 +599,9 @@ class TestPluginTelemetryThroughAuditedClients:
         def telemetry_emit(event: Any) -> None:
             exporter.export(event)
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
-        mock_response.text = '{"success": true}'
-        mock_response.content = b'{"success": true}'
-        mock_response.headers = {"content-type": "application/json"}
+        http_response = _json_response(200, {"success": True})
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("httpx.Client", autospec=True) as mock_client_class:
             client = AuditedHTTPClient(
                 execution=execution,
                 state_id="state-1",
@@ -579,7 +610,7 @@ class TestPluginTelemetryThroughAuditedClients:
                 base_url="https://api.example.com",
             )
             mock_instance = mock_client_class.return_value
-            mock_instance.post.return_value = mock_response
+            mock_instance.post.return_value = http_response
 
             client.post("/endpoint", json={"data": "test"})
 
@@ -610,32 +641,23 @@ class TestTelemetryEmissionOrderContract:
 
         call_order: list[str] = []
 
-        execution = MagicMock()
+        execution = _make_execution_recorder()
 
         def mock_record_call(**kwargs):
             call_order.append("landscape")
-            return MagicMock(request_hash="hash1", response_hash="hash2")
+            return _RecordedCall(request_hash="hash1", response_hash="hash2")
 
         execution.record_call.side_effect = mock_record_call
 
         def telemetry_emit(event: Any) -> None:
             call_order.append("telemetry")
 
-        mock_response = Mock()
-        mock_response.choices = [Mock(message=Mock(content="Hello!"))]
-        mock_response.model = "gpt-4"
-        mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-        mock_response.model_dump = Mock(return_value={})
-
-        mock_openai = MagicMock()
-        mock_openai.chat.completions.create.return_value = mock_response
-
         client = AuditedLLMClient(
             execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=telemetry_emit,
-            underlying_client=mock_openai,
+            underlying_client=_make_openai_client(),
             provider="azure",
         )
 
@@ -653,25 +675,20 @@ class TestTelemetryEmissionOrderContract:
 
         call_order: list[str] = []
 
-        execution = MagicMock()
+        execution = _make_execution_recorder()
 
         def mock_record_call(**kwargs):
             call_order.append("landscape")
-            return MagicMock(request_hash="hash1", response_hash="hash2")
+            return _RecordedCall(request_hash="hash1", response_hash="hash2")
 
         execution.record_call.side_effect = mock_record_call
 
         def telemetry_emit(event: Any) -> None:
             call_order.append("telemetry")
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
-        mock_response.text = '{"success": true}'
-        mock_response.content = b'{"success": true}'
-        mock_response.headers = {"content-type": "application/json"}
+        http_response = _json_response(200, {"success": True})
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("httpx.Client", autospec=True) as mock_client_class:
             client = AuditedHTTPClient(
                 execution=execution,
                 state_id="state-1",
@@ -680,7 +697,7 @@ class TestTelemetryEmissionOrderContract:
                 base_url="https://api.example.com",
             )
             mock_instance = mock_client_class.return_value
-            mock_instance.post.return_value = mock_response
+            mock_instance.post.return_value = http_response
 
             client.post("/endpoint", json={"data": "test"})
 
@@ -695,7 +712,7 @@ class TestTelemetryEmissionOrderContract:
         """
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        execution = MagicMock()
+        execution = _make_execution_recorder()
         execution.record_call.side_effect = Exception("Database error")
 
         emitted_events: list[Any] = []
@@ -703,21 +720,12 @@ class TestTelemetryEmissionOrderContract:
         def telemetry_emit(event: Any) -> None:
             emitted_events.append(event)
 
-        mock_response = Mock()
-        mock_response.choices = [Mock(message=Mock(content="Hello!"))]
-        mock_response.model = "gpt-4"
-        mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-        mock_response.model_dump = Mock(return_value={})
-
-        mock_openai = MagicMock()
-        mock_openai.chat.completions.create.return_value = mock_response
-
         client = AuditedLLMClient(
             execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=telemetry_emit,
-            underlying_client=mock_openai,
+            underlying_client=_make_openai_client(),
             provider="azure",
         )
 
@@ -750,30 +758,17 @@ class TestTelemetryFailureIsolationContract:
         """AuditedLLMClient isolates telemetry failure from call result."""
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        execution = MagicMock()
-        execution.record_call.return_value = MagicMock(
-            request_hash="hash1",
-            response_hash="hash2",
-        )
+        execution = _make_execution_recorder(request_hash="hash1", response_hash="hash2")
 
         def failing_telemetry_emit(event: Any) -> None:
             raise RuntimeError("Telemetry export failed!")
-
-        mock_response = Mock()
-        mock_response.choices = [Mock(message=Mock(content="Hello!"))]
-        mock_response.model = "gpt-4"
-        mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-        mock_response.model_dump = Mock(return_value={})
-
-        mock_openai = MagicMock()
-        mock_openai.chat.completions.create.return_value = mock_response
 
         client = AuditedLLMClient(
             execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=failing_telemetry_emit,
-            underlying_client=mock_openai,
+            underlying_client=_make_openai_client(),
             provider="azure",
         )
 
@@ -796,23 +791,14 @@ class TestTelemetryFailureIsolationContract:
         """AuditedHTTPClient isolates telemetry failure from call result."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        execution = MagicMock()
-        execution.record_call.return_value = MagicMock(
-            request_hash="hash1",
-            response_hash="hash2",
-        )
+        execution = _make_execution_recorder(request_hash="hash1", response_hash="hash2")
 
         def failing_telemetry_emit(event: Any) -> None:
             raise RuntimeError("Telemetry export failed!")
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
-        mock_response.text = '{"success": true}'
-        mock_response.content = b'{"success": true}'
-        mock_response.headers = {"content-type": "application/json"}
+        http_response = _json_response(200, {"success": True})
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("httpx.Client", autospec=True) as mock_client_class:
             client = AuditedHTTPClient(
                 execution=execution,
                 state_id="state-1",
@@ -821,7 +807,7 @@ class TestTelemetryFailureIsolationContract:
                 base_url="https://api.example.com",
             )
             mock_instance = mock_client_class.return_value
-            mock_instance.post.return_value = mock_response
+            mock_instance.post.return_value = http_response
 
             # CONTRACT: Call should succeed despite telemetry failure
             response = client.post("/endpoint", json={"data": "test"})

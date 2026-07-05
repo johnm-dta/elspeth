@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
+from elspeth.contracts import PluginSchema
+from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.errors import SinkTransactionalInvariantError
 from elspeth.core.canonical import canonical_json
 from elspeth.engine.executors.sink import SinkExecutor
 from elspeth.plugins.infrastructure.clients.dataverse import (
+    DataverseClient,
     DataverseClientError,
     DataversePageResponse,
 )
@@ -44,6 +47,10 @@ _BASE_CONFIG: dict[str, Any] = {
 }
 
 
+class FakeDataverseRowSchema(PluginSchema):
+    """Schema factory return value for tests that do not exercise schema coercion."""
+
+
 def _config(**overrides: Any) -> dict[str, Any]:
     """Return a base config dict with optional overrides."""
     cfg = dict(_BASE_CONFIG)
@@ -64,6 +71,36 @@ def _make_204_response() -> DataversePageResponse:
         paging_cookie=None,
         more_records=None,  # No body → no morerecords field
     )
+
+
+def _make_dataverse_client_double() -> Any:
+    """Create an interaction double specced to the real Dataverse client."""
+    return create_autospec(DataverseClient, instance=True, spec_set=True)
+
+
+def _make_sink_context_double() -> Any:
+    """Create a sink context double with a specced record_call method."""
+    ctx = create_autospec(SinkContext, instance=True, spec_set=True)
+    ctx.run_id = "test-run-123"
+    ctx.contract = None
+    ctx.landscape = None
+    ctx.operation_id = "op-001"
+    return ctx
+
+
+def _make_lifecycle_context_double(*, run_id: str = "test-run-123") -> Any:
+    """Create a lifecycle context double for on_start tests."""
+    ctx = create_autospec(LifecycleContext, instance=True, spec_set=True)
+    ctx.run_id = run_id
+    ctx.node_id = "sink-node"
+    ctx.operation_id = "op-001"
+    ctx.landscape = None
+    ctx.payload_store = None
+    ctx.rate_limit_registry = None
+    ctx.telemetry_emit = lambda event: None
+    ctx.concurrency_config = None
+    ctx.shutdown_event = None
+    return ctx
 
 
 def _plugin_context_for_operation_calls(*, telemetry_emit: Any) -> Any:
@@ -371,13 +408,13 @@ class TestDataverseSinkConfig:
 class TestDataverseSinkInit:
     """Tests for DataverseSink constructor validation."""
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_alternate_key_not_in_field_mapping_values_raises(self, _mock_schema: MagicMock) -> None:
         """alternate_key must be a Dataverse column that appears as a value in field_mapping."""
         with pytest.raises(PluginConfigError, match="not found in field_mapping values"):
             DataverseSink(_config(alternate_key="nonexistent_column"))
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_alternate_key_pipeline_field_resolved(self, _mock_schema: MagicMock) -> None:
         """The pipeline field for the alternate key should be resolved from field_mapping."""
         sink = inject_write_failure(DataverseSink(_config()))
@@ -386,7 +423,7 @@ class TestDataverseSinkInit:
         # So _alternate_key_pipeline_field should be "email"
         assert sink._alternate_key_pipeline_field == "email"
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_observed_schema_required_fields_populate_declared_required_fields(self, _mock_schema: MagicMock) -> None:
         """Observed-mode required_fields must become the sink boundary contract."""
         sink = inject_write_failure(
@@ -402,7 +439,7 @@ class TestDataverseSinkInit:
 
         assert sink.declared_required_fields == frozenset({"must_exist_for_contract"})
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_observed_schema_required_fields_fail_sink_boundary(self, _mock_schema: MagicMock) -> None:
         """Missing observed required fields must fail before Dataverse write I/O."""
         sink = inject_write_failure(
@@ -436,7 +473,7 @@ class TestFieldMappingAndLookups:
         """Create a DataverseSink without calling on_start."""
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
+            return_value=FakeDataverseRowSchema,
         ):
             return inject_write_failure(DataverseSink(_config(**overrides)))
 
@@ -534,7 +571,7 @@ class TestBuildUpsertUrl:
     def _make_sink(self) -> DataverseSink:
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
+            return_value=FakeDataverseRowSchema,
         ):
             return inject_write_failure(DataverseSink(_config()))
 
@@ -570,20 +607,18 @@ class TestArtifactDescriptor:
     def _make_sink_with_mock_client(self) -> tuple[DataverseSink, MagicMock]:
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
+            return_value=FakeDataverseRowSchema,
         ):
             sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = _make_204_response()
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
         return sink, mock_client
 
     def _make_mock_ctx(self) -> MagicMock:
-        ctx = MagicMock()
-        ctx.record_call = MagicMock()
-        ctx.run_id = "test-run-123"
+        ctx = _make_sink_context_double()
         return ctx
 
     def test_empty_rows_returns_empty_hash(self) -> None:
@@ -638,12 +673,10 @@ class TestWriteLifecycle:
     """Tests for on_start and write lifecycle."""
 
     def _make_mock_ctx(self) -> MagicMock:
-        ctx = MagicMock()
-        ctx.record_call = MagicMock()
-        ctx.run_id = "test-run-123"
+        ctx = _make_sink_context_double()
         return ctx
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     @patch("elspeth.plugins.sinks.dataverse.DataverseClient")
     @patch("azure.identity.ClientSecretCredential")
     def test_on_start_constructs_credential_and_client(
@@ -651,10 +684,7 @@ class TestWriteLifecycle:
     ) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_lifecycle = MagicMock()
-        mock_lifecycle.run_id = "test-run-123"
-        mock_lifecycle.telemetry_emit = MagicMock()
-        mock_lifecycle.rate_limit_registry = None
+        mock_lifecycle = _make_lifecycle_context_double()
 
         sink.on_start(mock_lifecycle)
 
@@ -666,27 +696,24 @@ class TestWriteLifecycle:
         mock_client_cls.assert_called_once()
         assert sink._client is not None
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     @patch("elspeth.plugins.sinks.dataverse.DataverseClient")
     @patch("azure.identity.ManagedIdentityCredential")
     def test_on_start_managed_identity(self, mock_mi_cls: MagicMock, _mock_client_cls: MagicMock, _mock_schema: MagicMock) -> None:
         cfg = _config(auth={"method": "managed_identity"})
         sink = inject_write_failure(DataverseSink(cfg))
 
-        mock_lifecycle = MagicMock()
-        mock_lifecycle.run_id = "run-mi"
-        mock_lifecycle.telemetry_emit = MagicMock()
-        mock_lifecycle.rate_limit_registry = None
+        mock_lifecycle = _make_lifecycle_context_double(run_id="run-mi")
 
         sink.on_start(mock_lifecycle)
 
         mock_mi_cls.assert_called_once()
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_write_processes_rows_serially(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = _make_204_response()
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -703,11 +730,11 @@ class TestWriteLifecycle:
         # Each row should trigger one upsert call
         assert mock_client.upsert.call_count == 3
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_each_row_gets_record_call(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = _make_204_response()
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -728,12 +755,12 @@ class TestWriteLifecycle:
             assert call.kwargs["status"].value == "success"
             assert call.kwargs["provider"] == "dataverse"
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_write_emits_single_completion_event_via_plugin_context(self, _mock_schema: MagicMock) -> None:
         """Real PluginContext path emits one completion event per Dataverse write."""
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = _make_204_response()
         sink._client = mock_client
 
@@ -749,7 +776,7 @@ class TestWriteLifecycle:
         assert event.request_hash == "req-hash"
         assert event.response_hash == "resp-hash"
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_per_row_attributable_400_diverts_not_raises(self, _mock_schema: MagicMock) -> None:
         """A non-retryable 400 is per-row-attributable: divert the row, don't abort the batch.
 
@@ -761,7 +788,7 @@ class TestWriteLifecycle:
         """
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = DataverseClientError(
             "Bad request (400)",
             retryable=False,
@@ -786,7 +813,7 @@ class TestWriteLifecycle:
         error_call = ctx.record_call.call_args_list[0]
         assert error_call.kwargs["status"].value == "error"
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_error_records_error_details(self, _mock_schema: MagicMock) -> None:
         """5xx (retryable) is a batch-integrity failure: it must still RAISE, not divert.
 
@@ -795,7 +822,7 @@ class TestWriteLifecycle:
         """
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = DataverseClientError(
             "Server error (500)",
             retryable=True,
@@ -816,13 +843,13 @@ class TestWriteLifecycle:
         assert error_data["retryable"] is True
         assert error_data["error_type"] == "DataverseClientError"
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_error_audit_preserves_request_headers(self, _mock_schema: MagicMock) -> None:
         """elspeth-98855f307a: the write-error audit must include the fingerprinted
         request_headers the client preserved on the error, mirroring the success path."""
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = DataverseClientError(
             "Server error (500)",
             retryable=True,
@@ -842,11 +869,11 @@ class TestWriteLifecycle:
         request_data = ctx.record_call.call_args_list[0].kwargs["request_data"]
         assert request_data["headers"] == {"Authorization": "<fingerprint:abc>"}
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_record_call_includes_url_and_method(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = _make_204_response()
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -860,7 +887,7 @@ class TestWriteLifecycle:
         assert "a%40b.com" in call_kwargs["request_data"]["url"]
         assert call_kwargs["response_data"]["status_code"] == 204
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_success_audit_preserves_client_fingerprinted_request_headers(
         self, _mock_schema: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -873,7 +900,7 @@ class TestWriteLifecycle:
             "Authorization": "<fingerprint:client-produced-fingerprint>",
             "Accept": "application/json",
         }
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = DataversePageResponse(
             status_code=204,
             rows=[],
@@ -893,48 +920,48 @@ class TestWriteLifecycle:
         call_kwargs = ctx.record_call.call_args_list[0].kwargs
         assert call_kwargs["request_data"]["headers"] == fingerprinted_headers
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_empty_alternate_key_value_raises(self, _mock_schema: MagicMock) -> None:
         """Empty string key value is caught by offensive guard."""
         sink = inject_write_failure(DataverseSink(_config()))
-        sink._client = MagicMock()
+        sink._client = _make_dataverse_client_double()
 
         ctx = self._make_mock_ctx()
 
         with pytest.raises(ValueError, match="empty or non-string value"):
             sink.write([{"email": "", "name": "Alice"}], ctx)
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_none_alternate_key_value_raises(self, _mock_schema: MagicMock) -> None:
         """None key value is caught by offensive guard."""
         sink = inject_write_failure(DataverseSink(_config()))
-        sink._client = MagicMock()
+        sink._client = _make_dataverse_client_double()
 
         ctx = self._make_mock_ctx()
 
         with pytest.raises(ValueError, match="empty or non-string value"):
             sink.write([{"email": None, "name": "Alice"}], ctx)
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_numeric_alternate_key_value_raises(self, _mock_schema: MagicMock) -> None:
         """Numeric key value is caught by offensive guard (must be string for URL)."""
         sink = inject_write_failure(DataverseSink(_config()))
-        sink._client = MagicMock()
+        sink._client = _make_dataverse_client_double()
 
         ctx = self._make_mock_ctx()
 
         with pytest.raises(ValueError, match="empty or non-string value"):
             sink.write([{"email": 42, "name": "Alice"}], ctx)
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_flush_is_noop(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
         sink.flush()  # Should not raise
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_close_releases_client(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         sink._client = mock_client
 
         sink.close()
@@ -942,7 +969,7 @@ class TestWriteLifecycle:
         mock_client.close.assert_called_once()
         assert sink._client is None
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_close_without_client_is_safe(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
         assert sink._client is None
@@ -962,25 +989,23 @@ class TestPerRowWriteFailureRouting:
     """
 
     def _make_mock_ctx(self) -> MagicMock:
-        ctx = MagicMock()
-        ctx.record_call = MagicMock()
-        ctx.run_id = "test-run-123"
+        ctx = _make_sink_context_double()
         return ctx
 
     def _make_sink(self, upsert_side_effect: Any) -> tuple[DataverseSink, MagicMock]:
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
+            return_value=FakeDataverseRowSchema,
         ):
             sink = inject_write_failure(DataverseSink(_config()))
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = upsert_side_effect
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
         return sink, mock_client
 
     @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_non_retryable_payload_4xx_diverts(self, _mock_schema: MagicMock, status_code: int) -> None:
         """Structured row-data 4xx about the row payload/key are diverted."""
         sink, _client = self._make_sink(
@@ -1005,7 +1030,7 @@ class TestPerRowWriteFailureRouting:
         assert ctx.record_call.call_args_list[0].kwargs["status"].value == "error"
 
     @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_generic_non_retryable_4xx_raises_fail_closed(self, _mock_schema: MagicMock, status_code: int) -> None:
         """A status-only 4xx is not enough to prove a single-row fault.
 
@@ -1039,7 +1064,7 @@ class TestPerRowWriteFailureRouting:
             (503, True),  # server error
         ],
     )
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_batch_integrity_errors_raise(self, _mock_schema: MagicMock, status_code: int, retryable: bool) -> None:
         """Auth/authz, rate limit, retryable and 5xx errors must raise, not divert."""
         sink, _client = self._make_sink(
@@ -1055,7 +1080,7 @@ class TestPerRowWriteFailureRouting:
         with pytest.raises(DataverseClientError):
             sink.write(rows, ctx)
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_none_status_code_raises_fail_safe(self, _mock_schema: MagicMock) -> None:
         """A DataverseClientError with no status_code cannot be attributed to a
         single row — fail safe by raising rather than silently diverting.
@@ -1073,7 +1098,7 @@ class TestPerRowWriteFailureRouting:
         with pytest.raises(DataverseClientError):
             sink.write(rows, ctx)
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_mid_batch_divert_continues_processing(self, _mock_schema: MagicMock) -> None:
         """Row 0 succeeds, row 1 hits a 400 (diverted), row 2 still succeeds.
 
@@ -1090,10 +1115,10 @@ class TestPerRowWriteFailureRouting:
 
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
+            return_value=FakeDataverseRowSchema,
         ):
             sink = inject_write_failure(DataverseSink(_config()))
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = [good, bad, good]
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -1117,7 +1142,7 @@ class TestPerRowWriteFailureRouting:
         statuses = [c.kwargs["status"].value for c in ctx.record_call.call_args_list]
         assert statuses == ["success", "error", "success"]
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_content_hash_and_row_count_reflect_written_rows_only(self, _mock_schema: MagicMock) -> None:
         """Diverted rows were never written to Dataverse, so they must not appear
         in the content_hash or the row_count metadata — the audit artifact
@@ -1133,10 +1158,10 @@ class TestPerRowWriteFailureRouting:
 
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
-            return_value=MagicMock(),
+            return_value=FakeDataverseRowSchema,
         ):
             sink = inject_write_failure(DataverseSink(_config()))
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = [good, bad, good]
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -1172,7 +1197,7 @@ class TestPerRowWriteFailureRouting:
 class TestIdempotentFlag:
     """Sink idempotent flag must be True for PATCH upsert mode."""
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_idempotent_is_true(self, _mock_schema: MagicMock) -> None:
         """PATCH upsert is idempotent — safe for retries and crash recovery."""
         sink = inject_write_failure(DataverseSink(_config()))
@@ -1192,19 +1217,17 @@ class TestIdempotentFlag:
 class TestRequestDataRecordsJsonPayload:
     """Verify that record_call request_data contains 'json': payload, not 'field_names'."""
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_request_data_contains_json_payload(self, _mock_schema: MagicMock) -> None:
         """request_data must contain 'json' key with the mapped payload dict."""
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.return_value = _make_204_response()
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
 
-        ctx = MagicMock()
-        ctx.record_call = MagicMock()
-        ctx.run_id = "test-run-123"
+        ctx = _make_sink_context_double()
 
         rows = [{"email": "alice@example.com", "name": "Alice"}]
         sink.write(rows, ctx)
@@ -1220,7 +1243,7 @@ class TestRequestDataRecordsJsonPayload:
         # Old format "field_names" must NOT exist
         assert "field_names" not in request_data
 
-    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
     def test_error_request_data_also_contains_json(self, _mock_schema: MagicMock) -> None:
         """Even on a diverted-row error, the ERROR record_call's request_data has 'json'.
 
@@ -1229,7 +1252,7 @@ class TestRequestDataRecordsJsonPayload:
         """
         sink = inject_write_failure(DataverseSink(_config()))
 
-        mock_client = MagicMock()
+        mock_client = _make_dataverse_client_double()
         mock_client.upsert.side_effect = DataverseClientError(
             "Bad request (400)",
             retryable=False,
@@ -1239,9 +1262,7 @@ class TestRequestDataRecordsJsonPayload:
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
 
-        ctx = MagicMock()
-        ctx.record_call = MagicMock()
-        ctx.run_id = "test-run-123"
+        ctx = _make_sink_context_double()
 
         rows = [{"email": "alice@example.com", "name": "Alice"}]
         result = sink.write(rows, ctx)

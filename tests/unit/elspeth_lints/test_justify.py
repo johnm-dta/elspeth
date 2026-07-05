@@ -24,8 +24,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -89,6 +90,109 @@ class Widget:
 _OVERRIDE_TOKEN_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN"
 _OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
 _OVERRIDE_TEST_TOKEN = "test-operator-override-token-2026-05-24"
+
+
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+        effect = self.side_effect
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
+class _ConstructorRecorder:
+    def __init__(self) -> None:
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        return None
+
+    def assert_not_called(self) -> None:
+        assert len(self.call_args_list) == 0
+
+
+class _CompletionMessageDouble:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _CompletionChoiceDouble:
+    def __init__(self, message: _CompletionMessageDouble, *, finish_reason: str) -> None:
+        self.message = message
+        self.finish_reason = finish_reason
+
+
+class _UsageDetailsDouble:
+    def __init__(self, cached_tokens: int) -> None:
+        self.cached_tokens = cached_tokens
+
+
+class _UsageDouble:
+    def __init__(self, *, prompt_tokens: int, prompt_tokens_details: _UsageDetailsDouble | None) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.prompt_tokens_details = prompt_tokens_details
+
+
+class _CompletionDouble:
+    def __init__(
+        self,
+        *,
+        content: str,
+        prompt_tokens: int,
+        cached_tokens: int | None,
+        served_model: str | None,
+        finish_reason: str,
+    ) -> None:
+        self.choices = [
+            _CompletionChoiceDouble(
+                _CompletionMessageDouble(content),
+                finish_reason=finish_reason,
+            )
+        ]
+        self.model = served_model
+        details = None if cached_tokens is None else _UsageDetailsDouble(cached_tokens)
+        self.usage = _UsageDouble(prompt_tokens=prompt_tokens, prompt_tokens_details=details)
+
+
+class _OpenAIClientDouble:
+    def __init__(self, completion: _CompletionDouble | None = None, *, side_effect: BaseException | None = None) -> None:
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                create=_CallRecorder(return_value=completion, side_effect=side_effect),
+            )
+        )
 
 
 def _build_source_tree(tmp_path: Path) -> tuple[Path, Path]:
@@ -223,7 +327,7 @@ def _mock_openrouter_completion(
     cached_tokens: int | None = 0,
     served_model: str | None = DEFAULT_JUDGE_MODEL,
     finish_reason: str = "stop",
-) -> MagicMock:
+) -> _CompletionDouble:
     """Build a mock OpenAI-SDK ``chat.completions.create`` return value.
 
     The judge routes through OpenRouter via the OpenAI SDK, so the mock
@@ -236,8 +340,7 @@ def _mock_openrouter_completion(
     cached count (caching off, or transport omitted it). ``0`` simulates
     caching-on with no hit; a positive int simulates a cache hit.
     """
-    message = MagicMock()
-    message.content = json.dumps(
+    content = json.dumps(
         {
             "verdict": verdict,
             "rationale": rationale,
@@ -245,35 +348,13 @@ def _mock_openrouter_completion(
             "should_use_decorator": should_use_decorator,
         }
     )
-    choice = MagicMock()
-    choice.message = message
-    choice.finish_reason = finish_reason
-    completion = MagicMock()
-    completion.choices = [choice]
-    # Explicitly set ``completion.model`` so existing happy-path tests
-    # (which assert the version-pinned ``judge_model`` survives
-    # the YAML round-trip) keep passing now that ``call_judge`` records
-    # the SERVED model id (not the requested one). Tests that need to
-    # exercise routing-divergence or absent-served-id paths pass
-    # ``served_model=`` explicitly. See the C1-1 (elspeth-0e1d0978fa)
-    # tests below.
-    completion.model = served_model
-    # Usage shape: total + optional details. cached_tokens=None means
-    # the field on details is absent (we model this by setting details
-    # to None directly, which judge._extract_cache_accounting treats as
-    # "no count reported").
-    if cached_tokens is None:
-        completion.usage = MagicMock(
-            prompt_tokens=prompt_tokens,
-            prompt_tokens_details=None,
-        )
-    else:
-        details = MagicMock(cached_tokens=cached_tokens)
-        completion.usage = MagicMock(
-            prompt_tokens=prompt_tokens,
-            prompt_tokens_details=details,
-        )
-    return completion
+    return _CompletionDouble(
+        content=content,
+        prompt_tokens=prompt_tokens,
+        cached_tokens=cached_tokens,
+        served_model=served_model,
+        finish_reason=finish_reason,
+    )
 
 
 @contextmanager
@@ -285,7 +366,7 @@ def _mock_judge_call(
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
     served_model: str | None = DEFAULT_JUDGE_MODEL,
-) -> Iterator[MagicMock]:
+) -> Iterator[Any]:
     """Patch ``openai.OpenAI`` so tests run offline.
 
     Yields the patched client class so callers can introspect how it was
@@ -300,8 +381,7 @@ def _mock_judge_call(
         cached_tokens=cached_tokens,
         served_model=served_model,
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(
             os.environ,
@@ -325,7 +405,7 @@ def _mock_judge_call_without_hmac(
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
     served_model: str | None = DEFAULT_JUDGE_MODEL,
-) -> Iterator[MagicMock]:
+) -> Iterator[Any]:
     """Patch the judge client while leaving metadata signing unconfigured."""
     fake_completion = _mock_openrouter_completion(
         verdict=verdict,
@@ -335,8 +415,7 @@ def _mock_judge_call_without_hmac(
         cached_tokens=cached_tokens,
         served_model=served_model,
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
@@ -392,16 +471,14 @@ def test_call_judge_crashes_on_malformed_json() -> None:
         rationale="...",
         surrounding_code="...",
     )
-    # OpenAI-shape mock with non-JSON content.
-    bad_message = MagicMock()
-    bad_message.content = "not json at all { ::: }"
-    bad_choice = MagicMock()
-    bad_choice.message = bad_message
-    bad_completion = MagicMock()
-    bad_completion.choices = [bad_choice]
-    bad_completion.usage = MagicMock(prompt_tokens=100, prompt_tokens_details=None)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = bad_completion
+    bad_completion = _CompletionDouble(
+        content="not json at all { ::: }",
+        prompt_tokens=100,
+        cached_tokens=None,
+        served_model=DEFAULT_JUDGE_MODEL,
+        finish_reason="stop",
+    )
+    fake_client = _OpenAIClientDouble(bad_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -447,8 +524,7 @@ def test_call_judge_rejects_invalid_confidence(confidence: Any) -> None:
             "should_use_decorator": None,
         }
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -477,8 +553,7 @@ def test_call_judge_rejects_extra_output_schema_fields() -> None:
             "fix": "rewrite the code",
         }
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -520,8 +595,7 @@ def test_call_judge_rejects_length_truncated_completion() -> None:
         rationale="ok",
         finish_reason="length",
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -543,8 +617,7 @@ def test_call_judge_wraps_raw_httpx_connect_error() -> None:
         rationale="...",
         surrounding_code="...",
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = httpx.ConnectError("connection refused")
+    fake_client = _OpenAIClientDouble(side_effect=httpx.ConnectError("connection refused"))
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -576,8 +649,7 @@ def test_call_judge_wraps_openrouter_status_errors(error_cls: str, status: int) 
     )
     response = httpx.Response(status, request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"))
     exc = getattr(openai, error_cls)(f"status {status}", response=response, body={"error": "test"})
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = exc
+    fake_client = _OpenAIClientDouble(side_effect=exc)
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -1669,15 +1741,14 @@ def test_justify_malformed_judge_response_exits_2_without_traceback(
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
 
-    bad_message = MagicMock()
-    bad_message.content = "not json at all { ::: }"
-    bad_choice = MagicMock()
-    bad_choice.message = bad_message
-    bad_completion = MagicMock()
-    bad_completion.choices = [bad_choice]
-    bad_completion.usage = MagicMock(prompt_tokens=100, prompt_tokens_details=None)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = bad_completion
+    bad_completion = _CompletionDouble(
+        content="not json at all { ::: }",
+        prompt_tokens=100,
+        cached_tokens=None,
+        served_model=DEFAULT_JUDGE_MODEL,
+        finish_reason="stop",
+    )
+    fake_client = _OpenAIClientDouble(bad_completion)
 
     exit_code = _run_justify_with_client(
         root=root,
@@ -1703,8 +1774,9 @@ def test_justify_transport_error_exits_2_without_traceback(
 
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = APIConnectionError(request=MagicMock())
+    import httpx
+
+    fake_client = _OpenAIClientDouble(side_effect=APIConnectionError(request=httpx.Request("POST", "https://openrouter.ai")))
 
     exit_code = _run_justify_with_client(
         root=root,
@@ -1725,7 +1797,7 @@ def _run_justify_with_client(
     *,
     root: Path,
     allowlist_dir: Path,
-    fake_client: MagicMock,
+    fake_client: _OpenAIClientDouble,
     rationale: str,
 ) -> int:
     argv = [
@@ -1803,7 +1875,7 @@ class Widget:
     ]
     # Set the API key so we definitely don't fall out via the
     # configuration check — the ambiguity error must fire first.
-    judge_called = MagicMock()
+    judge_called = _ConstructorRecorder()
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False), patch("openai.OpenAI", judge_called):
         exit_code = main(argv)
 
@@ -2738,7 +2810,7 @@ def test_justify_rule_mismatch_crashes_before_calling_judge(tmp_path: Path, caps
     # Provide the API key + a no-op client so the only failure mode
     # available is the --rule mismatch (not a config error or a call
     # going through).
-    judge_called = MagicMock()
+    judge_called = _ConstructorRecorder()
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False), patch("openai.OpenAI", judge_called):
         exit_code = main(argv)
     assert exit_code == 2

@@ -20,8 +20,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -63,6 +64,59 @@ class Widget:
 _TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
 
 
+class _CallRecorder:
+    """Tiny callable recorder for fake SDK call sites used in these tests."""
+
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_count = 0
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_count += 1
+        self.calls.append((args, kwargs))
+        if self.side_effect is None:
+            return self.return_value
+
+        if isinstance(self.side_effect, list):
+            if not self.side_effect:
+                raise AssertionError("fake call exhausted side_effect values")
+            outcome = self.side_effect.pop(0)
+        elif callable(self.side_effect) and not isinstance(self.side_effect, type):
+            outcome = self.side_effect(*args, **kwargs)
+        else:
+            outcome = self.side_effect
+
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if isinstance(outcome, type) and issubclass(outcome, BaseException):
+            raise outcome()
+        return outcome
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _FakeOpenAIClient:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CallRecorder(return_value=return_value, side_effect=side_effect)))
+
+
+def _fake_openai_client(*, return_value: Any = None, side_effect: Any = None) -> _FakeOpenAIClient:
+    return _FakeOpenAIClient(return_value=return_value, side_effect=side_effect)
+
+
+def _openai_sdk_request() -> Any:
+    """Real request object required by OpenAI SDK exception constructors."""
+    from httpx import Request
+
+    return Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+
+
 @pytest.fixture(autouse=True)
 def _judge_metadata_hmac_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep source-root allowlist loads able to verify signed fixture rows."""
@@ -100,27 +154,29 @@ def _mock_openrouter_completion(
     served_model: str | None = DEFAULT_JUDGE_MODEL,
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
-) -> MagicMock:
-    """OpenAI-shape chat-completion mock for OpenRouter routing.
+) -> SimpleNamespace:
+    """OpenAI-shape chat-completion fake for OpenRouter routing.
 
-    The judge calls the OpenAI SDK pointed at OpenRouter; this mock
+    The judge calls the OpenAI SDK pointed at OpenRouter; this fake
     matches ``client.chat.completions.create(...)``'s return shape —
     ``.choices[0].message.content`` is a JSON string the judge will
     parse, and ``.usage`` carries prompt-token accounting (required;
     the judge reads it offensively for cache-hit telemetry).
     """
-    message = MagicMock()
-    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
-    choice = MagicMock()
-    choice.message = message
-    completion = MagicMock()
-    completion.choices = [choice]
-    completion.model = served_model
-    completion.usage = MagicMock(
-        prompt_tokens=prompt_tokens,
-        prompt_tokens_details=MagicMock(cached_tokens=cached_tokens),
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
+                )
+            )
+        ],
+        model=served_model,
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+        ),
     )
-    return completion
 
 
 @contextmanager
@@ -131,7 +187,7 @@ def _mock_judge_call(
     served_model: str | None = DEFAULT_JUDGE_MODEL,
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
-) -> Iterator[MagicMock]:
+) -> Iterator[Any]:
     """Patch ``openai.OpenAI`` so reaudit's judge call runs offline."""
     fake_completion = _mock_openrouter_completion(
         verdict=verdict,
@@ -140,8 +196,7 @@ def _mock_judge_call(
         prompt_tokens=prompt_tokens,
         cached_tokens=cached_tokens,
     )
-    fake_client = MagicMock(spec_set=["chat"])
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _fake_openai_client(return_value=fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
@@ -1714,7 +1769,7 @@ def test_cli_reaudit_malformed_allowlist_exits_2_without_traceback(tmp_path: Pat
 
 
 @contextmanager
-def _mock_judge_call_raising(exc: BaseException) -> Iterator[MagicMock]:
+def _mock_judge_call_raising(exc: BaseException) -> Iterator[Any]:
     """Patch ``openai.OpenAI`` so the judge call raises ``exc``.
 
     Used to simulate transport failures inside reaudit's per-entry
@@ -1723,8 +1778,7 @@ def _mock_judge_call_raising(exc: BaseException) -> Iterator[MagicMock]:
     OpenAI SDK call would surface a network / timeout / rate-limit /
     5xx error.
     """
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = exc
+    fake_client = _fake_openai_client(side_effect=exc)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
@@ -1758,7 +1812,7 @@ def test_c3_2_transport_failure_classifies_judge_call_failed(tmp_path: Path) -> 
     # SDK error so the catch in reaudit exercises the actual SDK class
     # hierarchy (APIError is the umbrella; APIConnectionError is one
     # leaf the operator will see in production).
-    transient = APIConnectionError(request=MagicMock())
+    transient = APIConnectionError(request=_openai_sdk_request())
     with _mock_judge_call_raising(transient):
         report = reaudit_entries(
             root=root.resolve(),
@@ -1838,9 +1892,8 @@ def test_c3_2_sweep_continues_after_transport_failure(tmp_path: Path) -> None:
     # success. Validates that the failure is isolated to the failing
     # entry and the loop continues.
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    transient = APITimeoutError(request=MagicMock())
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = [ok_completion, transient, ok_completion]
+    transient = APITimeoutError(request=_openai_sdk_request())
+    fake_client = _fake_openai_client(side_effect=[ok_completion, transient, ok_completion])
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -1962,8 +2015,8 @@ def test_duplicate_matching_findings_record_ambiguous_outcome(tmp_path: Path) ->
         + "\n",
         encoding="utf-8",
     )
-    duplicate_a = MagicMock(canonical_key=key, line=5)
-    duplicate_b = MagicMock(canonical_key=key, line=6)
+    duplicate_a = SimpleNamespace(canonical_key=key, line=5)
+    duplicate_b = SimpleNamespace(canonical_key=key, line=6)
 
     with (
         patch.object(reaudit_module, "_scan_findings_for_file", return_value=[duplicate_a, duplicate_b]),
@@ -2116,7 +2169,7 @@ def test_c3_3_judge_call_failed_does_not_trigger_incomplete_sweep(tmp_path: Path
         judge_recorded_at="2024-01-01T00:00:00+00:00",
     )
 
-    transient = APIConnectionError(request=MagicMock())
+    transient = APIConnectionError(request=_openai_sdk_request())
     with _mock_judge_call_raising(transient):
         report = reaudit_entries(
             root=root.resolve(),
@@ -2165,7 +2218,7 @@ def test_c3_2_cli_exits_1_on_judge_call_failed(tmp_path: Path, capsys: pytest.Ca
         "--format",
         "text",
     ]
-    transient = APIConnectionError(request=MagicMock())
+    transient = APIConnectionError(request=_openai_sdk_request())
     with _mock_judge_call_raising(transient):
         exit_code = main(argv)
 
@@ -2378,13 +2431,14 @@ def test_t6b_mid_sweep_keyboard_interrupt_leaves_no_trailer(tmp_path: Path, caps
     # Mock the judge so the 4th call raises KeyboardInterrupt — the
     # first 3 entries classify normally, the 4th aborts the loop.
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = [
-        ok_completion,
-        ok_completion,
-        ok_completion,
-        KeyboardInterrupt(),
-    ]
+    fake_client = _fake_openai_client(
+        side_effect=[
+            ok_completion,
+            ok_completion,
+            ok_completion,
+            KeyboardInterrupt(),
+        ]
+    )
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -2426,8 +2480,7 @@ def test_t6b_resume_completes_killed_sweep(tmp_path: Path, capsys: pytest.Captur
     _write_n_duplicate_entries(allowlist_dir, root, count=3)
 
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    aborting_client = MagicMock()
-    aborting_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    aborting_client = _fake_openai_client(side_effect=[ok_completion, KeyboardInterrupt()])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=aborting_client),
@@ -2443,8 +2496,7 @@ def test_t6b_resume_completes_killed_sweep(tmp_path: Path, capsys: pytest.Captur
     assert not any(line["type"] == "trailer" for line in lines_after_abort)
 
     # Resume — provide enough successful responses for the remaining 2.
-    resume_client = MagicMock()
-    resume_client.chat.completions.create.side_effect = [ok_completion, ok_completion]
+    resume_client = _fake_openai_client(side_effect=[ok_completion, ok_completion])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=resume_client),
@@ -2480,8 +2532,7 @@ def test_t6b_resume_rejects_allowlist_edit_via_header_mismatch(tmp_path: Path, c
     _write_n_duplicate_entries(allowlist_dir, root, count=3)
 
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    aborting_client = MagicMock()
-    aborting_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    aborting_client = _fake_openai_client(side_effect=[ok_completion, KeyboardInterrupt()])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=aborting_client),
@@ -2545,7 +2596,7 @@ def test_t6b_resume_rejects_judge_transport_mismatch(tmp_path: Path, capsys: pyt
     captured = capsys.readouterr()
     run_id = _extract_run_id_from_stderr(captured.err)
 
-    resumed_judge = MagicMock(return_value=_accepted_response(transport=TRANSPORT_AGENT))
+    resumed_judge = _CallRecorder(return_value=_accepted_response(transport=TRANSPORT_AGENT))
     with patch("elspeth_lints.core.reaudit.call_judge", resumed_judge):
         resume_exit = _run_cli_reaudit(
             root=root,
@@ -2605,18 +2656,17 @@ def test_t6b_malformed_judge_json_classifies_judge_call_failed(tmp_path: Path) -
     # First response is malformed (not JSON); second is normal. The
     # loop should record JUDGE_CALL_FAILED for #1 and STILL_AGREES
     # for #2.
-    malformed = MagicMock()
-    malformed_choice = MagicMock()
-    malformed_choice.message.content = "this is not JSON at all"
-    malformed.choices = [malformed_choice]
-    malformed.usage = MagicMock(
-        prompt_tokens=4000,
-        prompt_tokens_details=MagicMock(cached_tokens=0),
+    malformed = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="this is not JSON at all"))],
+        model=DEFAULT_JUDGE_MODEL,
+        usage=SimpleNamespace(
+            prompt_tokens=4000,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        ),
     )
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
 
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = [malformed, ok_completion]
+    fake_client = _fake_openai_client(side_effect=[malformed, ok_completion])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -2696,8 +2746,7 @@ def test_t6c_concurrent_resume_rejected_across_processes(
     # Pre-create an incomplete sidecar by running a sweep that aborts
     # mid-loop. This gives us a real run_id for --resume to target.
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    fake_client = _fake_openai_client(side_effect=[ok_completion, KeyboardInterrupt()])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -2776,8 +2825,7 @@ def test_t6c_concurrent_resume_rejected_across_processes(
     # Process C: holder is gone; --resume now succeeds (the
     # sidecar is unlocked and validation passes).
     ok_completion_c = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    fake_client_c = MagicMock()
-    fake_client_c.chat.completions.create.return_value = ok_completion_c
+    fake_client_c = _fake_openai_client(return_value=ok_completion_c)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client_c),
@@ -2920,8 +2968,7 @@ def test_t6d_resume_after_sigkill_truncates_partial_line_and_appends_cleanly(tmp
 
     # Phase 1: real sweep, classify 1, abort on 2nd judge call.
     ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
-    aborting_client = MagicMock()
-    aborting_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    aborting_client = _fake_openai_client(side_effect=[ok_completion, KeyboardInterrupt()])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=aborting_client),
@@ -2955,8 +3002,7 @@ def test_t6d_resume_after_sigkill_truncates_partial_line_and_appends_cleanly(tmp
     # Phase 3: --resume. With T6d, this truncates the partial line and
     # appends cleanly. Without T6d, the first resumed write glues
     # onto the partial prefix and the next reload crashes.
-    resume_client = MagicMock()
-    resume_client.chat.completions.create.side_effect = [ok_completion, ok_completion]
+    resume_client = _fake_openai_client(side_effect=[ok_completion, ok_completion])
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=resume_client),
@@ -3484,8 +3530,7 @@ def test_t6c_completed_sidecar_pruned_after_retention_horizon(tmp_path: Path) ->
     completed_sidecar = sidecar_path_for(allowlist_dir, completed_run_id)
 
     # Force an incomplete sweep alongside.
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = KeyboardInterrupt()
+    fake_client = _fake_openai_client(side_effect=KeyboardInterrupt())
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),

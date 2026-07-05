@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -26,25 +30,114 @@ if TYPE_CHECKING:
     from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
 
-@pytest.fixture()
-def mock_recorder() -> MagicMock:
-    return MagicMock()
+@dataclass
+class FakeAuditRecorder:
+    call_indexes: list[int] = field(default_factory=list)
+    allocated_state_ids: list[str | None] = field(default_factory=list)
+    allocated_operation_ids: list[str] = field(default_factory=list)
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    operation_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def allocate_call_index(self, state_id: str | None) -> int:
+        self.allocated_state_ids.append(state_id)
+        if self.call_indexes:
+            return self.call_indexes.pop(0)
+        return len(self.allocated_state_ids) - 1
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        self.allocated_operation_ids.append(operation_id)
+        return len(self.allocated_operation_ids) - 1
+
+    def record_call(self, **call: Any) -> SimpleNamespace:
+        self.calls.append(call)
+        return SimpleNamespace(request_ref=f"request-{len(self.calls)}", response_ref=f"response-{len(self.calls)}")
+
+    def record_operation_call(self, **call: Any) -> SimpleNamespace:
+        self.operation_calls.append(call)
+        return SimpleNamespace(
+            request_ref=f"operation-request-{len(self.operation_calls)}",
+            response_ref=f"operation-response-{len(self.operation_calls)}",
+        )
+
+
+@dataclass
+class FakeTelemetryEmit:
+    events: list[Any] = field(default_factory=list)
+
+    def __call__(self, event: Any) -> None:
+        self.events.append(event)
+
+
+@dataclass(frozen=True)
+class HTTPPostCall:
+    url: str
+    kwargs: dict[str, Any]
+
+
+@dataclass
+class FakeHTTPClient:
+    response: httpx.Response | None = None
+    error: BaseException | None = None
+    post_calls: list[HTTPPostCall] = field(default_factory=list)
+    closed: bool = False
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        self.post_calls.append(HTTPPostCall(url=url, kwargs=dict(kwargs)))
+        if self.error is not None:
+            raise self.error
+        if self.response is None:
+            raise AssertionError("FakeHTTPClient.response must be set before post()")
+        return self.response
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def last_post(self) -> HTTPPostCall:
+        assert self.post_calls
+        return self.post_calls[-1]
+
+
+@contextmanager
+def _provider_http_client(provider: OpenRouterLLMProvider, http_client: FakeHTTPClient) -> Iterator[None]:
+    original_get = provider._get_http_client
+    original_release = provider._release_http_client
+
+    def get_http_client(state_id: str, *, token_id: str | None = None) -> FakeHTTPClient:
+        _ = state_id, token_id
+        return http_client
+
+    def release_http_client(state_id: str) -> None:
+        _ = state_id
+
+    provider._get_http_client = get_http_client  # type: ignore[method-assign]
+    provider._release_http_client = release_http_client  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        provider._get_http_client = original_get  # type: ignore[method-assign]
+        provider._release_http_client = original_release  # type: ignore[method-assign]
 
 
 @pytest.fixture()
-def mock_telemetry_emit() -> MagicMock:
-    return MagicMock()
+def audit_recorder() -> FakeAuditRecorder:
+    return FakeAuditRecorder()
 
 
 @pytest.fixture()
-def provider(mock_recorder: MagicMock, mock_telemetry_emit: MagicMock) -> OpenRouterLLMProvider:
+def telemetry_emit() -> FakeTelemetryEmit:
+    return FakeTelemetryEmit()
+
+
+@pytest.fixture()
+def provider(audit_recorder: FakeAuditRecorder, telemetry_emit: FakeTelemetryEmit) -> OpenRouterLLMProvider:
     return OpenRouterLLMProvider(
         api_key="test-key",
         base_url="https://openrouter.ai/api/v1",
         timeout_seconds=30.0,
-        recorder=mock_recorder,
+        recorder=audit_recorder,
         run_id="run-1",
-        telemetry_emit=mock_telemetry_emit,
+        telemetry_emit=telemetry_emit,
     )
 
 
@@ -100,8 +193,8 @@ def _assert_provider_body_redacted(message: str, *forbidden_fragments: str) -> N
 
 
 def test_provider_accepts_loopback_http_base_url(
-    mock_recorder: MagicMock,
-    mock_telemetry_emit: MagicMock,
+    audit_recorder: FakeAuditRecorder,
+    telemetry_emit: FakeTelemetryEmit,
 ) -> None:
     # Loopback HTTP is permitted for local OpenAI-compatible dev servers (the
     # shipped ChaosLLM examples target http://127.0.0.1:8199/v1); the bearer
@@ -110,16 +203,16 @@ def test_provider_accepts_loopback_http_base_url(
         api_key="test-key",
         base_url="http://127.0.0.1:8199/v1",
         timeout_seconds=30.0,
-        recorder=mock_recorder,
+        recorder=audit_recorder,
         run_id="run-1",
-        telemetry_emit=mock_telemetry_emit,
+        telemetry_emit=telemetry_emit,
     )
     assert provider._base_url == "http://127.0.0.1:8199/v1"
 
 
 def test_provider_rejects_remote_http_base_url(
-    mock_recorder: MagicMock,
-    mock_telemetry_emit: MagicMock,
+    audit_recorder: FakeAuditRecorder,
+    telemetry_emit: FakeTelemetryEmit,
 ) -> None:
     # The loopback exception must NOT widen to network-reachable hosts — a remote
     # HTTP base_url would send the bearer token over plaintext. Guards against the
@@ -129,9 +222,9 @@ def test_provider_rejects_remote_http_base_url(
             api_key="test-key",
             base_url="http://api.example.com/v1",
             timeout_seconds=30.0,
-            recorder=mock_recorder,
+            recorder=audit_recorder,
             run_id="run-1",
-            telemetry_emit=mock_telemetry_emit,
+            telemetry_emit=telemetry_emit,
         )
 
 
@@ -139,11 +232,8 @@ class TestExecuteQuery:
     """Tests for execute_query method."""
 
     def test_parses_json_response(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_http_response()
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_http_response())
+        with _provider_http_client(provider, http_client):
             result = provider.execute_query(
                 messages=[{"role": "user", "content": "hi"}],
                 model="gpt-4o",
@@ -162,11 +252,8 @@ class TestExecuteQuery:
 
     def test_max_tokens_none_omitted_from_request_body(self, provider: OpenRouterLLMProvider) -> None:
         """When max_tokens=None, it should NOT appear in the request body."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_http_response()
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_http_response())
+        with _provider_http_client(provider, http_client):
             provider.execute_query(
                 messages=[{"role": "user", "content": "hi"}],
                 model="gpt-4o",
@@ -177,123 +264,102 @@ class TestExecuteQuery:
             )
 
             # Verify the POST body does NOT contain max_tokens
-            call_args = mock_client.post.call_args
-            request_body = call_args.kwargs.get("json", call_args[1].get("json", {}))
+            request_body = http_client.last_post.kwargs["json"]
             assert "max_tokens" not in request_body
 
     def test_rejects_nan_in_response(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            # NaN in JSON
-            resp = httpx.Response(
-                status_code=200,
-                content=b'{"choices": [{"message": {"content": "hi"}}], "value": NaN}',
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        # NaN in JSON
+        resp = httpx.Response(
+            status_code=200,
+            content=b'{"choices": [{"message": {"content": "hi"}}], "value": NaN}',
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(LLMClientError, match="not valid JSON"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(LLMClientError, match="not valid JSON"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
     def test_rejects_null_content(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            body = json.dumps(
-                {
-                    "choices": [{"message": {"content": None}, "finish_reason": "stop"}],
-                    "model": "gpt-4o",
-                }
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": None}, "finish_reason": "stop"}],
+                "model": "gpt-4o",
+            }
+        )
+        resp = httpx.Response(
+            status_code=200,
+            content=body.encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(ContentPolicyError, match="null content"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            resp = httpx.Response(
-                status_code=200,
-                content=body.encode(),
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ContentPolicyError, match="null content"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
     def test_rejects_non_string_content(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            body = json.dumps(
-                {
-                    "choices": [{"message": {"content": 42}, "finish_reason": "stop"}],
-                    "model": "gpt-4o",
-                }
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": 42}, "finish_reason": "stop"}],
+                "model": "gpt-4o",
+            }
+        )
+        resp = httpx.Response(
+            status_code=200,
+            content=body.encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(LLMClientError, match="Expected string content"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            resp = httpx.Response(
-                status_code=200,
-                content=body.encode(),
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(LLMClientError, match="Expected string content"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
     def test_validates_usage_non_finite_via_json_parse(self, provider: OpenRouterLLMProvider) -> None:
         """Infinity in JSON is caught at the parse level by reject_nonfinite_constant."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            # Infinity literal in JSON — caught by reject_nonfinite_constant during json.loads
-            raw_json = b'{"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": Infinity}}'
-            resp = httpx.Response(
-                status_code=200,
-                content=raw_json,
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        # Infinity literal in JSON — caught by reject_nonfinite_constant during json.loads
+        raw_json = b'{"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": Infinity}}'
+        resp = httpx.Response(
+            status_code=200,
+            content=raw_json,
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(LLMClientError, match="not valid JSON"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(LLMClientError, match="not valid JSON"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
     def test_validates_usage_non_finite_float(self, provider: OpenRouterLLMProvider) -> None:
         """Non-finite float that survives JSON parsing (e.g., provider returns huge float)
         is caught by the post-parse usage validation."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            # Valid JSON but we patch json.loads to return non-finite float in usage
-            mock_client.post.return_value = _make_http_response()
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_http_response())
+        with _provider_http_client(provider, http_client):
             # Inject non-finite value after JSON parse
             import elspeth.plugins.transforms.llm.providers.openrouter as mod
 
@@ -321,70 +387,59 @@ class TestExecuteQuery:
     def test_empty_string_content_raises_content_policy_error(self, provider: OpenRouterLLMProvider) -> None:
         """Empty string content (not null) must raise ContentPolicyError,
         not ValueError from LLMQueryResult invariant."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            body = json.dumps(
-                {
-                    "choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}],
-                    "model": "gpt-4o",
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 0},
-                }
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}],
+                "model": "gpt-4o",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+            }
+        )
+        resp = httpx.Response(
+            status_code=200,
+            content=body.encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(ContentPolicyError, match="empty content"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            resp = httpx.Response(
-                status_code=200,
-                content=body.encode(),
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ContentPolicyError, match="empty content"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
     def test_whitespace_only_content_raises_content_policy_error(self, provider: OpenRouterLLMProvider) -> None:
         """Whitespace-only content must raise ContentPolicyError."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            body = json.dumps(
-                {
-                    "choices": [{"message": {"content": "   "}, "finish_reason": "stop"}],
-                    "model": "gpt-4o",
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 1},
-                }
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": "   "}, "finish_reason": "stop"}],
+                "model": "gpt-4o",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+            }
+        )
+        resp = httpx.Response(
+            status_code=200,
+            content=body.encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(ContentPolicyError, match="empty content"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            resp = httpx.Response(
-                status_code=200,
-                content=body.encode(),
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
-            )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ContentPolicyError, match="empty content"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
     def test_unknown_finish_reason(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_http_response(finish_reason="end_turn")
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_http_response(finish_reason="end_turn"))
+        with _provider_http_client(provider, http_client):
             result = provider.execute_query(
                 messages=[{"role": "user", "content": "hi"}],
                 model="gpt-4o",
@@ -398,11 +453,8 @@ class TestExecuteQuery:
         assert result.finish_reason.raw == "end_turn"
 
     def test_maps_finish_reason_stop(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_http_response(finish_reason="stop")
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_http_response(finish_reason="stop"))
+        with _provider_http_client(provider, http_client):
             result = provider.execute_query(
                 messages=[{"role": "user", "content": "hi"}],
                 model="gpt-4o",
@@ -416,22 +468,21 @@ class TestExecuteQuery:
 
     def test_sends_current_openrouter_app_attribution_headers(
         self,
-        mock_recorder: MagicMock,
-        mock_telemetry_emit: MagicMock,
+        audit_recorder: FakeAuditRecorder,
+        telemetry_emit: FakeTelemetryEmit,
     ) -> None:
-        mock_recorder.allocate_call_index.side_effect = [0, 1]
         provider = OpenRouterLLMProvider(
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
             timeout_seconds=30.0,
-            recorder=mock_recorder,
+            recorder=audit_recorder,
             run_id="run-1",
-            telemetry_emit=mock_telemetry_emit,
+            telemetry_emit=telemetry_emit,
         )
 
-        with patch("elspeth.plugins.infrastructure.clients.http.httpx.Client") as mock_client_class:
-            mock_client = mock_client_class.return_value
-            mock_client.post.return_value = _make_http_response()
+        http_client = FakeHTTPClient(response=_make_http_response())
+        with patch("elspeth.plugins.infrastructure.clients.http.httpx.Client", autospec=True) as client_class:
+            client_class.return_value = http_client
 
             provider.execute_query(
                 messages=[{"role": "user", "content": "hi"}],
@@ -442,7 +493,7 @@ class TestExecuteQuery:
                 token_id="tok-1",
             )
 
-        request_headers = mock_client.post.call_args.kwargs["headers"]
+        request_headers = http_client.last_post.kwargs["headers"]
         assert request_headers["HTTP-Referer"] == "https://github.com/johnm-dta/elspeth"
         assert request_headers["X-OpenRouter-Title"] == "Elspeth"
         assert "elspeth-rapid" not in set(request_headers.values())
@@ -452,128 +503,97 @@ class TestHTTPErrorMapping:
     """Tests for HTTP status code → exception mapping."""
 
     def test_429_raises_rate_limit_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(429)
-            mock_get.return_value = mock_client
-
-            with pytest.raises(RateLimitError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(response=_make_error_response(429))
+        with _provider_http_client(provider, http_client), pytest.raises(RateLimitError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_500_raises_server_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(500)
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ServerError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(response=_make_error_response(500))
+        with _provider_http_client(provider, http_client), pytest.raises(ServerError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_502_raises_server_error(self, provider: OpenRouterLLMProvider) -> None:
         """Verify 502 Bad Gateway maps to ServerError (5xx range, not just 500)."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(502)
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ServerError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(response=_make_error_response(502))
+        with _provider_http_client(provider, http_client), pytest.raises(ServerError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_503_raises_server_error(self, provider: OpenRouterLLMProvider) -> None:
         """Verify 503 Service Unavailable maps to ServerError."""
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(503)
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ServerError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(response=_make_error_response(503))
+        with _provider_http_client(provider, http_client), pytest.raises(ServerError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_network_error_raises_network_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.side_effect = httpx.ConnectError("connection refused")
-            mock_get.return_value = mock_client
-
-            with pytest.raises(NetworkError, match="Network error"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(error=httpx.ConnectError("connection refused"))
+        with _provider_http_client(provider, http_client), pytest.raises(NetworkError, match="Network error"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_timeout_raises_network_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.side_effect = httpx.ReadTimeout("timed out")
-            mock_get.return_value = mock_client
-
-            with pytest.raises(NetworkError, match="Network error"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(error=httpx.ReadTimeout("timed out"))
+        with _provider_http_client(provider, http_client), pytest.raises(NetworkError, match="Network error"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_4xx_raises_llm_client_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400)
-            mock_get.return_value = mock_client
-
-            with pytest.raises(LLMClientError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(response=_make_error_response(400))
+        with _provider_http_client(provider, http_client), pytest.raises(LLMClientError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_400_context_length_raises_context_length_error(self, provider: OpenRouterLLMProvider) -> None:
         provider_body = (
             '{"error": {"message": "This model\'s maximum context length is 8192 tokens", "api_key": "sk-or-v1-context-secret"}}'
         )
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=provider_body)
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=provider_body))
+        with _provider_http_client(provider, http_client):
             with pytest.raises(ContextLengthError) as exc_info:
                 provider.execute_query(
                     messages=[{"role": "user", "content": "hi"}],
@@ -594,23 +614,21 @@ class TestHTTPErrorMapping:
             )
 
     def test_400_context_length_exceeded_pattern(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(
+        http_client = FakeHTTPClient(
+            response=_make_error_response(
                 400,
                 body='{"error": {"code": "context_length_exceeded"}}',
             )
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ContextLengthError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        )
+        with _provider_http_client(provider, http_client), pytest.raises(ContextLengthError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_400_anthropic_prompt_too_long_pattern(self, provider: OpenRouterLLMProvider) -> None:
         # Anthropic via OpenRouter returns "prompt is too long: N tokens > M maximum"
@@ -623,43 +641,35 @@ class TestHTTPErrorMapping:
             '\\"invalid_request_error\\",\\"message\\":\\"prompt is too long: '
             '202814 tokens > 200000 maximum\\"}}","provider_name":"Anthropic"}}}'
         )
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=anthropic_body)
-            mock_get.return_value = mock_client
-
-            with pytest.raises(ContextLengthError):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="anthropic/claude-sonnet-4",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=anthropic_body))
+        with _provider_http_client(provider, http_client), pytest.raises(ContextLengthError):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="anthropic/claude-sonnet-4",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
 
     def test_empty_choices_raises(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            body = json.dumps({"choices": [], "model": "gpt-4o"})
-            resp = httpx.Response(
-                status_code=200,
-                content=body.encode(),
-                headers={"content-type": "application/json"},
-                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        body = json.dumps({"choices": [], "model": "gpt-4o"})
+        resp = httpx.Response(
+            status_code=200,
+            content=body.encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        )
+        http_client = FakeHTTPClient(response=resp)
+        with _provider_http_client(provider, http_client), pytest.raises(LLMClientError, match="Empty or missing choices"):
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
             )
-            mock_client.post.return_value = resp
-            mock_get.return_value = mock_client
-
-            with pytest.raises(LLMClientError, match="Empty or missing choices"):
-                provider.execute_query(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="gpt-4o",
-                    temperature=0.0,
-                    max_tokens=100,
-                    state_id="state-1",
-                    token_id="tok-1",
-                )
 
 
 class TestClientCaching:
@@ -667,14 +677,14 @@ class TestClientCaching:
 
     def test_client_cached_per_state_id(
         self,
-        mock_recorder: MagicMock,
-        mock_telemetry_emit: MagicMock,
+        audit_recorder: FakeAuditRecorder,
+        telemetry_emit: FakeTelemetryEmit,
     ) -> None:
         provider = OpenRouterLLMProvider(
             api_key="test-key",
-            recorder=mock_recorder,
+            recorder=audit_recorder,
             run_id="run-1",
-            telemetry_emit=mock_telemetry_emit,
+            telemetry_emit=telemetry_emit,
         )
 
         client1 = provider._get_http_client("state-a", token_id="tok-1")
@@ -686,14 +696,14 @@ class TestClientCaching:
 
     def test_concurrent_client_creation_same_state_id(
         self,
-        mock_recorder: MagicMock,
-        mock_telemetry_emit: MagicMock,
+        audit_recorder: FakeAuditRecorder,
+        telemetry_emit: FakeTelemetryEmit,
     ) -> None:
         provider = OpenRouterLLMProvider(
             api_key="test-key",
-            recorder=mock_recorder,
+            recorder=audit_recorder,
             run_id="run-1",
-            telemetry_emit=mock_telemetry_emit,
+            telemetry_emit=telemetry_emit,
         )
 
         clients: list[AuditedHTTPClient] = []
@@ -717,14 +727,14 @@ class TestClientCaching:
 
     def test_close_clears_clients(
         self,
-        mock_recorder: MagicMock,
-        mock_telemetry_emit: MagicMock,
+        audit_recorder: FakeAuditRecorder,
+        telemetry_emit: FakeTelemetryEmit,
     ) -> None:
         provider = OpenRouterLLMProvider(
             api_key="test-key",
-            recorder=mock_recorder,
+            recorder=audit_recorder,
             run_id="run-1",
-            telemetry_emit=mock_telemetry_emit,
+            telemetry_emit=telemetry_emit,
         )
 
         provider._get_http_client("state-1", token_id="tok-1")
@@ -740,9 +750,9 @@ class TestProtocolCompliance:
     def test_satisfies_llm_provider_protocol(self) -> None:
         provider = OpenRouterLLMProvider(
             api_key="test-key",
-            recorder=MagicMock(),
+            recorder=FakeAuditRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=FakeTelemetryEmit(),
         )
         assert isinstance(provider, LLMProvider)
 
@@ -767,14 +777,13 @@ class TestRuntimePreflight:
 
     def test_preflight_request_max_tokens_meets_azure_floor(self, provider: OpenRouterLLMProvider) -> None:
         """Preflight request body must include max_tokens >= 16 (Azure backend floor)."""
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_http_response(content="OK")
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_http_response(content="OK"))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
 
-            request_body = mock_client.post.call_args.kwargs["json"]
+            request_body = http_client.last_post.kwargs["json"]
             assert "max_tokens" in request_body, (
                 "Preflight must send max_tokens; Azure-backed OpenRouter routes reject requests without it."
             )
@@ -790,10 +799,9 @@ class TestRuntimePreflight:
             'value. Expected a value >= 16, but got 4 instead.",'
             '"authorization":"Bearer sk-or-v1-secret","code":400}}'
         )
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=provider_body)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=provider_body))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(LLMClientError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
@@ -811,10 +819,9 @@ class TestRuntimePreflight:
     def test_preflight_429_redacts_response_body_in_rate_limit_error(self, provider: OpenRouterLLMProvider) -> None:
         """A 429 from the provider must not surface raw response-body text."""
         provider_body = '{"error":{"message":"Rate limit exceeded: 60 RPM","api_key":"sk-or-v1-rate-secret","code":429}}'
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(429, body=provider_body)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(429, body=provider_body))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(RateLimitError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
@@ -829,10 +836,9 @@ class TestRuntimePreflight:
             '{"error":{"message":"Upstream provider unavailable",'
             '"request_echo":"Authorization: Bearer sk-or-v1-upstream-secret","code":500}}'
         )
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(500, body=provider_body)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(500, body=provider_body))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(ServerError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
@@ -849,11 +855,8 @@ class TestRuntimePreflight:
     def test_execute_query_400_redacts_response_body(self, provider: OpenRouterLLMProvider) -> None:
         """The same redaction contract applies to per-row execute_query calls."""
         provider_body = '{"error":{"message":"Model openai/gpt-5-mini not found","token":"sk-or-v1-query-secret","code":400}}'
-        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=provider_body)
-            mock_get.return_value = mock_client
-
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=provider_body))
+        with _provider_http_client(provider, http_client):
             with pytest.raises(LLMClientError) as exc_info:
                 provider.execute_query(
                     messages=[{"role": "user", "content": "hi"}],
@@ -876,10 +879,9 @@ class TestRuntimePreflight:
     def test_preflight_redacts_oversized_response_body(self, provider: OpenRouterLLMProvider) -> None:
         """Pathologically large response bodies are summarized without body text."""
         huge_body = '{"error":"' + ("x" * 10_000) + '"}'
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=huge_body)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=huge_body))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(LLMClientError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
@@ -896,10 +898,9 @@ class TestRuntimePreflight:
         """Provider-controlled content-type metadata must not become a second diagnostic leak."""
         provider_body = '{"error":{"message":"invalid","code":400}}'
         content_type = "application/json authorization=Bearer sk-or-v1-header-secret"
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=provider_body, content_type=content_type)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=provider_body, content_type=content_type))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(LLMClientError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
@@ -915,10 +916,9 @@ class TestRuntimePreflight:
         """Even syntactically valid media types are provider-controlled and not diagnostic text."""
         provider_body = '{"error":{"message":"invalid","code":400}}'
         content_type = "application/sk-or-v1-header-secret"
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=provider_body, content_type=content_type)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=provider_body, content_type=content_type))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(LLMClientError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
@@ -927,21 +927,20 @@ class TestRuntimePreflight:
             _assert_provider_body_redacted(message, "application/sk-or-v1-header-secret", "sk-or-v1-header-secret")
             assert "content_type" not in message
 
-    def test_preflight_error_message_omits_request_url(self, mock_recorder: MagicMock) -> None:
+    def test_preflight_error_message_omits_request_url(self, audit_recorder: FakeAuditRecorder) -> None:
         """Configurable base URLs can carry query strings; exception text must not copy them."""
         provider = OpenRouterLLMProvider(
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1?token=sk-or-v1-url-secret",
             timeout_seconds=30.0,
-            recorder=mock_recorder,
+            recorder=audit_recorder,
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=FakeTelemetryEmit(),
         )
         provider_body = '{"error":{"message":"invalid","code":400}}'
-        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(400, body=provider_body)
-            mock_client_cls.return_value = mock_client
+        http_client = FakeHTTPClient(response=_make_error_response(400, body=provider_body))
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient", autospec=True) as client_cls:
+            client_cls.return_value = http_client
 
             with pytest.raises(LLMClientError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")

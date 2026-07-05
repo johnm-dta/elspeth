@@ -141,7 +141,13 @@ class _SessionServiceLike(Protocol):
 
 class _ExecutionServiceLike(Protocol):
     async def validate(self, session_id: UUID, *, user_id: str | None = None) -> Any: ...
-    async def validate_state(self, state: Any, *, user_id: str | None = None) -> Any: ...
+    async def validate_state(
+        self,
+        state: Any,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> Any: ...
 
 
 class _ReadinessServiceLike(Protocol):
@@ -343,7 +349,10 @@ class ShareableReviewService:
                 detail="No composition state exists for this session",
             )
         composition_state = state_from_record(state_record)
-        validation = await self._execution_service.validate_state(composition_state, user_id=user_id)
+        # session_id scopes the sink path allowlist (blobs/<session_id>/) and
+        # inline-blob metadata lookups; omitting it fails closed to outputs-only
+        # and rejects states that /validate and /execute accept.
+        validation = await self._execution_service.validate_state(composition_state, user_id=user_id, session_id=session_id)
         if not validation.is_valid:
             raise CompositionNotRunnableError(
                 reason="validation_failed",

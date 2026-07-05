@@ -28,7 +28,7 @@ content-addressing covers the readiness fingerprint.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -151,13 +151,24 @@ class _FakeExecutionService:
     validation: ValidationResult
     validate_await_count: int = 0
     validate_state_await_count: int = 0
+    # Session ids received by validate_state, in call order. The share gate
+    # must thread the owning session id so the session-scoped sink allowlist
+    # (blobs/<session_id>/) matches /validate and /execute.
+    validate_state_session_ids: list[UUID | None] = field(default_factory=list)
 
     async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult:
         self.validate_await_count += 1
         return self.validation
 
-    async def validate_state(self, state: Any, *, user_id: str | None = None) -> ValidationResult:
+    async def validate_state(
+        self,
+        state: Any,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> ValidationResult:
         self.validate_state_await_count += 1
+        self.validate_state_session_ids.append(session_id)
         return self.validation
 
 
@@ -419,6 +430,35 @@ async def test_mark_ready_for_review_happy_path(
     payload = signer.verify(response.token)
     assert payload.session_id == session_record.id
     assert payload.payload_digest == response.payload_digest
+
+
+@pytest.mark.asyncio
+async def test_mark_ready_for_review_passes_session_id_to_validation(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    """validate_state must receive the owning session id.
+
+    The sink path allowlist is session-scoped (blobs/<session_id>/, see
+    elspeth-bdc17cfdb1): validating with session_id=None fails closed to
+    outputs-only and rejects a state whose sink writes to the session's own
+    blob subtree — a state /validate and /execute both accept.
+    """
+    snapshot = _readiness_snapshot(session_record.id)
+    service, _, execution_service, _ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=snapshot,
+    )
+    await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+    assert execution_service.validate_state_session_ids == [session_record.id]
 
 
 @pytest.mark.asyncio

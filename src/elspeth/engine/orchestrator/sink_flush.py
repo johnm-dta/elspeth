@@ -165,6 +165,12 @@ class SinkFlushCoordinator:
         step = sink_step
         total_diversions = DiversionCounts()
 
+        def consume_group(
+            live_pairs: list[tuple[TokenInfo, PendingOutcome | None]], group_pairs: list[tuple[TokenInfo, PendingOutcome | None]]
+        ) -> None:
+            consumed_pair_ids = {id(pair) for pair in group_pairs}
+            live_pairs[:] = [pair for pair in live_pairs if id(pair) not in consumed_pair_ids]
+
         for sink_name, token_outcome_pairs in pending_tokens.items():
             if not token_outcome_pairs:
                 continue
@@ -254,6 +260,7 @@ class SinkFlushCoordinator:
                 )
                 if on_token_written is not None:
                     on_token_written.flush()
+                consume_group(token_outcome_pairs, group_pairs)
                 reconcile_sink_write_diversions(
                     counters=counters,
                     sink_name=sink_name,

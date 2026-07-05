@@ -18,7 +18,7 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from elspeth.contracts.events import (
     PhaseAction,
@@ -38,6 +38,7 @@ from elspeth.core.canonical import stable_hash
 from elspeth.engine.orchestrator.graph_wiring import build_source_id_map
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
+    resolve_node_audit_metadata,
 )
 from elspeth.engine.orchestrator.types import GraphArtifacts
 from elspeth.engine.orchestrator.validation import (
@@ -105,24 +106,18 @@ class GraphRegistrationService:
         config_gate_node_ids: set[NodeID] = set(config_gate_id_map.values())
         aggregation_node_ids: set[NodeID] = set(aggregation_id_map.values())
 
-        # Map plugin instances to their node IDs for metadata extraction
-        # Config gates and coalesce nodes don't have plugin instances (they're structural)
-        # Aggregation transforms DO have instances - they're in config.transforms with node_id set
-        node_to_plugin: dict[NodeID, Any] = {}
-        for source_name, source_node_id in source_id_map.items():
-            node_to_plugin[source_node_id] = config.sources[source_name]
-        for seq, transform in enumerate(config.transforms):
-            if seq in transform_id_map:
-                # Regular transform - mapped by sequence number
-                node_to_plugin[transform_id_map[seq]] = transform
-            elif transform.node_id is not None and NodeID(transform.node_id) in aggregation_node_ids:
-                # Aggregation transform - has node_id set by CLI, not in transform_id_map
-                node_to_plugin[NodeID(transform.node_id)] = transform
-        for sink_name, sink in config.sinks.items():
-            if SinkName(sink_name) in sink_id_map:
-                node_to_plugin[sink_id_map[SinkName(sink_name)]] = sink
         coalesce_id_map: dict[CoalesceName, NodeID] = graph.get_coalesce_id_map()
         coalesce_node_ids: set[NodeID] = set(coalesce_id_map.values())
+        audit_metadata_by_node = resolve_node_audit_metadata(
+            config,
+            graph,
+            source_id_map=source_id_map,
+            transform_id_map=transform_id_map,
+            sink_id_map=sink_id_map,
+            config_gate_node_ids=config_gate_node_ids,
+            aggregation_node_ids=aggregation_node_ids,
+            coalesce_node_ids=coalesce_node_ids,
+        )
 
         # GRAPH phase - register nodes and edges in Landscape
         phase_start = time.perf_counter()
@@ -146,10 +141,7 @@ class GraphRegistrationService:
                 config,
                 graph,
                 execution_order,
-                node_to_plugin,
-                source_id,
-                config_gate_node_ids,
-                coalesce_node_ids,
+                audit_metadata_by_node,
             )
             self._record_declared_sources_ready(
                 factory=factory,

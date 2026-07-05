@@ -23,7 +23,7 @@ from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from elspeth.engine.clock import Clock
+    from elspeth.core.clock import MonotonicClock
 
 # Pattern for valid rate limiter names (used in SQL table names)
 _VALID_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
@@ -41,9 +41,9 @@ _hook_installed: bool = False
 
 
 class _PyrateClockAdapter(AbstractClock):
-    """Adapt ELSPETH's monotonic Clock protocol to pyrate-limiter milliseconds."""
+    """Adapt ELSPETH's monotonic clock protocol to pyrate-limiter milliseconds."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: MonotonicClock) -> None:
         self._clock = clock
 
     def now(self) -> int:
@@ -139,7 +139,7 @@ class RateLimiter:
         requests_per_minute: int,
         persistence_path: str | None = None,
         window_ms: int | Duration | None = None,
-        clock: Clock | None = None,
+        clock: MonotonicClock | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         """Initialize rate limiter.

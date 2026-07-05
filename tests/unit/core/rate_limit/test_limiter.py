@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import threading
 import time
 from pathlib import Path
@@ -75,6 +76,16 @@ class TestRateLimiterValidation:
 
         with pytest.raises(ValueError, match="requests_per_minute must be positive"):
             RateLimiter(name="test", requests_per_minute=-5)
+
+    def test_core_rate_limiter_does_not_import_engine_clock_contract(self) -> None:
+        """Core rate limiting must depend on the neutral monotonic clock contract."""
+        import elspeth.core.rate_limit.limiter as limiter_module
+
+        source_path = Path(limiter_module.__file__)
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        imported_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
+
+        assert "elspeth.engine.clock" not in imported_modules
 
 
 class TestRateLimiter:

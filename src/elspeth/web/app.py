@@ -530,6 +530,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Shutdown execution service thread pool without blocking the loop:
         # worker cleanup still schedules terminal-state writes back onto it.
         await execution_service.shutdown()
+        # Tear down the process-wide run_sync_in_worker pool before disposing
+        # the engine, so no worker thread races a query against a disposed pool.
+        from elspeth.web.async_workers import shutdown_async_workers
+
+        await shutdown_async_workers()
         app.state.session_engine.dispose()
 
 

@@ -27,7 +27,7 @@ Usage:
 
 import json as json_module
 from dataclasses import dataclass
-from urllib.parse import ParseResult, parse_qs, unquote, unquote_plus, urlparse, urlunparse
+from urllib.parse import ParseResult, parse_qs, quote_plus, unquote, unquote_plus, urlparse, urlunparse
 
 from elspeth.contracts.security import (
     SecretFingerprintError,
@@ -120,6 +120,8 @@ SENSITIVE_PARAMS = frozenset(
 
 _SLACK_WEBHOOK_HOSTS = frozenset({"hooks.slack.com", "hooks.slack-gov.com"})
 _KNOWN_WEBHOOK_PATH_SECRET_REDACTION = "REDACTED"
+_ODBC_CONNECT_PARAM = "odbc_connect"
+_ODBC_PASSWORD_KEYS = frozenset({"pwd", "password"})
 
 
 def _strip_sensitive_param_parts(raw_params: str) -> str:
@@ -134,6 +136,106 @@ def _strip_sensitive_param_parts(raw_params: str) -> str:
             continue
         kept_parts.append(part)
     return "&".join(kept_parts)
+
+
+def _extract_odbc_connect_passwords(decoded_value: str) -> list[str]:
+    """Return PWD/Password values embedded in a decoded ODBC connect string."""
+    return _scrub_odbc_connect_value(decoded_value)[1]
+
+
+def _iter_odbc_connect_parts(decoded_value: str) -> list[str]:
+    """Split an ODBC connect string on semicolons outside braced values."""
+    parts: list[str] = []
+    start = 0
+    in_braces = False
+    i = 0
+    while i < len(decoded_value):
+        char = decoded_value[i]
+        if in_braces:
+            if char == "}" and i + 1 < len(decoded_value) and decoded_value[i + 1] == "}":
+                i += 2
+                continue
+            if char == "}":
+                in_braces = False
+        elif char == "{":
+            in_braces = True
+        elif char == ";":
+            parts.append(decoded_value[start:i])
+            start = i + 1
+        i += 1
+    parts.append(decoded_value[start:])
+    return parts
+
+
+def _odbc_value_for_fingerprint(raw_value: str) -> str:
+    """Return the logical ODBC attribute value used for secret fingerprinting."""
+    stripped = raw_value.strip()
+    if not stripped.startswith("{"):
+        return stripped
+
+    value_chars: list[str] = []
+    i = 1
+    while i < len(stripped):
+        char = stripped[i]
+        if char == "}" and i + 1 < len(stripped) and stripped[i + 1] == "}":
+            value_chars.append("}")
+            i += 2
+            continue
+        if char == "}":
+            return "".join(value_chars)
+        value_chars.append(char)
+        i += 1
+    return stripped
+
+
+def _scrub_odbc_connect_value(decoded_value: str) -> tuple[str, list[str]]:
+    """Remove PWD/Password attributes from a decoded ODBC connect string."""
+    kept_parts: list[str] = []
+    passwords: list[str] = []
+    for part in _iter_odbc_connect_parts(decoded_value):
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        if sep and key.strip().lower() in _ODBC_PASSWORD_KEYS:
+            passwords.append(_odbc_value_for_fingerprint(value))
+            continue
+        kept_parts.append(part)
+    return ";".join(kept_parts), passwords
+
+
+def _strip_sensitive_database_param_parts(raw_params: str) -> tuple[str, list[str]]:
+    """Remove database query secrets, including PWD inside odbc_connect values."""
+    if not raw_params:
+        return "", []
+
+    kept_parts: list[str] = []
+    odbc_passwords: list[str] = []
+    for part in raw_params.split("&"):
+        raw_key, sep, raw_value = part.partition("=")
+        decoded_key = unquote_plus(raw_key)
+        base_key = _base_param_name(decoded_key.lower())
+        if base_key in SENSITIVE_PARAMS:
+            continue
+        if base_key == _ODBC_CONNECT_PARAM and sep:
+            decoded_value = unquote_plus(raw_value)
+            scrubbed_value, embedded_passwords = _scrub_odbc_connect_value(decoded_value)
+            if embedded_passwords:
+                odbc_passwords.extend(embedded_passwords)
+                kept_parts.append(f"{raw_key}={quote_plus(scrubbed_value)}")
+                continue
+        kept_parts.append(part)
+    return "&".join(kept_parts), odbc_passwords
+
+
+def _odbc_connect_sensitive_param_keys(params: dict[str, list[str]]) -> list[str]:
+    """Return odbc_connect keys whose decoded values still contain credentials."""
+    sensitive_keys: list[str] = []
+    for key, values in params.items():
+        if _base_param_name(key.lower()) != _ODBC_CONNECT_PARAM:
+            continue
+        if any(_extract_odbc_connect_passwords(value) for value in values):
+            sensitive_keys.append(key)
+    return sensitive_keys
 
 
 def _extract_known_webhook_path_secret(parsed: ParseResult, *, redacted_is_safe: bool = True) -> str | None:
@@ -183,6 +285,7 @@ class SanitizedDatabaseUrl:
             )
         query_params = parse_qs(parsed.query, keep_blank_values=True)
         sensitive_in_query = [k for k in query_params if _base_param_name(k.lower()) in SENSITIVE_PARAMS]
+        sensitive_in_query.extend(_odbc_connect_sensitive_param_keys(query_params))
         if sensitive_in_query:
             raise ValueError(
                 f"SanitizedDatabaseUrl cannot contain sensitive query parameters: "
@@ -191,6 +294,7 @@ class SanitizedDatabaseUrl:
             )
         fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
         sensitive_in_fragment = [k for k in fragment_params if _base_param_name(k.lower()) in SENSITIVE_PARAMS]
+        sensitive_in_fragment.extend(_odbc_connect_sensitive_param_keys(fragment_params))
         if sensitive_in_fragment:
             raise ValueError(
                 f"SanitizedDatabaseUrl cannot contain sensitive fragment parameters: "
@@ -227,8 +331,14 @@ class SanitizedDatabaseUrl:
         parsed = urlparse(url)
         query_params = parse_qs(parsed.query, keep_blank_values=True)
         fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
-        has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params)
-        has_sensitive_fragment_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in fragment_params)
+        sanitized_query, odbc_query_values = _strip_sensitive_database_param_parts(parsed.query)
+        sanitized_fragment, odbc_fragment_values = _strip_sensitive_database_param_parts(parsed.fragment)
+        has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params) or bool(
+            odbc_query_values
+        )
+        has_sensitive_fragment_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in fragment_params) or bool(
+            odbc_fragment_values
+        )
 
         if parsed.password is None and not has_sensitive_query_keys and not has_sensitive_fragment_keys:
             return cls(sanitized_url=url, fingerprint=None)
@@ -242,9 +352,11 @@ class SanitizedDatabaseUrl:
         for key, values in query_params.items():
             if _base_param_name(key.lower()) in SENSITIVE_PARAMS:
                 sensitive_values.extend(v for v in values if v)
+        sensitive_values.extend(odbc_query_values)
         for key, values in fragment_params.items():
             if _base_param_name(key.lower()) in SENSITIVE_PARAMS:
                 sensitive_values.extend(v for v in values if v)
+        sensitive_values.extend(odbc_fragment_values)
 
         # Compute fingerprint if we have a key
         fingerprint: str | None = None
@@ -287,9 +399,6 @@ class SanitizedDatabaseUrl:
             netloc = f"{parsed.username}@{host_part}{port_str}"
         else:
             netloc = f"{host_part}{port_str}"
-
-        sanitized_query = _strip_sensitive_param_parts(parsed.query)
-        sanitized_fragment = _strip_sensitive_param_parts(parsed.fragment)
 
         # ``urlunparse`` drops the ``//`` authority introducer for schemes
         # outside urllib's ``uses_netloc`` set (sqlite, postgresql, ...) whenever

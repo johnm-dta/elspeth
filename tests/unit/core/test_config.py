@@ -241,6 +241,78 @@ sources:
         assert "output" in settings.sinks
         assert settings.sinks["output"].plugin == "csv"
 
+    def test_load_settings_rejects_report_assemble_title_placeholder_before_env_expansion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("REPORT_SECRET", "expanded-host-secret")
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: text_rows
+    options:
+      path: input.csv
+transforms:
+  - name: report
+    plugin: report_assemble
+    input: text_rows
+    on_success: output
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      title: "${REPORT_SECRET}"
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: output.csv
+""")
+
+        with pytest.raises(ValueError, match=r"report_assemble.*title.*environment-variable placeholders"):
+            load_settings(config_file)
+
+    def test_load_settings_from_yaml_string_rejects_report_assemble_join_with_placeholder_before_env_expansion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("REPORT_JOINER", "expanded-host-secret")
+
+        with pytest.raises(ValueError, match=r"report_assemble.*join_with.*environment-variable placeholders"):
+            load_settings_from_yaml_string(
+                """
+sources:
+  primary:
+    plugin: csv
+    on_success: text_rows
+    options:
+      path: input.csv
+transforms:
+  - name: report
+    plugin: report_assemble
+    input: text_rows
+    on_success: output
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      join_with: "${REPORT_JOINER}"
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: output.csv
+"""
+            )
+
     def test_load_env_override_lowercases_structural_schema_option_keys(
         self,
         tmp_path: Path,

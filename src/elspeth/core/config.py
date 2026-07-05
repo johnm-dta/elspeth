@@ -1773,6 +1773,9 @@ class ElspethSettings(BaseModel):
 
 # Regex pattern for ${VAR} or ${VAR:-default} syntax
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_ENV_EXPANSION_FORBIDDEN_PLUGIN_OPTION_FIELDS = {
+    "report_assemble": frozenset({"join_with", "title"}),
+}
 
 
 def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
@@ -1817,6 +1820,42 @@ def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
             return value
 
     return {k: _expand_value(v) for k, v in config.items()}
+
+
+def _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config: Mapping[str, object]) -> None:
+    """Reject env placeholders in plugin options that render into artifacts.
+
+    Some plugin options are user-visible presentation fields rather than secret
+    references. Reject their raw ``${VAR}`` syntax before the loader expands it,
+    so later plugin validation cannot be bypassed by replacing the marker with
+    a host secret value.
+    """
+    for collection_name in ("transforms", "aggregations"):
+        collection = raw_config[collection_name] if collection_name in raw_config else None
+        if type(collection) is not list:
+            continue
+        for index, plugin_config in enumerate(collection):
+            if type(plugin_config) is not dict:
+                continue
+            plugin_name = plugin_config["plugin"] if "plugin" in plugin_config else None
+            if not isinstance(plugin_name, str):
+                continue
+            forbidden_fields = _ENV_EXPANSION_FORBIDDEN_PLUGIN_OPTION_FIELDS.get(plugin_name.lower())
+            if not forbidden_fields:
+                continue
+            options = plugin_config["options"] if "options" in plugin_config else None
+            if type(options) is not dict:
+                continue
+            for option_name in sorted(forbidden_fields):
+                value = options[option_name] if option_name in options else None
+                if not isinstance(value, str) or not _ENV_VAR_PATTERN.search(value):
+                    continue
+                raw_name = plugin_config["name"] if "name" in plugin_config else index
+                raise ValueError(
+                    f"{collection_name}[{raw_name!r}] {plugin_name} option {option_name!r} "
+                    "must not contain environment-variable placeholders before env expansion; "
+                    f"{plugin_name} emits this option in user-visible report output"
+                )
 
 
 def _fingerprint_secrets(
@@ -2513,6 +2552,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
 
     # Filter Dynaconf internals (now safe — all non-known keys are Dynaconf's)
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config)
 
     # Expand ${VAR} and ${VAR:-default} patterns in config values
     raw_config = _expand_env_vars(raw_config)
@@ -2561,6 +2601,7 @@ def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool =
 
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
     _reject_file_backed_template_options_for_in_memory_loader(raw_config)
+    _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config)
     if expand_env_vars:
         raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)

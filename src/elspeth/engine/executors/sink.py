@@ -44,6 +44,7 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
+from elspeth.engine.executors.sink_required_fields import _format_optional_missing_fields_context
 from elspeth.engine.spans import SpanFactory
 
 logger = logging.getLogger(__name__)
@@ -294,28 +295,8 @@ class SinkExecutor:
                 missing = sorted(f for f in sink.declared_required_fields if f not in row)
                 if not missing:
                     continue
-                # If a contract is available, annotate missing fields that are
-                # marked optional in the contract (coalesce merge artifact).
-                contract_context = ""
-                if contracts is not None:
-                    contract = contracts[row_index]
-                    # Hoist the property out of the comprehension: it builds a
-                    # new frozenset on every access, and we need it once per row.
-                    required_in_contract = contract.required_field_names
-                    # Use find_name() to handle the original-vs-normalized name
-                    # namespace mismatch: declared_required_fields may carry raw
-                    # field names while the contract indexes by normalized names.
-                    optional_in_contract: list[str] = []
-                    for missing_name in missing:
-                        normalized = contract.find_name(missing_name)
-                        if normalized is not None and normalized not in required_in_contract:
-                            optional_in_contract.append(missing_name)
-                    if optional_in_contract:
-                        contract_context = (
-                            f" Fields {optional_in_contract} are optional in the row's "
-                            f"schema contract (likely from coalesce merge). "
-                            f"Fix: ensure all branches produce these fields as required."
-                        )
+                row_contract = None if contracts is None else contracts[row_index]
+                contract_context = _format_optional_missing_fields_context(missing=missing, row_contract=row_contract)
                 raise SinkTransactionalInvariantError(
                     f"Sink '{sink.name}' row {row_index} is missing required fields "
                     f"{missing} at the transactional commit boundary. This is "

@@ -29,7 +29,7 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
-from elspeth.engine.executors.sink_required_fields import SinkRequiredFieldsContract
+from elspeth.engine.executors.sink_required_fields import SinkRequiredFieldsContract, _format_optional_missing_fields_context
 from elspeth.plugins.infrastructure.base import BaseSink
 
 
@@ -262,6 +262,33 @@ def test_boundary_check_uses_static_contract_snapshot_not_mutable_plugin_state()
 
     assert tuple(exc_info.value.payload["declared"]) == ("snapshot_required_field",)
     assert tuple(exc_info.value.payload["missing"]) == ("snapshot_required_field",)
+
+
+def test_optional_missing_fields_context_resolves_original_names() -> None:
+    contract = SchemaContract(
+        mode="OBSERVED",
+        fields=(
+            FieldContract(
+                normalized_name="customer_id",
+                original_name="Customer ID",
+                python_type=str,
+                required=False,
+                source="inferred",
+                nullable=False,
+            ),
+        ),
+        locked=True,
+    )
+
+    context = _format_optional_missing_fields_context(
+        missing=("Customer ID", "absent"),
+        row_contract=contract,
+    )
+
+    assert context == (
+        " Fields ['Customer ID'] are optional in the row's schema contract "
+        "(likely from coalesce merge). Fix: ensure all branches produce these fields as required."
+    )
 
 
 def test_boundary_check_bounds_runtime_observed_diagnostics() -> None:

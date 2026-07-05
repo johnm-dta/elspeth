@@ -195,6 +195,27 @@ class PluginContext:
         """Frozen run configuration exposed read-only for audit integrity."""
         return self._config
 
+    def for_contract(self, contract: SchemaContract | None) -> PluginContext:
+        """Return an operation-scoped copy with a different row contract."""
+        return PluginContext(
+            run_id=self.run_id,
+            _config=self._config,
+            landscape=self.landscape,
+            payload_store=self.payload_store,
+            rate_limit_registry=self.rate_limit_registry,
+            concurrency_config=self.concurrency_config,
+            shutdown_event=self.shutdown_event,
+            node_id=self.node_id,
+            token=self.token,
+            batch_token_ids=self.batch_token_ids,
+            aggregation_batch=self.aggregation_batch,
+            contract=contract,
+            state_id=self.state_id,
+            operation_id=self.operation_id,
+            telemetry_emit=self.telemetry_emit,
+            _pending_quarantine_validation_errors=self._pending_quarantine_validation_errors,
+        )
+
     @staticmethod
     def _validation_error_match_key(row: Any) -> str:
         """Build a stable lookup key for a raw validation-error payload."""

@@ -14,6 +14,7 @@ operates only on the parameters passed in.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from collections.abc import Callable
 from functools import partial
@@ -22,12 +23,31 @@ from typing import TYPE_CHECKING
 import structlog
 
 import elspeth.contracts.errors as contract_errors
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.engine.orchestrator.types import PipelineConfig
 
 slog = structlog.get_logger(__name__)
+
+_CLEANUP_ERROR_PREVIEW_CHARS = 160
+_UNSCRUBBED_CLEANUP_ERROR_TEXT = "<redacted-plugin-error>"
+
+
+def _safe_cleanup_error_text(error: Exception) -> tuple[str, str, int]:
+    """Return public-safe plugin exception text, digest, and raw length."""
+    try:
+        raw_text = str(error)
+    except Exception:
+        raw_text = f"<unrepresentable {type(error).__name__}>"
+
+    digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    scrubbed = scrub_text_for_audit(raw_text)
+    public_text = scrubbed if scrubbed != raw_text else _UNSCRUBBED_CLEANUP_ERROR_TEXT
+    if len(public_text) > _CLEANUP_ERROR_PREVIEW_CHARS:
+        public_text = public_text[:_CLEANUP_ERROR_PREVIEW_CHARS] + "..."
+    return public_text, digest, len(raw_text)
 
 
 def cleanup_plugins(
@@ -72,15 +92,19 @@ def cleanup_plugins(
     cleanup_errors: list[str] = []
 
     def record_cleanup_error(hook: str, plugin_name: str, error: Exception) -> None:
+        public_error, error_digest, error_length = _safe_cleanup_error_text(error)
         logger.warning(
             "Plugin cleanup hook failed",
             hook=hook,
             plugin=plugin_name,
-            error=str(error),
+            error=public_error,
             error_type=type(error).__name__,
-            exc_info=error,
+            error_sha256=error_digest,
+            error_length=error_length,
         )
-        cleanup_errors.append(f"{hook}({plugin_name}): {type(error).__name__}: {error}")
+        cleanup_errors.append(
+            f"{hook}({plugin_name}): {type(error).__name__}: {public_error} [message_sha256={error_digest}, message_length={error_length}]"
+        )
 
     def run_hook(hook_label: str, plugin_name: str, fn: Callable[[], None]) -> None:
         # Plugin cleanup MUST attempt every hook even when one fails — broad

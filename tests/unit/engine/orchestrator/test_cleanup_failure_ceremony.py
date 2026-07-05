@@ -45,6 +45,16 @@ class FailingCloseSink(CollectSink):
         raise RuntimeError("sink close failure")
 
 
+SENSITIVE_CLEANUP_MESSAGE = "cleanup failed for sk-1234567890abcdef1234567890abcdef password=hunter2 https://user:pass@example.test/path"
+
+
+class SensitiveFailingCloseSink(CollectSink):
+    """Sink that raises a secret-bearing cleanup error."""
+
+    def close(self) -> None:
+        raise RuntimeError(SENSITIVE_CLEANUP_MESSAGE)
+
+
 class MidIterationFailingSource(ListSource):
     """Source that yields its rows, then raises mid-iteration."""
 
@@ -70,6 +80,15 @@ class RecordingEventBus:
 
 def _config_with_failing_close_sink() -> PipelineConfig:
     sink = FailingCloseSink("default")
+    return PipelineConfig(
+        sources={"primary": as_source(ListSource([], name="src"))},
+        transforms=[],
+        sinks={"default": as_sink(sink)},
+    )
+
+
+def _config_with_sensitive_failing_close_sink() -> PipelineConfig:
+    sink = SensitiveFailingCloseSink("default")
     return PipelineConfig(
         sources={"primary": as_source(ListSource([], name="src"))},
         transforms=[],
@@ -110,6 +129,36 @@ class TestCleanupDoesNotMaskPendingException:
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
             cleanup_plugins(config, ctx, include_source=True)
+
+    def test_cleanup_failure_public_surfaces_scrub_plugin_error_text(self) -> None:
+        """Cleanup diagnostics keep location/type metadata without leaking plugin exception text."""
+        config = _config_with_sensitive_failing_close_sink()
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+
+        with structlog.testing.capture_logs() as captured, pytest.raises(RuntimeError) as exc_info:
+            cleanup_plugins(config, ctx, include_source=True)
+
+        public_error = str(exc_info.value)
+        captured_text = repr(captured)
+
+        for leaked in (
+            "sk-1234567890abcdef1234567890abcdef",
+            "password=hunter2",
+            "https://user:pass@example.test/path",
+        ):
+            assert leaked not in public_error
+            assert leaked not in captured_text
+
+        assert "sink.close(default)" in public_error
+        assert "RuntimeError" in public_error
+        assert "<redacted-secret>" in public_error
+
+        hook_log = next(entry for entry in captured if entry["event"] == "Plugin cleanup hook failed")
+        assert hook_log["hook"] == "sink.close"
+        assert hook_log["plugin"] == "default"
+        assert hook_log["error_type"] == "RuntimeError"
+        assert hook_log["error"] == "<redacted-secret>"
+        assert "exc_info" not in hook_log
 
 
 class TestPartialResultCeremonySurvivesCleanupFailure:

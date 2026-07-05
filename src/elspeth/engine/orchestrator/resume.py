@@ -732,6 +732,58 @@ class ResumeCoordinator:
         has_restored_barrier_work = snapshot.recovery.count_blocked_barrier_items(snapshot.run_id) > 0
         return batch_id_remap, has_restored_barrier_work
 
+    def _finalize_successful_resume(
+        self,
+        *,
+        factory: RecorderFactory,
+        run_id: str,
+        coordination_token: CoordinationToken,
+        heartbeat: RunHeartbeatThread,
+        duration_seconds: float,
+    ) -> RunResult:
+        """Complete the shared successful-resume ceremony."""
+        terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
+        factory.run_lifecycle.finalize_run(run_id, status=terminal_status, token=coordination_token)
+        result = audit_counters.to_run_result(run_id, terminal_status)
+
+        # Delete checkpoints on successful completion. LEADER WORK: the
+        # delete is epoch-fenced (ADR-030 §C.4 row 5) and must run BEFORE
+        # the seat release vacates the fence's CAS target.
+        self._checkpoints.delete_checkpoints(run_id)
+
+        # ADR-030 §A.3: stop the heartbeat thread BEFORE releasing the
+        # seat — the thread must not beat the seat after it is vacated.
+        heartbeat.stop()
+
+        # Seat hygiene (ADR-030 §D): release the seat AFTER the terminal
+        # finalize succeeded. Best-effort.
+        with best_effort("Seat release after resume finalize", run_id=run_id):
+            factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
+
+        self._ceremony.emit_run_finished(
+            run_id=run_id,
+            status=terminal_status,
+            row_count=result.rows_processed,
+            duration_seconds=duration_seconds,
+        )
+
+        cli_status, exit_code = cli_completion_for(terminal_status)
+        self._ceremony.emit_run_summary(
+            run_id=run_id,
+            status=cli_status,
+            rows_processed=result.rows_processed,
+            rows_succeeded=result.rows_succeeded,
+            rows_failed=result.rows_failed,
+            rows_quarantined=result.rows_quarantined,
+            duration_seconds=duration_seconds,
+            exit_code=exit_code,
+            rows_routed_success=result.rows_routed_success,
+            rows_routed_failure=result.rows_routed_failure,
+            routed_destinations=result.routed_destinations,
+        )
+
+        return result
+
     def resume(
         self,
         resume_point: ResumePoint,
@@ -936,52 +988,13 @@ class ResumeCoordinator:
                 # carries the truth.  Aggregate token_outcomes to derive the
                 # correct four-value terminal status and feed it to both the
                 # Landscape finalize and the local RunResult.
-                terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
-                factory.run_lifecycle.finalize_run(run_id, status=terminal_status, token=coordination_token)
-
-                # Delete checkpoints on successful completion. LEADER WORK:
-                # the delete is epoch-fenced (ADR-030 §C.4 row 5) and must
-                # run BEFORE the seat release vacates the fence's CAS target.
-                self._checkpoints.delete_checkpoints(run_id)
-
-                # ADR-030 §A.3: stop the heartbeat thread BEFORE releasing
-                # the seat — the thread must not beat the seat after it is
-                # vacated.
-                _heartbeat.stop()
-
-                # Seat hygiene (ADR-030 §D): release the seat AFTER the
-                # terminal finalize succeeded. Best-effort.
-                with best_effort("Seat release after resume finalize (no-work arm)", run_id=run_id):
-                    if coordination_token is not None:
-                        factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
-
-                result = audit_counters.to_run_result(run_id, terminal_status)
-
-                # Emit RunFinished telemetry (matching the normal completion path)
-                self._ceremony.emit_run_finished(
+                return self._finalize_successful_resume(
+                    factory=factory,
                     run_id=run_id,
-                    status=terminal_status,
-                    row_count=result.rows_processed,
+                    coordination_token=coordination_token,
+                    heartbeat=_heartbeat,
                     duration_seconds=0.0,
                 )
-
-                # Emit RunSummary event
-                cli_status, exit_code = cli_completion_for(terminal_status)
-                self._ceremony.emit_run_summary(
-                    run_id=run_id,
-                    status=cli_status,
-                    rows_processed=result.rows_processed,
-                    rows_succeeded=result.rows_succeeded,
-                    rows_failed=result.rows_failed,
-                    rows_quarantined=result.rows_quarantined,
-                    duration_seconds=0.0,
-                    exit_code=exit_code,
-                    rows_routed_success=result.rows_routed_success,
-                    rows_routed_failure=result.rows_routed_failure,
-                    routed_destinations=result.routed_destinations,
-                )
-
-                return result
 
             with shutdown_ctx as active_event:
                 # F1: bundle the journal-restore inputs (checkpoint scalars +
@@ -1053,53 +1066,13 @@ class ResumeCoordinator:
             # pin: test_adr_019_resume_counter_parity.py::
             # test_resume_derives_rows_coalesce_failed_from_durable_audit
             # (resumed run_B == uninterrupted oracle run_A).
-            terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
-
-            factory.run_lifecycle.finalize_run(run_id, status=terminal_status, token=coordination_token)
-            result = audit_counters.to_run_result(run_id, terminal_status)
-
-            # Delete checkpoints on successful completion. LEADER WORK: the
-            # delete is epoch-fenced (ADR-030 §C.4 row 5) and must run BEFORE
-            # the seat release vacates the fence's CAS target.
-            self._checkpoints.delete_checkpoints(run_id)
-
-            # ADR-030 §A.3: stop the heartbeat thread BEFORE releasing the
-            # seat — the thread must not beat the seat after it is vacated.
-            _heartbeat.stop()
-
-            # Seat hygiene (ADR-030 §D): release the seat AFTER the terminal
-            # finalize succeeded. Best-effort.
-            with best_effort("Seat release after resume finalize", run_id=run_id):
-                if coordination_token is not None:
-                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
-
-            # 7. Emit RunFinished telemetry
-            resume_duration = time.perf_counter() - resume_start_time
-            self._ceremony.emit_run_finished(
+            return self._finalize_successful_resume(
+                factory=factory,
                 run_id=run_id,
-                status=terminal_status,
-                row_count=result.rows_processed,
-                duration_seconds=resume_duration,
+                coordination_token=coordination_token,
+                heartbeat=_heartbeat,
+                duration_seconds=time.perf_counter() - resume_start_time,
             )
-
-            # 8. Emit RunSummary event
-            cli_status, exit_code = cli_completion_for(terminal_status)
-            total_duration = time.perf_counter() - resume_start_time
-            self._ceremony.emit_run_summary(
-                run_id=run_id,
-                status=cli_status,
-                rows_processed=result.rows_processed,
-                rows_succeeded=result.rows_succeeded,
-                rows_failed=result.rows_failed,
-                rows_quarantined=result.rows_quarantined,
-                duration_seconds=total_duration,
-                exit_code=exit_code,
-                rows_routed_success=result.rows_routed_success,
-                rows_routed_failure=result.rows_routed_failure,
-                routed_destinations=result.routed_destinations,
-            )
-
-            return result
         except GracefulShutdownError as shutdown_exc:
             # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
             _heartbeat.stop()

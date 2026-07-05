@@ -1549,6 +1549,52 @@ class TestGateExecutor:
         assert outcome.sink_name is None
         assert outcome.next_node_id == NodeID("next_node")
 
+    def test_config_gate_reuses_condition_parser_per_gate(self) -> None:
+        """Repeated tokens for the same gate reuse one parsed condition."""
+
+        class _CountingParser:
+            constructed = 0
+            evaluated = 0
+
+            def __init__(self, condition: str) -> None:
+                type(self).constructed += 1
+                self.condition = condition
+
+            def evaluate(self, row: PipelineRow) -> bool:
+                type(self).evaluated += 1
+                assert row["value"] == "test"
+                return True
+
+        factory = _make_factory()
+        edge_map = {(NodeID("cg_1"), "true"): "edge_true"}
+        route_map = {(NodeID("cg_1"), "true"): RouteDestination.processing_node(NodeID("next_node"))}
+        executor = GateExecutor(
+            factory.execution,
+            _make_span_factory(),
+            _make_step_resolver(),
+            edge_map=edge_map,
+            route_resolution_map=route_map,
+        )
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="True",
+            routes={"true": "next_conn", "false": "error_sink"},
+        )
+        contract = _make_contract()
+        first_token = _make_token(contract=contract, token_id="tok_1")
+        second_token = _make_token(contract=contract, token_id="tok_2")
+        ctx = make_context()
+
+        with patch("elspeth.engine.executors.gate.ExpressionParser", _CountingParser):
+            first_outcome = executor.execute_config_gate(config, "cg_1", first_token, ctx)
+            second_outcome = executor.execute_config_gate(config, "cg_1", second_token, ctx)
+
+        assert first_outcome.next_node_id == NodeID("next_node")
+        assert second_outcome.next_node_id == NodeID("next_node")
+        assert _CountingParser.evaluated == 2
+        assert _CountingParser.constructed == 1
+
     def test_config_gate_boolean_false_routes_via_false_label(self) -> None:
         """Boolean False condition evaluates to 'false' label."""
         factory = _make_factory()

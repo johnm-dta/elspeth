@@ -351,14 +351,8 @@ class TestExecuteRunCharacterization:
             ).scalar()
             assert divert_count == 2, f"Expected 2 DIVERT routing events, got {divert_count}"
 
-    def test_current_graph_not_cleared_on_error(self) -> None:
-        """Assert _current_graph is NOT cleared when _execute_run() raises.
-
-        Currently, _current_graph = None is OUTSIDE the finally block in
-        _execute_run(), so errors leave it set. This characterizes the current
-        behavior — if a future extraction moves cleanup into the finally block,
-        this test should be updated to expect None.
-        """
+    def test_current_graph_cleared_on_error(self) -> None:
+        """Assert _active_graph is cleared when _execute_run() raises."""
         db = make_landscape_db()
         orchestrator = Orchestrator(db)
 
@@ -395,9 +389,9 @@ class TestExecuteRunCharacterization:
         assert isinstance(exc_info.value.original_error, RuntimeError)
         assert str(exc_info.value.original_error) == "deliberate error for characterization test"
 
-        # Current behavior: _active_graph is NOT cleared on error
-        # (the set_active_graph(None) call is after the finally block, not inside it)
-        assert orchestrator._checkpoints._active_graph is not None
+        # The active graph binding is mechanically scoped to the run body, so
+        # failures cannot leave stale graph state in the checkpoint coordinator.
+        assert orchestrator._checkpoints._active_graph is None
 
 
 # ---------------------------------------------------------------------------

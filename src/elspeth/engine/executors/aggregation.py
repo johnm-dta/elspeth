@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import ValidationError
 
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import (
@@ -305,6 +306,37 @@ class AggregationExecutor:
         node = self._get_node(node_id, "_get_buffered_data")
         return node.snapshot_rows(), list(node.tokens)
 
+    @staticmethod
+    def _validate_batch_inputs(transform: BatchTransformProtocol, rows: Sequence[PipelineRow]) -> None:
+        """Validate reconstructed batch input rows before plugin execution."""
+        for idx, row in enumerate(rows):
+            try:
+                transform.input_schema.model_validate(row.to_dict(), strict=True)
+            except ValidationError as exc:
+                raise PluginContractViolation(
+                    f"Aggregation transform '{transform.name}' input validation failed for buffered row {idx}: {exc}. "
+                    "This indicates an upstream transform/source schema bug."
+                ) from exc
+
+    @staticmethod
+    def _validate_success_outputs(transform: BatchTransformProtocol, result: TransformResult) -> None:
+        """Validate successful batch output rows before audit completion."""
+        if result.row is not None:
+            emitted_rows: tuple[PipelineRow, ...] = (result.row,)
+        elif result.rows is not None:
+            emitted_rows = tuple(result.rows)
+        else:
+            emitted_rows = ()
+
+        for idx, row in enumerate(emitted_rows):
+            try:
+                transform.output_schema.model_validate(row.to_dict(), strict=True)
+            except ValidationError as exc:
+                raise PluginContractViolation(
+                    f"Aggregation transform '{transform.name}' output validation failed for emitted row {idx}: {exc}. "
+                    "This indicates a transform schema bug."
+                ) from exc
+
     def execute_flush(
         self,
         node_id: NodeID,
@@ -445,6 +477,8 @@ class AggregationExecutor:
             batch_finalized = False
 
             try:
+                self._validate_batch_inputs(transform, pipeline_rows)
+
                 with self._spans.aggregation_span(
                     transform.name,
                     node_id=node_id,
@@ -500,6 +534,8 @@ class AggregationExecutor:
 
                 # Complete node state and batch
                 if result.status == "success":
+                    self._validate_success_outputs(transform, result)
+
                     # Extract dicts for audit trail (Tier 1: full trust - store plain dicts)
                     output_data: dict[str, Any] | list[dict[str, Any]]
                     if result.row is not None:

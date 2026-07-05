@@ -10,9 +10,11 @@ to a focused collaborator the driver delegates to.
 
 Deliberately left on the driver: ``restore_source_iteration_context`` (two-line
 node/operation identity restoration threaded through the hot loop and the
-finalizer) and the initial ``lifecycle_state="loading"`` record inside
-``run_main_processing_loop`` setup — moving either would only churn hot-path
-call sites without narrowing this recorder's single concern.
+finalizer) — moving it would only churn hot-path call sites without narrowing
+this recorder's single concern. All four run_source lifecycle records (LOADING
+at loop setup, then EXHAUSTED/INTERRUPTED/LOADED) route through
+``record_run_source_lifecycle`` so the schema-evidence argument assembly lives
+in exactly one place.
 """
 
 from __future__ import annotations

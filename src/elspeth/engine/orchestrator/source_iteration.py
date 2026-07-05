@@ -22,7 +22,6 @@ Dependencies held by this driver:
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -41,7 +40,6 @@ from elspeth.contracts.events import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.core.operations import track_operation
@@ -526,15 +524,13 @@ class SourceIterationDriver:
                 source_id=source_id,
                 source_operation_id=source_operation_id,
             )
-            factory.run_lifecycle.record_run_source(
-                run_id=run_id,
-                source_node_id=source_id,
-                source_name=active_source_name,
-                plugin_name=active_source.name,
-                config_hash=stable_hash(active_source.config),
-                source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
-                schema_contract=active_source.get_schema_contract(),
-                lifecycle_state="loading",
+            self._lifecycle_recorder.record_run_source_lifecycle(
+                factory,
+                run_id,
+                source_id,
+                active_source_name,
+                active_source,
+                RunSourceLifecycleState.LOADING,
             )
 
             source_iterator = self.load_source_with_events(run_id, ctx, active_source=active_source)

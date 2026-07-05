@@ -34,7 +34,7 @@ from elspeth.engine.barrier_coordination import (
     BarrierRecoveryCoordinator,
     _LiveBarrierHold,
 )
-from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
+from elspeth.engine.dag_navigator import DAGNavigator
 from elspeth.engine.scheduler_drain import (
     MAX_WORK_QUEUE_ITERATIONS as MAX_WORK_QUEUE_ITERATIONS,  # re-export: tests import from here
 )
@@ -71,6 +71,7 @@ from elspeth.engine.token_traversal import (
 from elspeth.engine.token_traversal import (
     _TransformTerminal as _TransformTerminal,  # re-export
 )
+from elspeth.engine.work_items import WorkItem, WorkItemFactory
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
@@ -479,6 +480,7 @@ class RowProcessor:
             coalesce_on_success_map=self._coalesce_on_success_map,
             sink_names=self._sink_names,
         )
+        self._work_items = WorkItemFactory(self._nav)
 
         # Build error edge map: transform node_id -> DIVERT edge_id.
         # Scans edge_map for __error_{name}__ labels (created by dag.py for transforms
@@ -526,7 +528,7 @@ class RowProcessor:
             resolve_ingest_sequence=data_flow.resolve_row_ingest_sequence,
             queue_key_for_item=self._queue_key_for_blocked_item,
             barrier_key_for_item=self._barrier_key_for_blocked_item,
-            create_work_item=self._nav.create_work_item,
+            create_work_item=self._work_items.create,
         )
         self._coordination_token = coordination_token
         self._run_coordination = run_coordination
@@ -621,6 +623,7 @@ class RowProcessor:
             aggregation_executor=self._aggregation_executor,
             coalesce_executor=self._coalesce_executor,
             nav=self._nav,
+            work_items=self._work_items,
             clock=self._clock,
             aggregation_settings=self._aggregation_settings,
             coalesce_node_ids=self._coalesce_node_ids,
@@ -1380,7 +1383,7 @@ class RowProcessor:
             for token, enriched_data in zip(fctx.buffered_tokens, pipeline_rows, strict=True):
                 updated_token = token.with_updated_data(enriched_data)
                 child_items.append(
-                    self._nav.create_continuation_work_item(
+                    self._work_items.create_continuation(
                         token=updated_token,
                         current_node_id=fctx.node_id,
                         coalesce_name=work_item_coalesce_name,
@@ -1556,7 +1559,7 @@ class RowProcessor:
                 work_item_coalesce_name = fctx.coalesce_name if needs_coalesce else None
                 for token in expanded_tokens:
                     child_items.append(
-                        self._nav.create_continuation_work_item(
+                        self._work_items.create_continuation(
                             token=token,
                             current_node_id=fctx.node_id,
                             coalesce_name=work_item_coalesce_name,
@@ -2102,7 +2105,7 @@ class RowProcessor:
         initial_node_id = self._node_to_next[source_node_id]
         if transforms and initial_node_id == source_node_id:
             raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
-        return self._nav.create_work_item(
+        return self._work_items.create(
             token=token,
             current_node_id=initial_node_id,
             coalesce_node_id=coalesce_node_id,
@@ -2432,7 +2435,7 @@ class RowProcessor:
         coalesce merges that must continue processing, and for resume of fork→sink tokens.
         """
         return self._drain_work_queue(
-            self._nav.create_work_item(
+            self._work_items.create(
                 token=token,
                 current_node_id=current_node_id,
                 coalesce_node_id=coalesce_node_id,
@@ -2721,7 +2724,7 @@ class RowProcessor:
             # Non-terminal — consume held siblings and emit the merged child's
             # READY continuation in ONE atomic journal transition (F1/D6),
             # then resume the merged token at the coalesce step.
-            merged_item = self._nav.create_work_item(
+            merged_item = self._work_items.create(
                 token=outcome.merged_token,
                 current_node_id=coalesce_node_id,
             )
@@ -3145,7 +3148,7 @@ class RowProcessor:
         reconciles idempotently against the READY row inserted here (same
         deterministic work_item_id and field derivation).
         """
-        merged_item = self._nav.create_work_item(
+        merged_item = self._work_items.create(
             token=merged_token,
             current_node_id=coalesce_node_id,
             coalesce_node_id=coalesce_node_id,

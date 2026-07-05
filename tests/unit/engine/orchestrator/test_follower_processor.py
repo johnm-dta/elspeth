@@ -1539,7 +1539,7 @@ class TestFollowerBarrierNodeIds:
         processor._aggregation_settings = {}
         processor._follower_barrier_node_ids = frozenset({agg_node})
 
-        from elspeth.engine.dag_navigator import WorkItem
+        from elspeth.engine.work_items import WorkItem
         from elspeth.testing import make_token_info
 
         token = make_token_info(data={"v": 1}, token_id="tok-structural-1")
@@ -1558,9 +1558,9 @@ class TestFollowerBarrierNodeIds:
         adoption verb finds the correct row.
         """
         from elspeth.contracts.types import NodeID
-        from elspeth.engine.dag_navigator import WorkItem
         from elspeth.engine.processor import DAGTraversalContext, RowProcessor
         from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.work_items import WorkItem
         from elspeth.testing import make_token_info
         from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run
 

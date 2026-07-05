@@ -56,7 +56,6 @@ from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
-from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.executors import GateOutcome
 from elspeth.engine.executors.transform import TransformExecutor
 from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
@@ -71,6 +70,7 @@ from elspeth.engine.processor import (
 )
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
+from elspeth.engine.work_items import WorkItem
 from elspeth.plugins.infrastructure.clients.llm import LLMClientError
 from elspeth.plugins.transforms.batch_replicate import BatchReplicateConfig
 from elspeth.testing import make_contract, make_pipeline_row, make_row, make_source_row, make_token_info
@@ -499,7 +499,7 @@ class TestConstructorErrorEdgeMap:
     def test_navigator_is_constructed_from_traversal_context_factory(self) -> None:
         """RowProcessor should not re-derive DAGNavigator internals at the call site."""
         _, factory = _make_factory()
-        nav = SimpleNamespace(create_work_item=Mock(name="create_work_item"))
+        nav = SimpleNamespace()
         coalesce_on_success = {CoalesceName("merge"): "out"}
         sink_names = frozenset({"out", "error"})
 
@@ -3102,7 +3102,14 @@ class TestProcessRowGateBranching:
         with (
             patch.object(processor._gate_executor, "execute_config_gate", side_effect=config_gate_side_effect),
             patch.object(processor._transform_executor, "execute_transform", side_effect=transform_side_effect),
-            patch.object(processor._nav, "create_continuation_work_item", side_effect=continuation_side_effect),
+            patch.object(
+                processor,
+                "_work_items",
+                SimpleNamespace(
+                    create=processor._work_items.create,
+                    create_continuation=continuation_side_effect,
+                ),
+            ),
         ):
             results = processor.process_row(
                 row_index=0,

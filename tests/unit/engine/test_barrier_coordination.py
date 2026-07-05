@@ -46,7 +46,7 @@ from elspeth.engine.barrier_coordination import (
 )
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceOutcome
-from elspeth.engine.dag_navigator import WorkItem
+from elspeth.engine.work_items import WorkItem, WorkItemFactory
 
 _CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 _NOW = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
@@ -162,15 +162,6 @@ class FakeNav:
     def resolve_next_node(self, node_id: NodeID) -> NodeID | None:
         return self.next_node
 
-    def create_work_item(self, **kwargs: object) -> WorkItem:
-        return WorkItem(
-            token=kwargs["token"],
-            current_node_id=kwargs.get("current_node_id"),
-            coalesce_node_id=kwargs.get("coalesce_node_id"),
-            coalesce_name=kwargs.get("coalesce_name"),
-            on_success_sink=kwargs.get("on_success_sink"),
-        )
-
 
 def _batch_aware_transform() -> Mock:
     """Specced protocol mock — satisfies the runtime TransformProtocol check."""
@@ -215,6 +206,7 @@ def _make_coordinator(
             sink_name="merged_sink",
         )
 
+    resolved_nav = nav or FakeNav(transform=_batch_aware_transform())
     return BarrierIntakeCoordinator(
         run_id="run-1",
         scheduler=scheduler,
@@ -222,7 +214,8 @@ def _make_coordinator(
         execution=SimpleNamespace(get_max_node_state_attempts=lambda run_id, token_ids: {}),
         aggregation_executor=aggregation_executor or RecordingAggregationExecutor(),
         coalesce_executor=coalesce_executor,
-        nav=nav or FakeNav(transform=_batch_aware_transform()),
+        nav=resolved_nav,
+        work_items=WorkItemFactory(resolved_nav),
         clock=MockClock(start=100.0),
         aggregation_settings={_AGG_NODE: object()} if aggregation_executor is not None else {},
         coalesce_node_ids={_COALESCE: NodeID("coalesce-node")} if coalesce_executor is not None else {},

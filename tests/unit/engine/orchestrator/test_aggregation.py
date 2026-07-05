@@ -26,7 +26,6 @@ from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     find_aggregation_transform,
@@ -34,6 +33,7 @@ from elspeth.engine.orchestrator.aggregation import (
 )
 from elspeth.engine.orchestrator.resume import handle_incomplete_batches
 from elspeth.engine.orchestrator.types import AggNodeEntry, PipelineConfig, RowProcessorHandle
+from elspeth.engine.work_items import WorkItem
 from elspeth.testing import make_row, make_token_info
 
 # =============================================================================

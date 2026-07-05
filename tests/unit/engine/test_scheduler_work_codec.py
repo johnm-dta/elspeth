@@ -21,12 +21,12 @@ from elspeth.contracts.scheduler import BarrierEmission, TokenWorkItem, TokenWor
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.scheduler_work_codec import (
     TERMINAL_NODE_SENTINEL,
     ScheduledWorkFields,
     SchedulerWorkCodec,
 )
+from elspeth.engine.work_items import WorkItem
 
 _CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 _NOW = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)

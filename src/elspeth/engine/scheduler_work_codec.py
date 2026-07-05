@@ -26,7 +26,7 @@ from elspeth.contracts import TokenInfo
 from elspeth.contracts.scheduler import BarrierEmission, TokenWorkItem
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.engine.dag_navigator import WorkItem
+from elspeth.engine.work_items import WorkItem
 
 #: Legacy durable node-cursor marker for terminal-lane rows. Current writers
 #: persist NULL past the last node; rehydrate accepts both spellings.
@@ -34,7 +34,7 @@ TERMINAL_NODE_SENTINEL = "__terminal__"
 
 
 class WorkItemFactory(Protocol):
-    """Rehydrate seam — matches ``DAGNavigator.create_work_item``."""
+    """Rehydrate seam — matches ``WorkItemFactory.create``."""
 
     def __call__(
         self,

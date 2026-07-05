@@ -36,9 +36,9 @@ import pytest
 
 from elspeth.contracts import RowResult
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.processor import SCHEDULER_MAINTENANCE_INTERVAL
 from elspeth.engine.scheduler_drain import ProcessorMode
+from elspeth.engine.work_items import WorkItem
 from tests.unit.engine.test_scheduler_drain_characterization import (
     LEADER_OWNER,
     _build,

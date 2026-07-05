@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from elspeth.contracts import TransformProtocol
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.results import RowResult
-    from elspeth.engine.dag_navigator import WorkItem
+    from elspeth.engine.work_items import WorkItem
 
 
 def find_aggregation_transform(

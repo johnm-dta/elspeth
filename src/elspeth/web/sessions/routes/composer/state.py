@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TypedDict
 
@@ -69,6 +70,12 @@ class ImportStateYamlRequest(BaseModel):
 
     yaml: str = Field(min_length=1, max_length=MAX_RUNTIME_YAML_IMPORT_CHARS)
     source_blob_ids: dict[str, str] | None = None
+
+
+class SeedCompositionStateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: dict[str, Any]
 
 
 def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_dir: str) -> bool:
@@ -443,6 +450,64 @@ async def import_state_yaml(
             preflight_exception_policy="persist_invalid",
             initial_version=imported_state.version,
             telemetry_source="compose",
+        )
+        state_record = await service.save_composition_state(
+            session.id,
+            state_data,
+            provenance="session_seed",
+        )
+        return _state_response(state_record)
+
+
+@router.post(
+    "/{session_id}/state/e2e-seed",
+    response_model=CompositionStateResponse,
+    include_in_schema=False,
+)
+async def seed_state_for_e2e(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> CompositionStateResponse:
+    """Test-only state seed endpoint for Playwright-managed E2E runs."""
+    if not request.app.state.settings.e2e_state_seed_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    session = await _verify_session_ownership(session_id, user, request)
+
+    try:
+        body = SeedCompositionStateRequest.model_validate(await request.json())
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid seed request JSON") from exc
+
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+    async with compose_lock:
+        try:
+            seeded_state = CompositionState.from_dict(body.state)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid composition state JSON") from exc
+
+        _reject_unbound_blob_storage_sources(
+            seeded_state,
+            data_dir=str(request.app.state.settings.data_dir),
+        )
+        _reject_fabricated_secret_literals(
+            seeded_state,
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
+        )
+
+        service: SessionServiceProtocol = request.app.state.session_service
+        state_data, _validation = await _state_data_from_composer_state(
+            seeded_state,
+            settings=request.app.state.settings,
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
+            session_id=session.id,
+            runtime_preflight=None,
+            preflight_exception_policy="persist_invalid",
+            initial_version=seeded_state.version,
+            telemetry_source="state_seed",
         )
         state_record = await service.save_composition_state(
             session.id,

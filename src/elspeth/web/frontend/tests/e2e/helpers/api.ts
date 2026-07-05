@@ -16,6 +16,8 @@ export interface SessionSummary {
   title: string;
 }
 
+export type CompositionStateSeed = Record<string, unknown>;
+
 export async function authedContext(token: string): Promise<APIRequestContext> {
   return request.newContext({
     baseURL: BACKEND_BASE_URL,
@@ -60,6 +62,22 @@ export async function deleteSession(
       `DELETE /api/sessions/${sessionId} failed (${resp.status()}): ${(await resp.text()).slice(0, 500)}`,
     );
   }
+}
+
+export async function seedCompositionState(
+  ctx: APIRequestContext,
+  sessionId: string,
+  state: CompositionStateSeed,
+): Promise<Record<string, unknown>> {
+  const resp = await ctx.post(`/api/sessions/${sessionId}/state/e2e-seed`, {
+    data: { state },
+  });
+  if (!resp.ok()) {
+    throw new Error(
+      `POST /api/sessions/${sessionId}/state/e2e-seed failed (${resp.status()}): ${(await resp.text()).slice(0, 500)}`,
+    );
+  }
+  return (await resp.json()) as Record<string, unknown>;
 }
 
 // Minimal blob metadata fields used by tests.  The backend returns more fields

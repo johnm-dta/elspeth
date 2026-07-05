@@ -13,26 +13,19 @@
 //      reads "invalid".
 //
 // Why skipped:
-//   The composer tools (upsert_node, upsert_edge, etc.) are LLM-facing
-//   and not exposed as REST endpoints we can call directly. To seed
-//   composition state without driving a real LLM, we need either:
-//     (a) a direct state-mutation REST endpoint (e.g.,
-//         POST /api/sessions/{id}/state with the canonical state JSON),
-//         which doesn't exist today; or
-//     (b) an LLM stub server (the existing pytest ChaosLLM pattern,
-//         ported to a TypeScript stub the webServer can dial via
-//         ELSPETH_WEB__composer_model env override).
+//   State seeding now exists via seedCompositionState(), but this spec body
+//   still needs to be implemented from the outline below.
 //
-// Tracked as elspeth-3a7df642c5. Until then this spec is a tracked skip —
-// but the test body is sketched so the next contributor does not need
-// to re-derive intent from the issue tracker.
+// Tracked as elspeth-7cf763da7c. Until then this spec is a tracked skip — but
+// the test body is sketched so the next contributor does not need to re-derive
+// intent from the issue tracker.
 
 import { test } from "@playwright/test";
 
 test.describe("topology — runtime-connection vs UI-edge validation parity", () => {
   test.skip(
     true,
-    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+    "pending seeded spec implementation — tracked as elspeth-7cf763da7c",
   );
 
   test("connection-wired chain (no UI edges) validates as valid", async () => {

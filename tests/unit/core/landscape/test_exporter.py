@@ -1335,6 +1335,20 @@ class TestRecordOrder:
 class TestExportRunGrouped:
     """Tests for export_run_grouped — groups records by type."""
 
+    def test_iter_run_records_by_type_yields_record_type_pairs(self) -> None:
+        exporter = _make_exporter(
+            nodes=[_NODE],
+            edges=[_EDGE],
+        )
+
+        pairs = list(exporter.iter_run_records_by_type("run-1"))
+
+        assert pairs
+        assert pairs[0][0] == "run"
+        assert all(record_type == record["record_type"] for record_type, record in pairs)
+        assert "node" in {record_type for record_type, _record in pairs}
+        assert "edge" in {record_type for record_type, _record in pairs}
+
     def test_groups_by_record_type(self) -> None:
         exporter = _make_exporter(
             nodes=[_NODE],

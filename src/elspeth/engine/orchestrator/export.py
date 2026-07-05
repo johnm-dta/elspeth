@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import csv
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
+from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ from elspeth.engine.orchestrator.schema_reconstruction import (
 
 _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 _CSV_FORMULA_ESCAPE_PREFIX = "'"
+_JSON_EXPORT_BATCH_SIZE = 1000
 
 
 def _neutralize_csv_formula_cell(value: Any) -> Any:
@@ -59,6 +61,46 @@ def _neutralize_csv_formula_cell(value: Any) -> Any:
 def _neutralize_csv_formula_record(record: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copy with spreadsheet-executable string cells neutralized."""
     return {key: _neutralize_csv_formula_cell(value) for key, value in record.items()}
+
+
+class _CsvRecordTypeSpool:
+    """Bounded-memory spool for one CSV record type."""
+
+    def __init__(self) -> None:
+        self._file = TemporaryFile("w+", newline="", encoding="utf-8")  # noqa: SIM115 - spool owns and closes this file
+        self._writer = csv.writer(self._file)
+        self.fieldnames: set[str] = set()
+        self.count = 0
+
+    def append(self, record: dict[str, Any]) -> None:
+        self.fieldnames.update(record.keys())
+        self._writer.writerow([len(record)])
+        for key, value in record.items():
+            self._writer.writerow([key, value])
+        self.count += 1
+
+    def iter_records(self) -> Iterator[dict[str, Any]]:
+        self._file.seek(0)
+        reader = csv.reader(self._file)
+        while True:
+            try:
+                size_row = next(reader)
+            except StopIteration:
+                return
+            if len(size_row) != 1:
+                raise ValueError("CSV export spool is corrupt: record size row must have one column")
+            field_count = int(size_row[0])
+            record: dict[str, Any] = {}
+            for _ in range(field_count):
+                try:
+                    key, value = next(reader)
+                except StopIteration as exc:
+                    raise ValueError("CSV export spool is corrupt: record ended early") from exc
+                record[key] = value
+            yield record
+
+    def close(self) -> None:
+        self._file.close()
 
 
 class _FileSystemCsvAuditExportWriter:
@@ -81,6 +123,36 @@ class _FileSystemCsvAuditExportWriter:
             artifact_path=self._artifact_path,
             sign=sign,
         )
+
+
+def _write_json_export_batches(
+    *,
+    sink: SinkProtocol,
+    ctx: PluginContext,
+    records: Iterable[dict[str, Any]],
+    batch_size: int = _JSON_EXPORT_BATCH_SIZE,
+) -> tuple[int, int]:
+    """Write JSON export records to a sink in bounded batches."""
+    if batch_size < 1:
+        raise ValueError("JSON export batch size must be at least 1")
+
+    record_count = 0
+    batches_written = 0
+    batch: list[dict[str, Any]] = []
+
+    for record in records:
+        batch.append(record)
+        record_count += 1
+        if len(batch) >= batch_size:
+            sink.write(batch, ctx)
+            batches_written += 1
+            batch = []
+
+    if batch:
+        sink.write(batch, ctx)
+        batches_written += 1
+
+    return record_count, batches_written
 
 
 def export_landscape(
@@ -179,7 +251,6 @@ def export_landscape(
             sink.on_complete(ctx)
             sink.close()
     else:
-        records = list(exporter.export_run(run_id, sign=export_config.sign))
         sink.on_start(ctx)
         try:
             with track_operation(
@@ -188,10 +259,14 @@ def export_landscape(
                 sink.node_id,
                 "sink_write",
                 ctx,
-                input_data={"export_format": "json", "record_count": len(records)},
-            ):
-                if records:
-                    sink.write(records, ctx)
+                input_data={"export_format": "json"},
+            ) as operation:
+                record_count, batches_written = _write_json_export_batches(
+                    sink=sink,
+                    ctx=ctx,
+                    records=exporter.export_run(run_id, sign=export_config.sign),
+                )
+                operation.output_data = {"record_count": record_count, "batches_written": batches_written}
                 sink.flush()
         finally:
             sink.on_complete(ctx)
@@ -224,28 +299,30 @@ def _export_csv_multifile(
 
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get records grouped by type
-    grouped = exporter.export_run_grouped(run_id, sign=sign)
     formatter = CSVFormatter()
+    spools: dict[str, _CsvRecordTypeSpool] = {}
 
-    # Write each record type to its own CSV file
-    for record_type, records in grouped.items():
-        if not records:
-            continue
+    try:
+        for record_type, record in exporter.iter_run_records_by_type(run_id, sign=sign):
+            spool = spools.get(record_type)
+            if spool is None:
+                spool = _CsvRecordTypeSpool()
+                spools[record_type] = spool
+            spool.append(_neutralize_csv_formula_record(formatter.format(record)))
 
-        csv_path = export_dir / f"{record_type}.csv"
+        # Write each record type to its own CSV file.
+        for record_type, spool in spools.items():
+            if spool.count == 0:
+                continue
 
-        # Flatten all records for CSV
-        flat_records = [_neutralize_csv_formula_record(formatter.format(r)) for r in records]
+            csv_path = export_dir / f"{record_type}.csv"
+            fieldnames = sorted(spool.fieldnames)  # Sorted for determinism
 
-        # Get union of all keys (some records may have optional fields)
-        all_keys: set[str] = set()
-        for rec in flat_records:
-            all_keys.update(rec.keys())
-        fieldnames = sorted(all_keys)  # Sorted for determinism
-
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for rec in flat_records:
-                writer.writerow(rec)
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for rec in spool.iter_records():
+                    writer.writerow(rec)
+    finally:
+        for spool in spools.values():
+            spool.close()

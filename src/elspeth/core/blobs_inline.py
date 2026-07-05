@@ -66,12 +66,11 @@ async def _validate_blob_content_refs(
     blob_service: BlobServiceProtocol,
     config: dict[str, Any],
     *,
-    user_id: str,
+    session_id: UUID,
     per_ref_byte_cap: int | None = None,
     aggregate_byte_cap: int | None = None,
 ) -> list[BlobInlineValidationViolation]:
     """Return validate-path violations without raising recoverable errors."""
-    del user_id
     try:
         refs = _discover_blob_content_refs(config)
     except BlobContentResolutionError as exc:
@@ -80,7 +79,7 @@ async def _validate_blob_content_refs(
     violations: list[BlobInlineValidationViolation] = []
     aggregate_bytes = 0
     for ref in refs:
-        lookup_result = await _get_blob_record_for_validation(blob_service, ref)
+        lookup_result = await _get_blob_record_for_validation(blob_service, ref, session_id=session_id)
         if type(lookup_result) is BlobInlineValidationViolation:
             violations.append(lookup_result)
             continue
@@ -149,9 +148,11 @@ def _substitute_blob_content_refs_for_validation(config: dict[str, Any]) -> dict
 async def _get_blob_record_for_validation(
     blob_service: BlobServiceProtocol,
     ref: BlobInlineRef,
+    *,
+    session_id: UUID,
 ) -> BlobRecord | BlobInlineValidationViolation:
     try:
-        return await blob_service.get_blob(ref.blob_id)
+        record = await blob_service.get_blob(ref.blob_id)
     except BlobNotFoundError:
         return _missing_validation_violation(ref)
     except BlobStateError as exc:
@@ -160,6 +161,9 @@ async def _get_blob_record_for_validation(
             field_path=ref.field_path,
             detail=str(exc),
         )
+    if record.session_id != session_id:
+        return _missing_validation_violation(ref)
+    return record
 
 
 def _malformed_validation_violations(exc: BlobContentResolutionError) -> list[BlobInlineValidationViolation]:

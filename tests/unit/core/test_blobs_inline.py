@@ -29,6 +29,8 @@ from elspeth.core.blobs_inline import (
 VALID_HASH = "a" * 64
 BLOB1 = "5b7a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3a4b"
 BLOB2 = "7c3a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3aaa"
+SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
+OTHER_SESSION_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 class _AsyncCallRecorder:
@@ -76,13 +78,14 @@ def _ref_with_hash(content: bytes, field_path: str = "source.options.system_prom
 def _blob_record(
     *,
     blob_id: str = BLOB1,
+    session_id: UUID = SESSION_ID,
     status: str = "ready",
     content_hash: str | None = VALID_HASH,
     size_bytes: int = 12,
 ) -> BlobRecord:
     return BlobRecord(
         id=UUID(blob_id),
-        session_id=UUID("11111111-1111-4111-8111-111111111111"),
+        session_id=session_id,
         filename="prompt.txt",
         mime_type="text/plain",
         size_bytes=size_bytes,
@@ -480,7 +483,28 @@ class TestValidateBlobContentRefs:
         blob_service.get_blob.side_effect = BlobNotFoundError(BLOB1)
         config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
 
-        violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
+        violations = await _validate_blob_content_refs(blob_service, config, session_id=SESSION_ID)
+
+        assert violations == [
+            BlobInlineValidationViolation(
+                category="missing",
+                field_path="source.options.x",
+                detail=f"blob {UUID(BLOB1)} not found",
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_async_treats_cross_session_blob_as_missing_before_metadata_checks(self) -> None:
+        blob_service = _BlobServiceDouble()
+        blob_service.get_blob.return_value = _blob_record(
+            session_id=OTHER_SESSION_ID,
+            status="ready",
+            content_hash="b" * 64,
+            size_bytes=128,
+        )
+        config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
+
+        violations = await _validate_blob_content_refs(blob_service, config, session_id=SESSION_ID)
 
         assert violations == [
             BlobInlineValidationViolation(
@@ -495,7 +519,7 @@ class TestValidateBlobContentRefs:
         blob_service = _BlobServiceDouble()
         config = {"source": {"options": {"x": {"blob_ref": BLOB1}}}}
 
-        violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
+        violations = await _validate_blob_content_refs(blob_service, config, session_id=SESSION_ID)
 
         assert violations == [
             BlobInlineValidationViolation(
@@ -511,7 +535,7 @@ class TestValidateBlobContentRefs:
         blob_service = _BlobServiceDouble()
         config = {"source": {"options": {"x": {"blob_ref": BLOB1, "mode": []}}}}
 
-        violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
+        violations = await _validate_blob_content_refs(blob_service, config, session_id=SESSION_ID)
 
         assert violations == [
             BlobInlineValidationViolation(
@@ -531,7 +555,7 @@ class TestValidateBlobContentRefs:
         violations = await _validate_blob_content_refs(
             blob_service,
             config,
-            user_id="u",
+            session_id=SESSION_ID,
             per_ref_byte_cap=64,
         )
 

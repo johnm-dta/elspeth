@@ -27,7 +27,7 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins, plugin_node_scope
 from elspeth.engine.orchestrator.graph_wiring import assign_plugin_node_ids
-from elspeth.engine.orchestrator.types import (
+from elspeth.engine.orchestrator.run_state import (
     AggNodeEntry,
     RunContext,
 )
@@ -44,8 +44,10 @@ if TYPE_CHECKING:
     from elspeth.engine.barrier_coordination import BarrierJournalRestoreContext
     from elspeth.engine.orchestrator.ceremony import RunCeremony
     from elspeth.engine.orchestrator.processor_factory import ProcessorFactory
-    from elspeth.engine.orchestrator.types import (
+    from elspeth.engine.orchestrator.run_state import (
         GraphArtifacts,
+    )
+    from elspeth.engine.orchestrator.types import (
         PipelineConfig,
     )
 

@@ -20,7 +20,7 @@ from elspeth.core.events import EventBusProtocol
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.ceremony import RunCeremony
-from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
+from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
 
 
 def _raising_factory(exc: Exception) -> MagicMock:

@@ -23,7 +23,8 @@ from elspeth.core.config import ElspethSettings, RetrySettings, SinkSettings, So
 from elspeth.core.landscape.schema import rows_table, run_sources_table
 from elspeth.engine.orchestrator import PipelineConfig
 from elspeth.engine.orchestrator.core import Orchestrator
-from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters, LoopContext
+from elspeth.engine.orchestrator.run_state import LoopContext
+from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.llm import RateLimitError
 from elspeth.testing import make_pipeline_row, make_source_row

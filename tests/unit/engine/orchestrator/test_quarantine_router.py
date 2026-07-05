@@ -27,7 +27,8 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator.ceremony import RunCeremony
 from elspeth.engine.orchestrator.quarantine_router import QUARANTINE_ERROR_MAX_CHARS, QuarantineRouter
-from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, RouteValidationError
+from elspeth.engine.orchestrator.run_state import LoopContext
+from elspeth.engine.orchestrator.types import ExecutionCounters, RouteValidationError
 
 SOURCE_ID = NodeID("source-node")
 

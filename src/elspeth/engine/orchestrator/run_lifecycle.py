@@ -57,13 +57,13 @@ from elspeth.engine.orchestrator.export import (
     export_landscape,
 )
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
+from elspeth.engine.orchestrator.run_state import _RunFailedWithPartialResultError
 from elspeth.engine.orchestrator.run_status import (
     assert_terminal_counter_parity,
     cli_completion_for,
     derive_terminal_status_from_audit,
 )
 from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
-from elspeth.engine.orchestrator.types import _RunFailedWithPartialResultError
 
 if TYPE_CHECKING:
     import threading

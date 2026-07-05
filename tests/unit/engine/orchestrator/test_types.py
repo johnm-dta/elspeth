@@ -20,9 +20,8 @@ from elspeth.engine.orchestrator.types import (
     AggregationFlushResult,
     ExecutionCounters,
     PipelineConfig,
-    ValueSourceFinding,
-    ValueSourceValidationError,
 )
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceFinding, ValueSourceValidationError
 
 
 class TestAggregationFlushResult:
@@ -204,11 +203,26 @@ def test_processor_ports_live_outside_types_module() -> None:
     assert ports.AggregationProcessorPort.__module__ == "elspeth.engine.orchestrator.ports"
 
 
+def test_types_keeps_compatibility_reexports_for_moved_owned_types() -> None:
+    from elspeth.engine.orchestrator import plugin_types, ports, run_state, types, value_source_validation
+
+    assert types.RowPlugin is plugin_types.RowPlugin
+    assert types.TelemetryManagerProtocol is ports.TelemetryManagerProtocol
+    assert types.GraphArtifacts is run_state.GraphArtifacts
+    assert types.AggNodeEntry is run_state.AggNodeEntry
+    assert types.RunContext is run_state.RunContext
+    assert types.LoopContext is run_state.LoopContext
+    assert types.LoopResult is run_state.LoopResult
+    assert types.ResumeState is run_state.ResumeState
+    assert types.ValueSourceFinding is value_source_validation.ValueSourceFinding
+    assert types.ValueSourceValidationError is value_source_validation.ValueSourceValidationError
+
+
 class TestGraphArtifacts:
     """Test GraphArtifacts frozen dataclass with MappingProxyType wrapping."""
 
     def test_fields_frozen_to_mapping_proxy(self) -> None:
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         artifacts = GraphArtifacts(
             edge_map={(NodeID("node1"), "continue"): "edge1"},
@@ -227,7 +241,7 @@ class TestGraphArtifacts:
         assert isinstance(artifacts.coalesce_id_map, MappingProxyType)
 
     def test_is_frozen(self) -> None:
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         artifacts = GraphArtifacts(
             edge_map={},
@@ -246,7 +260,7 @@ class TestAggNodeEntry:
     """Test AggNodeEntry named pair."""
 
     def test_attribute_access(self) -> None:
-        from elspeth.engine.orchestrator.types import AggNodeEntry
+        from elspeth.engine.orchestrator.run_state import AggNodeEntry
 
         transform = object()
         entry = AggNodeEntry(transform=transform, node_id=NodeID("agg1"))
@@ -254,7 +268,7 @@ class TestAggNodeEntry:
         assert entry.node_id == NodeID("agg1")
 
     def test_is_frozen(self) -> None:
-        from elspeth.engine.orchestrator.types import AggNodeEntry
+        from elspeth.engine.orchestrator.run_state import AggNodeEntry
 
         entry = AggNodeEntry(transform=object(), node_id=NodeID("agg1"))
         with pytest.raises(AttributeError):
@@ -265,7 +279,7 @@ class TestRunContext:
     """Test RunContext frozen dataclass."""
 
     def test_mapping_fields_frozen(self) -> None:
-        from elspeth.engine.orchestrator.types import AggNodeEntry, RunContext
+        from elspeth.engine.orchestrator.run_state import AggNodeEntry, RunContext
 
         run_ctx = RunContext(
             ctx=object(),
@@ -282,7 +296,7 @@ class TestLoopContext:
     """Test LoopContext mutable dataclass."""
 
     def test_mutable_fields_can_be_updated(self) -> None:
-        from elspeth.engine.orchestrator.types import LoopContext
+        from elspeth.engine.orchestrator.run_state import LoopContext
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),

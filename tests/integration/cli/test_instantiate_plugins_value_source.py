@@ -36,7 +36,7 @@ import pytest
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.core.config import load_settings_from_yaml_string
-from elspeth.engine.orchestrator.types import ValueSourceValidationError
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceValidationError
 
 
 def _build_yaml_with_model(model: str, csv_path: Path, sink_path: Path) -> str:

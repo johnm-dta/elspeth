@@ -40,12 +40,10 @@ from elspeth.engine.orchestrator.aggregation import flush_remaining_aggregation_
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.leader_follower_drain import LeaderFollowerDrain
 from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes, flush_coalesce_pending
+from elspeth.engine.orchestrator.run_state import LoopContext, LoopResult, _RunFailedWithPartialResultError
 from elspeth.engine.orchestrator.runtime_preflight import run_transform_runtime_preflights
 from elspeth.engine.orchestrator.types import (
     ExecutionCounters,
-    LoopContext,
-    LoopResult,
-    _RunFailedWithPartialResultError,
 )
 from elspeth.engine.retry import RetryManager
 
@@ -65,11 +63,13 @@ if TYPE_CHECKING:
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
     from elspeth.engine.orchestrator.ports import EndOfInputBarrierProcessorPort
     from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
+    from elspeth.engine.orchestrator.run_state import (
+        GraphArtifacts,
+        PendingTokenMap,
+    )
     from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
     from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
     from elspeth.engine.orchestrator.types import (
-        GraphArtifacts,
-        PendingTokenMap,
         PipelineConfig,
         RunResult,
     )

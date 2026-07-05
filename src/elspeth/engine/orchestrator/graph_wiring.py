@@ -35,7 +35,8 @@ if TYPE_CHECKING:
     from elspeth.core.config import GateSettings
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.data_flow_repository import DataFlowRepository
-    from elspeth.engine.orchestrator.types import PipelineConfig, RowPlugin
+    from elspeth.engine.orchestrator.plugin_types import RowPlugin
+    from elspeth.engine.orchestrator.types import PipelineConfig
 
 
 def assign_plugin_node_ids(

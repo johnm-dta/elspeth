@@ -30,7 +30,8 @@ from elspeth.core.canonical import sanitize_for_canonical, stable_hash
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.ceremony import RunCeremony
-from elspeth.engine.orchestrator.types import LoopContext, RouteValidationError
+from elspeth.engine.orchestrator.run_state import LoopContext
+from elspeth.engine.orchestrator.types import RouteValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

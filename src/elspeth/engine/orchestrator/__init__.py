@@ -28,12 +28,12 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from elspeth.engine.orchestrator.core import Orchestrator, prepare_for_run
+    from elspeth.engine.orchestrator.plugin_types import RowPlugin
     from elspeth.engine.orchestrator.types import (
         AggregationFlushResult,
         ExecutionCounters,
         PipelineConfig,
         RouteValidationError,
-        RowPlugin,
         RunResult,
     )
 
@@ -42,9 +42,9 @@ _TYPE_EXPORTS = {
     "ExecutionCounters",
     "PipelineConfig",
     "RouteValidationError",
-    "RowPlugin",
     "RunResult",
 }
+_PLUGIN_TYPE_EXPORTS = {"RowPlugin"}
 _RUNTIME_EXPORTS = {"Orchestrator", "prepare_for_run"}
 
 __all__ = [
@@ -62,6 +62,8 @@ __all__ = [
 def __getattr__(name: str) -> Any:
     if name in _TYPE_EXPORTS:
         value = getattr(import_module("elspeth.engine.orchestrator.types"), name)
+    elif name in _PLUGIN_TYPE_EXPORTS:
+        value = getattr(import_module("elspeth.engine.orchestrator.plugin_types"), name)
     elif name in _RUNTIME_EXPORTS:
         value = getattr(import_module("elspeth.engine.orchestrator.core"), name)
     else:

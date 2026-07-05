@@ -45,7 +45,8 @@ from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.resume import run_resume_processing_loop, setup_resume_context
-from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, LoopResult, ResumeState, _RunFailedWithPartialResultError
+from elspeth.engine.orchestrator.run_state import LoopContext, LoopResult, ResumeState, _RunFailedWithPartialResultError
+from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.engine.processor import RowProcessor
 from elspeth.testing import make_row_result, make_source_row
 from tests.fixtures.landscape import make_landscape_db
@@ -1572,7 +1573,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         the except block didn't exist. A regression to include_source=False
         or removal of the except block will cause this test to fail.
         """
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         db = make_landscape_db()
         orch = _make_orchestrator(db)
@@ -1638,7 +1639,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
     def test_transform_start_failure_cleans_only_successfully_started_plugins(self) -> None:
         """A transform whose on_start fails must not receive teardown hooks."""
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         db = make_landscape_db()
         orch = _make_orchestrator(db)
@@ -1695,7 +1696,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
     def test_source_start_failure_skips_failing_source_and_unstarted_plugins(self) -> None:
         """A source whose on_start fails is not considered started for cleanup."""
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         db = make_landscape_db()
         orch = _make_orchestrator(db)
@@ -1750,7 +1751,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
     def test_sink_start_failure_cleans_only_successfully_started_sinks(self) -> None:
         """A sink whose on_start fails must not receive teardown hooks."""
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         db = make_landscape_db()
         orch = _make_orchestrator(db)
@@ -1806,7 +1807,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
     def test_startup_hooks_receive_their_plugin_node_id(self) -> None:
         """Each plugin on_start hook must see its own orchestrator-assigned node id."""
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         db = make_landscape_db()
         orch = _make_orchestrator(db)

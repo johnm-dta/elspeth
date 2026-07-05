@@ -84,7 +84,8 @@ if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
     from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.executors import GateOutcome
-    from elspeth.engine.orchestrator.types import RowPlugin, TelemetryManagerProtocol
+    from elspeth.engine.orchestrator.plugin_types import RowPlugin
+    from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
 
 from elspeth.contracts import BatchTransformProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.declaration_contracts import (

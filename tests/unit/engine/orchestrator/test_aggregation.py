@@ -33,7 +33,8 @@ from elspeth.engine.orchestrator.aggregation import (
 )
 from elspeth.engine.orchestrator.ports import AggregationProcessorPort
 from elspeth.engine.orchestrator.resume import handle_incomplete_batches
-from elspeth.engine.orchestrator.types import AggNodeEntry, PipelineConfig
+from elspeth.engine.orchestrator.run_state import AggNodeEntry
+from elspeth.engine.orchestrator.types import PipelineConfig
 from elspeth.engine.work_items import WorkItem
 from elspeth.testing import make_row, make_token_info
 

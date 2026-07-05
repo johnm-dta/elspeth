@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         CheckpointAfterSinkCallback,
         _CheckpointFactory,
     )
-    from elspeth.engine.orchestrator.types import (
+    from elspeth.engine.orchestrator.run_state import (
         LoopContext,
     )
 

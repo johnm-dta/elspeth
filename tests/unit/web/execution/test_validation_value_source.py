@@ -23,7 +23,7 @@ import pytest
 
 from elspeth.contracts.value_source import register_value_source_plugin
 from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
-from elspeth.engine.orchestrator.types import (
+from elspeth.engine.orchestrator.value_source_validation import (
     ValueSourceFinding,
     ValueSourceValidationError,
 )

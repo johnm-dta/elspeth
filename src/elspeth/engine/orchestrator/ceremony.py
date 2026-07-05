@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.core.events import EventBusProtocol
-    from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
+    from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
 
 slog = structlog.get_logger(__name__)
 

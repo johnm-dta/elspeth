@@ -6,13 +6,15 @@ Provides:
 - CheckpointCompatibilityValidator: Validate checkpoint topology compatibility
 - ResumeCheck: Result of checking if a run can be resumed
 - ResumePoint: Information needed to resume a run
+- NonResumableRunError: Clean operator-facing resume refusal
+- IncompleteTokenSpec: Token continuation metadata needed by resume
 - checkpoint_dumps/checkpoint_loads: Type-preserving JSON serialization for aggregation state
 """
 
 from elspeth.contracts import ResumeCheck, ResumePoint
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
-from elspeth.core.checkpoint.recovery import RecoveryManager
+from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, NonResumableRunError, RecoveryManager, check_run_status_resumable
 from elspeth.core.checkpoint.serialization import checkpoint_dumps, checkpoint_loads
 
 __all__ = [
@@ -20,9 +22,12 @@ __all__ = [
     "CheckpointCorruptionError",
     "CheckpointManager",
     "IncompatibleCheckpointError",
+    "IncompleteTokenSpec",
+    "NonResumableRunError",
     "RecoveryManager",
     "ResumeCheck",
     "ResumePoint",
+    "check_run_status_resumable",
     "checkpoint_dumps",
     "checkpoint_loads",
 ]

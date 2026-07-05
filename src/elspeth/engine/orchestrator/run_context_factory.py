@@ -25,7 +25,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
-from elspeth.engine.orchestrator.cleanup import cleanup_plugins
+from elspeth.engine.orchestrator.cleanup import cleanup_plugins, plugin_node_scope
 from elspeth.engine.orchestrator.graph_wiring import assign_plugin_node_ids
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
@@ -147,15 +147,17 @@ class RunContextFactory:
         try:
             if include_source_on_start:
                 for source_name, source in config.sources.items():
-                    ctx.node_id = artifacts.source_id_map[source_name]
-                    source.on_start(ctx)
+                    with plugin_node_scope(ctx, getattr(source, "node_id", None)):
+                        source.on_start(ctx)
                     started_sources[source_name] = source
                 ctx.node_id = source_id
             for transform in config.transforms:
-                transform.on_start(ctx)
+                with plugin_node_scope(ctx, getattr(transform, "node_id", None)):
+                    transform.on_start(ctx)
                 started_transforms.append(transform)
             for sink_name, sink in config.sinks.items():
-                sink.on_start(ctx)
+                with plugin_node_scope(ctx, getattr(sink, "node_id", None)):
+                    sink.on_start(ctx)
                 started_sinks[sink_name] = sink
 
             processor, coalesce_node_map, coalesce_executor = self._processor_factory.build_processor(

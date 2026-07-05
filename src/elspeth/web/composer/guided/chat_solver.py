@@ -90,7 +90,57 @@ _ADVISORY_NO_TOOLS_ADDENDUM: Final[str] = (
     "invoking a tool — even to describe your reasoning. If the user's message "
     "needs an action you can't take from here (for example, they described "
     "data without giving you the actual rows), say so plainly and ask for "
-    "what is missing.\n"
+    "what is missing. Do not ask the user to re-send the same message, say "
+    "`go ahead`, or wait for a tool-enabled version of this reply; this path "
+    "will remain advisory. If the wizard controls can complete the action, "
+    "point to those controls plainly.\n"
+)
+
+_STEP_1_FALSE_TOOL_DECLINE_REPLY_MARKERS: Final[tuple[str, ...]] = (
+    "don't have my tools",
+    "do not have my tools",
+    "no tools available",
+    "tools available in this reply",
+    "tool-enabled",
+)
+
+_STEP_1_FALSE_TOOL_DECLINE_RESEND_MARKERS: Final[tuple[str, ...]] = (
+    "re-send",
+    "resend",
+    "send your message",
+    "send it again",
+    "say 'go ahead'",
+    'say "go ahead"',
+    "say go ahead",
+    "just say go ahead",
+)
+
+_STEP_1_SOURCE_ACTIONABLE_USER_MARKERS: Final[tuple[str, ...]] = (
+    "csv",
+    "json",
+    "path",
+    "file",
+    "headers",
+    "header",
+    "columns",
+    "column",
+    "rows",
+    "row",
+    "url",
+    "schema",
+    "source",
+    "invalid",
+    "discard",
+    "quarantine",
+)
+
+_STEP_1_SOURCE_FALSE_DECLINE_RETRY_ADDENDUM: Final[str] = (
+    "## Retry after false tool-decline\n\n"
+    "Your previous reply said you had no tools and asked the user to re-send, "
+    "but this request DOES include the `resolve_source` tool. The user's "
+    "message contains source-building details. Do not ask the user to re-send "
+    "or say `go ahead`; either call `resolve_source` now, or explain the "
+    "specific missing source data in plain prose."
 )
 
 
@@ -121,6 +171,41 @@ def _require_prose_assistant_message(value: object, *, tool: str) -> str:
                 "transcript into the chat message"
             )
     return value
+
+
+def _step_1_user_message_has_source_action_signal(user_message: str, *, current_source: SourceResolved | None) -> bool:
+    lowered = user_message.lower()
+    if any(marker in lowered for marker in _STEP_1_SOURCE_ACTIONABLE_USER_MARKERS):
+        return True
+    # A terse revision like "same again" can still be actionable after a source
+    # exists, but only retry the no-tools loop when it at least reads like a
+    # command rather than a general question.
+    return current_source is not None and any(
+        marker in lowered
+        for marker in (
+            "same again",
+            "use this",
+            "make it",
+            "change it",
+            "update it",
+            "replace it",
+        )
+    )
+
+
+def _should_retry_step_1_source_false_tool_decline(
+    *,
+    user_message: str,
+    prose_reply: str,
+    current_source: SourceResolved | None,
+) -> bool:
+    """Detect the observed Step-1 loop where a tool-equipped call denies tools."""
+    lowered_reply = prose_reply.lower()
+    if not any(marker in lowered_reply for marker in _STEP_1_FALSE_TOOL_DECLINE_REPLY_MARKERS):
+        return False
+    if not any(marker in lowered_reply for marker in _STEP_1_FALSE_TOOL_DECLINE_RESEND_MARKERS):
+        return False
+    return _step_1_user_message_has_source_action_signal(user_message, current_source=current_source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,140 +669,156 @@ async def maybe_resolve_step_1_source_chat(
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
-    # SPLIT the system prompt: the stable per-step skill is the byte-stable,
-    # markable head (messages[0]); the dynamic hint/revise context + tool
-    # instructions ride in messages[1]. Only the ~1199-token skill is in the
-    # marked cache prefix.
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()},
-        {
-            "role": "system",
-            "content": _build_step_1_source_dynamic_block(
-                plugin_hint=plugin_hint,
-                current_source=current_source,
-            ),
-        },
-    ]
-    if context_block is not None:
-        messages.append({"role": "system", "content": context_block})
-    messages.append({"role": "user", "content": user_message})
-    tools = [_STEP_1_SOURCE_TOOL]
-    # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
-    # the audit record (messages / tools below, read in the finally block).
-    # Gated on THIS call's model.
-    if supports_anthropic_prompt_cache_markers(model):
-        messages, marked_tools = apply_anthropic_cache_markers(messages, tools)
-        if marked_tools is not None:
-            tools = marked_tools
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-    }
-    if temperature is not None:
-        kwargs["temperature"] = temperature
-    if seed is not None:
-        kwargs["seed"] = seed
-    started_at = datetime.now(UTC)
-    started_ns = time.monotonic_ns()
-    status: ComposerLLMCallStatus | None = None
-    response: Any = None
-    error_class: str | None = None
-    error_message: str | None = None
-    try:
-        response = await _bounded_acompletion(kwargs, timeout_seconds)
+    retry_addendum: str | None = None
+    for attempt_index in range(2):
+        # SPLIT the system prompt: the stable per-step skill is the byte-stable,
+        # markable head (messages[0]); the dynamic hint/revise context + tool
+        # instructions ride in messages[1]. Only the ~1199-token skill is in the
+        # marked cache prefix.
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()},
+            {
+                "role": "system",
+                "content": _build_step_1_source_dynamic_block(
+                    plugin_hint=plugin_hint,
+                    current_source=current_source,
+                ),
+            },
+        ]
+        if context_block is not None:
+            messages.append({"role": "system", "content": context_block})
+        if retry_addendum is not None:
+            messages.append({"role": "system", "content": retry_addendum})
+        messages.append({"role": "user", "content": user_message})
+        tools = [_STEP_1_SOURCE_TOOL]
+        # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
+        # the audit record (messages / tools below, read in the finally block).
+        # Gated on THIS call's model.
+        if supports_anthropic_prompt_cache_markers(model):
+            messages, marked_tools = apply_anthropic_cache_markers(messages, tools)
+            if marked_tools is not None:
+                tools = marked_tools
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if seed is not None:
+            kwargs["seed"] = seed
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        status: ComposerLLMCallStatus | None = None
+        response: Any = None
+        error_class: str | None = None
+        error_message: str | None = None
+        try:
+            response = await _bounded_acompletion(kwargs, timeout_seconds)
 
-        message = response.choices[0].message
-        tool_calls = message.tool_calls or ()
-        for tool_call in tool_calls:
-            function = tool_call.function
-            if function is None:
-                continue
-            if function.name != "resolve_source":
-                continue
-            arguments = function.arguments
-            if not isinstance(arguments, str):
-                raise ValueError(f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}")
-            result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
-            status = ComposerLLMCallStatus.SUCCESS
-            return Step1SourceChatOutcome(resolution=result, prose_reply=None)
-        # No resolve_source call: the model judged the message doesn't carry
-        # enough detail to act (or it's a plain question) and answered in
-        # prose instead. Validate + return that prose directly — the SAME
-        # register guard the tool argument gets — so the caller never needs
-        # a second, tool-less call to obtain an answer to show the user.
-        # Deliberately gated on ``not tool_calls`` (mirrors the step-2 sink
-        # salvage): a response that ALSO carries a hallucinated tool call is a
-        # more suspicious shape — its prose narrates an action that never ran —
-        # and must not be trusted; it falls through to the advisory fallback
-        # (now grounded by _ADVISORY_NO_TOOLS_ADDENDUM) exactly as before.
-        if not tool_calls:
-            content = message.content
-            if content is None or not str(content).strip():
-                # Genuinely empty/defective response (no tool call, no
-                # content): both fields None — the caller falls back to the
-                # advisory chat path exactly as before.
+            message = response.choices[0].message
+            tool_calls = message.tool_calls or ()
+            for tool_call in tool_calls:
+                function = tool_call.function
+                if function is None:
+                    continue
+                if function.name != "resolve_source":
+                    continue
+                arguments = function.arguments
+                if not isinstance(arguments, str):
+                    raise ValueError(
+                        f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}"
+                    )
+                result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
                 status = ComposerLLMCallStatus.SUCCESS
-                return Step1SourceChatOutcome(resolution=None, prose_reply=None)
-            prose = _require_prose_assistant_message(str(content), tool="maybe_resolve_step_1_source_chat")
-            status = ComposerLLMCallStatus.SUCCESS
-            return Step1SourceChatOutcome(resolution=None, prose_reply=prose)
+                return Step1SourceChatOutcome(resolution=result, prose_reply=None)
+            # No resolve_source call: the model judged the message doesn't carry
+            # enough detail to act (or it's a plain question) and answered in
+            # prose instead. Validate + return that prose directly — the SAME
+            # register guard the tool argument gets — so the caller never needs
+            # a second, tool-less call to obtain an answer to show the user.
+            # Deliberately gated on ``not tool_calls`` (mirrors the step-2 sink
+            # salvage): a response that ALSO carries a hallucinated tool call is a
+            # more suspicious shape — its prose narrates an action that never ran —
+            # and must not be trusted; it falls through to the advisory fallback
+            # (now grounded by _ADVISORY_NO_TOOLS_ADDENDUM) exactly as before.
+            if not tool_calls:
+                content = message.content
+                if content is None or not str(content).strip():
+                    # Genuinely empty/defective response (no tool call, no
+                    # content): both fields None — the caller falls back to the
+                    # advisory chat path exactly as before.
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return Step1SourceChatOutcome(resolution=None, prose_reply=None)
+                prose = _require_prose_assistant_message(str(content), tool="maybe_resolve_step_1_source_chat")
+                if attempt_index == 0 and _should_retry_step_1_source_false_tool_decline(
+                    user_message=user_message,
+                    prose_reply=prose,
+                    current_source=current_source,
+                ):
+                    status = ComposerLLMCallStatus.SUCCESS
+                    retry_addendum = _STEP_1_SOURCE_FALSE_DECLINE_RETRY_ADDENDUM
+                    continue
+                status = ComposerLLMCallStatus.SUCCESS
+                return Step1SourceChatOutcome(resolution=None, prose_reply=prose)
 
-        # Non-empty tool_calls with no resolve_source (hallucinated tool name
-        # or function=None): return the empty outcome so the route falls back
-        # to the tool-less advisory call, matching the step-2 contract.
-        status = ComposerLLMCallStatus.SUCCESS
-        return Step1SourceChatOutcome(resolution=None, prose_reply=None)
-    except TimeoutError:
-        status = ComposerLLMCallStatus.TIMEOUT
-        error_class = "TimeoutError"
-        error_message = "TimeoutError"
-        raise
-    except asyncio.CancelledError as exc:
-        status = ComposerLLMCallStatus.CANCELLED
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMAuthError as exc:
-        status = ComposerLLMCallStatus.AUTH_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMBadRequestError as exc:
-        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMAPIError as exc:
-        status = ComposerLLMCallStatus.API_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
-        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
-        error_class = type(exc).__name__
-        error_message = "malformed_response"
-        raise
-    except Exception as exc:
-        status = ComposerLLMCallStatus.API_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    finally:
-        _record_llm_call(
-            recorder=recorder,
-            model=model,
-            messages=messages,
-            tools=tools,
-            status=status,
-            started_at=started_at,
-            started_ns=started_ns,
-            temperature=temperature,
-            seed=seed,
-            response=response,
-            error_class=error_class,
-            error_message=error_message,
-        )
+            # Non-empty tool_calls with no resolve_source (hallucinated tool name
+            # or function=None): return the empty outcome so the route falls back
+            # to the tool-less advisory call, matching the step-2 contract.
+            status = ComposerLLMCallStatus.SUCCESS
+            return Step1SourceChatOutcome(resolution=None, prose_reply=None)
+        except TimeoutError:
+            status = ComposerLLMCallStatus.TIMEOUT
+            error_class = "TimeoutError"
+            error_message = "TimeoutError"
+            raise
+        except asyncio.CancelledError as exc:
+            status = ComposerLLMCallStatus.CANCELLED
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAuthError as exc:
+            status = ComposerLLMCallStatus.AUTH_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMBadRequestError as exc:
+            status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAPIError as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
+            status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+            error_class = type(exc).__name__
+            error_message = "malformed_response"
+            raise
+        except Exception as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        finally:
+            _record_llm_call(
+                recorder=recorder,
+                model=model,
+                messages=messages,
+                tools=tools,
+                status=status,
+                started_at=started_at,
+                started_ns=started_ns,
+                temperature=temperature,
+                seed=seed,
+                response=response,
+                error_class=error_class,
+                error_message=error_message,
+            )
+
+    raise InvariantError("maybe_resolve_step_1_source_chat: retry loop exhausted without returning")
 
 
 _STEP_2_SINK_TOOL: dict[str, Any] = {

@@ -179,6 +179,18 @@ class TestShutdownHandlerContext:
             # After first signal, SIGINT should now be default_int_handler
             assert signal.getsignal(signal.SIGINT) == signal.default_int_handler
 
+    def test_sigterm_signal_restores_default_sigterm_handler(self) -> None:
+        """After first SIGTERM, a second SIGTERM must not re-enter graceful handling."""
+        from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
+
+        with shutdown_handler_context() as event:
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+            assert event.is_set()
+            assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+
 
 class TestCheckpointInterruptedProgress:
     """Tests for checkpoint_interrupted_progress shutdown-checkpoint behavior."""

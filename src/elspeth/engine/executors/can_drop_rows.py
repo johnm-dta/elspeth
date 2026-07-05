@@ -5,10 +5,10 @@ This contract registers for TWO dispatch sites:
     * ``post_emission_check`` — single-token path from ``TransformExecutor``.
     * ``batch_flush_check``   — batch-flush path from ``RowProcessor``.
 
-The contract is intentionally scoped to pass-through transforms only. It
-retires ADR-009 Clause 3's empty-emission carve-out mechanically: empty
-success output is now allowed only when the plugin explicitly declares
-``can_drop_rows=True``.
+The primary empty-emission contract is scoped to pass-through transforms. The
+same registered dispatcher adopter also owns the stricter ``success_empty()``
+path: zero-emission success is allowed only for pass-through filters that
+explicitly declare ``can_drop_rows=True``.
 """
 
 from __future__ import annotations
@@ -102,51 +102,6 @@ def verify_can_drop_rows(
     )
 
 
-def verify_zero_emission_declaration_path(
-    *,
-    plugin: Any,
-    plugin_name: str,
-    node_id: str,
-    run_id: str,
-    row_id: str,
-    token_id: str,
-    emitted_count: int,
-    used_success_empty: bool,
-) -> None:
-    """Reject ``success_empty()`` outside the explicit filter declaration path.
-
-    ADR-012 scopes ``can_drop_rows`` to pass-through filters. The dispatcher-
-    owned contract covers the ``passes_through_input=True`` / missing-opt-in
-    case; this inline guard closes the non-pass-through escape hatch so
-    ``success_empty()`` cannot silently route as ``DROPPED_BY_FILTER``.
-    """
-    if not used_success_empty:
-        return
-    if emitted_count != 0:
-        return
-    passes_through_input = _require_bool_flag(plugin, attr_name="passes_through_input")
-    can_drop_rows = _require_bool_flag(plugin, attr_name="can_drop_rows")
-    if passes_through_input:
-        return
-
-    raise ZeroEmissionSuccessContractViolation(
-        transform=plugin_name,
-        transform_node_id=node_id,
-        run_id=run_id,
-        row_id=row_id,
-        token_id=token_id,
-        passes_through_input=passes_through_input,
-        can_drop_rows=can_drop_rows,
-        emitted_count=emitted_count,
-        message=(
-            f"Transform {plugin_name!r} (node {node_id!r}) returned "
-            f"TransformResult.success_empty() for row {row_id!r}, but zero-"
-            f"emission success is reserved for pass-through filters declaring "
-            f"passes_through_input=True and can_drop_rows=True."
-        ),
-    )
-
-
 class CanDropRowsContract(DeclarationContract):
     """ADR-012 adopter for empty-emission governance."""
 
@@ -157,7 +112,46 @@ class CanDropRowsContract(DeclarationContract):
     def applies_to(self, plugin: Any) -> bool:
         passes_through_input = _require_bool_flag(plugin, attr_name="passes_through_input")
         can_drop_rows = _require_bool_flag(plugin, attr_name="can_drop_rows")
-        return passes_through_input and not can_drop_rows
+        return (not passes_through_input) or (passes_through_input and not can_drop_rows)
+
+    @staticmethod
+    def _verify_zero_emission_success_path(
+        *,
+        plugin: Any,
+        plugin_name: str,
+        node_id: str,
+        run_id: str,
+        row_id: str,
+        token_id: str,
+        emitted_count: int,
+        used_success_empty: bool,
+    ) -> None:
+        """Reject ``success_empty()`` outside the explicit filter declaration path."""
+        if not used_success_empty:
+            return
+        if emitted_count != 0:
+            return
+        passes_through_input = _require_bool_flag(plugin, attr_name="passes_through_input")
+        can_drop_rows = _require_bool_flag(plugin, attr_name="can_drop_rows")
+        if passes_through_input:
+            return
+
+        raise ZeroEmissionSuccessContractViolation(
+            transform=plugin_name,
+            transform_node_id=node_id,
+            run_id=run_id,
+            row_id=row_id,
+            token_id=token_id,
+            passes_through_input=passes_through_input,
+            can_drop_rows=can_drop_rows,
+            emitted_count=emitted_count,
+            message=(
+                f"Transform {plugin_name!r} (node {node_id!r}) returned "
+                f"TransformResult.success_empty() for row {row_id!r}, but zero-"
+                f"emission success is reserved for pass-through filters declaring "
+                f"passes_through_input=True and can_drop_rows=True."
+            ),
+        )
 
     @implements_dispatch_site("post_emission_check")
     def post_emission_check(
@@ -170,6 +164,22 @@ class CanDropRowsContract(DeclarationContract):
         transform_node_id = inputs.plugin.node_id
         if transform_node_id is None:
             raise OrchestrationInvariantError(f"Transform {inputs.plugin.name!r} has no node_id set at can-drop-rows check time.")
+        emitted_count = len(outputs.emitted_rows)
+        self._verify_zero_emission_success_path(
+            plugin=inputs.plugin,
+            plugin_name=inputs.plugin.name,
+            node_id=transform_node_id,
+            run_id=inputs.run_id,
+            row_id=inputs.row_id,
+            token_id=inputs.token_id,
+            emitted_count=emitted_count,
+            used_success_empty=outputs.used_success_empty,
+        )
+        if not (
+            _require_bool_flag(inputs.plugin, attr_name="passes_through_input")
+            and not _require_bool_flag(inputs.plugin, attr_name="can_drop_rows")
+        ):
+            return
         verify_can_drop_rows(
             plugin=inputs.plugin,
             plugin_name=inputs.plugin.name,
@@ -177,7 +187,7 @@ class CanDropRowsContract(DeclarationContract):
             run_id=inputs.run_id,
             row_id=inputs.row_id,
             token_id=inputs.token_id,
-            emitted_count=len(outputs.emitted_rows),
+            emitted_count=emitted_count,
         )
 
     @implements_dispatch_site("batch_flush_check")
@@ -193,6 +203,22 @@ class CanDropRowsContract(DeclarationContract):
             raise OrchestrationInvariantError(
                 f"Transform {inputs.plugin.name!r} has no node_id set at can-drop-rows batch-flush check time."
             )
+        emitted_count = len(outputs.emitted_rows)
+        self._verify_zero_emission_success_path(
+            plugin=inputs.plugin,
+            plugin_name=inputs.plugin.name,
+            node_id=transform_node_id,
+            run_id=inputs.run_id,
+            row_id=inputs.row_id,
+            token_id=inputs.token_id,
+            emitted_count=emitted_count,
+            used_success_empty=outputs.used_success_empty,
+        )
+        if not (
+            _require_bool_flag(inputs.plugin, attr_name="passes_through_input")
+            and not _require_bool_flag(inputs.plugin, attr_name="can_drop_rows")
+        ):
+            return
         verify_can_drop_rows(
             plugin=inputs.plugin,
             plugin_name=inputs.plugin.name,
@@ -200,7 +226,7 @@ class CanDropRowsContract(DeclarationContract):
             run_id=inputs.run_id,
             row_id=inputs.row_id,
             token_id=inputs.token_id,
-            emitted_count=len(outputs.emitted_rows),
+            emitted_count=emitted_count,
         )
 
     @classmethod

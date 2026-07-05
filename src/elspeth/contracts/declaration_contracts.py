@@ -251,8 +251,11 @@ class PostEmissionOutputs:
     """
 
     emitted_rows: tuple[Any, ...]
+    used_success_empty: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.used_success_empty) is not bool:
+            raise TypeError(f"{type(self).__name__}.used_success_empty must be bool, got {type(self.used_success_empty).__name__!r}")
         object.__setattr__(
             self,
             "emitted_rows",
@@ -306,8 +309,11 @@ class BatchFlushOutputs:
     """
 
     emitted_rows: tuple[Any, ...]
+    used_success_empty: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.used_success_empty) is not bool:
+            raise TypeError(f"{type(self).__name__}.used_success_empty must be bool, got {type(self.used_success_empty).__name__!r}")
         object.__setattr__(
             self,
             "emitted_rows",

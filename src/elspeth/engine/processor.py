@@ -140,7 +140,6 @@ from elspeth.engine.executors import (
     GateExecutor,
     TransformExecutor,
 )
-from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
 from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
 from elspeth.engine.executors.transform import record_transform_error_with_routing
 from elspeth.engine.retry import RetryManager
@@ -1070,17 +1069,6 @@ class RowProcessor:
         transform_node_id_str = str(fctx.node_id)
 
         try:
-            verify_zero_emission_declaration_path(
-                plugin=fctx.transform,
-                plugin_name=fctx.transform.name,
-                node_id=transform_node_id_str,
-                run_id=self._run_id,
-                row_id=identity_token.row_id,
-                token_id=identity_token.token_id,
-                emitted_count=len(emitted),
-                used_success_empty=used_success_empty,
-            )
-
             # _FlushContext.__post_init__ guarantees buffered_tokens is non-empty;
             # no defensive emptiness guard (CLAUDE.md: defensive programming
             # forbidden for internal paths).
@@ -1123,7 +1111,10 @@ class RowProcessor:
                                 static_contract=static_contract,
                                 effective_input_fields=token_fields,
                             ),
-                            outputs=BatchFlushOutputs(emitted_rows=(emitted_row,)),
+                            outputs=BatchFlushOutputs(
+                                emitted_rows=(emitted_row,),
+                                used_success_empty=used_success_empty,
+                            ),
                         )
                 elif len(emitted) == 0:
                     # Zero-emission success has no 1:1 pairing witness, but the
@@ -1143,7 +1134,10 @@ class RowProcessor:
                             static_contract=static_contract,
                             effective_input_fields=input_fields,
                         ),
-                        outputs=BatchFlushOutputs(emitted_rows=()),
+                        outputs=BatchFlushOutputs(
+                            emitted_rows=(),
+                            used_success_empty=used_success_empty,
+                        ),
                     )
                 else:
                     # Count mismatch is ``_route_passthrough_results``'s
@@ -1169,7 +1163,10 @@ class RowProcessor:
                         static_contract=static_contract,
                         effective_input_fields=input_fields,
                     ),
-                    outputs=BatchFlushOutputs(emitted_rows=tuple(emitted)),
+                    outputs=BatchFlushOutputs(
+                        emitted_rows=tuple(emitted),
+                        used_success_empty=used_success_empty,
+                    ),
                 )
         except PluginContractViolation as violation:
             self._record_flush_violation(fctx, violation)

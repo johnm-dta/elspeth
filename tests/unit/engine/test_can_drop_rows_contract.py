@@ -22,12 +22,12 @@ from elspeth.contracts.declaration_contracts import (
 from elspeth.contracts.errors import (
     PassThroughContractViolation,
     UnexpectedEmptyEmissionViolation,
+    ZeroEmissionSuccessContractViolation,
 )
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.engine.executors.can_drop_rows import (
     CanDropRowsContract,
     verify_can_drop_rows,
-    verify_zero_emission_declaration_path,
 )
 from elspeth.engine.executors.declaration_dispatch import (
     run_batch_flush_checks,
@@ -94,7 +94,7 @@ def test_applies_to_uses_direct_attributes() -> None:
     assert contract.applies_to(plugin) is False
     plugin.can_drop_rows = False
     plugin.passes_through_input = False
-    assert contract.applies_to(plugin) is False
+    assert contract.applies_to(plugin) is True
 
 
 def test_applies_to_on_plugin_missing_attribute_crashes() -> None:
@@ -227,24 +227,6 @@ def test_verify_can_drop_rows_rejects_non_boolean_flags_before_building_payload(
         )
 
 
-def test_verify_zero_emission_declaration_path_rejects_non_boolean_flags() -> None:
-    plugin = _plugin()
-    plugin.passes_through_input = "false"
-    plugin.can_drop_rows = "false"
-
-    with pytest.raises(TypeError, match=r"passes_through_input must be bool"):
-        verify_zero_emission_declaration_path(
-            plugin=plugin,
-            plugin_name=plugin.name,
-            node_id=plugin.node_id or "",
-            run_id="run-1",
-            row_id="row-1",
-            token_id="token-1",
-            emitted_count=0,
-            used_success_empty=True,
-        )
-
-
 def test_dispatcher_aggregates_with_pass_through_on_zero_rows(_isolated_registry) -> None:
     register_declaration_contract(PassThroughDeclarationContract())
     register_declaration_contract(CanDropRowsContract())
@@ -275,6 +257,28 @@ def test_dispatcher_aggregates_with_pass_through_on_zero_rows(_isolated_registry
     assert pass_through_child.divergence_set == frozenset({"carry", "source"})
 
 
+def test_dispatcher_rejects_success_empty_for_non_pass_through_transform(_isolated_registry) -> None:
+    register_declaration_contract(CanDropRowsContract())
+
+    plugin = _plugin(passes_through_input=False, can_drop_rows=False)
+    inputs = PostEmissionInputs(
+        plugin=plugin,
+        node_id=plugin.node_id or "",
+        run_id="run-success-empty",
+        row_id="row-success-empty",
+        token_id="token-success-empty",
+        input_row=_row(("source",)),
+        static_contract=frozenset(),
+        effective_input_fields=frozenset({"source"}),
+    )
+
+    with pytest.raises(ZeroEmissionSuccessContractViolation):
+        run_post_emission_checks(
+            inputs=inputs,
+            outputs=PostEmissionOutputs(emitted_rows=(), used_success_empty=True),
+        )
+
+
 def test_batch_flush_dispatcher_aggregates_with_pass_through_on_zero_rows(_isolated_registry) -> None:
     register_declaration_contract(PassThroughDeclarationContract())
     register_declaration_contract(CanDropRowsContract())
@@ -297,3 +301,26 @@ def test_batch_flush_dispatcher_aggregates_with_pass_through_on_zero_rows(_isola
 
     child_types = {type(child).__name__ for child in exc_info.value.violations}
     assert child_types == {"UnexpectedEmptyEmissionViolation", "PassThroughContractViolation"}
+
+
+def test_batch_flush_dispatcher_rejects_success_empty_for_non_pass_through_transform(_isolated_registry) -> None:
+    register_declaration_contract(CanDropRowsContract())
+
+    plugin = _plugin(passes_through_input=False, can_drop_rows=False, is_batch_aware=True)
+    token_row = _row(("source",))
+    inputs = BatchFlushInputs(
+        plugin=plugin,
+        node_id=plugin.node_id or "",
+        run_id="run-batch-success-empty",
+        row_id="row-batch-success-empty",
+        token_id="token-batch-success-empty",
+        buffered_tokens=(token_row,),
+        static_contract=frozenset(),
+        effective_input_fields=frozenset({"source"}),
+    )
+
+    with pytest.raises(ZeroEmissionSuccessContractViolation):
+        run_batch_flush_checks(
+            inputs=inputs,
+            outputs=BatchFlushOutputs(emitted_rows=(), used_success_empty=True),
+        )

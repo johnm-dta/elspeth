@@ -948,3 +948,65 @@ class TestFingerprintValueErrorWrapping:
             "load_secrets_from_config() must catch ValueError and re-raise as SecretLoadError "
             "to prevent bare exceptions from fingerprint key validation"
         )
+
+
+class TestVaultUrlAllowlist:
+    """Deployment-owned exact-URL allowlist for keyvault vault_url (elspeth-7572facbc6).
+
+    The allowlist is provisioned outside pipeline YAML via the
+    ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS env var. When set, the configured
+    vault_url must match one of the listed URLs exactly — closing the
+    cross-tenant token-capture vector the built-in Azure suffix check cannot.
+    When unset, the suffix check enforced at SecretsConfig construction is the
+    floor.
+    """
+
+    _ENV = "ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS"
+
+    def test_permits_exact_match(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.security.config_secrets import _enforce_vault_url_allowlist
+
+        monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net")
+        _enforce_vault_url_allowlist("https://approved.vault.azure.net")  # no raise
+
+    def test_rejects_non_matching_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.security.config_secrets import _enforce_vault_url_allowlist
+
+        monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net")
+        with pytest.raises(SecretLoadError, match="allowlist"):
+            _enforce_vault_url_allowlist("https://different.vault.azure.net")
+
+    def test_noop_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.security.config_secrets import _enforce_vault_url_allowlist
+
+        monkeypatch.delenv(self._ENV, raising=False)
+        _enforce_vault_url_allowlist("https://anything.vault.azure.net")  # no raise
+
+    def test_matches_one_of_several_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.security.config_secrets import _enforce_vault_url_allowlist
+
+        monkeypatch.setenv(self._ENV, "https://a.vault.azure.net, https://b.vault.azure.net")
+        _enforce_vault_url_allowlist("https://b.vault.azure.net")  # no raise
+
+    def test_normalizes_trailing_slash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.security.config_secrets import _enforce_vault_url_allowlist
+
+        # Allowlist entry has a trailing slash; the configured URL does not
+        # (SecretsConfig already strips it). They must still match.
+        monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net/")
+        _enforce_vault_url_allowlist("https://approved.vault.azure.net")  # no raise
+
+    def test_load_secrets_rejects_url_outside_allowlist_before_any_io(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The gate fires before the fingerprint preflight and all Key Vault I/O."""
+        monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net")
+        # Deliberately omit ELSPETH_FINGERPRINT_KEY: the allowlist gate must
+        # reject first, proving it precedes the preflight and any KV I/O.
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+
+        config = SecretsConfig(
+            source="keyvault",
+            vault_url="https://different.vault.azure.net",
+            mapping={"MY_API_KEY": "my-api-key-secret"},
+        )
+        with pytest.raises(SecretLoadError, match="allowlist"):
+            load_secrets_from_config(config)

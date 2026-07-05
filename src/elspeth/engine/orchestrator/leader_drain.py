@@ -395,8 +395,8 @@ class LeaderDrainCoordinator:
 
         finally:
             cleanup_plugins(config, run_ctx.ctx, include_source=True)
+            self._checkpoints.set_active_graph(None)
 
-        self._checkpoints.set_active_graph(None)
         return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
 
 

@@ -234,6 +234,15 @@ class SecretsConfig(BaseModel):
         if not isinstance(v, str):
             return v  # Pydantic will reject with clean "str type expected" error
 
+        # Normalize edge whitespace up front so the value we VALIDATE is the value
+        # we STORE. urlparse silently drops leading whitespace (and a trailing tab)
+        # while parsing, so without this a value like " https://x.vault.azure.net"
+        # passes every host/component check on its parsed form yet is persisted —
+        # and later handed to the DefaultAzureCredential-backed client — with the
+        # stray whitespace intact. Stripping only removes edge whitespace, so it
+        # can never turn a rejected host into an accepted one (elspeth-7572facbc6).
+        v = v.strip()
+
         # P0-3: Reject ${VAR} references (chicken-egg problem)
         if "${" in v:
             raise ValueError(

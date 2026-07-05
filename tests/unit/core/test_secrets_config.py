@@ -272,3 +272,44 @@ class TestVaultUrlSSRFHardening:
 
         config = SecretsConfig(source="keyvault", vault_url=url, mapping={"KEY": "key"})
         assert config.vault_url == url
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            " https://my-vault.vault.azure.net",  # leading space
+            "\thttps://my-vault.vault.azure.net",  # leading tab
+            "https://my-vault.vault.azure.net\t",  # trailing tab
+            "  https://my-vault.vault.azure.net  ",  # both ends
+            "https://my-vault.vault.azure.net/ ",  # trailing slash + space
+        ],
+    )
+    def test_vault_url_strips_surrounding_whitespace(self, raw: str) -> None:
+        """Edge whitespace is normalised so the stored value == the validated value.
+
+        urlparse drops leading whitespace (and a trailing tab) while parsing, so
+        these inputs would otherwise pass validation on their parsed form but be
+        persisted — and handed to the Key Vault client — with the whitespace
+        intact. The validator must strip first (elspeth-7572facbc6).
+        """
+        from elspeth.core.config import SecretsConfig
+
+        config = SecretsConfig(source="keyvault", vault_url=raw, mapping={"KEY": "key"})
+        assert config.vault_url == "https://my-vault.vault.azure.net"
+
+    def test_vault_url_rejects_bare_trailing_dot_fqdn(self) -> None:
+        """A trailing-dot FQDN fails closed rather than matching the suffix.
+
+        ``my-vault.vault.azure.net.`` is a valid absolute-DNS spelling of the real
+        vault, but the leading-dot suffix check does not match it, so it is
+        rejected — the operator drops the dot. This locks the commit's
+        "trailing-dot FQDNs fail closed" claim (elspeth-7572facbc6), distinct from
+        the look-alike ``…azure.net.attacker.com`` case above.
+        """
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="approved Azure Key Vault"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net.",
+                mapping={"KEY": "key"},
+            )

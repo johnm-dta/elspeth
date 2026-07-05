@@ -106,15 +106,17 @@ def _reject_fabricated_secret_literals(
     """Reject literal credential values in pasted YAML before persistence.
 
     The composer's tool-call surface (``set_source``, ``patch_node_options``,
-    ``set_output``) only catches a fabricated ("typed the value directly
-    instead of wiring a secret_ref") credential at /validate or runtime-
-    preflight time -- by then the literal has already been written into
-    CompositionState. Pasted YAML has no equivalent tool-call gate at all, so
-    without this check a literal credential would sail straight through
-    ``_state_data_from_composer_state``'s ``persist_invalid`` policy: written
-    to the DB as plaintext and echoed back verbatim in this response's
-    ``sources``/``nodes``/``outputs`` fields, regardless of whether the state
-    is later flagged ``is_valid=False``.
+    ``set_output``) already rejects a fabricated ("typed the value directly
+    instead of wiring a secret_ref") credential *before* persistence, via
+    ``_credential_wiring_contract_failure`` in ``composer/tools/_common.py``:
+    the mutation handler returns the unchanged state, so the literal is never
+    written into CompositionState. Pasted YAML bypasses those handlers
+    entirely (it reconstructs the state directly from the parsed document),
+    so it has no equivalent gate -- without this check a literal credential
+    would sail straight through ``_state_data_from_composer_state``'s
+    ``persist_invalid`` policy: written to the DB as plaintext and echoed back
+    verbatim in this response's ``sources``/``nodes``/``outputs`` fields,
+    regardless of whether the state is later flagged ``is_valid=False``.
 
     Checking (and rejecting outright, before any persistence) here is
     stricter than the tool-call path affords today -- deliberately so, since

@@ -651,6 +651,55 @@ class TestSetSource:
         assert "source" not in result.updated_state.sources
         assert SOURCE_AUTHORING_KEY in result.data["error"]
 
+    def test_set_source_rejects_literal_credential_value_without_mutating_state(self) -> None:
+        """set_source rejects a literal credential *before* it is persisted.
+
+        Regression lock for elspeth-9c54287830. The credential-literal gate
+        on the tool-call path lives in ``_credential_wiring_contract_failure``
+        (not ``_prevalidate_plugin_options`` — that helper only checks
+        secret-ref *placement*), and every mutation tool calls it before
+        writing the option into ``CompositionState``. ``set_source`` was the
+        only guarded mutation tool WITHOUT this regression test (its five
+        siblings — patch_source_options, patch_node_options, set_output,
+        patch_output_options, upsert_node — all have one), so a future
+        refactor could silently drop the guard here and a literal credential
+        would then persist and echo through GET /state.
+
+        Bug-verification protocol (cf.
+        ``test_set_source_rejects_manual_blob_ref_in_options`` above): delete
+        the ``_credential_wiring_contract_failure`` block in
+        ``_execute_set_source`` (src/elspeth/web/composer/tools/sources.py)
+        and confirm this test fails with the source persisted; then restore.
+        This guards against the test passing both pre- and post-guard — test
+        theatre otherwise undetectable until a regression slips through.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        literal = "literal-source-key-for-test"
+
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {"path": "/data/in.csv", "api_key": literal},
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+
+        _assert_secret_wiring_contract_failure(
+            result,
+            state,
+            literal_value=literal,
+            field="source:api_key",
+        )
+        # Belt-and-suspenders: the source is absent from persisted state, so a
+        # subsequent GET /state cannot echo the literal (the boundary the
+        # original report named).
+        assert "source" not in result.updated_state.sources
+
 
 class TestVfDestinationAdvisory:
     """Advisory note when on_validation_failure references an unknown output.

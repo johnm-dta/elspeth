@@ -128,6 +128,58 @@ class TestLLMConfigBase:
         assert "patch_node_options" in message
         assert '"patch": {"required_input_fields": ["content", "url"]}' in message
 
+    def test_dynamic_row_item_access_requires_explicit_opt_out(self) -> None:
+        """Dynamic row[expr] access must not look like a no-row-field prompt."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template='{% set k = "ssn" %}Secret: {{ row[k] }}',
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row[expr]" in message
+        assert "options.required_input_fields: []" in message
+
+    def test_dynamic_row_get_access_requires_explicit_opt_out(self) -> None:
+        """Dynamic row.get(expr) access must fail closed by default."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="Secret: {{ row.get(k) }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    def test_dynamic_row_access_rejected_even_with_declared_fields(self) -> None:
+        """A declared field list is not a dynamic-key allowlist."""
+        with pytest.raises(ValidationError, match="dynamic row field access"):
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template='{% set k = "ssn" %}Secret: {{ row[k] }}',
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["ssn"],
+            )
+
+    def test_dynamic_row_access_accepts_empty_required_fields_opt_out(self) -> None:
+        """The documented empty-list opt-out remains explicit and accepted."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template='{% set k = "ssn" %}Secret: {{ row[k] }}',
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=[],
+        )
+
+        assert config.required_input_fields == []
+
 
 class TestRequiredInputFieldsAppearInTemplate:
     """Dual of `_validate_required_input_fields_declared`: catches the inverse

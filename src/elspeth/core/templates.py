@@ -19,7 +19,8 @@ This is a DEVELOPMENT HELPER for discovering template dependencies:
 
 Limitations (documented so developers know when to override):
 - Cannot analyze conditional access (extracts all branches)
-- Cannot analyze dynamic keys (row[variable] is ignored)
+- Cannot resolve dynamic keys (row[variable]) to concrete field names; use
+  extract_jinja2_field_usage() when callers must fail closed on dynamic access
 - Cannot analyze macro internals from imports
 - May include fields only used in optional branches
 - Bracket syntax (row["Original Name"]) returns names verbatim, which may be
@@ -32,6 +33,7 @@ fields and declare only the truly required subset in required_input_fields.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from jinja2 import Environment
@@ -41,14 +43,51 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
 
 __all__ = [
+    "DYNAMIC_ROW_FIELD",
+    "Jinja2FieldExtraction",
+    "extract_jinja2_field_usage",
     "extract_jinja2_fields",
     "extract_jinja2_fields_with_details",
     "extract_jinja2_fields_with_names",
 ]
 
+DYNAMIC_ROW_FIELD = "<dynamic-row-field>"
+
+
+@dataclass(frozen=True, slots=True)
+class Jinja2FieldExtraction:
+    """Concrete and dynamic row-field references found in a Jinja2 template."""
+
+    fields: frozenset[str]
+    dynamic_accesses: tuple[str, ...] = ()
+
+    @property
+    def has_dynamic_access(self) -> bool:
+        """Return whether the template has row[expr] or row.get(expr)."""
+        return bool(self.dynamic_accesses)
+
 
 def _create_field_extraction_environment() -> Environment:
     return Environment(autoescape=True)
+
+
+def extract_jinja2_field_usage(
+    template_string: str,
+    namespace: str = "row",
+) -> Jinja2FieldExtraction:
+    """Extract concrete fields and flag dynamic row-field access.
+
+    Dynamic accesses such as ``row[key]`` and ``row.get(key)`` cannot be
+    resolved to a concrete field name at parse time. They are therefore
+    reported separately so security-sensitive callers can fail closed instead
+    of treating an empty concrete-field set as "no row fields referenced."
+    """
+    env = _create_field_extraction_environment()
+    ast = env.parse(template_string)
+    fields: set[str] = set()
+    dynamic_accesses: list[str] = []
+    _walk_ast(ast, namespace, fields, dynamic_accesses)
+    return Jinja2FieldExtraction(fields=frozenset(fields), dynamic_accesses=tuple(dynamic_accesses))
 
 
 def extract_jinja2_fields(
@@ -90,7 +129,8 @@ def extract_jinja2_fields(
     env = _create_field_extraction_environment()
     ast = env.parse(template_string)
     fields: set[str] = set()
-    _walk_ast(ast, namespace, fields)
+    dynamic_accesses: list[str] = []
+    _walk_ast(ast, namespace, fields, dynamic_accesses)
     return frozenset(fields)
 
 
@@ -110,26 +150,27 @@ _PIPELINE_ROW_API_NAMES: frozenset[str] = frozenset(
 )
 
 
-def _walk_ast(node: Node, namespace: str, fields: set[str]) -> None:
+def _walk_ast(node: Node, namespace: str, fields: set[str], dynamic_accesses: list[str]) -> None:
     """Recursively walk AST to find namespace attribute/item accesses.
 
     Args:
         node: Current AST node
         namespace: Variable name to search for
         fields: Set to accumulate found field names (mutated)
+        dynamic_accesses: List to accumulate dynamic access kinds (mutated)
     """
-    # Handle row.get("field") syntax (Call node with string literal key)
     if (
         isinstance(node, Call)
         and isinstance(node.node, Getattr)
         and isinstance(node.node.node, Name)
         and node.node.node.name == namespace
         and node.node.attr == "get"
-        and len(node.args) >= 1
-        and isinstance(node.args[0], Const)
-        and isinstance(node.args[0].value, str)
     ):
-        fields.add(node.args[0].value)
+        # Handle row.get("field") syntax and fail-visible dynamic keys.
+        if len(node.args) >= 1 and isinstance(node.args[0], Const) and isinstance(node.args[0].value, str):
+            fields.add(node.args[0].value)
+        elif len(node.args) >= 1:
+            dynamic_accesses.append("get")
 
     # Handle row.field_name syntax (Getattr node)
     # Exclude PipelineRow API names (get, keys, contract, etc.) — these are
@@ -142,19 +183,16 @@ def _walk_ast(node: Node, namespace: str, fields: set[str]) -> None:
     ):
         fields.add(node.attr)
 
-    # Handle row["field_name"] syntax (Getitem node with string constant)
-    if (
-        isinstance(node, Getitem)
-        and isinstance(node.node, Name)
-        and node.node.name == namespace
-        and isinstance(node.arg, Const)
-        and isinstance(node.arg.value, str)
-    ):
-        fields.add(node.arg.value)
+    # Handle row["field_name"] syntax and fail-visible dynamic keys.
+    if isinstance(node, Getitem) and isinstance(node.node, Name) and node.node.name == namespace:
+        if isinstance(node.arg, Const) and isinstance(node.arg.value, str):
+            fields.add(node.arg.value)
+        else:
+            dynamic_accesses.append("item")
 
     # Recurse into child nodes
     for child in node.iter_child_nodes():
-        _walk_ast(child, namespace, fields)
+        _walk_ast(child, namespace, fields, dynamic_accesses)
 
 
 def extract_jinja2_fields_with_details(
@@ -194,11 +232,11 @@ def extract_jinja2_fields_with_details(
             and isinstance(node.node.node, Name)
             and node.node.node.name == namespace
             and node.node.attr == "get"
-            and len(node.args) >= 1
-            and isinstance(node.args[0], Const)
-            and isinstance(node.args[0].value, str)
         ):
-            append_access(node.args[0].value, "item")
+            if len(node.args) >= 1 and isinstance(node.args[0], Const) and isinstance(node.args[0].value, str):
+                append_access(node.args[0].value, "item")
+            elif len(node.args) >= 1:
+                append_access(DYNAMIC_ROW_FIELD, "get_dynamic")
 
         if (
             isinstance(node, Getattr)
@@ -208,14 +246,11 @@ def extract_jinja2_fields_with_details(
         ):
             append_access(node.attr, "attr")
 
-        if (
-            isinstance(node, Getitem)
-            and isinstance(node.node, Name)
-            and node.node.name == namespace
-            and isinstance(node.arg, Const)
-            and isinstance(node.arg.value, str)
-        ):
-            append_access(node.arg.value, "item")
+        if isinstance(node, Getitem) and isinstance(node.node, Name) and node.node.name == namespace:
+            if isinstance(node.arg, Const) and isinstance(node.arg.value, str):
+                append_access(node.arg.value, "item")
+            else:
+                append_access(DYNAMIC_ROW_FIELD, "item_dynamic")
 
         for child in node.iter_child_nodes():
             walk(child)

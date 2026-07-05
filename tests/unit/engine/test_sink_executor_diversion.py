@@ -178,7 +178,7 @@ def _make_failsink(name: str = "csv_failsink", node_id: str = "node-failsink") -
     return _SinkDouble(name=name, node_id=node_id, artifact_path="/tmp/failsink")
 
 
-def _make_executor() -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
+def _make_executor(*, bulk_repository: bool = False) -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
     execution = SimpleNamespace()
     execution.begin_node_state = _CallRecorder()
     execution.complete_node_state = _CallRecorder()
@@ -212,6 +212,17 @@ def _make_executor() -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
 
     execution.begin_node_state.side_effect = _begin_state
     execution.register_artifact.side_effect = _register_artifact
+    if bulk_repository:
+
+        def _begin_states_many(entries: tuple[tuple[str, str, str, int, dict[str, object]], ...]) -> list[SimpleNamespace]:
+            states: list[SimpleNamespace] = []
+            for _entry in entries:
+                state_counter[0] += 1
+                states.append(SimpleNamespace(state_id=f"state-{state_counter[0]}"))
+            return states
+
+        execution.begin_node_states_many = _CallRecorder(side_effect=_begin_states_many)
+        execution.complete_node_states_completed_many = _CallRecorder()
     spans = _SpanFactoryDouble()
     executor = SinkExecutor(execution, data_flow, spans, "run-1")
     return executor, execution, data_flow  # type: ignore[return-value]
@@ -372,6 +383,31 @@ class TestNoDiversions:
         )
         assert artifact is not None
         assert diversion_counts.total == 0
+
+
+class TestBulkRepositoryCapabilities:
+    """SinkExecutor bulk paths are selected by repository capability."""
+
+    def test_capability_repository_uses_bulk_primary_begin_and_completion(self) -> None:
+        executor, execution, _data_flow = _make_executor(bulk_repository=True)
+        sink = _make_sink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        artifact, diversion_counts = executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=_make_context(),
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+        )
+
+        assert artifact is not None
+        assert diversion_counts.total == 0
+        assert execution.begin_node_states_many.call_count == 1
+        assert execution.begin_node_state.call_count == 0
+        assert execution.complete_node_states_completed_many.call_count == 1
+        assert execution.complete_node_state.call_count == 0
 
 
 class TestDiscardMode:

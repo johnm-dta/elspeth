@@ -2,9 +2,10 @@
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
@@ -46,6 +47,22 @@ from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
 from elspeth.engine.spans import SpanFactory
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _BulkBeginNodeStateRepository(Protocol):
+    def begin_node_states_many(
+        self,
+        entries: Sequence[tuple[str, str, str, int, Mapping[str, object]]],
+    ) -> list[NodeStateOpen]: ...
+
+
+@runtime_checkable
+class _BulkCompleteNodeStateRepository(Protocol):
+    def complete_node_states_completed_many(
+        self,
+        completions: Sequence[tuple[str, Mapping[str, object], float]],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,7 +446,7 @@ class SinkExecutor:
         """
         all_states: list[tuple[TokenInfo, NodeStateOpen]] = []
         try:
-            can_use_bulk_begin = type(self._execution) is ExecutionRepository and all(
+            can_use_bulk_begin = isinstance(self._execution, _BulkBeginNodeStateRepository) and all(
                 token.resume_attempt_offset == 0 and token.resume_checkpoint_id is None for token in tokens
             )
             if can_use_bulk_begin:
@@ -621,7 +638,7 @@ class SinkExecutor:
         # Amortize batch write time across ALL tokens (including diverted)
         # since sink.write() processed the entire batch
         per_token_ms = duration_ms / total_token_count
-        primary_sink_outputs: list[tuple[str, dict[str, object], float]] = []
+        primary_sink_outputs: list[tuple[str, Mapping[str, object], float]] = []
         for token, state in primary_states:
             output_dict = token.row_data.to_dict()
             primary_sink_outputs.append(
@@ -637,7 +654,7 @@ class SinkExecutor:
             )
         completed_primary_ids: set[str] = set()
         try:
-            if type(self._execution) is ExecutionRepository:
+            if isinstance(self._execution, _BulkCompleteNodeStateRepository):
                 # Single audit transaction: on failure nothing was completed,
                 # so leaving completed_primary_ids empty is accurate.
                 self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs))

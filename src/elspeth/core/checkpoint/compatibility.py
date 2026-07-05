@@ -49,10 +49,16 @@ class CheckpointCompatibilityValidator:
         # unchanged. Validate the entire DAG; this catches node removal,
         # node-config drift, and changes to sibling branches in multi-sink DAGs.
         current_topology_hash = self.compute_full_topology_hash(current_graph)
+        checkpoint_topology_hash = checkpoint.full_topology_hash
 
-        if checkpoint.upstream_topology_hash != current_topology_hash:
+        if checkpoint_topology_hash != current_topology_hash:
             # Provide detailed diagnostic
-            return self._create_topology_mismatch_error(checkpoint, current_graph, checkpoint.upstream_topology_hash, current_topology_hash)
+            return self._create_topology_mismatch_error(
+                checkpoint,
+                current_graph,
+                checkpoint_topology_hash,
+                current_topology_hash,
+            )
 
         # All validations passed
         return ResumeCheck(can_resume=True)

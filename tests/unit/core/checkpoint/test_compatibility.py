@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from elspeth.contracts import Checkpoint, NodeType
 from elspeth.core.canonical import compute_full_topology_hash
@@ -88,6 +89,24 @@ def test_validate_rejects_topology_hash_mismatch() -> None:
     assert result.reason is not None
     assert "Pipeline configuration changed since checkpoint was created." in result.reason
     assert "Expected topology hash" in result.reason
+
+
+def test_checkpoint_exposes_full_topology_hash_accessor() -> None:
+    graph = _graph(checkpoint_config={"version": 1})
+    checkpoint = _checkpoint_for_graph(graph)
+
+    assert checkpoint.full_topology_hash == checkpoint.upstream_topology_hash
+
+
+def test_validator_reads_full_topology_hash_accessor_not_legacy_column_name() -> None:
+    graph = _graph(checkpoint_config={"version": 1})
+    checkpoint = SimpleNamespace(full_topology_hash=compute_full_topology_hash(graph))
+
+    validator = CheckpointCompatibilityValidator()
+    result = validator.validate(checkpoint, graph)  # type: ignore[arg-type]
+
+    assert result.can_resume is True
+    assert result.reason is None
 
 
 def test_validate_accepts_unchanged_graph() -> None:

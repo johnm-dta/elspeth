@@ -137,6 +137,7 @@ def _full_resume_point(
             checkpoint_id=checkpoint_id,
             sequence_number=sequence_number,
             upstream_topology_hash=topology_hash,
+            full_topology_hash=topology_hash,
         ),
         sequence_number=sequence_number,
     )
@@ -155,6 +156,7 @@ def _latest_checkpoint(
         checkpoint_id=checkpoint_id,
         sequence_number=sequence_number,
         upstream_topology_hash=topology_hash,
+        full_topology_hash=topology_hash,
     )
 
 

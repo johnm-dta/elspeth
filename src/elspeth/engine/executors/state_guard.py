@@ -16,7 +16,7 @@ import logging
 import time
 from collections.abc import Mapping
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from elspeth.contracts import ExecutionError, NodeStateOpen
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from elspeth.contracts.node_state_context import NodeStateContext
 
 logger = logging.getLogger(__name__)
+
+_GUARD_TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateStatus.FAILED})
 
 
 def _render_exception_message(exc_type: type[BaseException], exc_val: BaseException | None) -> str:
@@ -256,7 +258,7 @@ class NodeStateGuard:
 
     def complete(
         self,
-        status: NodeStateStatus,
+        status: Literal[NodeStateStatus.COMPLETED, NodeStateStatus.FAILED],
         *,
         output_data: dict[str, Any] | list[dict[str, Any]] | None = None,
         duration_ms: float | None = None,
@@ -271,8 +273,16 @@ class NodeStateGuard:
         but post-commit materialization failures must not trigger a second
         terminal write on top of an already-persisted state.
         """
+        if status not in _GUARD_TERMINAL_NODE_STATE_STATUSES:
+            valid = ", ".join(member.name for member in sorted(_GUARD_TERMINAL_NODE_STATE_STATUSES, key=lambda item: item.value))
+            status_name = status.name if isinstance(status, NodeStateStatus) else repr(status)
+            raise OrchestrationInvariantError(
+                f"NodeStateGuard.complete() only accepts terminal node states ({valid}); got {status_name}. "
+                "Use ExecutionRepository.complete_node_state() directly for non-terminal state transitions."
+            )
+
         try:
-            self._execution.complete_node_state(  # type: ignore[call-overload,misc]  # generic NodeStateStatus vs Literal overloads
+            self._execution.complete_node_state(
                 state_id=self.state_id,
                 status=status,
                 output_data=output_data,

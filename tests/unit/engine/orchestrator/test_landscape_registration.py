@@ -14,6 +14,7 @@ from elspeth.engine.orchestrator.landscape_registration import (
     NodeAuditMetadata,
     register_nodes_with_landscape,
     resolve_node_audit_metadata,
+    resolve_source_contracts_by_node_id,
 )
 
 _SCHEMA_CONFIG = SchemaConfig(mode="observed", fields=None)
@@ -163,16 +164,29 @@ def test_resolve_node_audit_metadata_fails_closed_on_unmapped_plugin_node() -> N
         )
 
 
-def test_register_nodes_with_landscape_uses_resolved_audit_metadata() -> None:
+def test_resolve_source_contracts_by_node_id_uses_source_id_map() -> None:
     schema_contract = object()
     source = _Plugin(
         name="csv",
-        plugin_version="ignored",
-        determinism=Determinism.NON_DETERMINISTIC,
+        plugin_version="source:1",
+        determinism=Determinism.IO_READ,
         source_file_hash=None,
         schema_contract=schema_contract,
     )
     config = SimpleNamespace(sources={"input": source})
+
+    assert resolve_source_contracts_by_node_id(config, {"input": NodeID("src")}) == {NodeID("src"): schema_contract}
+
+
+def test_resolve_source_contracts_by_node_id_fails_closed_on_stale_source_map() -> None:
+    config = SimpleNamespace(sources={})
+
+    with pytest.raises(OrchestrationInvariantError, match="Source ID map references source"):
+        resolve_source_contracts_by_node_id(config, {"missing": NodeID("src")})
+
+
+def test_register_nodes_with_landscape_uses_resolved_audit_metadata() -> None:
+    schema_contract = object()
     graph = _Graph(_node_info("src", NodeType.SOURCE, plugin_name="csv", config={"source_name": "input"}))
     data_flow = _DataFlow()
     factory = SimpleNamespace(data_flow=data_flow)
@@ -180,7 +194,6 @@ def test_register_nodes_with_landscape_uses_resolved_audit_metadata() -> None:
     register_nodes_with_landscape(
         factory,
         "run-1",
-        config,
         graph,
         ["src"],
         {
@@ -190,6 +203,7 @@ def test_register_nodes_with_landscape_uses_resolved_audit_metadata() -> None:
                 source_file_hash="sha256:aaaaaaaaaaaaaaaa",
             )
         },
+        {NodeID("src"): schema_contract},
     )
 
     assert data_flow.register_node_calls == [

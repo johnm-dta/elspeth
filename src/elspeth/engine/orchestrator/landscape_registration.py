@@ -31,6 +31,7 @@ from elspeth.contracts.types import NodeID, SinkName
 if TYPE_CHECKING:
     from elspeth.contracts import SourceProtocol
     from elspeth.contracts.plugin_context import PluginContext
+    from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.orchestrator.types import PipelineConfig
@@ -115,13 +116,31 @@ def resolve_node_audit_metadata(
     return metadata_by_node
 
 
+def resolve_source_contracts_by_node_id(
+    config: PipelineConfig,
+    source_id_map: Mapping[str, NodeID],
+) -> dict[NodeID, SchemaContract | None]:
+    """Resolve source output contracts by graph node ID."""
+
+    source_contracts_by_node_id: dict[NodeID, SchemaContract | None] = {}
+    for source_name, source_node_id in source_id_map.items():
+        try:
+            source = config.sources[source_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Source ID map references source {source_name!r}, but PipelineConfig.sources has no matching source."
+            ) from exc
+        source_contracts_by_node_id[source_node_id] = source.get_schema_contract()
+    return source_contracts_by_node_id
+
+
 def register_nodes_with_landscape(
     factory: RecorderFactory,
     run_id: str,
-    config: PipelineConfig,
     graph: ExecutionGraph,
     execution_order: list[str],
     audit_metadata_by_node: Mapping[NodeID, NodeAuditMetadata],
+    source_contracts_by_node_id: Mapping[NodeID, SchemaContract | None],
 ) -> None:
     """Register each node in the execution graph with Landscape.
 
@@ -132,10 +151,10 @@ def register_nodes_with_landscape(
     Args:
         factory: RecorderFactory for audit trail.
         run_id: Run identifier.
-        config: Pipeline configuration (for source contract).
         graph: Execution graph (for node info lookup).
         execution_order: Topological ordering of node IDs.
         audit_metadata_by_node: Pre-resolved plugin/engine metadata by node ID.
+        source_contracts_by_node_id: Pre-resolved output contracts for source nodes.
     """
 
     for node_id in execution_order:
@@ -155,18 +174,12 @@ def register_nodes_with_landscape(
                 "populated by the builder."
             )
 
-        # Get output_contract for source nodes
-        # Sources have get_schema_contract() method that returns their output contract
         output_contract = None
         if node_info.node_type == NodeType.SOURCE:
-            if "source_name" not in node_info.config:
-                raise OrchestrationInvariantError(
-                    f"DAG source node '{node_info.node_id}' is missing 'source_name' in its config. "
-                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
-                    f"This is a graph-construction bug — node config keys: {sorted(node_info.config.keys())}."
-                )
-            source_name = str(node_info.config["source_name"])
-            output_contract = config.sources[source_name].get_schema_contract()
+            try:
+                output_contract = source_contracts_by_node_id[NodeID(node_id)]
+            except KeyError as exc:
+                raise FrameworkBugError(f"Source node '{node_id}' has no resolved output contract entry.") from exc
 
         factory.data_flow.register_node(
             run_id=run_id,

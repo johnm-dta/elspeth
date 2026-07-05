@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,17 @@ slog = structlog.get_logger(__name__)
 
 _CLEANUP_ERROR_PREVIEW_CHARS = 160
 _UNSCRUBBED_CLEANUP_ERROR_TEXT = "<redacted-plugin-error>"
+
+
+@contextmanager
+def plugin_node_scope(ctx: PluginContext, node_id: str | None) -> Iterator[None]:
+    """Temporarily scope lifecycle hooks to a plugin node."""
+    previous_node_id = ctx.node_id
+    ctx.node_id = node_id
+    try:
+        yield
+    finally:
+        ctx.node_id = previous_node_id
 
 
 def _safe_cleanup_error_text(error: Exception) -> tuple[str, str, int]:
@@ -120,7 +132,7 @@ def cleanup_plugins(
             f"{hook}({plugin_name}): {type(error).__name__}: {public_error} [message_sha256={error_digest}, message_length={error_length}]"
         )
 
-    def run_hook(hook_label: str, plugin_name: str, fn: Callable[[], None]) -> None:
+    def run_hook(hook_label: str, plugin_name: str, node_id: str | None, fn: Callable[[], None]) -> None:
         # Plugin cleanup MUST attempt every hook even when one fails — broad
         # catch is required by the best-effort lifecycle contract documented
         # above. FrameworkBugError / AuditIntegrityError (TIER_1_ERRORS) signal
@@ -129,7 +141,8 @@ def cleanup_plugins(
         # downgrade them to a cleanup warning. Everything else is recorded and
         # folded into the RuntimeError raised after all hooks finish.
         try:
-            fn()
+            with plugin_node_scope(ctx, node_id):
+                fn()
         except contract_errors.TIER_1_ERRORS:
             raise
         except Exception as exc:
@@ -141,25 +154,40 @@ def cleanup_plugins(
     # the loop-variable closure trap that lambdas would otherwise need
     # default-argument workarounds for.
     for transform in transforms_for_cleanup:
-        run_hook("transform.on_complete", transform.name, partial(transform.on_complete, ctx))
+        run_hook(
+            "transform.on_complete",
+            transform.name,
+            getattr(transform, "node_id", None),
+            partial(transform.on_complete, ctx),
+        )
     for sink in sinks_for_cleanup.values():
-        run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
+        run_hook(
+            "sink.on_complete",
+            sink.name,
+            getattr(sink, "node_id", None),
+            partial(sink.on_complete, ctx),
+        )
     if include_source:
         for source in sources_for_cleanup.values():
-            run_hook("source.on_complete", source.name, partial(source.on_complete, ctx))
+            run_hook(
+                "source.on_complete",
+                source.name,
+                getattr(source, "node_id", None),
+                partial(source.on_complete, ctx),
+            )
 
     # Close source (if included) and all sinks
     if include_source:
         for source in sources_for_cleanup.values():
-            run_hook("source.close", source.name, source.close)
+            run_hook("source.close", source.name, getattr(source, "node_id", None), source.close)
 
     # Close all transforms (release resources - file handles, connections, etc.)
     for transform in transforms_for_cleanup:
-        run_hook("transform.close", transform.name, transform.close)
+        run_hook("transform.close", transform.name, getattr(transform, "node_id", None), transform.close)
 
     # Close all sinks
     for sink in sinks_for_cleanup.values():
-        run_hook("sink.close", sink.name, sink.close)
+        run_hook("sink.close", sink.name, getattr(sink, "node_id", None), sink.close)
 
     if cleanup_errors:
         error_summary = "; ".join(cleanup_errors)

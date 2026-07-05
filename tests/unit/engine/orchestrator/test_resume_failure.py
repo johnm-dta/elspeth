@@ -1804,6 +1804,89 @@ class TestBuildProcessorCallsCleanupOnFailure:
         failing_sink.on_complete.assert_not_called()
         failing_sink.close.assert_not_called()
 
+    def test_startup_hooks_receive_their_plugin_node_id(self) -> None:
+        """Each plugin on_start hook must see its own orchestrator-assigned node id."""
+        from elspeth.engine.orchestrator.types import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        observed: list[tuple[str, str | None]] = []
+
+        config = MagicMock(spec=PipelineConfig)
+        source = _specced_source(name="source")
+        transform = _specced_transform(name="transform", node_id=None)
+        sink = _specced_sink(name="sink")
+        source.on_start.side_effect = lambda ctx: observed.append(("source", ctx.node_id))
+        transform.on_start.side_effect = lambda ctx: observed.append(("transform", ctx.node_id))
+        sink.on_start.side_effect = lambda ctx: observed.append(("sink", ctx.node_id))
+        config.sources = {"source": source}
+        config.transforms = [transform]
+        config.sinks = {"sink": sink}
+        config.config = {}
+        config.aggregation_settings = None
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"sink": NodeID("sink-1")},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+        processor = MagicMock(spec=RowProcessor)
+
+        with patch.object(orch._processor_factory, "build_processor", return_value=(processor, {}, None)):
+            run_ctx = orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        assert observed == [
+            ("source", "source-1"),
+            ("transform", "transform-1"),
+            ("sink", "sink-1"),
+        ]
+        assert run_ctx.ctx.node_id == "source-1"
+
+    def test_cleanup_hooks_receive_their_plugin_node_id(self) -> None:
+        """Each plugin on_complete hook must run under its own node id."""
+        from elspeth.contracts.plugin_context import PluginContext
+
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+        ctx.node_id = "source-1"
+        observed: list[tuple[str, str | None]] = []
+
+        source = _specced_source(name="source", node_id="source-1")
+        transform = _specced_transform(name="transform", node_id="transform-1")
+        sink = _specced_sink(name="sink", node_id="sink-1")
+        source.on_complete.side_effect = lambda hook_ctx: observed.append(("source", hook_ctx.node_id))
+        transform.on_complete.side_effect = lambda hook_ctx: observed.append(("transform", hook_ctx.node_id))
+        sink.on_complete.side_effect = lambda hook_ctx: observed.append(("sink", hook_ctx.node_id))
+
+        config = MagicMock(spec=PipelineConfig)
+        config.sources = {"source": source}
+        config.transforms = [transform]
+        config.sinks = {"sink": sink}
+
+        cleanup_plugins(config, ctx)
+
+        assert observed == [
+            ("transform", "transform-1"),
+            ("sink", "sink-1"),
+            ("source", "source-1"),
+        ]
+        assert ctx.node_id == "source-1"
+
 
 class TestCleanupPluginsReRaisesSystemExceptions:
     """Regression test: _cleanup_plugins must re-raise FrameworkBugError/AuditIntegrityError.

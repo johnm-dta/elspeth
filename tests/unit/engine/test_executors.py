@@ -1140,6 +1140,27 @@ class TestTransformExecutor:
         assert kwargs["status"] == NodeStateStatus.FAILED
         assert "plugin bug" in kwargs["error"].exception
 
+    def test_exception_from_process_scrubs_secret_message_in_failed_state(self) -> None:
+        """Secret-bearing plugin exception text must not be persisted in audit errors."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        transform = _make_transform()
+        secret = "sk-" + ("a" * 32)
+        transform.process.side_effect = RuntimeError(f"Authorization: Bearer {secret}")
+        token = _make_token()
+        ctx = make_context()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            executor.execute_transform(transform, token, ctx)
+
+        assert secret in str(exc_info.value)
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        error = kwargs["error"]
+        assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
     def test_exception_path_captures_duration(self) -> None:
         """Duration is captured even when exception is raised."""
         factory = _make_factory()

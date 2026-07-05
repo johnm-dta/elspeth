@@ -982,27 +982,3 @@ class AggregationExecutor:
         should_flush = node.trigger.should_trigger()
         trigger_type = node.trigger.get_trigger_type() if should_flush else None
         return (should_flush, trigger_type)
-
-    def restore_batch(self, batch_id: str) -> None:
-        """Restore a batch as the current in-progress batch.
-
-        Called during recovery to resume a batch that was in progress
-        when the crash occurred.
-
-        Args:
-            batch_id: The batch to restore as current
-
-        Raises:
-            AuditIntegrityError: If batch not found in audit trail
-        """
-        batch = self._execution.get_batch(batch_id)
-        if batch is None:
-            raise AuditIntegrityError(f"Batch not found in audit trail: {batch_id}")
-
-        node_id = NodeID(batch.aggregation_node_id)
-        node = self._get_node(node_id, "restore_batch")
-        node.batch_id = batch_id
-
-        # Restore member count from database
-        members = self._execution.get_batch_members(batch_id)
-        node.member_count = len(members)

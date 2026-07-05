@@ -14,9 +14,9 @@ from unittest.mock import patch
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.run_state import LoopContext
 from elspeth.engine.orchestrator.types import (
     ExecutionCounters,
-    LoopContext,
 )
 from tests.fixtures.landscape import make_landscape_db
 

@@ -40,7 +40,7 @@ from elspeth.engine.orchestrator.landscape_registration import (
     resolve_node_audit_metadata,
     resolve_source_contracts_by_node_id,
 )
-from elspeth.engine.orchestrator.types import GraphArtifacts
+from elspeth.engine.orchestrator.run_state import GraphArtifacts
 from elspeth.engine.orchestrator.validation import (
     validate_pipeline_route_targets,
 )

@@ -41,12 +41,11 @@ from elspeth.contracts.value_source import (
 from elspeth.core.config import resolve_config
 from elspeth.engine.orchestrator.types import (
     PipelineConfig,
-    ValueSourceFinding,
-    ValueSourceValidationError,
 )
 from elspeth.engine.orchestrator.validation import (
     validate_pipeline_route_targets,
 )
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceFinding, ValueSourceValidationError
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol

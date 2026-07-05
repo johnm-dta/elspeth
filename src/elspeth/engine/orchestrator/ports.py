@@ -13,10 +13,23 @@ if TYPE_CHECKING:
     from elspeth.contracts import RowResult, TokenInfo
     from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.coordination import CoordinationToken
+    from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.schema_contract import PipelineRow
     from elspeth.contracts.types import CoalesceName, NodeID
     from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
+
+
+class TelemetryManagerProtocol(Protocol):
+    """Engine-facing telemetry sink surface."""
+
+    def handle_event(self, event: TelemetryEvent) -> None:
+        """Handle one telemetry event emitted by the engine."""
+        ...
+
+    def flush(self) -> None:
+        """Flush queued telemetry to exporters before returning control."""
+        ...
 
 
 class RunIdentityPort(Protocol):

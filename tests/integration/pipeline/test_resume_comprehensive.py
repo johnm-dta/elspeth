@@ -2526,7 +2526,8 @@ class TestMultiSourceResumeContractDispatch:
         from elspeth.contracts import ResumedRow
         from elspeth.contracts.errors import OrchestrationInvariantError
         from elspeth.engine.orchestrator.resume import run_resume_processing_loop
-        from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext
+        from elspeth.engine.orchestrator.run_state import LoopContext
+        from elspeth.engine.orchestrator.types import ExecutionCounters
 
         processor = _ResumeLoopProcessorFake(run_id="run-missing-source-contract")
 
@@ -2773,7 +2774,7 @@ class TestMultiSourceResumeContractDispatch:
         """
         import dataclasses
 
-        from elspeth.engine.orchestrator.types import ResumeState
+        from elspeth.engine.orchestrator.run_state import ResumeState
 
         field_names = {f.name for f in dataclasses.fields(ResumeState)}
         assert "schema_contract" not in field_names, (

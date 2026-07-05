@@ -27,7 +27,8 @@ from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.counter_classification import TERMINAL_PAIR_COUNTER_EFFECTS, apply_counter_increments
 from elspeth.engine.orchestrator.ports import CoalesceCompletionPort
-from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap
+from elspeth.engine.orchestrator.run_state import PendingTokenMap
+from elspeth.engine.orchestrator.types import ExecutionCounters
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext

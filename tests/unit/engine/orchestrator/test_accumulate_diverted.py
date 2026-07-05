@@ -15,7 +15,8 @@ from elspeth.contracts import TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
-from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap
+from elspeth.engine.orchestrator.run_state import PendingTokenMap
+from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.testing import make_token_info
 
 

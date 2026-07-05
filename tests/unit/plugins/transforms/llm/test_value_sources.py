@@ -125,7 +125,7 @@ class TestWalkerBehaviour:
         from unittest.mock import patch
 
         from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
-        from elspeth.engine.orchestrator.types import ValueSourceValidationError
+        from elspeth.engine.orchestrator.value_source_validation import ValueSourceValidationError
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         plugin = LLMTransform(

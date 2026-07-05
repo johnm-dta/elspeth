@@ -19,17 +19,26 @@ from elspeth.contracts import TransformProtocol
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.config import GateSettings
-from elspeth.engine.orchestrator.types import RowPlugin
+from elspeth.engine.orchestrator.plugin_types import RowPlugin
 
 
 class DAGTraversalSnapshot(Protocol):
     """Traversal fields consumed by DAGNavigator.from_traversal_context()."""
 
-    coalesce_node_map: Mapping[CoalesceName, NodeID]
-    node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings]
-    node_to_next: Mapping[NodeID, NodeID | None]
-    branch_first_node: Mapping[str, NodeID]
-    structural_node_ids: frozenset[NodeID]
+    @property
+    def coalesce_node_map(self) -> Mapping[CoalesceName, NodeID]: ...
+
+    @property
+    def node_to_plugin(self) -> Mapping[NodeID, RowPlugin | GateSettings]: ...
+
+    @property
+    def node_to_next(self) -> Mapping[NodeID, NodeID | None]: ...
+
+    @property
+    def branch_first_node(self) -> Mapping[str, NodeID]: ...
+
+    @property
+    def structural_node_ids(self) -> frozenset[NodeID]: ...
 
 
 class DAGNavigator:

@@ -53,8 +53,8 @@ from elspeth.core.secrets import (
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import (
     RouteValidationError,
-    ValueSourceValidationError,
 )
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts

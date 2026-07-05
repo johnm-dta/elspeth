@@ -42,11 +42,11 @@ from elspeth.engine.orchestrator.processor_factory import ProcessorFactory
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
 from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
-from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
-from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
-from elspeth.engine.orchestrator.types import (
+from elspeth.engine.orchestrator.run_state import (
     _RunFailedWithPartialResultError as _RunFailedWithPartialResultError,
 )
+from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
+from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
 from elspeth.engine.spans import SpanFactory
 
 if TYPE_CHECKING:
@@ -70,11 +70,11 @@ if TYPE_CHECKING:
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.core.rate_limit import RateLimitRegistry
     from elspeth.engine.clock import Clock
+    from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
+    from elspeth.engine.orchestrator.run_state import GraphArtifacts
     from elspeth.engine.orchestrator.types import (
-        GraphArtifacts,
         PipelineConfig,
         RunResult,
-        TelemetryManagerProtocol,
     )
 
 

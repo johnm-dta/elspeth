@@ -49,9 +49,9 @@ if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.clock import Clock
     from elspeth.engine.coalesce_executor import CoalesceExecutor
+    from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
     from elspeth.engine.orchestrator.types import (
         PipelineConfig,
-        TelemetryManagerProtocol,
     )
     from elspeth.engine.spans import SpanFactory
 

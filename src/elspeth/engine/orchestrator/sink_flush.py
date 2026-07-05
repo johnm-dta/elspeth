@@ -44,10 +44,9 @@ if TYPE_CHECKING:
         SchedulerTerminalizer,
         _CheckpointFactory,
     )
+    from elspeth.engine.orchestrator.run_state import LoopContext, PendingTokenMap
     from elspeth.engine.orchestrator.types import (
         ExecutionCounters,
-        LoopContext,
-        PendingTokenMap,
         PipelineConfig,
     )
     from elspeth.engine.spans import SpanFactory

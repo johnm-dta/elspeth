@@ -32,7 +32,8 @@ if TYPE_CHECKING:
     from elspeth.contracts import SourceProtocol
     from elspeth.contracts.types import NodeID
     from elspeth.core.config import GateSettings
-    from elspeth.engine.orchestrator.types import PipelineConfig, RowPlugin
+    from elspeth.engine.orchestrator.plugin_types import RowPlugin
+    from elspeth.engine.orchestrator.types import PipelineConfig
 
 
 def validate_route_destinations(

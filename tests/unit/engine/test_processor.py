@@ -58,7 +58,7 @@ from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
 from elspeth.engine.executors import GateOutcome
 from elspeth.engine.executors.transform import TransformExecutor
-from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
+from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
 from elspeth.engine.processor import (
     MAX_WORK_QUEUE_ITERATIONS,
     SCHEDULER_MAINTENANCE_INTERVAL,

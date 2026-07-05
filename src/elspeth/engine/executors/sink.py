@@ -1212,11 +1212,12 @@ class SinkExecutor:
             raise OrchestrationInvariantError(f"Sink '{sink.name}' executed without node_id - orchestrator bug")
         sink_node_id: str = sink.node_id
 
-        # Synchronize context contract to the sink-bound tokens.
-        ctx.contract = self._merge_batch_contract(tokens)
+        # Scope the sink row contract to the primary operation. The caller's
+        # context may be reused by later operations with different row shapes.
+        primary_ctx = ctx.for_contract(self._merge_batch_contract(tokens))
 
         # CRITICAL: Clear state_id before entering operation context.
-        ctx.state_id = None
+        primary_ctx.state_id = None
 
         # ── PRE-PHASE: Open node_states for ALL tokens at primary sink ──
         all_states = self._open_primary_states(
@@ -1224,7 +1225,7 @@ class SinkExecutor:
             rows=rows,
             sink_node_id=sink_node_id,
             step_in_pipeline=step_in_pipeline,
-            ctx=ctx,
+            ctx=primary_ctx,
         )
 
         # Index by token_id for O(1) lookup in Phases 2 and 3.
@@ -1235,7 +1236,7 @@ class SinkExecutor:
             sink=sink,
             rows=rows,
             tokens=tokens,
-            ctx=ctx,
+            ctx=primary_ctx,
             all_states=all_states,
             sink_node_id=sink_node_id,
         )
@@ -1282,6 +1283,8 @@ class SinkExecutor:
             diversion_by_index = {d.row_index: d for d in diversions}
 
             if failsink is not None:
+                failsink_ctx = ctx.for_contract(None)
+                failsink_ctx.state_id = None
                 failsink_count = self._handle_failsink_diversions(
                     failsink=failsink,
                     failsink_name=failsink_name,
@@ -1290,7 +1293,7 @@ class SinkExecutor:
                     diversion_by_index=diversion_by_index,
                     sink_name=sink_name,
                     step_in_pipeline=step_in_pipeline,
-                    ctx=ctx,
+                    ctx=failsink_ctx,
                     on_token_written=on_token_written,
                 )
             else:

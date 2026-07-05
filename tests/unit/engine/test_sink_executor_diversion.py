@@ -26,6 +26,7 @@ from elspeth.contracts.errors import (
     PluginContractViolation,
     SinkRequiredFieldsViolation,
 )
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
 
@@ -148,8 +149,8 @@ class _SpanFactoryDouble:
         self.sink_span = _CallRecorder(return_value=_SpanContext())
 
 
-def _make_context(run_id: str = "run-1") -> SimpleNamespace:
-    return SimpleNamespace(run_id=run_id, operation_id=None)
+def _make_context(run_id: str = "run-1") -> PluginContext:
+    return PluginContext(run_id=run_id, config={})
 
 
 def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = None) -> TokenInfo:
@@ -595,6 +596,56 @@ class TestFailsinkMode:
         assert failsink_rows[0]["__diversion_reason"] == "invalid metadata"
         assert failsink_rows[0]["__diverted_from"] == "primary"
         assert "__diversion_timestamp" in failsink_rows[0]
+
+    def test_primary_and_failsink_use_separate_scoped_contexts(self) -> None:
+        executor, _execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=1, reason="invalid metadata", row_data={"doc": "hello"}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+        caller_ctx = _make_context()
+        stale_contract = _ContractDouble()
+        caller_ctx.contract = stale_contract  # type: ignore[assignment]
+        caller_ctx.state_id = "prior-state"
+        primary_ctx = None
+        failsink_ctx = None
+
+        def _primary_write(_rows: list[dict[str, object]], call_ctx: PluginContext) -> SinkWriteResult:
+            nonlocal primary_ctx
+            primary_ctx = call_ctx
+            return SinkWriteResult(artifact=_make_artifact("/tmp/primary"), diversions=diversions)
+
+        def _failsink_write(_rows: list[dict[str, object]], call_ctx: PluginContext) -> SinkWriteResult:
+            nonlocal failsink_ctx
+            failsink_ctx = call_ctx
+            return SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
+
+        sink.write.side_effect = _primary_write
+        failsink.write.side_effect = _failsink_write
+
+        executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=caller_ctx,
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+            failsink=failsink,
+            failsink_name="csv_failsink",
+            failsink_edge_id="edge-failsink-1",
+        )
+
+        assert primary_ctx is not caller_ctx
+        assert primary_ctx is not None
+        assert primary_ctx.contract is tokens[0].row_data.contract
+        assert primary_ctx.state_id is None
+        assert failsink_ctx is not caller_ctx
+        assert failsink_ctx is not primary_ctx
+        assert failsink_ctx is not None
+        assert failsink_ctx.contract is None
+        assert failsink_ctx.state_id is None
+        assert caller_ctx.contract is stale_contract
+        assert caller_ctx.state_id == "prior-state"
 
     def test_failsink_flush_called(self) -> None:
         executor, _execution, _data_flow = _make_executor()

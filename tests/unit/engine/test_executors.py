@@ -4457,8 +4457,8 @@ class TestSinkExecutor:
         assert len(rows) == 1
         assert rows[0] == {"value": "test", "extra_field": "extra_value", "another": 123}
 
-    def test_sink_updates_ctx_contract_from_tokens(self) -> None:
-        """SinkExecutor should synchronize ctx.contract to sink token contracts."""
+    def test_sink_passes_scoped_contract_without_mutating_caller_context(self) -> None:
+        """SinkExecutor should pass sink token contracts on a scoped context."""
         factory = _make_factory()
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
 
@@ -4509,7 +4509,7 @@ class TestSinkExecutor:
         )
 
         assert captured_contract is sink_contract
-        assert ctx.contract is sink_contract
+        assert ctx.contract is stale_contract
 
     def test_sink_merges_mixed_token_contracts_for_context(self) -> None:
         """SinkExecutor should merge mixed token contracts before sink.write()."""
@@ -4574,7 +4574,8 @@ class TestSinkExecutor:
         sink.write.side_effect = capture_write
 
         ctx = make_context()
-        ctx.contract = _make_contract()
+        stale_contract = _make_contract()
+        ctx.contract = stale_contract
         pending = _default_pending()
 
         executor.write(
@@ -4589,7 +4590,7 @@ class TestSinkExecutor:
         assert captured_contract is not None
         assert captured_contract == expected_merged
         assert captured_contract.get_field("extra") is not None
-        assert ctx.contract == expected_merged
+        assert ctx.contract is stale_contract
 
 
 # =============================================================================

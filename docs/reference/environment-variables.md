@@ -65,6 +65,7 @@ Used to HMAC-sign exported audit records for integrity verification. Only requir
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `ELSPETH_ALLOW_RAW_SECRETS` | Skip fingerprinting (development only) | `false` |
+| `ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS` | Pin `secrets.vault_url` to exact vaults | unset (approved-suffix check only) |
 | `DATABASE_URL` | Audit database connection | `sqlite:///./runs/audit.db` |
 
 ### ELSPETH_ALLOW_RAW_SECRETS
@@ -72,6 +73,16 @@ Used to HMAC-sign exported audit records for integrity verification. Only requir
 **Development only.** When set to `true`, allows running pipelines without `ELSPETH_FINGERPRINT_KEY` even when configs contain secrets. Secrets will be stored in plain text in the audit trail.
 
 **Never use in production.** This is intended only for local development and testing.
+
+### ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS
+
+**Deployment-owned Key Vault allowlist.** A comma- or whitespace-separated list of exact Key Vault URLs. When set, a `secrets.vault_url` that is not an exact match is refused before any Key Vault call — closing the residual risk that a settings file points ELSPETH's Azure credentials at a real but foreign vault (e.g. one in another tenant).
+
+Set this at the deployment/host level, **never** in pipeline YAML. When unset, `vault_url` is still restricted to approved Azure Key Vault host suffixes (`.vault.azure.net` and its sovereign-cloud variants). See the [Key Vault runbook](../runbooks/configure-keyvault-secrets.md) for details.
+
+```bash
+export ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS="https://elspeth-prod-vault.vault.azure.net"
+```
 
 ---
 

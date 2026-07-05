@@ -154,3 +154,121 @@ class TestSecretsConfigValidation:
                 vault_url=123,  # Integer instead of string
                 mapping={"KEY": "key"},
             )
+
+
+class TestVaultUrlSSRFHardening:
+    """SSRF / credential-boundary hardening for vault_url (elspeth-7572facbc6).
+
+    A well-formed Azure Key Vault endpoint carries no userinfo, no non-standard
+    port, no path/query/fragment, and its host is an approved Key Vault suffix.
+    These checks stop an operator settings file from aiming a
+    DefaultAzureCredential-backed client at an arbitrary HTTPS host.
+    """
+
+    def test_vault_url_rejects_userinfo(self) -> None:
+        """Embedded user:pass@ is rejected (credential-in-URL / host confusion)."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="userinfo"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://user:pass@my-vault.vault.azure.net",
+                mapping={"KEY": "key"},
+            )
+
+    def test_vault_url_rejects_unexpected_port(self) -> None:
+        """A non-443 port is rejected."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="port"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net:8443",
+                mapping={"KEY": "key"},
+            )
+
+    def test_vault_url_allows_explicit_standard_port(self) -> None:
+        """An explicit :443 is the standard HTTPS port and is accepted."""
+        from elspeth.core.config import SecretsConfig
+
+        config = SecretsConfig(
+            source="keyvault",
+            vault_url="https://my-vault.vault.azure.net:443",
+            mapping={"KEY": "key"},
+        )
+        assert config.vault_url == "https://my-vault.vault.azure.net:443"
+
+    def test_vault_url_rejects_path(self) -> None:
+        """A path component is rejected — a vault endpoint is host-only."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="path"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net/secrets/steal",
+                mapping={"KEY": "key"},
+            )
+
+    def test_vault_url_rejects_query_string(self) -> None:
+        """A query string is rejected."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="query"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net?x=1",
+                mapping={"KEY": "key"},
+            )
+
+    def test_vault_url_rejects_fragment(self) -> None:
+        """A fragment is rejected."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="fragment"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net#frag",
+                mapping={"KEY": "key"},
+            )
+
+    def test_vault_url_rejects_non_keyvault_host(self) -> None:
+        """A host outside the approved Key Vault suffixes is rejected (SSRF)."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="approved Azure Key Vault"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://evil.example.com",
+                mapping={"KEY": "key"},
+            )
+
+    def test_vault_url_rejects_suffix_lookalike(self) -> None:
+        """A host that only embeds the suffix as a substring is rejected.
+
+        ``my-vault.vault.azure.net.attacker.com`` ends with ``.attacker.com`` —
+        the leading-dot suffix match must not be fooled.
+        """
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="approved Azure Key Vault"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net.attacker.com",
+                mapping={"KEY": "key"},
+            )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://my-vault.vault.azure.net",  # public cloud
+            "https://my-vault.vault.azure.cn",  # Azure China (Mooncake)
+            "https://my-vault.vault.usgovcloudapi.net",  # US Government
+            "https://my-vault.vault.microsoftazure.de",  # legacy Germany
+        ],
+    )
+    def test_vault_url_accepts_sovereign_cloud_suffixes(self, url: str) -> None:
+        """All sovereign-cloud Key Vault suffixes are accepted."""
+        from elspeth.core.config import SecretsConfig
+
+        config = SecretsConfig(source="keyvault", vault_url=url, mapping={"KEY": "key"})
+        assert config.vault_url == url

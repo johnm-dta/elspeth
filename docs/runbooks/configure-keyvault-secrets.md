@@ -241,6 +241,37 @@ secrets:
   mapping: ...
 ```
 
+### 4.3 Vault URL Is Restricted to Approved Azure Key Vault Endpoints
+
+For security, `vault_url` is validated as a real Azure Key Vault endpoint at
+config load — before ELSPETH ever authenticates to it. This prevents a settings
+file from aiming ELSPETH's Azure credentials at an arbitrary host. The URL must:
+
+- use HTTPS;
+- carry no userinfo (`user:pass@`), no path, no query string, and no fragment;
+- use no port other than 443;
+- have a host ending in an approved Azure Key Vault suffix — `.vault.azure.net`
+  (public cloud), `.vault.azure.cn` (China), `.vault.usgovcloudapi.net`
+  (US Government), or `.vault.microsoftazure.de` (legacy Germany). Private Link
+  keeps the public `<vault>.vault.azure.net` host, so it is already covered.
+
+Anything else is rejected before a credentialed request is made.
+
+#### Optional: pin to exact vaults (deployment allowlist)
+
+The suffix check still permits *any* Azure Key Vault, including one in another
+tenant. To close that gap, a deployment can pin the exact vault URL(s) it trusts
+via the `ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS` environment variable — set by the
+deployment/operator, **never** in pipeline YAML:
+
+```bash
+# Comma- or space-separated list of exact vault URLs
+export ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS="https://elspeth-prod-vault.vault.azure.net"
+```
+
+When set, a `vault_url` that is not an exact match is refused before any Key
+Vault call. When unset, the suffix check above is the floor.
+
 Why? Secrets must be loaded before Dynaconf resolves `${VAR}` syntax. The vault URL is needed to fetch the secrets in the first place.
 
 ### 4.3 Mapping Format

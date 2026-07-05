@@ -47,6 +47,47 @@ class SecretLoadError(Exception):
     pass
 
 
+_KEYVAULT_ALLOWLIST_ENV_VAR = "ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS"
+"""Env var naming the deployment-owned exact-URL Key Vault allowlist.
+
+Provisioned by the deployment (never pipeline YAML) per the one-instance-per-org
+model. Comma- or whitespace-separated exact vault URLs. See
+``_enforce_vault_url_allowlist``.
+"""
+
+
+def _enforce_vault_url_allowlist(vault_url: str) -> None:
+    """Enforce the optional deployment-owned exact-URL Key Vault allowlist.
+
+    ``SecretsConfig`` already restricts ``vault_url`` to an approved Azure Key
+    Vault host suffix at construction time (the always-on floor). A deployment
+    that wants to pin to specific vaults sets ``ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS``
+    (outside pipeline YAML); when set, ``vault_url`` must match one of the listed
+    URLs exactly. This closes the residual cross-tenant token-capture vector — a
+    settings file aiming a ``DefaultAzureCredential``-backed client at a real but
+    foreign ``*.vault.azure.net`` — that a suffix check cannot (elspeth-7572facbc6).
+
+    When the env var is unset or empty this is a no-op: the suffix floor governs.
+
+    Args:
+        vault_url: The configured (already suffix-validated, trailing-slash
+            normalised) Key Vault URL.
+
+    Raises:
+        SecretLoadError: If an allowlist is provisioned and ``vault_url`` is not
+            in it. Raised before any Key Vault I/O.
+    """
+    raw = os.environ.get(_KEYVAULT_ALLOWLIST_ENV_VAR, "")
+    allowed = {entry.rstrip("/") for entry in raw.replace(",", " ").split() if entry.strip()}
+    if not allowed:
+        return
+    if vault_url.rstrip("/") not in allowed:
+        raise SecretLoadError(
+            f"vault_url {vault_url!r} is not in the deployment Key Vault allowlist "
+            f"({_KEYVAULT_ALLOWLIST_ENV_VAR}). Approved vault URLs: {sorted(allowed)}."
+        )
+
+
 def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInput]:
     """Load secrets from configured source and inject into environment.
 
@@ -76,6 +117,12 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
         return []
 
     # source == "keyvault"
+    # Security gate (elspeth-7572facbc6): enforce the deployment-owned exact-URL
+    # allowlist BEFORE the fingerprint preflight and any Key Vault I/O, so a
+    # disallowed endpoint never reaches a DefaultAzureCredential-backed client.
+    assert config.vault_url is not None, "vault_url required when source=keyvault"
+    _enforce_vault_url_allowlist(config.vault_url)
+
     # Preflight check for fingerprint key before any Key Vault calls.
     # Audit recording requires ELSPETH_FINGERPRINT_KEY to compute secret fingerprints.
     # Without it, secrets would be fetched but audit recording would fail later,
@@ -110,7 +157,7 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
     # Note: KeyVaultSecretLoader uses lazy client initialization — the constructor
     # does no network I/O. Azure exceptions (auth, HTTP, network) are only raised
     # during get_secret() calls, where they're caught in the loop below.
-    assert config.vault_url is not None, "vault_url required when source=keyvault"
+    # (vault_url is asserted non-None above, at the allowlist gate.)
     loader = KeyVaultSecretLoader(vault_url=config.vault_url)
 
     # Load each mapped secret, fingerprint immediately, collect resolution records.

@@ -156,6 +156,25 @@ Anchored with \\A...\\Z (not ^...$): $ matches just before a trailing newline, s
 "NAME\\n" would otherwise be wrongly accepted.
 """
 
+_APPROVED_KEYVAULT_HOST_SUFFIXES: tuple[str, ...] = (
+    ".vault.azure.net",  # Azure public cloud
+    ".vault.azure.cn",  # Azure China (Mooncake)
+    ".vault.usgovcloudapi.net",  # Azure US Government
+    ".vault.microsoftazure.de",  # Azure Germany (legacy)
+)
+"""Approved Azure Key Vault DNS suffixes across the public and sovereign clouds.
+
+A ``keyvault`` ``vault_url`` host must end with one of these (elspeth-7572facbc6).
+This is the always-on floor that keeps a settings file from aiming a
+``DefaultAzureCredential``-backed client at an arbitrary host; a deployment may
+tighten further to exact URLs via the ``ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS``
+allowlist enforced at the loader boundary (core/security/config_secrets.py).
+Each suffix carries a leading dot so a look-alike host such as
+``my-vault.vault.azure.net.attacker.com`` cannot pass. Private Link keeps the
+public ``{vault}.vault.azure.net`` host (only DNS resolution changes), so it is
+already covered.
+"""
+
 
 class SecretsConfig(BaseModel):
     """Configuration for secret loading.
@@ -235,6 +254,32 @@ class SecretsConfig(BaseModel):
         # P0-3: Require HTTPS
         if parsed.scheme.lower() != "https":
             raise ValueError(f"vault_url must use HTTPS protocol, got: {parsed.scheme}://")
+
+        # SSRF / credential-boundary hardening (elspeth-7572facbc6). A well-formed
+        # Key Vault endpoint is host-only: no userinfo, no non-standard port, no
+        # path/query/fragment, and its host is an approved Key Vault suffix.
+        # Rejecting these stops a settings file from aiming a
+        # DefaultAzureCredential-backed client at an arbitrary HTTPS host.
+        if parsed.username or parsed.password:
+            raise ValueError(f"vault_url must not contain userinfo (user:pass@), got: {v}")
+        try:
+            port = parsed.port
+        except ValueError as e:
+            raise ValueError(f"vault_url has an invalid port: {v}") from e
+        if port not in (None, 443):
+            raise ValueError(f"vault_url must not specify a non-standard port, got port {port}")
+        if parsed.path not in ("", "/"):
+            raise ValueError(f"vault_url must not contain a path, got: {parsed.path!r}")
+        if parsed.query:
+            raise ValueError(f"vault_url must not contain a query string, got: {v}")
+        if parsed.fragment:
+            raise ValueError(f"vault_url must not contain a fragment, got: {v}")
+        host = parsed.hostname or ""
+        if not any(host.endswith(suffix) for suffix in _APPROVED_KEYVAULT_HOST_SUFFIXES):
+            raise ValueError(
+                f"vault_url host {host!r} is not an approved Azure Key Vault endpoint "
+                f"(must end with one of {list(_APPROVED_KEYVAULT_HOST_SUFFIXES)})."
+            )
 
         # Normalize: strip trailing slash
         return v.rstrip("/")

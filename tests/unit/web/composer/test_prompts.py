@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -96,6 +95,18 @@ class PromptShieldCatalog(StubCatalog):
                 secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
             ),
         ]
+
+
+class SecretResolverStub:
+    def __init__(self, inventory: list[SecretInventoryItem], available_names: set[str]) -> None:
+        self._inventory = inventory
+        self._available_names = available_names
+
+    def list_refs(self, _user_id: str) -> list[SecretInventoryItem]:
+        return self._inventory
+
+    def has_ref(self, _user_id: str, name: str) -> bool:
+        return name in self._available_names
 
 
 def _stub_catalog() -> CatalogService:
@@ -266,11 +277,12 @@ class TestBuildContextString:
     def test_secret_unavailable_prompt_shield_is_hidden_from_dynamic_context(self) -> None:
         state = _empty_state()
         catalog: CatalogService = PromptShieldCatalog()
-        secret_service = MagicMock()
-        secret_service.list_refs.return_value = [
-            SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
-        ]
-        secret_service.has_ref.side_effect = lambda _user_id, name: name == "OPENROUTER_API_KEY"
+        secret_service = SecretResolverStub(
+            inventory=[
+                SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
+            ],
+            available_names={"OPENROUTER_API_KEY"},
+        )
 
         context = build_context_string(state, catalog, secret_service=secret_service, user_id="test-user")
         parsed = json.loads(context.split("\n", 1)[1])

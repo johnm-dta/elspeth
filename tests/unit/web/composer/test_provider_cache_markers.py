@@ -271,7 +271,7 @@ class TestCacheMarkersWiredAtCallSite:
     async def test_anthropic_model_emits_cache_control_to_litellm(self) -> None:
         from collections.abc import Mapping
         from dataclasses import dataclass
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from elspeth.web.composer.service import (
             ComposerAvailability,
@@ -309,7 +309,7 @@ class TestCacheMarkersWiredAtCallSite:
 
         with patch(
             "elspeth.web.composer.service._litellm_acompletion",
-            new=AsyncMock(side_effect=fake_acompletion),
+            new=fake_acompletion,
         ):
             await service.compose("Build a CSV pipeline.", [], state)
 
@@ -341,7 +341,7 @@ class TestCacheMarkersWiredAtCallSite:
         """
         from collections.abc import Mapping
         from dataclasses import dataclass
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from elspeth.web.composer.service import (
             ComposerAvailability,
@@ -379,7 +379,7 @@ class TestCacheMarkersWiredAtCallSite:
 
         with patch(
             "elspeth.web.composer.service._litellm_acompletion",
-            new=AsyncMock(side_effect=fake_acompletion),
+            new=fake_acompletion,
         ):
             await service.compose("Build a CSV pipeline.", [], state)
 

@@ -4,7 +4,6 @@ import asyncio
 import importlib
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import structlog
@@ -27,6 +26,24 @@ from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+
+class _CatalogServiceFake:
+    def post_call_hints(self, **_kwargs: object) -> tuple[object, ...]:
+        return ()
+
+
+class _ExecutionServiceFake:
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def get_session_lock(self, session_id: str) -> asyncio.Lock:
+        if session_id not in self._locks:
+            self._locks[session_id] = asyncio.Lock()
+        return self._locks[session_id]
+
+    def cleanup_session_lock(self, session_id: str) -> None:
+        self._locks.pop(session_id, None)
 
 
 def _make_app(tmp_path: Path, user_id: str = "alice") -> tuple[FastAPI, SessionServiceImpl]:
@@ -61,10 +78,10 @@ def _make_app(tmp_path: Path, user_id: str = "alice") -> tuple[FastAPI, SessionS
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=SecretBytes(b"\x00" * 32),
     )
-    app.state.catalog_service = MagicMock()
+    app.state.catalog_service = _CatalogServiceFake()
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
-    app.state.execution_service = AsyncMock()
+    app.state.execution_service = _ExecutionServiceFake()
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
     app.include_router(create_session_router())

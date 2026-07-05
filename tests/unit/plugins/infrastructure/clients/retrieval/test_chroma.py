@@ -9,14 +9,14 @@ name to prevent cross-test interference.
 """
 
 import uuid
-from unittest.mock import MagicMock
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
 chromadb = pytest.importorskip("chromadb")
 
 from elspeth.contracts.enums import CallStatus, CallType  # noqa: E402
-from elspeth.core.landscape.execution_repository import ExecutionRepository  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.chroma import (  # noqa: E402
     ChromaSearchProvider,
@@ -25,13 +25,40 @@ from elspeth.plugins.infrastructure.clients.retrieval.chroma import (  # noqa: E
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk  # noqa: E402
 
 
-def _mock_execution() -> MagicMock:
-    """Create a mock execution repository with spec enforcement.
+@dataclass
+class _RecordedCall:
+    call_id: str
 
-    Using spec=ExecutionRepository ensures misspelled method names
-    (e.g., allocate_call_indax) raise AttributeError in tests.
-    """
-    return MagicMock(spec=ExecutionRepository)
+
+@dataclass
+class _FakeExecutionRecorder:
+    call_indices: dict[str, int] = field(default_factory=dict)
+    recorded_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def allocate_call_index(self, state_id: str) -> int:
+        index = self.call_indices.get(state_id, 0)
+        self.call_indices[state_id] = index + 1
+        return index
+
+    def record_call(self, **kwargs: Any) -> _RecordedCall:
+        self.recorded_calls.append(kwargs)
+        return _RecordedCall(call_id=f"call-{len(self.recorded_calls)}")
+
+    def only_recorded_call(self) -> dict[str, Any]:
+        assert len(self.recorded_calls) == 1
+        return self.recorded_calls[0]
+
+
+@dataclass
+class _FailingCountCollection:
+    error: BaseException
+
+    def count(self) -> int:
+        raise self.error
+
+
+def _fake_execution() -> _FakeExecutionRecorder:
+    return _FakeExecutionRecorder()
 
 
 def _precreate_collection(name: str, distance_function: str = "cosine") -> None:
@@ -180,7 +207,7 @@ class TestChromaSearchProvider:
             mode="ephemeral",
             distance_function=distance_function,
         )
-        return ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        return ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
 
     def test_search_returns_retrieval_chunks(self):
         provider = self._make_provider(
@@ -264,8 +291,7 @@ class TestChromaSearchProvider:
         # Without this, an auditor cannot distinguish "retrieval ran against an
         # empty corpus" from "retrieval never ran". collection_count makes it
         # distinguishable from a populated query that simply matched nothing.
-        provider._execution.record_call.assert_called_once()
-        kwargs = provider._execution.record_call.call_args.kwargs
+        kwargs = provider._execution.only_recorded_call()
         assert kwargs["call_type"] == CallType.VECTOR
         assert kwargs["status"] == CallStatus.SUCCESS
         response = kwargs["response_data"].to_dict()
@@ -322,7 +348,7 @@ class TestChromaSearchProvider:
             persist_directory=str(tmp_path),
             distance_function="cosine",
         )
-        ChromaSearchProvider(config=config_cosine, execution=_mock_execution(), run_id="test-run")
+        ChromaSearchProvider(config=config_cosine, execution=_fake_execution(), run_id="test-run")
 
         # Provider with mismatched distance function should fail
         config_l2 = ChromaSearchProviderConfig(
@@ -332,7 +358,7 @@ class TestChromaSearchProvider:
             distance_function="l2",
         )
         with pytest.raises(RetrievalError, match="distance_function"):
-            ChromaSearchProvider(config=config_l2, execution=_mock_execution(), run_id="test-run")
+            ChromaSearchProvider(config=config_l2, execution=_fake_execution(), run_id="test-run")
 
     def test_missing_hnsw_space_metadata_raises(self, tmp_path):
         """Collection without hnsw:space metadata must crash — can't normalize scores."""
@@ -345,7 +371,7 @@ class TestChromaSearchProvider:
             persist_directory=str(tmp_path),
         )
         with pytest.raises(RetrievalError, match="hnsw:space"):
-            ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+            ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
 
     def test_close_does_not_raise(self):
         provider = self._make_provider()
@@ -383,10 +409,10 @@ class TestChromaSearchProvider:
             mode="ephemeral",
             distance_function="cosine",
         )
-        mock_execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=config,
-            execution=mock_execution,
+            execution=execution,
             run_id="run-1",
         )
         provider._collection.add(documents=["test doc"], ids=["doc1"])
@@ -397,7 +423,7 @@ class TestChromaSearchProvider:
             state_id="state-1",
             token_id="token-1",
         )
-        mock_execution.record_call.assert_called_once()
+        execution.only_recorded_call()
 
 
 class TestChromaScoreNormalization:
@@ -410,7 +436,7 @@ class TestChromaScoreNormalization:
             mode="ephemeral",
             distance_function=distance_function,
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["test document"], ids=["doc1"])
         return provider
 
@@ -468,10 +494,10 @@ class TestCallTypeCorrectness:
             mode="ephemeral",
             distance_function="cosine",
         )
-        mock_execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=config,
-            execution=mock_execution,
+            execution=execution,
             run_id="run-1",
         )
         provider._collection.add(documents=["test doc"], ids=["doc1"])
@@ -482,8 +508,7 @@ class TestCallTypeCorrectness:
             state_id="state-1",
             token_id="token-1",
         )
-        mock_execution.record_call.assert_called_once()
-        assert mock_execution.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
+        assert execution.only_recorded_call()["call_type"] == CallType.VECTOR
 
 
 class TestTier3ResultBoundary:
@@ -499,7 +524,7 @@ class TestTier3ResultBoundary:
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         # Simulate malformed SDK response — missing 'documents' key
@@ -521,7 +546,7 @@ class TestTier3ResultBoundary:
         unique_name = f"t3m-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral")
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         with (
@@ -549,7 +574,7 @@ class TestTier3ResultBoundary:
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         with (
@@ -572,7 +597,7 @@ class TestTier3ResultBoundary:
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         with (
@@ -597,7 +622,7 @@ class TestNonFiniteDistanceHandling:
             mode="ephemeral",
             distance_function="cosine",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         return provider
 
     def test_nan_distance_raises_retrieval_error(self):
@@ -657,7 +682,7 @@ class TestDistanceTypeValidation:
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["doc a", "doc b"], ids=["doc1", "doc2"])
 
         with (
@@ -690,7 +715,7 @@ class TestPostQueryFailureAudit:
 
         unique_name = f"pqa-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -704,8 +729,7 @@ class TestPostQueryFailureAudit:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.only_recorded_call()["status"] == CallStatus.ERROR
 
     def test_non_numeric_distance_records_error_call(self):
         """Corrupt distance produces audit record before crashing."""
@@ -713,7 +737,7 @@ class TestPostQueryFailureAudit:
 
         unique_name = f"pqd-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -736,8 +760,7 @@ class TestPostQueryFailureAudit:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.only_recorded_call()["status"] == CallStatus.ERROR
 
     def test_nan_distance_records_error_call(self):
         """NaN distance from corrupt index produces audit record."""
@@ -745,7 +768,7 @@ class TestPostQueryFailureAudit:
 
         unique_name = f"pqn-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -768,8 +791,7 @@ class TestPostQueryFailureAudit:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.only_recorded_call()["status"] == CallStatus.ERROR
 
     def test_none_documents_records_error_call(self):
         """None in response fields produces audit record."""
@@ -777,7 +799,7 @@ class TestPostQueryFailureAudit:
 
         unique_name = f"pqnr-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -795,8 +817,7 @@ class TestPostQueryFailureAudit:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.only_recorded_call()["status"] == CallStatus.ERROR
 
     def test_length_mismatch_records_error_call(self):
         """Mismatched result array lengths produce audit record, not a bare ValueError.
@@ -809,7 +830,7 @@ class TestPostQueryFailureAudit:
 
         unique_name = f"pqlm-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -832,8 +853,7 @@ class TestPostQueryFailureAudit:
         ):
             provider.search("test", top_k=2, min_score=0.0, state_id="s1", token_id=None)
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.only_recorded_call()["status"] == CallStatus.ERROR
 
     def test_non_serializable_metadata_records_error_call(self):
         """RetrievalChunk ValueError (non-JSON metadata) produces audit record, not a bare ValueError.
@@ -846,7 +866,7 @@ class TestPostQueryFailureAudit:
 
         unique_name = f"pqms-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -869,8 +889,7 @@ class TestPostQueryFailureAudit:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.only_recorded_call()["status"] == CallStatus.ERROR
 
 
 class TestDocTypeValidation:
@@ -886,7 +905,7 @@ class TestDocTypeValidation:
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["real doc"], ids=["doc1"])
 
         # Simulate SDK returning non-string document (corrupt index)
@@ -918,7 +937,7 @@ class TestDocTypeValidation:
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider = ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
         provider._collection.add(documents=["real doc"], ids=["doc1"])
         provider.last_skipped_count = 1
         provider.last_skipped_reasons = [{"reason": "invalid_content_type", "id": "old-doc", "type": "int"}]
@@ -964,7 +983,7 @@ class TestChromaSearchProviderReadiness:
             mode="ephemeral",
             distance_function="cosine",
         )
-        return ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        return ChromaSearchProvider(config=config, execution=_fake_execution(), run_id="test-run")
 
     def test_collection_with_documents_is_ready(self) -> None:
         """Collection exists and has documents."""
@@ -996,12 +1015,8 @@ class TestChromaSearchProviderReadiness:
 
     def test_connection_error(self) -> None:
         """ChromaDB count() fails — reports unreachable with error details."""
-        from unittest.mock import MagicMock
-
         provider = self._make_provider()
-        mock_collection = MagicMock()
-        mock_collection.count.side_effect = ConnectionError("Connection refused")
-        provider._collection = mock_collection
+        provider._collection = _FailingCountCollection(ConnectionError("Connection refused"))
 
         result = provider.check_readiness()
 
@@ -1011,12 +1026,8 @@ class TestChromaSearchProviderReadiness:
 
     def test_uncaught_exception_crashes_through(self) -> None:
         """Programming errors (e.g. TypeError) must NOT be caught by check_readiness."""
-        from unittest.mock import MagicMock
-
         provider = self._make_provider()
-        mock_collection = MagicMock()
-        mock_collection.count.side_effect = TypeError("unexpected type")
-        provider._collection = mock_collection
+        provider._collection = _FailingCountCollection(TypeError("unexpected type"))
 
         with pytest.raises(TypeError, match="unexpected type"):
             provider.check_readiness()
@@ -1037,15 +1048,15 @@ class TestCountErrorBoundary:
         _precreate_collection(unique_name)
         return ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
-            execution=_mock_execution(),
+            execution=_fake_execution(),
             run_id="test-run",
         )
 
-    def _make_provider_with_execution(self) -> tuple["ChromaSearchProvider", MagicMock]:
-        """Build a provider backed by a real ephemeral collection + captured execution mock."""
+    def _make_provider_with_execution(self) -> tuple["ChromaSearchProvider", _FakeExecutionRecorder]:
+        """Build a provider backed by a real ephemeral collection + captured execution recorder."""
         unique_name = f"ceb-{uuid.uuid4().hex[:12]}"
         _precreate_collection(unique_name)
-        execution = _mock_execution()
+        execution = _fake_execution()
         provider = ChromaSearchProvider(
             config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
             execution=execution,
@@ -1056,9 +1067,7 @@ class TestCountErrorBoundary:
     def test_count_connection_error_raises_retrieval_error_retryable(self) -> None:
         """count() ConnectionError must be wrapped in RetrievalError(retryable=True) with audit record."""
         provider, execution = self._make_provider_with_execution()
-        mock_collection = MagicMock()
-        mock_collection.count.side_effect = ConnectionError("refused")
-        provider._collection = mock_collection
+        provider._collection = _FailingCountCollection(ConnectionError("refused"))
 
         with pytest.raises(RetrievalError) as exc_info:
             provider.search("query", top_k=5, min_score=0.0, state_id="s1", token_id=None)
@@ -1066,16 +1075,14 @@ class TestCountErrorBoundary:
         # Must be retryable (transient infrastructure failure)
         assert exc_info.value.retryable is True
         # Must have produced an audit ERROR record
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
-        assert execution.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
+        call = execution.only_recorded_call()
+        assert call["status"] == CallStatus.ERROR
+        assert call["call_type"] == CallType.VECTOR
 
     def test_count_not_found_error_raises_retrieval_error_permanent(self) -> None:
         """count() NotFoundError must be wrapped in RetrievalError(retryable=False) with audit record."""
         provider, execution = self._make_provider_with_execution()
-        mock_collection = MagicMock()
-        mock_collection.count.side_effect = chromadb.errors.NotFoundError("collection gone")
-        provider._collection = mock_collection
+        provider._collection = _FailingCountCollection(chromadb.errors.NotFoundError("collection gone"))
 
         with pytest.raises(RetrievalError) as exc_info:
             provider.search("query", top_k=5, min_score=0.0, state_id="s1", token_id=None)
@@ -1083,16 +1090,14 @@ class TestCountErrorBoundary:
         # NotFoundError is permanent
         assert exc_info.value.retryable is False
         # Must have produced an audit ERROR record
-        execution.record_call.assert_called_once()
-        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
-        assert execution.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
+        call = execution.only_recorded_call()
+        assert call["status"] == CallStatus.ERROR
+        assert call["call_type"] == CallType.VECTOR
 
     def test_count_programming_error_crashes_through(self) -> None:
         """TypeError from count() (a code bug) must NOT be caught -- it must crash through."""
         provider, _execution = self._make_provider_with_execution()
-        mock_collection = MagicMock()
-        mock_collection.count.side_effect = TypeError("bad argument")
-        provider._collection = mock_collection
+        provider._collection = _FailingCountCollection(TypeError("bad argument"))
 
         with pytest.raises(TypeError, match="bad argument"):
             provider.search("query", top_k=5, min_score=0.0, state_id="s1", token_id=None)

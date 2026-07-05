@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import structlog
@@ -23,6 +22,46 @@ from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+
+class _CatalogServiceFake:
+    def list_sources(self):
+        return [
+            PluginSummary(
+                name="inline_blob",
+                description="Inline blob source",
+                plugin_type="source",
+                config_fields=[],
+            ),
+        ]
+
+    def list_transforms(self):
+        return []
+
+    def list_sinks(self):
+        return []
+
+    def get_schema(self, plugin_type, name):
+        assert plugin_type == "source"
+        assert name == "inline_blob"
+        return PluginSchemaInfo(
+            name="inline_blob",
+            plugin_type="source",
+            description="Inline blob source",
+            json_schema={"title": "Config", "properties": {}},
+            knob_schema={"fields": []},
+        )
+
+
+class _BlobServiceFake:
+    async def list_blobs(self, *args, **kwargs):
+        return []
+
+    async def create_blob(self, *args, **kwargs):
+        return None
+
+    async def get_blob(self, *args, **kwargs):
+        return None
 
 
 def _make_app(tmp_path, user_id="alice"):
@@ -46,25 +85,7 @@ def _make_app(tmp_path, user_id="alice"):
     app.dependency_overrides[get_current_user] = mock_user
     app.state.session_service = service
     app.state.session_engine = engine
-    catalog = MagicMock(spec=["list_sources", "list_transforms", "list_sinks", "get_schema"])
-    catalog.list_sources.return_value = [
-        PluginSummary(
-            name="inline_blob",
-            description="Inline blob source",
-            plugin_type="source",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_transforms.return_value = []
-    catalog.list_sinks.return_value = []
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="inline_blob",
-        plugin_type="source",
-        description="Inline blob source",
-        json_schema={"title": "Config", "properties": {}},
-        knob_schema={"fields": []},
-    )
-    app.state.catalog_service = catalog
+    app.state.catalog_service = _CatalogServiceFake()
     app.state.settings = WebSettings(
         data_dir=tmp_path,
         composer_max_composition_turns=15,
@@ -74,10 +95,7 @@ def _make_app(tmp_path, user_id="alice"):
         shareable_link_signing_key=b"\x00" * 32,
     )
     app.state.payload_store = FilesystemPayloadStore(app.state.settings.get_payload_store_path())
-    app.state.blob_service = MagicMock()
-    app.state.blob_service.list_blobs = AsyncMock(return_value=[])
-    app.state.blob_service.create_blob = AsyncMock()
-    app.state.blob_service.get_blob = AsyncMock()
+    app.state.blob_service = _BlobServiceFake()
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.composer_progress_registry = ComposerProgressRegistry()

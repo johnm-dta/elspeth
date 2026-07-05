@@ -42,13 +42,17 @@ class FakeCredential:
         return SimpleNamespace(token="fake-token-for-testing")
 
 
+def _noop_telemetry_emit(*_args: Any, **_kwargs: Any) -> None:
+    """Lifecycle/source context telemetry callback unused by these tests."""
+
+
 class FakeLifecycleContext:
     """Mock LifecycleContext for on_start()."""
 
     def __init__(self) -> None:
         self.run_id = "integration-test-run"
         self.node_id = "test-node"
-        self.telemetry_emit = MagicMock()
+        self.telemetry_emit = _noop_telemetry_emit
         self.rate_limit_registry = None
         self.landscape = None
         self.payload_store = None
@@ -63,7 +67,7 @@ class FakeSourceContext:
         self.node_id = "test-node"
         self.operation_id = "op-001"
         self.landscape = None
-        self.telemetry_emit = MagicMock()
+        self.telemetry_emit = _noop_telemetry_emit
         self.calls: list[dict[str, Any]] = []
         self.validation_errors: list[dict[str, Any]] = []
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from tests.integration.web.composer.guided.test_step_3_e2e import (
     _create_session,
@@ -23,6 +23,10 @@ def _post_chat(client: TestClient, session_id: str, *, message: str, step_index:
     return resp.status_code, resp.json()
 
 
+async def _fake_acompletion(*_args: object, **_kwargs: object) -> object:
+    return _fake_resolve_source_response_csv()
+
+
 def test_chat_apply_then_get_render_the_same_step_1_turn(composer_test_client: TestClient) -> None:
     client = composer_test_client
     session_id = _create_session(client)
@@ -31,7 +35,7 @@ def test_chat_apply_then_get_render_the_same_step_1_turn(composer_test_client: T
     _get_guided(client, session_id)  # records the initial SINGLE_SELECT turn
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=_fake_resolve_source_response_csv()),
+        new=_fake_acompletion,
     ):
         status, apply_body = _post_chat(client, session_id, message="make a csv source", step_index="step_1_source")
     assert status == 200, apply_body

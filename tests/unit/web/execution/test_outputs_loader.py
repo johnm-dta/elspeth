@@ -8,8 +8,8 @@ can enumerate and re-fetch every sink output the run produced.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -22,6 +22,15 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.execution.outputs import load_run_outputs_for_settings, load_run_outputs_from_db, path_or_uri_to_filesystem_path
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+@dataclass(frozen=True)
+class _SettingsFake:
+    landscape_url: str
+    landscape_passphrase: str | None = None
+
+    def get_landscape_url(self) -> str:
+        return self.landscape_url
 
 
 def _register_node(
@@ -122,9 +131,7 @@ def test_load_run_outputs_records_exists_now_filesystem_check(tmp_path: Path) ->
 
 
 def test_load_run_outputs_for_settings_raises_when_sqlite_audit_db_missing(tmp_path: Path) -> None:
-    settings = MagicMock()
-    settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'missing-audit.db'}"
-    settings.landscape_passphrase = None
+    settings = _SettingsFake(landscape_url=f"sqlite:///{tmp_path / 'missing-audit.db'}")
 
     with pytest.raises(RuntimeError, match="audit database"):
         load_run_outputs_for_settings(

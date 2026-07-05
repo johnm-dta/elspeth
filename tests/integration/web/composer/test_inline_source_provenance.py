@@ -27,7 +27,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -67,17 +66,22 @@ def _empty_state() -> CompositionState:
     )
 
 
-def _mock_catalog() -> MagicMock:
-    catalog = MagicMock()
-    catalog.has_plugin.return_value = True
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="csv",
-        plugin_type="source",
-        description="CSV file source",
-        json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
-        knob_schema={"fields": []},
-    )
-    return catalog
+class _CatalogFake:
+    def has_plugin(self, _plugin_type: str, _name: str) -> bool:
+        return True
+
+    def get_schema(self, _plugin_type: str, _name: str) -> PluginSchemaInfo:
+        return PluginSchemaInfo(
+            name="csv",
+            plugin_type="source",
+            description="CSV file source",
+            json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
+            knob_schema={"fields": []},
+        )
+
+
+def _mock_catalog() -> _CatalogFake:
+    return _CatalogFake()
 
 
 def _session_with_user_message() -> tuple[Any, str, str]:

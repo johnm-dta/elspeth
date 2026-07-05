@@ -19,11 +19,13 @@ class patch), so this default never weakens a real gate assertion.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 
 from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
+
+
+async def _clean_advisor_checkpoint(*_args: object, **_kwargs: object) -> AdvisorCheckpointVerdict:
+    return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +39,6 @@ def _stub_advisor_end_gate_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ComposerServiceImpl,
         "_run_advisor_checkpoint",
-        AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")),
+        _clean_advisor_checkpoint,
         raising=True,
     )

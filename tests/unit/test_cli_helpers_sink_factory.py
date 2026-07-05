@@ -2,24 +2,59 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from dataclasses import dataclass
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-from elspeth.plugins.infrastructure.manager import PluginManager
+
+@dataclass(frozen=True, slots=True)
+class _SinkConfigFake:
+    plugin: str
+    options: dict[str, Any]
+    on_write_failure: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigFake:
+    sinks: dict[str, _SinkConfigFake]
+
+
+class _SinkFake:
+    def __init__(self, options: dict[str, Any]) -> None:
+        self.options = options
+        self._on_write_failure = "fail"
+
+
+class _SinkClassRecorder:
+    def __init__(self) -> None:
+        self.instances: list[_SinkFake] = []
+
+    def __call__(self, options: dict[str, Any]) -> _SinkFake:
+        instance = _SinkFake(options)
+        self.instances.append(instance)
+        return instance
+
+
+class _PluginManagerFake:
+    def __init__(self, sink_cls: type[_SinkFake] | _SinkClassRecorder) -> None:
+        self._sink_cls = sink_cls
+
+    def get_sink_by_name(self, _name: str) -> type[_SinkFake] | _SinkClassRecorder:
+        return self._sink_cls
 
 
 class TestMakeSinkFactory:
     """Tests for runtime_factory.make_sink_factory()."""
 
-    def _make_config_with_sink(self, sink_name: str = "csv_out", plugin_name: str = "csv", on_write_failure: str = "fail") -> MagicMock:
-        sink_config = MagicMock()
-        sink_config.plugin = plugin_name
-        sink_config.options = {"path": "/tmp/out.csv"}
-        sink_config.on_write_failure = on_write_failure
-        config = MagicMock()
-        config.sinks = {sink_name: sink_config}
-        return config
+    def _make_config_with_sink(self, sink_name: str = "csv_out", plugin_name: str = "csv", on_write_failure: str = "fail") -> _ConfigFake:
+        sink_config = _SinkConfigFake(
+            plugin=plugin_name,
+            options={"path": "/tmp/out.csv"},
+            on_write_failure=on_write_failure,
+        )
+        return _ConfigFake(sinks={sink_name: sink_config})
 
     def test_raises_on_unknown_sink_name(self) -> None:
         from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
@@ -35,14 +70,10 @@ class TestMakeSinkFactory:
 
         config = self._make_config_with_sink(on_write_failure="quarantine")
 
-        mock_sink_cls = MagicMock()
-        mock_sink_instance = MagicMock()
-        mock_sink_cls.return_value = mock_sink_instance
+        sink_cls = _SinkClassRecorder()
+        manager = _PluginManagerFake(sink_cls)
 
-        mock_manager = MagicMock(spec=PluginManager)
-        mock_manager.get_sink_by_name.return_value = mock_sink_cls
-
-        with patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=mock_manager):
+        with patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager):
             factory = make_sink_factory(config)
             sink = factory("csv_out")
 
@@ -53,10 +84,9 @@ class TestMakeSinkFactory:
 
         config = self._make_config_with_sink()
 
-        mock_manager = MagicMock(spec=PluginManager)
-        mock_manager.get_sink_by_name.return_value = MagicMock
+        manager = _PluginManagerFake(_SinkFake)
 
-        with patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=mock_manager):
+        with patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager):
             factory = make_sink_factory(config)
             sink1 = factory("csv_out")
             sink2 = factory("csv_out")

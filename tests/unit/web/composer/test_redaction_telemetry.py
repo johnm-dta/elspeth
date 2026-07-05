@@ -11,12 +11,20 @@ There is NO _increment_counter helper — that function does not exist.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from dataclasses import dataclass, field
 
 from elspeth.web.composer.redaction_telemetry import (
     NoopRedactionTelemetry,
     RedactionTelemetry,
 )
+
+
+@dataclass
+class _RecordingCounter:
+    add_calls: list[tuple[int, dict[str, str]]] = field(default_factory=list)
+
+    def add(self, amount: int, attributes: dict[str, str]) -> None:
+        self.add_calls.append((amount, dict(attributes)))
 
 
 def test_noop_implements_protocol() -> None:
@@ -48,19 +56,19 @@ def test_otel_telemetry_emits_via_module_level_counters(monkeypatch) -> None:
     import elspeth.web.composer.redaction_telemetry as rt_mod
     from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
 
-    mock_unknown = MagicMock()
-    mock_dispatch = MagicMock()
-    mock_summarizer = MagicMock()
+    unknown_counter = _RecordingCounter()
+    dispatch_counter = _RecordingCounter()
+    summarizer_counter = _RecordingCounter()
 
-    monkeypatch.setattr(rt_mod, "_UNKNOWN_RESPONSE_KEY_COUNTER", mock_unknown)
-    monkeypatch.setattr(rt_mod, "_MANIFEST_DISPATCH_COUNTER", mock_dispatch)
-    monkeypatch.setattr(rt_mod, "_SUMMARIZER_ERROR_COUNTER", mock_summarizer)
+    monkeypatch.setattr(rt_mod, "_UNKNOWN_RESPONSE_KEY_COUNTER", unknown_counter)
+    monkeypatch.setattr(rt_mod, "_MANIFEST_DISPATCH_COUNTER", dispatch_counter)
+    monkeypatch.setattr(rt_mod, "_SUMMARIZER_ERROR_COUNTER", summarizer_counter)
 
     tel = OtelRedactionTelemetry()
     tel.unknown_response_key_redacted(tool_name="set_source")
     tel.manifest_dispatch(tool_name="set_source", shape="type_driven")
     tel.summarizer_error(tool_name="set_source")
 
-    mock_unknown.add.assert_called_once_with(1, {"tool_name": "set_source"})
-    mock_dispatch.add.assert_called_once_with(1, {"tool_name": "set_source", "shape": "type_driven"})
-    mock_summarizer.add.assert_called_once_with(1, {"tool_name": "set_source"})
+    assert unknown_counter.add_calls == [(1, {"tool_name": "set_source"})]
+    assert dispatch_counter.add_calls == [(1, {"tool_name": "set_source", "shape": "type_driven"})]
+    assert summarizer_counter.add_calls == [(1, {"tool_name": "set_source"})]

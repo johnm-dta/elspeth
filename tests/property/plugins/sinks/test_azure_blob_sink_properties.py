@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -63,6 +64,44 @@ rows_strategy = st.lists(row_strategy, min_size=1, max_size=5)
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class FakeBlobClient:
+    """Blob client fake that records uploaded payloads."""
+
+    uploaded_payloads: list[bytes] = field(default_factory=list)
+
+    def upload_blob(self, data: bytes, *, overwrite: bool) -> None:
+        self.uploaded_payloads.append(data)
+
+
+@dataclass
+class FakeContainerClient:
+    """Container fake that returns the same blob client for each requested path."""
+
+    blob_client: FakeBlobClient = field(default_factory=FakeBlobClient)
+    blob_paths: list[str] = field(default_factory=list)
+    closed: bool = False
+
+    def get_blob_client(self, blob_path: str) -> FakeBlobClient:
+        self.blob_paths.append(blob_path)
+        return self.blob_client
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class FakeBlobServiceClient:
+    """Service fake that records requested containers."""
+
+    container_client: FakeContainerClient = field(default_factory=FakeContainerClient)
+    containers: list[str] = field(default_factory=list)
+
+    def get_container_client(self, container: str) -> FakeContainerClient:
+        self.containers.append(container)
+        return self.container_client
+
+
 def _base_config(**overrides: Any) -> dict[str, Any]:
     """Minimal valid config dict."""
     cfg: dict[str, Any] = {
@@ -76,15 +115,10 @@ def _base_config(**overrides: Any) -> dict[str, Any]:
     return cfg
 
 
-def _mock_blob_upload() -> tuple[MagicMock, MagicMock]:
-    """Create mock service client returning (service, blob_client) for upload assertions."""
-    mock_blob_client = MagicMock()
-    mock_container = MagicMock()
-    mock_container.get_blob_client.return_value = mock_blob_client
-    mock_container.close = MagicMock()
-    mock_service = MagicMock()
-    mock_service.get_container_client.return_value = mock_container
-    return mock_service, mock_blob_client
+def _fake_blob_upload() -> tuple[FakeBlobServiceClient, FakeBlobClient]:
+    """Create fake service client returning (service, blob_client) for upload assertions."""
+    fake_service = FakeBlobServiceClient()
+    return fake_service, fake_service.container_client.blob_client
 
 
 def _make_sink_ctx() -> PluginContext:
@@ -97,10 +131,9 @@ def _make_sink_ctx() -> PluginContext:
     )
 
 
-def _get_uploaded_bytes(mock_blob: MagicMock) -> bytes:
+def _get_uploaded_bytes(fake_blob: FakeBlobClient) -> bytes:
     """Extract the bytes passed to upload_blob."""
-    data: bytes = mock_blob.upload_blob.call_args[0][0]
-    return data
+    return fake_blob.uploaded_payloads[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -116,18 +149,18 @@ class TestAzureBlobSinkHashProperties:
     @patch(PATCH_AUTH)
     def test_hash_matches_uploaded_content(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         rows: list[dict[str, object]],
     ) -> None:
         """Artifact hash == SHA-256 of captured upload bytes, size matches."""
         sink = inject_write_failure(AzureBlobSink(_base_config()))
         ctx = _make_sink_ctx()
-        mock_service, mock_blob = _mock_blob_upload()
-        mock_create.return_value = mock_service
+        fake_service, fake_blob = _fake_blob_upload()
+        mock_create.return_value = fake_service
 
         result = sink.write(rows, ctx)
 
-        uploaded = _get_uploaded_bytes(mock_blob)
+        uploaded = _get_uploaded_bytes(fake_blob)
         expected_hash = hashlib.sha256(uploaded).hexdigest()
         assert result.artifact.content_hash == expected_hash
         assert result.artifact.size_bytes == len(uploaded)
@@ -137,7 +170,7 @@ class TestAzureBlobSinkHashProperties:
     @patch(PATCH_AUTH)
     def test_same_rows_produce_same_hash(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         rows: list[dict[str, object]],
     ) -> None:
         """Same rows written to two separate sink instances produce same hash."""
@@ -145,8 +178,8 @@ class TestAzureBlobSinkHashProperties:
         for _ in range(2):
             sink = inject_write_failure(AzureBlobSink(_base_config()))
             ctx = _make_sink_ctx()
-            mock_service, _mock_blob = _mock_blob_upload()
-            mock_create.return_value = mock_service
+            fake_service, _fake_blob = _fake_blob_upload()
+            mock_create.return_value = fake_service
 
             result = sink.write(rows, ctx)
             hashes.append(result.artifact.content_hash)
@@ -167,18 +200,18 @@ class TestAzureBlobSinkJSONLRoundTrip:
     @patch(PATCH_AUTH)
     def test_jsonl_round_trip(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         rows: list[dict[str, object]],
     ) -> None:
         """Write rows as JSONL, parse uploaded bytes back, verify values match."""
         sink = inject_write_failure(AzureBlobSink(_base_config(format="jsonl")))
         ctx = _make_sink_ctx()
-        mock_service, mock_blob = _mock_blob_upload()
-        mock_create.return_value = mock_service
+        fake_service, fake_blob = _fake_blob_upload()
+        mock_create.return_value = fake_service
 
         sink.write(rows, ctx)
 
-        uploaded = _get_uploaded_bytes(mock_blob)
+        uploaded = _get_uploaded_bytes(fake_blob)
         lines = uploaded.decode("utf-8").strip().split("\n")
         assert len(lines) == len(rows)
 
@@ -210,7 +243,7 @@ class TestAzureBlobSinkBufferingProperties:
     @patch(PATCH_AUTH)
     def test_two_writes_equals_one_combined_write(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         rows_a: list[dict[str, object]],
         rows_b: list[dict[str, object]],
     ) -> None:
@@ -218,22 +251,22 @@ class TestAzureBlobSinkBufferingProperties:
         # Two-write path
         sink_split = inject_write_failure(AzureBlobSink(_base_config()))
         ctx_split = _make_sink_ctx()
-        mock_service_split, mock_blob_split = _mock_blob_upload()
-        mock_create.return_value = mock_service_split
+        fake_service_split, fake_blob_split = _fake_blob_upload()
+        mock_create.return_value = fake_service_split
 
         sink_split.write(rows_a, ctx_split)
         sink_split.write(rows_b, ctx_split)
 
-        uploaded_split = _get_uploaded_bytes(mock_blob_split)
+        uploaded_split = _get_uploaded_bytes(fake_blob_split)
 
         # One-write path
         sink_combined = inject_write_failure(AzureBlobSink(_base_config()))
         ctx_combined = _make_sink_ctx()
-        mock_service_combined, mock_blob_combined = _mock_blob_upload()
-        mock_create.return_value = mock_service_combined
+        fake_service_combined, fake_blob_combined = _fake_blob_upload()
+        mock_create.return_value = fake_service_combined
 
         sink_combined.write(rows_a + rows_b, ctx_combined)
 
-        uploaded_combined = _get_uploaded_bytes(mock_blob_combined)
+        uploaded_combined = _get_uploaded_bytes(fake_blob_combined)
 
         assert uploaded_split == uploaded_combined

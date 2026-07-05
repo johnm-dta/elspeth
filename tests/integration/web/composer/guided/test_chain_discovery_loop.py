@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -38,20 +38,26 @@ def _empty_state() -> CompositionState:
     return CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
 
 
-def _mock_catalog() -> MagicMock:
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_transforms.return_value = [
-        PluginSummary(name="web_scrape", description="Fetch URL rows", plugin_type="transform", config_fields=[]),
-        PluginSummary(name="llm", description="LLM transform", plugin_type="transform", config_fields=[]),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="web_scrape",
-        plugin_type="transform",
-        description="Fetch URL rows",
-        json_schema={"title": "Config", "properties": {}},
-        knob_schema={"fields": []},
-    )
-    return catalog
+class _TransformCatalog:
+    def list_transforms(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(name="web_scrape", description="Fetch URL rows", plugin_type="transform", config_fields=[]),
+            PluginSummary(name="llm", description="LLM transform", plugin_type="transform", config_fields=[]),
+        ]
+
+    def get_schema(self, plugin_type: str, name: str) -> PluginSchemaInfo:
+        assert (plugin_type, name) == ("transform", "web_scrape")
+        return PluginSchemaInfo(
+            name="web_scrape",
+            plugin_type="transform",
+            description="Fetch URL rows",
+            json_schema={"title": "Config", "properties": {}},
+            knob_schema={"fields": []},
+        )
+
+
+def _catalog() -> CatalogService:
+    return _TransformCatalog()
 
 
 def _source() -> SourceResolved:
@@ -128,7 +134,7 @@ async def test_chain_loop_lists_transforms_then_proposes() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=6,
         )
@@ -165,10 +171,9 @@ async def test_chain_loop_refuses_to_dispatch_mutation_tool() -> None:
     async def _fake(**kwargs: Any) -> SimpleNamespace:
         return responses.pop(0)
 
-    spy = MagicMock(name="execute_tool")
     with (
         patch("elspeth.web.composer.guided.chain_solver._litellm_acompletion", side_effect=_fake),
-        patch("elspeth.web.composer.guided._discovery.execute_tool", spy),
+        patch("elspeth.web.composer.guided._discovery.execute_tool", autospec=True) as execute_tool_spy,
         pytest.raises(ChainSolverResponseShapeError),
     ):
         await solve_chain(
@@ -178,12 +183,12 @@ async def test_chain_loop_refuses_to_dispatch_mutation_tool() -> None:
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=6,
         )
 
-    spy.assert_not_called()
+    execute_tool_spy.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -213,7 +218,7 @@ async def test_chain_loop_malformed_discovery_args_raise_shape_error() -> None:
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=6,
         )
@@ -248,7 +253,7 @@ async def test_chain_loop_threads_parallel_tool_calls() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=6,
         )
@@ -280,7 +285,7 @@ async def test_chain_loop_raises_at_iteration_cap() -> None:
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=2,
         )
@@ -312,7 +317,7 @@ async def test_chain_loop_emit_turn_terminal_regardless_of_siblings() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=6,
         )
@@ -375,7 +380,7 @@ async def test_solve_chain_threads_intent_as_user_role_message() -> None:
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=6,
         )

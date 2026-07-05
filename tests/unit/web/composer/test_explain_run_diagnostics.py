@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from litellm.exceptions import (
@@ -61,6 +61,7 @@ async def test_explain_run_diagnostics_wraps_litellm_policy_exceptions(
     composer's normalised error envelope.
     """
     service = composer_service_without_sessions_service
+    litellm_exception = exc_factory()
     snapshot: dict[str, object] = {
         "run_id": "run-test-1",
         "status": "failed",
@@ -68,11 +69,14 @@ async def test_explain_run_diagnostics_wraps_litellm_policy_exceptions(
         "rows": [],
     }
 
+    async def fake_call_text_llm(_messages: list[dict[str, str]]) -> object:
+        raise litellm_exception
+
     with (
         patch.object(
             service,
             "_call_text_llm",
-            new=AsyncMock(side_effect=exc_factory()),
+            new=fake_call_text_llm,
         ),
         pytest.raises(ComposerServiceError) as exc_info,
     ):
@@ -80,7 +84,7 @@ async def test_explain_run_diagnostics_wraps_litellm_policy_exceptions(
 
     # Wrap message mirrors the existing ``LLM unavailable ({type})`` pattern.
     assert "LLM unavailable" in str(exc_info.value)
-    assert type(exc_factory()).__name__ in str(exc_info.value)
+    assert type(litellm_exception).__name__ in str(exc_info.value)
 
 
 @pytest.mark.parametrize("exc_cls", [RuntimeError, ValueError, asyncio.CancelledError])
@@ -97,9 +101,14 @@ async def test_unrelated_exceptions_propagate(
     LiteLLM policy-gate set.
     """
     service = composer_service_without_sessions_service
+    unrelated_exception = exc_cls("boom")
     snapshot: dict[str, object] = {"run_id": "run-x", "status": "failed", "row_count": 0, "rows": []}
+
+    async def fake_call_text_llm(_messages: list[dict[str, str]]) -> object:
+        raise unrelated_exception
+
     with (
-        patch.object(service, "_call_text_llm", new=AsyncMock(side_effect=exc_cls("boom"))),
+        patch.object(service, "_call_text_llm", new=fake_call_text_llm),
         pytest.raises(exc_cls),
     ):
         await service.explain_run_diagnostics(snapshot)

@@ -5,12 +5,33 @@ import pytest
 from elspeth.contracts import CallStatus, CallType, FrameworkBugError, NodeType
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.row_data import CallDataResult, CallDataState
 from elspeth.core.landscape.schema import operations_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
+
+
+class _IntegrityFailingPayloadStore:
+    def __init__(self, content_ref: str, retrieve_error: PayloadIntegrityError) -> None:
+        self.content_ref = content_ref
+        self.retrieve_error = retrieve_error
+        self.stored_payloads: list[bytes] = []
+
+    def store(self, content: bytes) -> str:
+        self.stored_payloads.append(content)
+        return self.content_ref
+
+    def retrieve(self, content_hash: str) -> bytes:
+        raise self.retrieve_error
+
+    def exists(self, content_hash: str) -> bool:
+        return content_hash == self.content_ref
+
+    def delete(self, content_hash: str) -> bool:
+        return False
 
 
 def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory, str]:
@@ -1003,19 +1024,14 @@ class TestGetCallResponseData:
         assert result.data is not None
         assert result.data["text"] == "world"
 
-    def test_payload_integrity_error_raises_audit_integrity(self, tmp_path):
+    def test_payload_integrity_error_raises_audit_integrity(self):
         """PayloadIntegrityError (hash mismatch) must translate to AuditIntegrityError with context."""
-        from unittest.mock import MagicMock
-
-        from elspeth.contracts.errors import AuditIntegrityError
-        from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
-
         db = make_landscape_db()
-        mock_store = MagicMock()
-        # store() succeeds during recording, retrieve() fails with hash mismatch
-        mock_store.store.return_value = "sha256-abc123"
-        mock_store.retrieve.side_effect = PayloadIntegrityError("hash mismatch: expected abc, got def")
-        factory = RecorderFactory(db, payload_store=mock_store)
+        payload_store = _IntegrityFailingPayloadStore(
+            "sha256-abc123",
+            PayloadIntegrityError("hash mismatch: expected abc, got def"),
+        )
+        factory = RecorderFactory(db, payload_store=payload_store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
         register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")

@@ -18,9 +18,9 @@ This module pins:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import insert
@@ -35,6 +35,16 @@ from elspeth.web.execution.discard_summary import load_discard_summaries_for_set
 from elspeth.web.execution.outputs import load_run_outputs_for_settings
 
 RUN_ID = "ro-surface-run"
+
+
+@dataclass(frozen=True)
+class _SettingsFake:
+    landscape_url: str
+    landscape_passphrase: str | None = None
+    data_dir: Path | None = None
+
+    def get_landscape_url(self) -> str:
+        return self.landscape_url
 
 
 @pytest.fixture
@@ -52,12 +62,8 @@ def audit_db_url(tmp_path: Path) -> str:
     return url
 
 
-def _settings(url: str, data_dir: Path | None = None) -> MagicMock:
-    settings = MagicMock()
-    settings.get_landscape_url.return_value = url
-    settings.landscape_passphrase = None
-    settings.data_dir = data_dir
-    return settings
+def _settings(url: str, data_dir: Path | None = None) -> _SettingsFake:
+    return _SettingsFake(landscape_url=url, data_dir=data_dir)
 
 
 @pytest.fixture

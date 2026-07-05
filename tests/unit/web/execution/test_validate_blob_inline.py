@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -135,6 +135,22 @@ def _ready_blob_record(*, session_id: UUID, blob_id: UUID = BLOB_ID, size_bytes:
     )
 
 
+class _BlobMetadataService:
+    def __init__(self, record: BlobRecord | None) -> None:
+        self._record = record
+        self.requested_blob_ids: list[UUID] = []
+
+    async def get_blob(self, blob_id: UUID) -> BlobRecord:
+        self.requested_blob_ids.append(blob_id)
+        if self._record is None:
+            raise BlobNotFoundError(str(blob_id))
+        return self._record
+
+
+class _UnusedSessionService:
+    pass
+
+
 def test_validate_returns_structured_violation_for_missing_inline_blob(tmp_path: Path) -> None:
     result = validate_pipeline(
         _state_with_inline_prompt(tmp_path),
@@ -217,8 +233,7 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
 
 @pytest.mark.asyncio
 async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_path: Path) -> None:
-    blob_service = MagicMock(spec=object)
-    blob_service.get_blob = AsyncMock(side_effect=BlobNotFoundError(str(BLOB_ID)))
+    blob_service = _BlobMetadataService(record=None)
     loop = asyncio.get_running_loop()
     service = ExecutionServiceImpl(
         loop=loop,
@@ -231,7 +246,7 @@ async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_
             composer_rate_limit_per_minute=60,
             shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         ),
-        session_service=MagicMock(spec=object),
+        session_service=_UnusedSessionService(),
         yaml_generator=composer_yaml_generator,
         telemetry=build_sessions_telemetry(),
         blob_service=blob_service,
@@ -243,15 +258,14 @@ async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_
 
     assert result.is_valid is False
     assert any(error.error_code == "missing_inline_blob_content" for error in result.errors)
-    blob_service.get_blob.assert_awaited_once_with(BLOB_ID)
+    assert blob_service.requested_blob_ids == [BLOB_ID]
 
 
 @pytest.mark.asyncio
 async def test_execution_service_validate_state_treats_cross_session_inline_blob_as_missing(tmp_path: Path) -> None:
     requested_session_id = uuid4()
     other_session_id = uuid4()
-    blob_service = MagicMock(spec=object)
-    blob_service.get_blob = AsyncMock(return_value=_ready_blob_record(session_id=other_session_id))
+    blob_service = _BlobMetadataService(record=_ready_blob_record(session_id=other_session_id))
     loop = asyncio.get_running_loop()
     service = ExecutionServiceImpl(
         loop=loop,
@@ -264,7 +278,7 @@ async def test_execution_service_validate_state_treats_cross_session_inline_blob
             composer_rate_limit_per_minute=60,
             shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         ),
-        session_service=MagicMock(spec=object),
+        session_service=_UnusedSessionService(),
         yaml_generator=composer_yaml_generator,
         telemetry=build_sessions_telemetry(),
         blob_service=blob_service,
@@ -280,4 +294,4 @@ async def test_execution_service_validate_state_treats_cross_session_inline_blob
 
     assert result.is_valid is False
     assert any(error.error_code == "missing_inline_blob_content" for error in result.errors)
-    blob_service.get_blob.assert_awaited_once_with(BLOB_ID)
+    assert blob_service.requested_blob_ids == [BLOB_ID]

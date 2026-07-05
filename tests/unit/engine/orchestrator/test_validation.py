@@ -9,11 +9,11 @@ are rejected with clear error messages.
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from dataclasses import dataclass
 
 import pytest
 
-from elspeth.contracts import RouteDestination, TransformProtocol
+from elspeth.contracts import RouteDestination
 from elspeth.contracts.types import GateName, NodeID, SinkName
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.engine.orchestrator.validation import (
@@ -27,21 +27,30 @@ from elspeth.engine.orchestrator.validation import (
 # =============================================================================
 
 
-def _make_transform(*, node_id: str, name: str, on_error: str | None = None) -> TransformProtocol:
-    """Create a mock transform with on_error setting."""
-    transform = Mock(spec=TransformProtocol)
-    transform.node_id = node_id
-    transform.name = name
-    transform.on_error = on_error
-    return transform
+@dataclass
+class FakeTransform:
+    node_id: str
+    name: str
+    on_error: str | None = None
 
 
-def _make_source(*, name: str = "csv-source", on_validation_failure: str = "discard") -> Mock:
-    """Create a mock source with quarantine settings."""
-    source = Mock()
-    source.name = name
-    source._on_validation_failure = on_validation_failure
-    return source
+@dataclass
+class FakeSource:
+    name: str = "csv-source"
+    _on_validation_failure: str = "discard"
+
+
+@dataclass
+class FakeConfigGate:
+    name: str
+
+
+def _make_transform(*, node_id: str, name: str, on_error: str | None = None) -> FakeTransform:
+    return FakeTransform(node_id=node_id, name=name, on_error=on_error)
+
+
+def _make_source(*, name: str = "csv-source", on_validation_failure: str = "discard") -> FakeSource:
+    return FakeSource(name=name, _on_validation_failure=on_validation_failure)
 
 
 # =============================================================================
@@ -54,8 +63,7 @@ class TestValidateRouteDestinations:
 
     def test_config_gates_validated(self) -> None:
         """Config-driven gates are also validated via config_gate_id_map."""
-        config_gate = Mock()
-        config_gate.name = "config_gate"
+        config_gate = FakeConfigGate(name="config_gate")
         gate_id_map = {GateName("config_gate"): NodeID("cfg-gate-1")}
         route_map = {(NodeID("cfg-gate-1"), "route_a"): RouteDestination.sink(SinkName("missing_sink"))}
         sinks = {"output"}
@@ -81,8 +89,7 @@ class TestValidateRouteDestinations:
 
     def test_gate_discard_route_passes_without_matching_sink(self) -> None:
         """Gate route target 'discard' is a virtual terminal destination, not a sink."""
-        config_gate = Mock()
-        config_gate.name = "quality_gate"
+        config_gate = FakeConfigGate(name="quality_gate")
         gate_id_map = {GateName("quality_gate"): NodeID("cfg-gate-1")}
         route_map = {(NodeID("cfg-gate-1"), "false"): RouteDestination.discard()}
 

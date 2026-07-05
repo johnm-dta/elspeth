@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from dataclasses import dataclass
+from unittest.mock import patch
 
 import pytest
 
@@ -14,6 +15,40 @@ from tests.unit.web.auth.conftest import make_rs256_token
 TENANT_ID = "00000000-aaaa-bbbb-cccc-111111111111"
 AUDIENCE = "my-entra-app-id"
 ISSUER = f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
+
+
+@dataclass(frozen=True)
+class _DiscoveryResponse:
+    payload: dict[str, object]
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self.payload
+
+
+class _DiscoveryAsyncClient:
+    def __init__(self, jwks_response: dict[str, object]) -> None:
+        self._jwks_response = jwks_response
+
+    async def __aenter__(self) -> _DiscoveryAsyncClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+    async def get(self, url: str, **kwargs: object) -> _DiscoveryResponse:
+        if ".well-known/openid-configuration" in url:
+            return _DiscoveryResponse(
+                {
+                    "jwks_uri": f"{ISSUER}/discovery/v2.0/keys",
+                    "issuer": ISSUER,
+                }
+            )
+        if "keys" in url:
+            return _DiscoveryResponse(self._jwks_response)
+        raise AssertionError(f"Unexpected discovery URL: {url}")
 
 
 def _valid_entra_claims(overrides: dict[str, object] | None = None) -> dict[str, object]:
@@ -40,25 +75,8 @@ def mock_httpx_discovery(jwks_response):
     NOTE: Similar fixture exists in test_oidc_provider.py.
     Intentionally kept separate — different ISSUER and JWKS URL patterns.
     """
-
-    async def mock_get(url, **kwargs):
-        response = MagicMock()
-        response.raise_for_status = lambda: None
-        if ".well-known/openid-configuration" in url:
-            response.json.return_value = {
-                "jwks_uri": f"{ISSUER}/discovery/v2.0/keys",
-                "issuer": ISSUER,
-            }
-        elif "keys" in url:
-            response.json.return_value = jwks_response
-        return response
-
-    client_mock = AsyncMock()
-    client_mock.get = mock_get
-    client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-    client_mock.__aexit__ = AsyncMock(return_value=False)
-
-    return patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock)
+    client = _DiscoveryAsyncClient(jwks_response)
+    return patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client)
 
 
 class TestEntraTenantValidation:

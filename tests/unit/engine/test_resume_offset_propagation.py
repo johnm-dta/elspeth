@@ -18,21 +18,65 @@ Task 7's full RED→GREEN drive of the integration test.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 from sqlalchemy import select
 
-from elspeth.contracts import NodeType, PendingOutcome, TokenInfo
+from elspeth.contracts import NodeType, PendingOutcome, PluginSchema, TokenInfo
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.schema import node_states_table
 from elspeth.engine.executors import SinkExecutor
-from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
+
+class _PermissiveSchema(PluginSchema):
+    """Accept arbitrary sink rows for executor plumbing tests."""
+
+
+class _SinkDouble:
+    def __init__(self, node_id: str = "node-sink-1") -> None:
+        self.name = "primary_sink"
+        self.node_id = node_id
+        self.input_schema = _PermissiveSchema
+        self.declared_guaranteed_fields = frozenset()
+        self.declared_required_fields = frozenset()
+        self._on_write_failure = "discard"
+
+    def write(self, rows: list[dict[str, object]], ctx: object) -> SinkWriteResult:
+        del rows, ctx
+        return SinkWriteResult(
+            artifact=ArtifactDescriptor.for_file(path="/tmp/test-sink", content_hash="a" * 64, size_bytes=10),
+            diversions=(),
+        )
+
+    def _reset_diversion_log(self) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+
+class _SpanContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+
+class _SpanFactoryDouble:
+    def sink_span(
+        self,
+        sink_name: str,
+        *,
+        node_id: str | None = None,
+        token_ids: list[str] | None = None,
+    ) -> _SpanContext:
+        del sink_name, node_id, token_ids
+        return _SpanContext()
 
 
 def _make_permissive_contract() -> SchemaContract:
@@ -41,29 +85,6 @@ def _make_permissive_contract() -> SchemaContract:
         mode="OBSERVED",
         locked=True,
     )
-
-
-def _make_sink_mock(node_id: str = "node-sink-1") -> MagicMock:
-    """Minimal sink mock that returns a successful SinkWriteResult (no diversions)."""
-    sink = MagicMock()
-    sink.name = "primary_sink"
-    sink.node_id = node_id
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink.write.return_value = SinkWriteResult(
-        artifact=ArtifactDescriptor.for_file(path="/tmp/test-sink", content_hash="a" * 64, size_bytes=10),
-        diversions=(),
-    )
-    sink._on_write_failure = "discard"
-    sink._reset_diversion_log = MagicMock()
-    return sink
-
-
-def _make_spans() -> MagicMock:
-    spans = MagicMock(spec=SpanFactory)
-    spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
-    spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
-    return spans
 
 
 class TestTokenResumeOffsetReachesSinkNodeState:
@@ -132,17 +153,17 @@ class TestTokenResumeOffsetReachesSinkNodeState:
         executor = SinkExecutor(
             factory.execution,
             factory.data_flow,
-            _make_spans(),
+            _SpanFactoryDouble(),
             run_id,
         )
 
-        sink_mock = _make_sink_mock(node_id=sink_node_id)
+        sink = _SinkDouble(node_id=sink_node_id)
         ctx = make_context(landscape=factory.plugin_audit_writer(), run_id=run_id)
         pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
         # ── Drive the token through the sink ──
         executor.write(
-            sink=sink_mock,
+            sink=sink,
             tokens=[token],
             ctx=ctx,
             step_in_pipeline=1,
@@ -213,16 +234,16 @@ class TestTokenResumeOffsetReachesSinkNodeState:
         executor = SinkExecutor(
             factory.execution,
             factory.data_flow,
-            _make_spans(),
+            _SpanFactoryDouble(),
             run_id,
         )
 
-        sink_mock = _make_sink_mock(node_id=sink_node_id)
+        sink = _SinkDouble(node_id=sink_node_id)
         ctx = make_context(landscape=factory.plugin_audit_writer(), run_id=run_id)
         pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
         executor.write(
-            sink=sink_mock,
+            sink=sink,
             tokens=[token],
             ctx=ctx,
             step_in_pipeline=1,

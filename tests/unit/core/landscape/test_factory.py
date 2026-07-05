@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import cast
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.engine import Connection, Engine
@@ -16,6 +15,7 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.factory import RecorderFactory, _PluginAuditWriterAdapter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from tests.fixtures.stores import MockPayloadStore
 
 
 class _PostgresEngineWithoutPragmas:
@@ -97,9 +97,9 @@ class TestPayloadStore:
 
     def test_payload_store_propagated(self) -> None:
         db = LandscapeDB.in_memory()
-        mock_store = MagicMock()
-        factory = RecorderFactory(db, payload_store=mock_store)
-        assert factory.payload_store is mock_store
+        payload_store = MockPayloadStore()
+        factory = RecorderFactory(db, payload_store=payload_store)
+        assert factory.payload_store is payload_store
 
     def test_payload_store_defaults_to_none(self, factory: RecorderFactory) -> None:
         assert factory.payload_store is None

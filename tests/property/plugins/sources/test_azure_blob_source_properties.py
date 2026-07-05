@@ -11,7 +11,7 @@ import io
 import json
 import keyword
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -28,6 +28,38 @@ FAKE_CONN_STRING = "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=Z
 DYNAMIC_SCHEMA: dict[str, Any] = {"mode": "observed"}
 QUARANTINE_SINK = "quarantine"
 PATCH_AUTH = "elspeth.plugins.infrastructure.azure_auth.AzureAuthConfig.create_blob_service_client"
+
+
+class _BlobDownload:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def readall(self) -> bytes:
+        return self._data
+
+
+class _BlobClientFake:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def download_blob(self) -> _BlobDownload:
+        return _BlobDownload(self._data)
+
+
+class _ContainerClientFake:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def get_blob_client(self, *_args: Any, **_kwargs: Any) -> _BlobClientFake:
+        return _BlobClientFake(self._data)
+
+
+class _BlobServiceClientFake:
+    def __init__(self, data: bytes = b"") -> None:
+        self._data = data
+
+    def get_container_client(self, *_args: Any, **_kwargs: Any) -> _ContainerClientFake:
+        return _ContainerClientFake(self._data)
 
 
 # ---------------------------------------------------------------------------
@@ -78,20 +110,16 @@ def _base_config(**overrides: Any) -> dict[str, Any]:
     return config
 
 
-def _mock_blob_download(data: bytes) -> MagicMock:
-    """Create a mock service client that returns data from download_blob().readall()."""
-    mock_blob_client = MagicMock()
-    mock_blob_client.download_blob.return_value.readall.return_value = data
-    mock_service = MagicMock()
-    mock_service.get_container_client.return_value.get_blob_client.return_value = mock_blob_client
-    return mock_service
+def _mock_blob_download(data: bytes) -> _BlobServiceClientFake:
+    """Create a service client fake that returns data from download_blob().readall()."""
+    return _BlobServiceClientFake(data)
 
 
 def _make_source(config: dict[str, Any]) -> Any:
     """Create AzureBlobSource with patched auth."""
     from elspeth.plugins.sources.azure_blob_source import AzureBlobSource
 
-    with patch(PATCH_AUTH, return_value=MagicMock()):
+    with patch(PATCH_AUTH, return_value=_BlobServiceClientFake()):
         return AzureBlobSource(config)
 
 
@@ -111,7 +139,7 @@ class TestAzureBlobSourceCSVProperties:
     @patch(PATCH_AUTH)
     def test_csv_round_trip_preserves_values(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         columns: list[str],
         data: st.DataObject,
     ) -> None:
@@ -168,7 +196,7 @@ class TestAzureBlobSourceJSONProperties:
     @patch(PATCH_AUTH)
     def test_json_round_trip_preserves_structure(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         keys: list[str],
         data: st.DataObject,
     ) -> None:
@@ -213,7 +241,7 @@ class TestAzureBlobSourceQuarantineProperties:
     @patch(PATCH_AUTH)
     def test_garbage_json_never_silently_dropped(
         self,
-        mock_create: MagicMock,
+        mock_create: Any,
         garbage: bytes,
     ) -> None:
         """If garbage is not a valid JSON array, all returned rows are quarantined."""

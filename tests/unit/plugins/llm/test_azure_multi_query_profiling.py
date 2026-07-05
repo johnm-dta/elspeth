@@ -15,15 +15,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
-from unittest.mock import Mock
+from typing import Any, Protocol
 
 import pytest
 
 from elspeth.contracts import TransformResult
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
-from elspeth.plugins.transforms.llm.provider import LLMProvider
+from elspeth.plugins.transforms.llm.provider import LLMQueryResult
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -88,6 +87,53 @@ def make_mock_llm_response(score: int, rationale: str, delay_ms: float = 0) -> t
     """Create a ChaosLLM payload with optional artificial delay."""
     payload: dict[str, Any] = {"score": score, "rationale": rationale}
     return (payload, delay_ms) if delay_ms > 0 else payload
+
+
+class _QueryExecutor(Protocol):
+    def __call__(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int | None,
+        state_id: str,
+        token_id: str,
+        response_format: dict[str, object] | None = None,
+    ) -> LLMQueryResult: ...
+
+
+class _ProviderDouble:
+    def __init__(self, execute_query: _QueryExecutor) -> None:
+        self._execute_query = execute_query
+        self.closed = False
+
+    def execute_query(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int | None,
+        state_id: str,
+        token_id: str,
+        response_format: dict[str, object] | None = None,
+    ) -> LLMQueryResult:
+        return self._execute_query(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            state_id=state_id,
+            token_id=token_id,
+            response_format=response_format,
+        )
+
+    def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class TestLoadScenarios:
@@ -314,7 +360,6 @@ class TestLoadScenarios:
         re-raising or bubbling a retryable error back to the engine.
         """
         from elspeth.plugins.infrastructure.clients.llm import RateLimitError
-        from elspeth.plugins.transforms.llm.provider import LLMQueryResult
 
         # Pin the retry budget low so the persistent rate limit exhausts quickly.
         config = _make_config(max_capacity_retry_seconds=1)
@@ -326,8 +371,7 @@ class TestLoadScenarios:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=10)
 
-        # Mock the provider to raise RateLimitError persistently (every call).
-        mock_provider = Mock(spec=LLMProvider)
+        # Provider double raises RateLimitError persistently (every call).
         query_call_count = [0]
 
         def mock_execute_query(
@@ -343,9 +387,7 @@ class TestLoadScenarios:
             query_call_count[0] += 1
             raise RateLimitError("Rate limit exceeded")
 
-        mock_provider.execute_query.side_effect = mock_execute_query
-        mock_provider.close = Mock()
-        transform._provider = mock_provider
+        transform._provider = _ProviderDouble(mock_execute_query)
 
         try:
             row = {
@@ -453,11 +495,10 @@ class TestRowAtomicity:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=50)
 
-        # Mock provider to simulate capacity errors. Failures must be PERSISTENT
+        # Provider double simulates capacity errors. Failures must be PERSISTENT
         # for a deterministic subset of rows — a transient failure would now be
         # absorbed by the bounded local retry and never surface as a failed row.
         # Rows whose index is divisible by 5 (10 of 50) fail every query attempt.
-        mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
         failing_rows = {i for i in range(50) if i % 5 == 0}
 
@@ -482,9 +523,7 @@ class TestRowAtomicity:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider.execute_query.side_effect = mock_execute_query
-        mock_provider.close = Mock()
-        transform._provider = mock_provider
+        transform._provider = _ProviderDouble(mock_execute_query)
 
         try:
             # Process 50 rows; 10 (index % 5 == 0) divert via exhausted retry budget.
@@ -564,7 +603,6 @@ class TestRowAtomicity:
         # 80% of rows (index not divisible by 5: 16 of 20) fail PERSISTENTLY so the
         # bounded local retry cannot rescue them; the rest succeed. Persistent (not
         # transient) failure is required post-B3.7 to still produce failed rows.
-        mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
         failing_rows = {i for i in range(20) if i % 5 != 0}
 
@@ -590,9 +628,7 @@ class TestRowAtomicity:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider.execute_query.side_effect = mock_execute_query
-        mock_provider.close = Mock()
-        transform._provider = mock_provider
+        transform._provider = _ProviderDouble(mock_execute_query)
 
         try:
             # Process 20 rows; 16 (index % 5 != 0) divert via exhausted retry budget.
@@ -664,7 +700,6 @@ class TestRowAtomicity:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=30)
 
-        mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
 
         def mock_execute_query(
@@ -689,9 +724,7 @@ class TestRowAtomicity:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider.execute_query.side_effect = mock_execute_query
-        mock_provider.close = Mock()
-        transform._provider = mock_provider
+        transform._provider = _ProviderDouble(mock_execute_query)
 
         try:
             # Process 30 rows

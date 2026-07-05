@@ -8,7 +8,7 @@ get_ssrf_safe() actually sends.
 import socket
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -34,6 +34,51 @@ from elspeth.testing import make_field, make_pipeline_row, make_row
 _TEST_IP = "104.18.27.120"
 
 
+class _ReturnValueCall:
+    def __init__(self, return_value: Any) -> None:
+        self.return_value = return_value
+        self.call_count = 0
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.call_count += 1
+        return self.return_value
+
+
+class _LandscapeRecorderFake:
+    def __init__(self, call: Call) -> None:
+        self.record_call = _ReturnValueCall(call)
+        self.allocate_call_index = _ReturnValueCall(0)
+
+
+class _PayloadStoreFake:
+    def __init__(self, payload_ref: str) -> None:
+        self.payload_ref = payload_ref
+        self.stored_payloads: list[bytes] = []
+
+    def store(self, payload: bytes) -> str:
+        self.stored_payloads.append(payload)
+        return self.payload_ref
+
+
+class _RateLimitRegistryFake:
+    def get_limiter(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+class _AuditedHTTPClientFake:
+    def __init__(self, result: tuple[httpx.Response, str, Call]) -> None:
+        self._result = result
+        self.get_ssrf_safe_call_count = 0
+        self.close_call_count = 0
+
+    def get_ssrf_safe(self, *_args: Any, **_kwargs: Any) -> tuple[httpx.Response, str, Call]:
+        self.get_ssrf_safe_call_count += 1
+        return self._result
+
+    def close(self) -> None:
+        self.close_call_count += 1
+
+
 def _mock_getaddrinfo(ip: str = _TEST_IP) -> Any:
     """Create a mock getaddrinfo that returns the given IP."""
 
@@ -53,9 +98,6 @@ def _mock_getaddrinfo(ip: str = _TEST_IP) -> Any:
 @pytest.fixture
 def mock_ctx():
     """Create PluginContext with required attributes for web scraping."""
-    # Mock landscape recorder
-    landscape = Mock()
-
     # Configure record_call to return a proper Call object so process() can
     # read call.request_ref and call.response_ref without FrameworkBugError.
     mock_call = Call(
@@ -71,15 +113,9 @@ def mock_ctx():
         response_ref="test-response-ref-hash",
         latency_ms=100.0,
     )
-    landscape.record_call.return_value = mock_call
-    landscape.allocate_call_index.return_value = 0
-    # Mock payload store (WebScrapeTransform uses self._payload_store.store())
-    payload_store = Mock()
-    payload_store.store.return_value = "test-processed-hash"
-
-    # Mock rate limit registry
-    rate_limit_registry = Mock()
-    rate_limit_registry.get_limiter.return_value = None
+    landscape = _LandscapeRecorderFake(mock_call)
+    payload_store = _PayloadStoreFake("test-processed-hash")
+    rate_limit_registry = _RateLimitRegistryFake()
 
     # Create context
     ctx = PluginContext(
@@ -1092,8 +1128,7 @@ def test_web_scrape_forward_probe_preserves_baseline_and_restores_payload_store(
     assert WebScrapeTransform.passes_through_input is True
 
     original_fetch = transform._fetch_url
-    original_payload_store = Mock()
-    original_payload_store.store.return_value = "existing-hash"
+    original_payload_store = _PayloadStoreFake("existing-hash")
     transform._payload_store = original_payload_store
 
     base_row = make_pipeline_row({"baseline": "kept"})
@@ -2119,15 +2154,14 @@ def test_b3_10_web_scrape_wires_max_body_bytes_into_audited_http_client(mock_ctx
     )
 
     with patch("elspeth.plugins.transforms.web_scrape.AuditedHTTPClient") as client_cls:
-        client = Mock()
-        client.get_ssrf_safe.return_value = (response, "https://example.com/ok", mock_ctx.landscape.record_call.return_value)
+        client = _AuditedHTTPClientFake((response, "https://example.com/ok", mock_ctx.landscape.record_call.return_value))
         client_cls.return_value = client
 
         transform._fetch_url(safe_request, mock_ctx)
 
     assert client_cls.call_args.kwargs["max_response_body_bytes"] == 1234
-    client.get_ssrf_safe.assert_called_once()
-    client.close.assert_called_once()
+    assert client.get_ssrf_safe_call_count == 1
+    assert client.close_call_count == 1
 
 
 @respx.mock

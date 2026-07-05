@@ -6,7 +6,7 @@ equivalent to legacy step-based triggering for reachable states.
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from dataclasses import dataclass
 
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
@@ -25,8 +25,8 @@ def _make_processor(
     step_count: int,
     coalesce_name: CoalesceName | None,
     coalesce_node_id: NodeID | None,
-    coalesce_executor: Mock | None,
-) -> tuple[RowProcessor, Mock]:
+    coalesce_executor: _CoalesceExecutorFake | None,
+) -> tuple[RowProcessor, _CoalesceExecutorFake]:
     """Construct a minimal processor with deterministic step/node mappings."""
     db = make_landscape_db()
     factory = make_factory(db)
@@ -70,7 +70,31 @@ def _make_processor(
         scheduler=factory.scheduler,
     )
 
-    return processor, coalesce_executor if coalesce_executor is not None else Mock()
+    return processor, coalesce_executor if coalesce_executor is not None else _CoalesceExecutorFake()
+
+
+@dataclass(frozen=True, slots=True)
+class _BarrierAcceptResult:
+    held: bool
+    merged_token: None
+
+
+class _AcceptRecorder:
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.return_value = _BarrierAcceptResult(held=True, merged_token=None)
+
+    def __call__(self, *args, **kwargs) -> _BarrierAcceptResult:
+        self.call_count += 1
+        return self.return_value
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
+class _CoalesceExecutorFake:
+    def __init__(self) -> None:
+        self.accept = _AcceptRecorder()
 
 
 class TestCoalesceTriggerEquivalence:
@@ -102,8 +126,7 @@ class TestCoalesceTriggerEquivalence:
         coalesce_node_id = NodeID(f"node-{coalesce_step}") if has_coalesce_name else None
         current_node_id = NodeID(f"node-{current_step}")
 
-        executor = Mock()
-        executor.accept.return_value = Mock(held=True, merged_token=None)
+        executor = _CoalesceExecutorFake()
         processor, coalesce_executor = _make_processor(
             step_count=step_count,
             coalesce_name=coalesce_name,

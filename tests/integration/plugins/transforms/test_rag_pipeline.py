@@ -9,7 +9,8 @@ All data-carrying types are real to avoid BUG-LINEAGE-01 pattern.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from dataclasses import dataclass, field
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -55,23 +56,55 @@ def _make_row(data):
     return PipelineRow(data, contract)
 
 
+@dataclass
+class _TransformToken:
+    token_id: str = "token-1"
+
+
+@dataclass
+class _TransformContext:
+    state_id: str = "state-1"
+    run_id: str = "run-1"
+    token: _TransformToken = field(default_factory=_TransformToken)
+
+
+@dataclass
+class _TelemetryRecorder:
+    payloads: list[object] = field(default_factory=list)
+
+    def __call__(self, payload):
+        self.payloads.append(payload)
+
+
+@dataclass
+class _LandscapeRecorder:
+    readiness_checks: list[dict[str, object]] = field(default_factory=list)
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def allocate_call_index(self, state_id):
+        return sum(1 for call in self.calls if call["state_id"] == state_id)
+
+    def record_call(self, **kwargs):
+        self.calls.append(kwargs)
+
+    def record_readiness_check(self, **kwargs):
+        self.readiness_checks.append(kwargs)
+
+
+@dataclass
+class _LifecycleContext:
+    run_id: str = "run-1"
+    landscape: _LandscapeRecorder = field(default_factory=_LandscapeRecorder)
+    telemetry_emit: _TelemetryRecorder = field(default_factory=_TelemetryRecorder)
+    rate_limit_registry: object | None = None
+
+
 def _mock_ctx(state_id="state-1"):
-    ctx = MagicMock()
-    ctx.state_id = state_id
-    ctx.run_id = "run-1"
-    token = MagicMock()
-    token.token_id = "token-1"
-    ctx.token = token
-    return ctx
+    return _TransformContext(state_id=state_id)
 
 
 def _mock_lifecycle_ctx():
-    ctx = MagicMock()
-    ctx.run_id = "run-1"
-    ctx.landscape = MagicMock()
-    ctx.telemetry_emit = MagicMock()
-    ctx.rate_limit_registry = None
-    return ctx
+    return _LifecycleContext()
 
 
 def _create_transform_with_lifecycle(**config_overrides):
@@ -192,7 +225,7 @@ class TestRAGPipelineIntegration:
         ):
             transform.on_start(lifecycle_ctx)
         transform.on_complete(lifecycle_ctx)
-        lifecycle_ctx.telemetry_emit.assert_called_once()
+        assert len(lifecycle_ctx.telemetry_emit.payloads) == 1
 
     def test_plugin_discovery(self):
         from elspeth.plugins.infrastructure.discovery import PLUGIN_SCAN_CONFIG

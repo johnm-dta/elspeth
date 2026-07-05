@@ -12,9 +12,9 @@ while the repo is tested directly.
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -59,6 +59,11 @@ from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+@dataclass(frozen=True)
+class _RowcountResult:
+    rowcount: int
 
 
 def _make_repo(
@@ -310,9 +315,7 @@ class TestCompleteNodeStateCrashPaths:
                 def patched_execute(stmt, *args: Any, **kwargs: Any):
                     result = original_execute(stmt, *args, **kwargs)
                     if stmt.is_insert and stmt.table is node_states_table:
-                        mock_result = MagicMock()
-                        mock_result.rowcount = 1
-                        return mock_result
+                        return _RowcountResult(rowcount=1)
                     return result
 
                 conn.execute = patched_execute
@@ -501,7 +504,7 @@ class TestRecordRoutingEventsRowcount:
     """Test that record_routing_events checks INSERT rowcount (H5)."""
 
     def test_zero_rowcount_raises_audit_integrity(self) -> None:
-        """Mocked zero rowcount on routing event INSERT raises AuditIntegrityError.
+        """Fake zero rowcount on routing event INSERT raises AuditIntegrityError.
 
         This simulates a database anomaly where the INSERT succeeds but
         reports zero rows affected.
@@ -521,7 +524,7 @@ class TestRecordRoutingEventsRowcount:
 
         routes = [RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)]
 
-        # Mock the connection's execute to return rowcount=0 for INSERTs
+        # Fake the connection's execute to return rowcount=0 for INSERTs
         original_connection = repo._db.write_connection
 
         from contextlib import contextmanager
@@ -535,9 +538,7 @@ class TestRecordRoutingEventsRowcount:
                     result = original_execute(stmt, *args, **kwargs)
                     # Intercept INSERT results to simulate zero rowcount
                     if stmt.is_insert:
-                        mock_result = MagicMock()
-                        mock_result.rowcount = 0
-                        return mock_result
+                        return _RowcountResult(rowcount=0)
                     return result
 
                 conn.execute = patched_execute

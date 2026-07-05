@@ -2,6 +2,7 @@
 
 import io
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,20 @@ DYNAMIC_SCHEMA = {"mode": "observed"}
 
 # Standard quarantine routing for tests
 QUARANTINE_SINK = "quarantine"
+
+
+@dataclass(slots=True)
+class _ValidationErrorLandscapeFake:
+    validation_error_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_validation_error(self, **kwargs: Any) -> str:
+        self.validation_error_calls.append(dict(kwargs))
+        return "verr_test"
+
+    @property
+    def only_validation_error_call(self) -> dict[str, Any]:
+        assert len(self.validation_error_calls) == 1
+        return self.validation_error_calls[0]
 
 
 class TestJSONSource:
@@ -1125,19 +1140,16 @@ class TestJSONSourceDataKeyStructuralErrors:
 
     def test_data_key_structural_error_uses_parse_schema_mode(self, tmp_path: Path) -> None:
         """Structural data_key errors record contract-valid schema_mode='parse'."""
-        from unittest.mock import MagicMock
-
         from elspeth.plugins.sources.json_source import JSONSource
 
         json_file = tmp_path / "data.json"
         json_file.write_text('{"wrong_key": [{"id": 1}]}')
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_test"
+        landscape = _ValidationErrorLandscapeFake()
         ctx = make_context(
             run_id="test-run",
             node_id="source_json",
-            landscape=mock_landscape,
+            landscape=landscape,
         )
 
         source = JSONSource(
@@ -1152,7 +1164,7 @@ class TestJSONSourceDataKeyStructuralErrors:
 
         list(source.load(ctx))
 
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
+        call_kwargs = landscape.only_validation_error_call
         assert call_kwargs["schema_mode"] == "parse"
 
 
@@ -1248,19 +1260,16 @@ class TestJSONSourceArrayModeUnicodeDecodeError:
 
     def test_invalid_encoding_records_validation_error(self, tmp_path: Path) -> None:
         """Invalid encoding in array mode records validation error in audit trail."""
-        from unittest.mock import MagicMock
-
         from elspeth.plugins.sources.json_source import JSONSource
 
         json_file = tmp_path / "data.json"
         json_file.write_bytes(b'[{"id": 1}, {"name": "\xff\xfe"}]')
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_test"
+        landscape = _ValidationErrorLandscapeFake()
         ctx = make_context(
             run_id="test-run",
             node_id="source_json",
-            landscape=mock_landscape,
+            landscape=landscape,
         )
 
         source = JSONSource(
@@ -1276,8 +1285,7 @@ class TestJSONSourceArrayModeUnicodeDecodeError:
         list(source.load(ctx))
 
         # Verify validation error was recorded via landscape
-        mock_landscape.record_validation_error.assert_called_once()
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
+        call_kwargs = landscape.only_validation_error_call
         assert call_kwargs["schema_mode"] == "parse"
         assert "utf-8" in call_kwargs["error"].lower()
 

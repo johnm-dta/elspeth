@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 import structlog
@@ -1526,10 +1526,14 @@ class TestForkEndpoint:
         # Use raise_server_exceptions=False so the 500 is returned as an
         # HTTP response rather than propagated as a Python exception.
         client = TestClient(app, raise_server_exceptions=False)
+
+        async def fail_copy_blobs_for_fork(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("disk I/O error")
+
         with patch.object(
             blob_service,
             "copy_blobs_for_fork",
-            new=AsyncMock(side_effect=RuntimeError("disk I/O error")),
+            new=fail_copy_blobs_for_fork,
         ):
             response = client.post(
                 f"/api/sessions/{session.id}/fork",
@@ -1589,10 +1593,14 @@ class TestForkEndpoint:
         # Use raise_server_exceptions=False so the 500 is returned as an
         # HTTP response rather than propagated as a Python exception.
         client = TestClient(app, raise_server_exceptions=False)
+
+        async def fail_save_composition_state(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("DB write failed")
+
         with patch.object(
             service,
             "save_composition_state",
-            new=AsyncMock(side_effect=RuntimeError("DB write failed")),
+            new=fail_save_composition_state,
         ):
             response = client.post(
                 f"/api/sessions/{session.id}/fork",
@@ -1635,16 +1643,22 @@ class TestForkEndpoint:
         # exception object so __notes__ is inspectable.
         client = TestClient(app)
 
+        async def fail_copy_blobs_for_fork(*args: Any, **kwargs: Any) -> None:
+            raise primary
+
+        async def fail_archive_session(*args: Any, **kwargs: Any) -> None:
+            raise cleanup
+
         with (
             patch.object(
                 blob_service,
                 "copy_blobs_for_fork",
-                new=AsyncMock(side_effect=primary),
+                new=fail_copy_blobs_for_fork,
             ),
             patch.object(
                 service,
                 "archive_session",
-                new=AsyncMock(side_effect=cleanup),
+                new=fail_archive_session,
             ),
             pytest.raises(RuntimeError) as exc_info,
         ):

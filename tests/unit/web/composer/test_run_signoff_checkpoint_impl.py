@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,6 +25,26 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.config import WebSettings
+
+
+@dataclass(frozen=True)
+class _AdvisorCheckpointCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class _AdvisorCheckpointFake:
+    def __init__(self, return_value: AdvisorCheckpointVerdict) -> None:
+        self.return_value = return_value
+        self.calls: list[_AdvisorCheckpointCall] = []
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> AdvisorCheckpointVerdict:
+        self.calls.append(_AdvisorCheckpointCall(args=args, kwargs=kwargs))
+        return self.return_value
+
+    def assert_awaited_once(self) -> _AdvisorCheckpointCall:
+        assert len(self.calls) == 1
+        return self.calls[0]
 
 
 def _mock_catalog() -> MagicMock:
@@ -86,7 +108,8 @@ def _state() -> CompositionState:
 async def test_run_signoff_delegates_to_end_checkpoint() -> None:
     service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
     verdict = AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN: looks good")
-    service._run_advisor_checkpoint = AsyncMock(return_value=verdict)
+    checkpoint = _AdvisorCheckpointFake(return_value=verdict)
+    service._run_advisor_checkpoint = checkpoint
     recorder = BufferingRecorder()
 
     async def sink(event: object) -> None:
@@ -95,8 +118,7 @@ async def test_run_signoff_delegates_to_end_checkpoint() -> None:
     out = await service.run_signoff_checkpoint(state=_state(), session_id="s1", recorder=recorder, progress=sink)
 
     assert out is verdict
-    service._run_advisor_checkpoint.assert_awaited_once()
-    kwargs = service._run_advisor_checkpoint.await_args.kwargs
+    kwargs = checkpoint.assert_awaited_once().kwargs
     assert kwargs["phase"] == "end"
     assert kwargs["session_id"] == "s1"
     assert kwargs["recorder"] is recorder
@@ -106,12 +128,13 @@ async def test_run_signoff_delegates_to_end_checkpoint() -> None:
 @pytest.mark.asyncio
 async def test_run_signoff_progress_defaults_none() -> None:
     service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
-    service._run_advisor_checkpoint = AsyncMock(
+    checkpoint = _AdvisorCheckpointFake(
         return_value=AdvisorCheckpointVerdict(
             ok=False,
             blocking=False,
             findings_text=_ADVISOR_UNAVAILABLE_USER_DETAIL,
         )
     )
+    service._run_advisor_checkpoint = checkpoint
     await service.run_signoff_checkpoint(state=_state(), session_id=None, recorder=None)
-    assert service._run_advisor_checkpoint.await_args.kwargs["progress"] is None
+    assert checkpoint.assert_awaited_once().kwargs["progress"] is None

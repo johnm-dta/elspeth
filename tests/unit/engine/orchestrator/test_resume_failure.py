@@ -35,10 +35,12 @@ from elspeth.contracts.types import SinkName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.checkpoint.recovery import RecoveryManager
-from elspeth.core.config import ElspethSettings
+from elspeth.core.config import AggregationSettings, ElspethSettings
 from elspeth.core.dag import ExecutionGraph
+from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.core import Orchestrator, _RunFailedWithPartialResultError
@@ -717,7 +719,7 @@ class TestResumeFinalizesAsFailed:
                 ),
             ),
             incomplete_by_row={},
-            recovery_manager=MagicMock(),
+            recovery_manager=MagicMock(spec=RecoveryManager),
             payload_store=MockPayloadStore(),
             run_id="run-source-scoped-contracts",
             resume_checkpoint_id="checkpoint-source-scoped-contracts",
@@ -829,7 +831,14 @@ class TestResumeFinalizesAsFailed:
             sources={"refunds": source},
             transforms=(),
             sinks={"refunds_sink": _specced_sink()},
-            aggregation_settings={NodeID("agg-refunds"): MagicMock()},
+            aggregation_settings={
+                NodeID("agg-refunds"): AggregationSettings(
+                    name="agg-refunds",
+                    plugin="refund_batcher",
+                    input="refunds_sink",
+                    on_error="discard",
+                )
+            },
         )
         factory = MagicMock(spec=RecorderFactory)
         events: list[str] = []
@@ -1323,8 +1332,8 @@ class TestResumeFinalizesAsFailed:
         run_id = "run-structural-counter-resume"
         _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
-        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
-        mock_factory.run_lifecycle.finalize_run = MagicMock()
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=DataFlowRepository.sweep_deferred_invariants_or_crash)
+        mock_factory.run_lifecycle.finalize_run = MagicMock(spec=RunLifecycleRepository.finalize_run)
         # F2 (resume-fork-reemit): rows_processed is now sourced from a dedicated
         # distinct-source-row query, not a per-leaf tally over the outcome list.
         # This synthetic scenario represents 3 source rows reaching a terminal

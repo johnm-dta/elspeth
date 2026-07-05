@@ -6,8 +6,8 @@ invalid configurations or data that previously passed silently.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -125,13 +125,15 @@ class TestJsonSinkHeaderCollision:
         from elspeth.contracts.header_modes import HeaderMode
         from elspeth.plugins.infrastructure.display_headers import apply_display_headers
 
-        # Minimal stub satisfying DisplayHeaderHost protocol
-        stub = MagicMock()
-        stub._headers_mode = HeaderMode.CUSTOM
-        stub._headers_custom_mapping = {"field_a": "Output", "field_b": "Output"}
-        stub._resolved_display_headers = None
-        stub._display_headers_resolved = True
-        stub._output_contract = None
+        # Minimal state satisfying DisplayHeaderHost protocol for this helper.
+        stub = SimpleNamespace(
+            _headers_mode=HeaderMode.CUSTOM,
+            _headers_custom_mapping={"field_a": "Output", "field_b": "Output"},
+            _resolved_display_headers=None,
+            _display_headers_resolved=True,
+            _needs_resume_field_resolution=False,
+            _output_contract=None,
+        )
 
         with pytest.raises(ValueError, match="Header collision"):
             apply_display_headers(stub, [{"field_a": 1, "field_b": 2}])
@@ -268,8 +270,8 @@ class TestMCPErrorTypeValidation:
         """Unrecognized error_type should raise ValueError."""
         from elspeth.mcp.analyzers.queries import get_errors
 
-        db = MagicMock()
-        factory = MagicMock()
+        db = object()
+        factory = object()
 
         with pytest.raises(ValueError, match="Invalid error_type"):
             get_errors(db, factory, "run-123", error_type="fatal")

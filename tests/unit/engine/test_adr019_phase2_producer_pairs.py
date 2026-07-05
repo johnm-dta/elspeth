@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 from elspeth.contracts import PendingOutcome
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.processor import RowProcessor
 from elspeth.testing import make_token_info
 from tests.unit.engine.test_processor import _make_factory, _make_processor
@@ -39,7 +38,7 @@ def test_processor_terminal_work_item_returns_default_flow_pair() -> None:
 
     result, _child_items = processor._process_single_token(
         token=token,
-        ctx=MagicMock(),
+        ctx=PluginContext(run_id="run-adr019-phase2", config={}),
         current_node_id=None,
         on_success_sink="terminal_sink",
     )
@@ -59,7 +58,7 @@ def test_sink_primary_write_records_pending_outcome_path() -> None:
     executor.write(
         sink=sink,
         tokens=tokens,  # type: ignore[arg-type]
-        ctx=MagicMock(run_id="run-1"),
+        ctx=PluginContext(run_id="run-1", config={}),
         step_in_pipeline=5,
         sink_name="primary",
         pending_outcome=PendingOutcome(

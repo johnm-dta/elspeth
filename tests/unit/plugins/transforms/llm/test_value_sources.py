@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from elspeth.contracts.value_source import (
@@ -120,7 +122,7 @@ class TestWalkerBehaviour:
         OpenRouter. The value-source predicate must treat that URL as the
         same endpoint so a hallucinated model fails before the HTTP call.
         """
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
         from elspeth.engine.orchestrator.types import ValueSourceValidationError
@@ -137,10 +139,7 @@ class TestWalkerBehaviour:
                 "required_input_fields": [],
             }
         )
-        wired = MagicMock()
-        wired.plugin = plugin
-        wired.settings = MagicMock()
-        wired.settings.name = "openrouter_node_1"
+        wired = SimpleNamespace(plugin=plugin, settings=SimpleNamespace(name="openrouter_node_1"))
         with (
             patch(
                 "elspeth.engine.orchestrator.preflight.get_catalog_values",

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -34,19 +34,25 @@ def _empty_state() -> CompositionState:
     return CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
 
 
-def _mock_catalog() -> MagicMock:
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sinks.return_value = [
-        PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="json",
-        plugin_type="sink",
-        description="JSON Lines sink",
-        json_schema={"title": "Config", "properties": {}},
-        knob_schema={"fields": []},
-    )
-    return catalog
+class _SinkCatalog:
+    def list_sinks(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),
+        ]
+
+    def get_schema(self, plugin_type: str, name: str) -> PluginSchemaInfo:
+        assert (plugin_type, name) == ("sink", "json")
+        return PluginSchemaInfo(
+            name="json",
+            plugin_type="sink",
+            description="JSON Lines sink",
+            json_schema={"title": "Config", "properties": {}},
+            knob_schema={"fields": []},
+        )
+
+
+def _catalog() -> CatalogService:
+    return _SinkCatalog()
 
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> SimpleNamespace:
@@ -94,7 +100,7 @@ async def test_sink_loop_lists_sinks_then_resolves() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
         )
 
@@ -131,13 +137,12 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
     async def _fake(**kwargs: Any) -> SimpleNamespace:
         return responses.pop(0)
 
-    spy = MagicMock(name="execute_tool")
     with (
         patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake),
         # ``execute_tool`` is dispatched from the shared ``_discovery`` helper
         # (``_execute_discovery_call``) after the discovery-loop primitives were
         # extracted there; spy at that seam, not at ``chat_solver``.
-        patch("elspeth.web.composer.guided._discovery.execute_tool", spy),
+        patch("elspeth.web.composer.guided._discovery.execute_tool", autospec=True) as execute_tool_spy,
     ):
         result = await maybe_resolve_step_2_sink_chat(
             model="m",
@@ -146,13 +151,13 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
         )
 
     assert result.sink is None
     assert result.assistant_message is None
-    spy.assert_not_called()
+    execute_tool_spy.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -188,7 +193,7 @@ async def test_sink_loop_threads_parallel_tool_calls() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
         )
 
@@ -223,7 +228,7 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
             max_discovery_iters=3,
         )
@@ -267,7 +272,7 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_mock_catalog(),
+            catalog=_catalog(),
             user_id="u1",
         )
 

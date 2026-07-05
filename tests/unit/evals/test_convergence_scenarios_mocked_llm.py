@@ -53,7 +53,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.web.blobs.service import content_hash as _content_hash
-from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
+from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
@@ -62,6 +62,7 @@ from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from tests.unit.evals.conftest import _clean_advisor_checkpoint
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SUITE = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "convergence-suite"
@@ -1087,7 +1088,12 @@ class TestPreflightRepairContinue:
         # Turn 4: claim completion (now valid).
         turn4 = _llm_response(content="Fixed the sink path and ready.", tool_calls=None)
 
-        def _content_aware_preflight(state: CompositionState, user_id: str | None = None) -> ValidationResult:
+        def _content_aware_preflight(
+            state: CompositionState,
+            user_id: str | None = None,
+            session_id: str | None = None,
+        ) -> ValidationResult:
+            del user_id, session_id
             sink_path = state.outputs[0].options.get("path") if state.outputs else None
             if sink_path == _BROKEN_SINK_PATH:
                 return _preflight_invalid_for_placeholder_sink()
@@ -1100,7 +1106,7 @@ class TestPreflightRepairContinue:
             patch.object(
                 service,
                 "_run_advisor_checkpoint",
-                new=AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")),
+                new=_clean_advisor_checkpoint,
             ),
         ):
             mock_llm.side_effect = [turn1, turn2, turn3, turn4]

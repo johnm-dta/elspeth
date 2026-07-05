@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
@@ -26,6 +26,8 @@ from elspeth.contracts import (
 from elspeth.contracts.results import SourceRow
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID
+from elspeth.core.checkpoint.manager import CheckpointManager
+from elspeth.core.checkpoint.recovery import RecoveryManager
 from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
@@ -121,6 +123,10 @@ def _begin_test_run(db: LandscapeDB) -> tuple[RecorderFactory, str, MockPayloadS
         canonical_version="sha256-rfc8785-v1",
     )
     return factory, run.run_id, payload_store
+
+
+def _recovery_manager_for(db: LandscapeDB) -> RecoveryManager:
+    return RecoveryManager(db, CheckpointManager(db))
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +513,7 @@ class TestResumePathCharacterization:
             barrier_restore=None,
             payload_store=payload_store,
             incomplete_by_row={},
-            recovery_manager=MagicMock(),
+            recovery_manager=_recovery_manager_for(db),
             resume_checkpoint_id="char-test-checkpoint",
             schema_contracts_by_source={source_node_id: resume_contract},
             coordination_token=leader_coordination_token(factory, run_id),
@@ -628,7 +634,7 @@ class TestResumePathCharacterization:
                 barrier_restore=None,
                 payload_store=payload_store,
                 incomplete_by_row={},
-                recovery_manager=MagicMock(),
+                recovery_manager=_recovery_manager_for(db),
                 resume_checkpoint_id="char-test-checkpoint",
                 schema_contracts_by_source={source_node_id: schema_contract},
                 coordination_token=leader_coordination_token(factory, run_id),

@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.guided.emitters import (
     build_step_1_schema_form_turn_from_resolved,
     build_step_2_schema_form_turn_from_resolved,
@@ -18,7 +19,13 @@ from elspeth.web.composer.guided.resolved import (
 
 def _catalog() -> CatalogService:
     catalog = MagicMock(spec=CatalogService)
-    catalog.get_schema.return_value = MagicMock(knob_schema={"fields": []})
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="test",
+        plugin_type="source",
+        description="Test schema",
+        json_schema={"type": "object", "properties": {}},
+        knob_schema={"fields": []},
+    )
     return catalog
 
 

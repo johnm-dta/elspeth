@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -32,10 +31,34 @@ def _state() -> CompositionState:
     )
 
 
-def _service(verdict: AdvisorCheckpointVerdict) -> object:
-    svc = AsyncMock()
-    svc.run_signoff_checkpoint = AsyncMock(return_value=verdict)
-    return svc
+class _AdvisorServiceFake:
+    def __init__(self, verdict: AdvisorCheckpointVerdict | None) -> None:
+        self._verdict = verdict
+        self.run_signoff_checkpoint_calls = 0
+
+    async def run_signoff_checkpoint(
+        self,
+        *,
+        state: CompositionState,
+        session_id: str | None,
+        recorder: object | None,
+        progress: object | None = None,
+    ) -> AdvisorCheckpointVerdict:
+        del state, session_id, recorder, progress
+        self.run_signoff_checkpoint_calls += 1
+        if self._verdict is None:
+            raise AssertionError("advisor sign-off checkpoint must not be called")
+        return self._verdict
+
+    def assert_signoff_checkpoint_awaited_once(self) -> None:
+        assert self.run_signoff_checkpoint_calls == 1
+
+    def assert_signoff_checkpoint_not_awaited(self) -> None:
+        assert self.run_signoff_checkpoint_calls == 0
+
+
+def _service(verdict: AdvisorCheckpointVerdict | None) -> _AdvisorServiceFake:
+    return _AdvisorServiceFake(verdict)
 
 
 @pytest.mark.asyncio
@@ -54,7 +77,7 @@ async def test_clean_completes_and_increments_counter() -> None:
     assert decision.outcome is SignoffOutcome.COMPLETE
     assert decision.reason is None
     assert new_session.advisor_checkpoint_passes_used == 1
-    svc.run_signoff_checkpoint.assert_awaited_once()
+    svc.assert_signoff_checkpoint_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -92,7 +115,7 @@ async def test_budget_already_spent_does_not_recall_provider() -> None:
     )
     assert decision.outcome is SignoffOutcome.BLOCKED_FLAGGED
     assert new_session.advisor_checkpoint_passes_used == 3
-    svc.run_signoff_checkpoint.assert_not_awaited()
+    svc.assert_signoff_checkpoint_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -190,7 +213,7 @@ async def test_exhausted_with_acknowledged_outage_completes_cross_request() -> N
     )
     assert decision.outcome is SignoffOutcome.COMPLETE
     assert decision.reason == "unavailable"
-    svc.run_signoff_checkpoint.assert_not_awaited()
+    svc.assert_signoff_checkpoint_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -213,4 +236,4 @@ async def test_exhausted_acknowledged_but_prior_was_flag_stays_blocked() -> None
         acknowledged_unavailable=True,
     )
     assert decision.outcome is SignoffOutcome.BLOCKED_FLAGGED
-    svc.run_signoff_checkpoint.assert_not_awaited()
+    svc.assert_signoff_checkpoint_not_awaited()

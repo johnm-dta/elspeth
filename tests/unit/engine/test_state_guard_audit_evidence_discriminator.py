@@ -9,11 +9,13 @@ context in the audit trail — *iff* they explicitly inherit AuditEvidenceBase.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
+from elspeth.contracts import NodeStateStatus
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.errors import ExecutionError
 from elspeth.engine.executors.state_guard import NodeStateGuard
@@ -24,13 +26,49 @@ class _NonPluginEvidence(AuditEvidenceBase, RuntimeError):
         return {"kind": "other", "detail": "widened-discriminator"}
 
 
-def _make_execution() -> MagicMock:
-    execution = MagicMock()
-    execution.begin_node_state.return_value = MagicMock(state_id="s-1")
-    return execution
+@dataclass(frozen=True)
+class _CompletionCall:
+    state_id: str
+    status: NodeStateStatus
+    duration_ms: float
+    error: ExecutionError | None
 
 
-def _make_guard(execution: MagicMock) -> NodeStateGuard:
+class _ExecutionFake:
+    def __init__(self) -> None:
+        self.completion_calls: list[_CompletionCall] = []
+
+    def begin_node_state(self, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(state_id="s-1")
+
+    def complete_node_state(
+        self,
+        *,
+        state_id: str,
+        status: NodeStateStatus,
+        duration_ms: float,
+        error: ExecutionError | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        self.completion_calls.append(
+            _CompletionCall(
+                state_id=state_id,
+                status=status,
+                duration_ms=duration_ms,
+                error=error,
+            )
+        )
+
+    def assert_completed_once(self) -> _CompletionCall:
+        assert len(self.completion_calls) == 1
+        return self.completion_calls[0]
+
+
+def _make_execution() -> _ExecutionFake:
+    return _ExecutionFake()
+
+
+def _make_guard(execution: _ExecutionFake) -> NodeStateGuard:
     return NodeStateGuard(
         execution=execution,
         token_id="tok-1",
@@ -44,17 +82,10 @@ def _make_guard(execution: MagicMock) -> NodeStateGuard:
 
 def test_non_plugin_audit_evidence_populates_context() -> None:
     execution = _make_execution()
-    captured: dict[str, ExecutionError | None] = {"err": None}
-
-    def _capture(*_, error: ExecutionError | None = None, **__) -> None:
-        captured["err"] = error
-
-    execution.complete_node_state.side_effect = _capture
     with pytest.raises(_NonPluginEvidence), _make_guard(execution):
         raise _NonPluginEvidence("widened")
 
-    execution.complete_node_state.assert_called_once()
-    err = captured["err"]
+    err = execution.assert_completed_once().error
     assert err is not None and err.context is not None
     assert err.context["kind"] == "other"
 
@@ -68,31 +99,17 @@ def test_duck_typed_exception_does_NOT_populate_context() -> None:
             return {"attacker": "payload"}
 
     execution = _make_execution()
-    captured: dict[str, ExecutionError | None] = {"err": None}
-
-    def _capture(*_, error: ExecutionError | None = None, **__) -> None:
-        captured["err"] = error
-
-    execution.complete_node_state.side_effect = _capture
     with pytest.raises(_Mimic), _make_guard(execution):
         raise _Mimic("mimic")
 
-    execution.complete_node_state.assert_called_once()
-    err = captured["err"]
+    err = execution.assert_completed_once().error
     assert err is not None and err.context is None
 
 
 def test_plain_runtime_error_leaves_context_none() -> None:
     execution = _make_execution()
-    captured: dict[str, ExecutionError | None] = {"err": None}
-
-    def _capture(*_, error: ExecutionError | None = None, **__) -> None:
-        captured["err"] = error
-
-    execution.complete_node_state.side_effect = _capture
     with pytest.raises(RuntimeError), _make_guard(execution):
         raise RuntimeError("plain")
 
-    execution.complete_node_state.assert_called_once()
-    err = captured["err"]
+    err = execution.assert_completed_once().error
     assert err is not None and err.context is None

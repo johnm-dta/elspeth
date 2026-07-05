@@ -25,8 +25,8 @@ nested data structures, not just the specific case that triggered the bug.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -51,15 +51,47 @@ def _wrap_dict_as_pipeline_row(data: dict[str, Any]) -> PipelineRow:
     return PipelineRow(data, _make_observed_contract())
 
 
-def _create_mock_recorder(branches: list[str]) -> MagicMock:
-    """Create a mock recorder that returns child tokens for fork operations.
+@dataclass(frozen=True)
+class _ForkedToken:
+    token_id: str
+    branch_name: str
+    fork_group_id: str
+
+
+@dataclass(frozen=True)
+class _ExpandedToken:
+    token_id: str
+    expand_group_id: str
+
+
+class _RecordingTokenRepository:
+    """Small DataFlowRepository fake for token property tests."""
+
+    def __init__(self, *, branches: list[str] | None = None, expand_count: int | None = None) -> None:
+        self._branches = branches
+        self._expand_count = expand_count
+        self.expand_called = False
+
+    def fork_token(self, **_: Any) -> tuple[list[_ForkedToken], str]:
+        assert self._branches is not None
+        children = [
+            _ForkedToken(token_id=f"child_{i}", branch_name=branch, fork_group_id="fork_1") for i, branch in enumerate(self._branches)
+        ]
+        return children, "fork_1"
+
+    def expand_token(self, **_: Any) -> tuple[list[_ExpandedToken], str]:
+        assert self._expand_count is not None
+        self.expand_called = True
+        children = [_ExpandedToken(token_id=f"expanded_{i}", expand_group_id="expand_1") for i in range(self._expand_count)]
+        return children, "expand_1"
+
+
+def _create_fake_recorder(branches: list[str]) -> _RecordingTokenRepository:
+    """Create a fake recorder that returns child tokens for fork operations.
 
     Note: fork_token now returns tuple[list[Token], str] for atomic operation.
     """
-    mock_recorder = MagicMock()
-    children = [MagicMock(token_id=f"child_{i}", branch_name=branch, fork_group_id="fork_1") for i, branch in enumerate(branches)]
-    mock_recorder.fork_token.return_value = (children, "fork_1")
-    return mock_recorder
+    return _RecordingTokenRepository(branches=branches)
 
 
 class TestForkIsolationProperties:
@@ -78,7 +110,7 @@ class TestForkIsolationProperties:
         is immutable, fork operations must create independent copies via deepcopy
         to ensure each child can be independently updated with_updated_data().
         """
-        mock_recorder = _create_mock_recorder(branches)
+        mock_recorder = _create_fake_recorder(branches)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -128,7 +160,7 @@ class TestForkIsolationProperties:
         if not isinstance(row_data, dict):
             row_data = {"nested": row_data}
 
-        mock_recorder = _create_mock_recorder(branches)
+        mock_recorder = _create_fake_recorder(branches)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -203,7 +235,7 @@ class TestForkParentPreservationProperties:
         Since PipelineRow is immutable, we verify parent and children
         have different PipelineRow instances (not shared).
         """
-        mock_recorder = _create_mock_recorder(branches)
+        mock_recorder = _create_fake_recorder(branches)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -250,7 +282,7 @@ class TestForkParentPreservationProperties:
         - Correct branch_name
         - Non-None fork_group_id
         """
-        mock_recorder = _create_mock_recorder(branches)
+        mock_recorder = _create_fake_recorder(branches)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -303,7 +335,7 @@ class TestForkRowDataOverrideProperties:
 
         The override row_data should be used instead of parent's data.
         """
-        mock_recorder = _create_mock_recorder(branches)
+        mock_recorder = _create_fake_recorder(branches)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -341,7 +373,7 @@ class TestForkRowDataOverrideProperties:
         When no override is provided, children should receive a copy of
         the parent's row_data.
         """
-        mock_recorder = _create_mock_recorder(branches)
+        mock_recorder = _create_fake_recorder(branches)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -387,15 +419,12 @@ def _make_locked_contract_from_data(data: dict[str, Any]) -> SchemaContract:
     return SchemaContract(mode="OBSERVED", fields=fields, locked=True)
 
 
-def _create_mock_recorder_for_expand(count: int) -> MagicMock:
-    """Create a mock recorder that returns child tokens for expand operations.
+def _create_fake_recorder_for_expand(count: int) -> _RecordingTokenRepository:
+    """Create a fake recorder that returns child tokens for expand operations.
 
     expand_token returns tuple[list[Token], str] like fork_token.
     """
-    mock_recorder = MagicMock()
-    children = [MagicMock(token_id=f"expanded_{i}", expand_group_id="expand_1") for i in range(count)]
-    mock_recorder.expand_token.return_value = (children, "expand_1")
-    return mock_recorder
+    return _RecordingTokenRepository(expand_count=count)
 
 
 # =============================================================================
@@ -424,7 +453,7 @@ class TestExpandIsolationProperties:
         """
         expanded_rows = [dict(row_data) for _ in range(count)]
         output_contract = _make_locked_contract_from_data(row_data)
-        mock_recorder = _create_mock_recorder_for_expand(count)
+        mock_recorder = _create_fake_recorder_for_expand(count)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -469,7 +498,7 @@ class TestExpandIsolationProperties:
 
         expanded_rows = [dict(row_data) for _ in range(count)]
         output_contract = _make_locked_contract_from_data(row_data)
-        mock_recorder = _create_mock_recorder_for_expand(count)
+        mock_recorder = _create_fake_recorder_for_expand(count)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -525,7 +554,7 @@ class TestExpandParentPreservationProperties:
         """
         expanded_rows = [dict(row_data) for _ in range(count)]
         output_contract = _make_locked_contract_from_data(row_data)
-        mock_recorder = _create_mock_recorder_for_expand(count)
+        mock_recorder = _create_fake_recorder_for_expand(count)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -565,7 +594,7 @@ class TestExpandParentPreservationProperties:
         """
         expanded_rows = [dict(row_data) for _ in range(count)]
         output_contract = _make_locked_contract_from_data(row_data)
-        mock_recorder = _create_mock_recorder_for_expand(count)
+        mock_recorder = _create_fake_recorder_for_expand(count)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -612,7 +641,7 @@ class TestExpandParentPreservationProperties:
         row_data_dict = {"value": 42}
         expanded_rows = [dict(row_data_dict) for _ in range(count)]
         unlocked_contract = SchemaContract(mode="OBSERVED", fields=())  # locked=False
-        mock_recorder = _create_mock_recorder_for_expand(count)
+        mock_recorder = _create_fake_recorder_for_expand(count)
         step_resolver = lambda node_id: 1  # noqa: E731
         manager = TokenManager(mock_recorder, step_resolver=step_resolver)
 
@@ -633,4 +662,4 @@ class TestExpandParentPreservationProperties:
                 run_id="test_run_1",
             )
 
-        mock_recorder.expand_token.assert_not_called()
+        assert not mock_recorder.expand_called

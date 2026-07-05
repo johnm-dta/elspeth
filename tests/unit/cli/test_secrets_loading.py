@@ -4,12 +4,36 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
+from elspeth.core.security.secret_loader import SecretRef
+
 runner = CliRunner()
+
+
+class _GetSecretRecorder:
+    def __init__(self, *, value: tuple[str, SecretRef] | None = None, error: Exception | None = None) -> None:
+        self._value = value
+        self._error = error
+        self.calls: list[str] = []
+
+    def __call__(self, name: str) -> tuple[str, SecretRef]:
+        self.calls.append(name)
+        if self._error is not None:
+            raise self._error
+        assert self._value is not None
+        return self._value
+
+    def assert_called_once_with(self, name: str) -> None:
+        assert self.calls == [name]
+
+
+class _KeyVaultLoaderFake:
+    def __init__(self, get_secret: _GetSecretRecorder) -> None:
+        self.get_secret = get_secret
 
 
 class TestCLISecretsLoading:
@@ -45,15 +69,21 @@ sinks:
 """)
 
         with patch("elspeth.core.security.secret_loader.KeyVaultSecretLoader") as MockLoader:
-            mock_loader = MagicMock()
-            mock_loader.get_secret.return_value = ("loaded-from-keyvault", MagicMock())
-            MockLoader.return_value = mock_loader
+            loader = _KeyVaultLoaderFake(
+                _GetSecretRecorder(
+                    value=(
+                        "loaded-from-keyvault",
+                        SecretRef(name="test-secret", fingerprint="", source="keyvault"),
+                    )
+                )
+            )
+            MockLoader.return_value = loader
 
             # Run with --dry-run to avoid full execution
             runner.invoke(app, ["--no-dotenv", "run", "--settings", str(settings_file), "--dry-run"])
 
             # Verify secret was loaded
-            mock_loader.get_secret.assert_called_once_with("test-secret")
+            loader.get_secret.assert_called_once_with("test-secret")
 
     def test_run_with_keyvault_failure_exits_with_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Key Vault failure should exit with clear error message."""
@@ -84,9 +114,8 @@ sinks:
 """)
 
         with patch("elspeth.core.security.secret_loader.KeyVaultSecretLoader") as MockLoader:
-            mock_loader = MagicMock()
-            mock_loader.get_secret.side_effect = SecretNotFoundError("Not found")
-            MockLoader.return_value = mock_loader
+            loader = _KeyVaultLoaderFake(_GetSecretRecorder(error=SecretNotFoundError("Not found")))
+            MockLoader.return_value = loader
 
             result = runner.invoke(app, ["--no-dotenv", "run", "--settings", str(settings_file), "--dry-run"])
 

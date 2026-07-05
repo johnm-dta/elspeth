@@ -10,8 +10,6 @@ method's contract that telemetry failures must not mask run errors.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from elspeth.contracts.errors import AuditIntegrityError, TelemetryExporterError
@@ -33,8 +31,12 @@ class _FlushRaises:
         pass
 
 
+class _UnusedEvents:
+    pass
+
+
 def _ceremony(telemetry: object) -> RunCeremony:
-    return RunCeremony(events=MagicMock(), telemetry=telemetry)
+    return RunCeremony(events=_UnusedEvents(), telemetry=telemetry)
 
 
 def test_programming_error_does_not_mask_pending_run_exception():

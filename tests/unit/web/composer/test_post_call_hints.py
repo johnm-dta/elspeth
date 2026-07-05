@@ -10,9 +10,11 @@ Phase 1 / Step 3 of composer-jit-hints — see
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
 
+from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.composer.state import (
     CompositionState,
     PipelineMetadata,
@@ -57,10 +59,40 @@ def _failed_result(state: CompositionState | None = None) -> ToolResult:
     )
 
 
-def _catalog_returning(hints: tuple[str, ...]) -> MagicMock:
-    catalog = MagicMock()
-    catalog.post_call_hints.return_value = hints
-    return catalog
+@dataclass(frozen=True)
+class _PostCallHintsCall:
+    plugin_type: PluginKind
+    plugin_name: str
+    tool_name: str
+    config_snapshot: Mapping[str, object]
+
+
+class _CatalogWithPostCallHints:
+    def __init__(self, hints: tuple[str, ...]) -> None:
+        self._hints = hints
+        self.post_call_hints_calls: list[_PostCallHintsCall] = []
+
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        self.post_call_hints_calls.append(
+            _PostCallHintsCall(
+                plugin_type=plugin_type,
+                plugin_name=plugin_name,
+                tool_name=tool_name,
+                config_snapshot=config_snapshot,
+            )
+        )
+        return self._hints
+
+
+def _catalog_returning(hints: tuple[str, ...]) -> _CatalogWithPostCallHints:
+    return _CatalogWithPostCallHints(hints)
 
 
 def test_attach_post_call_hints_populates_field_when_plugin_returns_hints() -> None:
@@ -74,12 +106,14 @@ def test_attach_post_call_hints_populates_field_when_plugin_returns_hints() -> N
         config_snapshot={"path": "/tmp/data.csv"},
     )
     assert result.post_call_hints == ("first hint", "second hint")
-    catalog.post_call_hints.assert_called_once_with(
-        plugin_type="source",
-        plugin_name="csv",
-        tool_name="set_source",
-        config_snapshot={"path": "/tmp/data.csv"},
-    )
+    assert catalog.post_call_hints_calls == [
+        _PostCallHintsCall(
+            plugin_type="source",
+            plugin_name="csv",
+            tool_name="set_source",
+            config_snapshot={"path": "/tmp/data.csv"},
+        )
+    ]
 
 
 def test_attach_post_call_hints_no_change_when_hints_empty() -> None:
@@ -110,7 +144,7 @@ def test_attach_post_call_hints_skipped_on_failure() -> None:
         config_snapshot={},
     )
     assert result.post_call_hints == ()
-    catalog.post_call_hints.assert_not_called()
+    assert catalog.post_call_hints_calls == []
 
 
 def test_attach_post_call_hints_skipped_when_plugin_name_none() -> None:
@@ -125,7 +159,7 @@ def test_attach_post_call_hints_skipped_when_plugin_name_none() -> None:
         config_snapshot={"condition": "row['x'] > 0"},
     )
     assert result.post_call_hints == ()
-    catalog.post_call_hints.assert_not_called()
+    assert catalog.post_call_hints_calls == []
 
 
 def test_tool_result_to_dict_omits_post_call_hints_when_empty() -> None:

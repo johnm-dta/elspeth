@@ -7,12 +7,24 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from tests.fixtures.factories import make_context, make_source_context
+from tests.fixtures.landscape import RecorderSetup, make_recorder_with_run
 
 # Dynamic schema config for tests - SourceDataConfig requires schema
 DYNAMIC_SCHEMA = {"mode": "observed"}
 
 # Standard quarantine routing for tests
 QUARANTINE_SINK = "quarantine"
+
+
+def _make_csv_context_with_audit_recorder() -> tuple[PluginContext, RecorderSetup]:
+    setup = make_recorder_with_run(source_node_id="source_csv", source_plugin_name="csv")
+    ctx = PluginContext(
+        run_id=setup.run_id,
+        node_id=setup.source_node_id,
+        config={},
+        landscape=setup.factory.plugin_audit_writer(),
+    )
+    return ctx, setup
 
 
 class TestCSVSource:
@@ -1246,20 +1258,12 @@ class TestCSVSourceSkipRowsAudit:
 
     def test_skip_rows_equals_file_length_records_validation_error(self, tmp_path: Path) -> None:
         """skip_rows consuming all rows records via landscape."""
-        from unittest.mock import MagicMock
-
         from elspeth.plugins.sources.csv_source import CSVSource
 
         csv_file = tmp_path / "exact.csv"
         csv_file.write_text("header1\nrow1\n")  # 2 rows total
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_test"
-        ctx = make_context(
-            run_id="test-run",
-            node_id="source_csv",
-            landscape=mock_landscape,
-        )
+        ctx, setup = _make_csv_context_with_audit_recorder()
 
         source = CSVSource(
             {
@@ -1274,10 +1278,10 @@ class TestCSVSourceSkipRowsAudit:
         assert len(results) == 0
 
         # Validation error recorded in landscape
-        mock_landscape.record_validation_error.assert_called_once()
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
-        assert call_kwargs["schema_mode"] == "parse"
-        assert "skip_rows" in call_kwargs["error"]
+        errors = setup.factory.data_flow.get_validation_errors_for_run(ctx.run_id)
+        assert len(errors) == 1
+        assert errors[0].schema_mode == "parse"
+        assert "skip_rows" in errors[0].error
 
     def test_skip_rows_csv_error_quarantines_and_stops(self, tmp_path: Path, ctx: PluginContext) -> None:
         """csv.Error during skip_rows yields quarantine and stops processing."""
@@ -1383,20 +1387,14 @@ class TestCSVSourceSkipRowsAudit:
 
     def test_skip_rows_csv_error_records_validation_error(self, tmp_path: Path) -> None:
         """csv.Error during skip_rows records validation error in landscape."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from elspeth.plugins.sources.csv_source import CSVSource
 
         csv_file = tmp_path / "preamble_error.csv"
         csv_file.write_text("preamble\nid,name\n1,alice\n")
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_test"
-        ctx = make_context(
-            run_id="test-run",
-            node_id="source_csv",
-            landscape=mock_landscape,
-        )
+        ctx, setup = _make_csv_context_with_audit_recorder()
 
         source = CSVSource(
             {
@@ -1433,28 +1431,20 @@ class TestCSVSourceSkipRowsAudit:
         with patch("elspeth.plugins.sources.csv_source.csv.reader", side_effect=patched_reader):
             list(source.load(ctx))
 
-        mock_landscape.record_validation_error.assert_called_once()
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
-        assert call_kwargs["schema_mode"] == "parse"
-        assert "skip_rows" in call_kwargs["error"]
+        errors = setup.factory.data_flow.get_validation_errors_for_run(ctx.run_id)
+        assert len(errors) == 1
+        assert errors[0].schema_mode == "parse"
+        assert "skip_rows" in errors[0].error
 
     def test_skip_rows_no_header_after_successful_skip_records_error(self, tmp_path: Path) -> None:
         """File with exactly skip_rows rows (no header left) records validation error."""
-        from unittest.mock import MagicMock
-
         from elspeth.plugins.sources.csv_source import CSVSource
 
         csv_file = tmp_path / "no_header.csv"
         # Only 1 row — skip_rows=1 consumes it, no header remains
         csv_file.write_text("preamble line\n")
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_test"
-        ctx = make_context(
-            run_id="test-run",
-            node_id="source_csv",
-            landscape=mock_landscape,
-        )
+        ctx, setup = _make_csv_context_with_audit_recorder()
 
         source = CSVSource(
             {
@@ -1469,10 +1459,10 @@ class TestCSVSourceSkipRowsAudit:
         assert len(results) == 0
 
         # Validation error recorded for missing header after skip
-        mock_landscape.record_validation_error.assert_called_once()
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
-        assert "skip_rows" in call_kwargs["error"] or "header" in call_kwargs["error"]
-        assert call_kwargs["schema_mode"] == "parse"
+        errors = setup.factory.data_flow.get_validation_errors_for_run(ctx.run_id)
+        assert len(errors) == 1
+        assert "skip_rows" in errors[0].error or "header" in errors[0].error
+        assert errors[0].schema_mode == "parse"
 
 
 class TestCSVSourceQuarantineErrorRedaction:

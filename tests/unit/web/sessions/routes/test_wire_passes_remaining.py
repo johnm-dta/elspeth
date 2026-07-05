@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -50,10 +50,13 @@ _ASK_ADVISOR_BODY: dict[str, Any] = {
 }
 
 
-def _flagging_service() -> MagicMock:
-    svc = MagicMock(spec_set=["run_signoff_checkpoint"])
-    svc.run_signoff_checkpoint = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: review"))
-    return svc
+class _FlaggingServiceFake:
+    async def run_signoff_checkpoint(self, *_args: object, **_kwargs: object) -> AdvisorCheckpointVerdict:
+        return AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: review")
+
+
+def _flagging_service() -> _FlaggingServiceFake:
+    return _FlaggingServiceFake()
 
 
 async def _dispatch(session, state, svc, *, turn_response, max_passes=3):

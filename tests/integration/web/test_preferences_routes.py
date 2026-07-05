@@ -323,9 +323,11 @@ def test_db_unavailable_returns_503() -> None:
     generic 500; that's a different code path (programmer error / bug),
     not the DB-down user-visible outcome this test is meant to assert.
     """
-    from unittest.mock import AsyncMock, MagicMock
-
     from sqlalchemy.exc import OperationalError
+
+    class _UnavailablePreferencesService:
+        async def get_composer_preferences(self, _user_id: str) -> object:
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
 
     app = FastAPI()
     identity = UserIdentity(user_id="alice", username="alice")
@@ -333,10 +335,7 @@ def test_db_unavailable_returns_503() -> None:
     async def _mock_user() -> UserIdentity:
         return identity
 
-    broken_service: MagicMock = MagicMock()
-    db_error = OperationalError("SELECT 1", {}, Exception("connection refused"))
-    broken_service.get_composer_preferences = AsyncMock(side_effect=db_error)
-    app.state.preferences_service = broken_service
+    app.state.preferences_service = _UnavailablePreferencesService()
     app.dependency_overrides[get_current_user] = _mock_user
 
     # Register the production OperationalError handler — the test app

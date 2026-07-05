@@ -29,7 +29,7 @@ Counters covered:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
 
@@ -45,18 +45,34 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
 
 
+class _CallRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.calls.append((args, kwargs))
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+
+class _CounterFake:
+    def __init__(self) -> None:
+        self.add = _CallRecorder()
+
+
 @pytest.fixture
-def patched_counters(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, MagicMock]]:
-    """Replace the three module-level OTel counters with MagicMocks.
+def patched_counters(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, _CounterFake]]:
+    """Replace the three module-level OTel counters with recording fakes.
 
     Returns the dict so each test can assert on whichever counter is
     relevant to the pathway exercised.  Monkeypatch restores the originals
     on teardown so other tests in the suite are not affected.
     """
     counters = {
-        "manifest_dispatch": MagicMock(),
-        "unknown_response_key": MagicMock(),
-        "summarizer_error": MagicMock(),
+        "manifest_dispatch": _CounterFake(),
+        "unknown_response_key": _CounterFake(),
+        "summarizer_error": _CounterFake(),
     }
     monkeypatch.setattr(rt_mod, "_MANIFEST_DISPATCH_COUNTER", counters["manifest_dispatch"])
     monkeypatch.setattr(rt_mod, "_UNKNOWN_RESPONSE_KEY_COUNTER", counters["unknown_response_key"])
@@ -86,7 +102,7 @@ def _safe_reason() -> HandlesNoSensitiveDataReason:
     )
 
 
-def test_manifest_dispatch_counter_fires_on_argument_redaction(patched_counters: dict[str, MagicMock]) -> None:
+def test_manifest_dispatch_counter_fires_on_argument_redaction(patched_counters: dict[str, _CounterFake]) -> None:
     """``redact_tool_call_arguments`` fires manifest_dispatch once per call.
 
     Exercises the production ``OtelRedactionTelemetry`` against a real
@@ -102,7 +118,7 @@ def test_manifest_dispatch_counter_fires_on_argument_redaction(patched_counters:
     patched_counters["manifest_dispatch"].add.assert_called_once_with(1, {"tool_name": "set_source", "shape": "type_driven"})
 
 
-def test_manifest_dispatch_counter_fires_on_response_redaction(patched_counters: dict[str, MagicMock]) -> None:
+def test_manifest_dispatch_counter_fires_on_response_redaction(patched_counters: dict[str, _CounterFake]) -> None:
     """``redact_tool_call_response`` fires manifest_dispatch once per call.
 
     Exercises the response walker via a declarative manifest entry
@@ -118,7 +134,7 @@ def test_manifest_dispatch_counter_fires_on_response_redaction(patched_counters:
 
 def test_unknown_response_key_counter_fires_on_declarative_unknown_key(
     monkeypatch: pytest.MonkeyPatch,
-    patched_counters: dict[str, MagicMock],
+    patched_counters: dict[str, _CounterFake],
 ) -> None:
     """An unknown key in a declarative-entry response fires the counter.
 
@@ -143,7 +159,7 @@ def test_unknown_response_key_counter_fires_on_declarative_unknown_key(
 
 def test_summarizer_error_counter_fires_before_audit_integrity_error(
     monkeypatch: pytest.MonkeyPatch,
-    patched_counters: dict[str, MagicMock],
+    patched_counters: dict[str, _CounterFake],
 ) -> None:
     """A summarizer that raises fires summarizer_error_total BEFORE the AuditIntegrityError raise.
 

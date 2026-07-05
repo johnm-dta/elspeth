@@ -9,7 +9,6 @@ These tests verify that:
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
@@ -26,6 +25,22 @@ from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.base_classes import create_observed_contract, inject_write_failure
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
+
+
+class FlushProbe:
+    """Callable test fake for monkey-patching a sink flush method."""
+
+    def __init__(self, *, side_effect: OSError | None = None, call_order: list[str] | None = None) -> None:
+        self.side_effect = side_effect
+        self.call_order = call_order
+        self.call_count = 0
+
+    def __call__(self) -> None:
+        self.call_count += 1
+        if self.call_order is not None:
+            self.call_order.append("flush")
+        if self.side_effect is not None:
+            raise self.side_effect
 
 
 class TestSinkDurability:
@@ -187,8 +202,9 @@ class TestSinkDurability:
             )
             checkpoint_created = True
 
-        # Patch real sink's flush to fail
-        real_sink.flush = Mock(side_effect=OSError("Disk full - simulated crash"))  # type: ignore[method-assign]  # intentional monkey-patch for test
+        # Patch real sink's flush to fail.
+        failing_flush = FlushProbe(side_effect=OSError("Disk full - simulated crash"))
+        real_sink.flush = failing_flush  # type: ignore[method-assign]  # intentional monkey-patch for test
 
         # Execute sink write - should fail on flush
         tokens = [token]
@@ -209,7 +225,7 @@ class TestSinkDurability:
         assert checkpoint is None
 
         # Verify: flush() was patched and called (crashed as expected)
-        real_sink.flush.assert_called_once()
+        assert failing_flush.call_count == 1
 
     def test_checkpoint_failure_raises_after_successful_flush(
         self,
@@ -343,9 +359,6 @@ class TestSinkDurability:
         # Track call order
         call_order = []
 
-        def tracking_flush():
-            call_order.append("flush")
-
         def tracking_checkpoint_callback(token_info):
             call_order.append("checkpoint")
             checkpoint_mgr.create_checkpoint(
@@ -355,7 +368,8 @@ class TestSinkDurability:
                 graph=mock_graph,
             )
 
-        real_sink.flush = Mock(side_effect=tracking_flush)  # type: ignore[method-assign]  # intentional monkey-patch for test
+        tracking_flush = FlushProbe(call_order=call_order)
+        real_sink.flush = tracking_flush  # type: ignore[method-assign]  # intentional monkey-patch for test
 
         # Execute sink write
         tokens = [token]

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -23,6 +23,15 @@ from elspeth.web.execution.accounting import (
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _NOW = datetime(2026, 5, 6, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class _SettingsFake:
+    landscape_url: str
+    landscape_passphrase: str | None = None
+
+    def get_landscape_url(self) -> str:
+        return self.landscape_url
 
 
 def _setup_run_with_row(db: LandscapeDB, *, run_id: str, row_id: str = "row-1") -> None:
@@ -296,9 +305,7 @@ def test_batch_loader_does_not_fabricate_absent_landscape_runs() -> None:
 
 
 def test_settings_loader_returns_empty_for_missing_sqlite_database(tmp_path: Path) -> None:
-    settings = MagicMock()
-    settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'missing-audit.db'}"
-    settings.landscape_passphrase = None
+    settings = _SettingsFake(landscape_url=f"sqlite:///{tmp_path / 'missing-audit.db'}")
 
     assert load_run_accounting_for_settings(settings, ("run-1", None)) == {}
 

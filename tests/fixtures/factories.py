@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
@@ -143,9 +144,7 @@ def make_context(
         landscape = Mock(spec=PluginAuditWriter)
         # Configure get_node_state() to return a mock with matching token_id
         # so that PluginContext.record_call() token consistency checks pass.
-        node_state_mock = Mock()
-        node_state_mock.token_id = token.token_id
-        landscape.get_node_state.return_value = node_state_mock
+        landscape.get_node_state.return_value = SimpleNamespace(token_id=token.token_id)
 
     return PluginContext(
         run_id=run_id,

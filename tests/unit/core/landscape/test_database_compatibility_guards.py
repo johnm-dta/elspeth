@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -26,6 +25,56 @@ def _make_instance(url: str) -> LandscapeDB:
     instance._engine = create_engine(url, echo=False)
     instance._require_existing_schema = False
     return instance
+
+
+class _InspectorFake:
+    def __init__(
+        self,
+        *,
+        table_names: list[str] | None = None,
+        columns: dict[str, list[dict[str, object]]] | None = None,
+        foreign_keys: list[dict[str, object]] | dict[str, list[dict[str, object]]] | None = None,
+        check_constraints: list[dict[str, object]] | None = None,
+        indexes: list[dict[str, object]] | None = None,
+        get_table_names_error: Exception | None = None,
+    ) -> None:
+        self._table_names = table_names or []
+        self._columns = columns or {}
+        self._foreign_keys = foreign_keys or []
+        self._check_constraints = check_constraints or []
+        self._indexes = indexes or []
+        self._get_table_names_error = get_table_names_error
+
+    def get_table_names(self) -> list[str]:
+        if self._get_table_names_error is not None:
+            raise self._get_table_names_error
+        return self._table_names
+
+    def get_columns(self, table_name: str) -> list[dict[str, object]]:
+        return self._columns[table_name]
+
+    def get_foreign_keys(self, table_name: str) -> list[dict[str, object]]:
+        if isinstance(self._foreign_keys, dict):
+            return self._foreign_keys.get(table_name, [])
+        return self._foreign_keys
+
+    def get_check_constraints(self, _table_name: str) -> list[dict[str, object]]:
+        return self._check_constraints
+
+    def get_indexes(self, _table_name: str) -> list[dict[str, object]]:
+        return self._indexes
+
+
+class _CreateEngineFake:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self.calls.append((args, kwargs))
+        return object()
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert self.calls == [(args, kwargs)]
 
 
 class TestSyncSchemaEpochDirectionalGuard:
@@ -731,24 +780,24 @@ class TestSchemaCompatibilityGuards:
         instance = _make_instance(f"sqlite:///{tmp_path / 'postgres_shape.db'}")
         instance.connection_string = "postgresql://user@host/db"
 
-        mock_inspector = Mock()
-        mock_inspector.get_table_names.return_value = ["runs", "token_outcomes"]
-        mock_inspector.get_columns.side_effect = lambda table_name: {
-            "runs": [{"name": "run_id"}],
-            "token_outcomes": [
-                {"name": "outcome_id", "nullable": False},
-                {"name": "run_id", "nullable": False},
-                {"name": "token_id", "nullable": False},
-                {"name": "outcome", "nullable": False},
-                {"name": "is_terminal", "nullable": False},
-                {"name": "recorded_at", "nullable": False},
-            ],
-        }[table_name]
-        mock_inspector.get_foreign_keys.return_value = []
-        mock_inspector.get_check_constraints.return_value = []
-        mock_inspector.get_indexes.return_value = []
-
-        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        inspector = _InspectorFake(
+            table_names=["runs", "token_outcomes"],
+            columns={
+                "runs": [{"name": "run_id"}],
+                "token_outcomes": [
+                    {"name": "outcome_id", "nullable": False},
+                    {"name": "run_id", "nullable": False},
+                    {"name": "token_id", "nullable": False},
+                    {"name": "outcome", "nullable": False},
+                    {"name": "is_terminal", "nullable": False},
+                    {"name": "recorded_at", "nullable": False},
+                ],
+            },
+            foreign_keys=[],
+            check_constraints=[],
+            indexes=[],
+        )
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: inspector)
         monkeypatch.setattr(
             database_module,
             "metadata",
@@ -848,30 +897,31 @@ class TestSchemaCompatibilityGuards:
 
         instance = _make_instance(f"sqlite:///{tmp_path / 'stale_fk_shapes.db'}")
 
-        mock_inspector = Mock()
-        mock_inspector.get_table_names.return_value = ["transform_errors", "tokens", "nodes"]
-        mock_inspector.get_columns.side_effect = lambda table_name: [
-            {"name": column_name}
-            for column_name in {
-                "transform_errors": ("run_id", "token_id", "transform_id"),
-                "tokens": ("token_id", "run_id"),
-                "nodes": ("node_id", "run_id"),
-            }[table_name]
-        ]
-        mock_inspector.get_foreign_keys.return_value = [
-            {
-                "constrained_columns": ["token_id"],
-                "referred_table": "tokens",
-                "referred_columns": ["token_id"],
+        inspector = _InspectorFake(
+            table_names=["transform_errors", "tokens", "nodes"],
+            columns={
+                table_name: [{"name": column_name} for column_name in column_names]
+                for table_name, column_names in {
+                    "transform_errors": ("run_id", "token_id", "transform_id"),
+                    "tokens": ("token_id", "run_id"),
+                    "nodes": ("node_id", "run_id"),
+                }.items()
             },
-            {
-                "constrained_columns": ["transform_id"],
-                "referred_table": "nodes",
-                "referred_columns": ["node_id"],
-            },
-        ]
+            foreign_keys=[
+                {
+                    "constrained_columns": ["token_id"],
+                    "referred_table": "tokens",
+                    "referred_columns": ["token_id"],
+                },
+                {
+                    "constrained_columns": ["transform_id"],
+                    "referred_table": "nodes",
+                    "referred_columns": ["node_id"],
+                },
+            ],
+        )
 
-        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: inspector)
         monkeypatch.setattr(
             database_module,
             "metadata",
@@ -904,28 +954,28 @@ class TestSchemaCompatibilityGuards:
 
         instance = _make_instance(f"sqlite:///{tmp_path / 'stale_resume_checkpoint_fk.db'}")
 
-        mock_inspector = Mock()
-        mock_inspector.get_table_names.return_value = ["node_states", "checkpoints"]
-        mock_inspector.get_columns.side_effect = lambda table_name: [
-            {"name": column_name}
-            for column_name in {
-                "node_states": ("state_id", "resume_checkpoint_id"),
-                "checkpoints": ("checkpoint_id",),
-            }[table_name]
-        ]
-        mock_inspector.get_foreign_keys.side_effect = lambda table_name: (
-            [
-                {
-                    "constrained_columns": ["resume_checkpoint_id"],
-                    "referred_table": "checkpoints",
-                    "referred_columns": ["checkpoint_id"],
-                }
-            ]
-            if table_name == "node_states"
-            else []
+        inspector = _InspectorFake(
+            table_names=["node_states", "checkpoints"],
+            columns={
+                table_name: [{"name": column_name} for column_name in column_names]
+                for table_name, column_names in {
+                    "node_states": ("state_id", "resume_checkpoint_id"),
+                    "checkpoints": ("checkpoint_id",),
+                }.items()
+            },
+            foreign_keys={
+                "node_states": [
+                    {
+                        "constrained_columns": ["resume_checkpoint_id"],
+                        "referred_table": "checkpoints",
+                        "referred_columns": ["checkpoint_id"],
+                    }
+                ],
+                "checkpoints": [],
+            },
         )
 
-        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: inspector)
         monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"node_states": object(), "checkpoints": object()}))
         monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", ())
         monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
@@ -1091,14 +1141,15 @@ class TestSchemaCompatibilityGuards:
 
         instance = _make_instance(f"sqlite:///{tmp_path / 'encrypted.db'}")
 
-        mock_inspector = Mock()
-        mock_inspector.get_table_names.side_effect = OperationalError(
-            "SELECT name FROM sqlite_master",
-            {},
-            Exception("file is not a database"),
+        inspector = _InspectorFake(
+            get_table_names_error=OperationalError(
+                "SELECT name FROM sqlite_master",
+                {},
+                Exception("file is not a database"),
+            )
         )
 
-        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: inspector)
 
         with pytest.raises(SchemaCompatibilityError, match="encrypted or passphrase is incorrect"):
             instance._validate_schema()
@@ -1352,13 +1403,13 @@ class TestJournalPathGuards:
 
     def test_from_url_dump_to_jsonl_requires_explicit_path_for_non_sqlite(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-SQLite URLs must provide dump_to_jsonl_path explicitly."""
-        mock_create_engine = Mock(spec_set=database_module.create_engine, return_value=Mock(spec_set=[]))
-        monkeypatch.setattr(database_module, "create_engine", mock_create_engine)
+        create_engine_fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", create_engine_fake)
 
         with pytest.raises(ValueError, match="dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases"):
             LandscapeDB.from_url("postgresql://user@host/db", dump_to_jsonl=True)
 
-        mock_create_engine.assert_called_once_with("postgresql://user@host/db", echo=False)
+        create_engine_fake.assert_called_once_with("postgresql://user@host/db", echo=False)
 
     def test_from_url_dump_to_jsonl_rejects_in_memory_sqlite_without_path(self) -> None:
         """In-memory SQLite has no file path, so automatic journal derivation must fail."""

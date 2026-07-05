@@ -1036,13 +1036,15 @@ class TestComposerSingleToolCall:
             sessions_service=_test_sessions_service(engine, tmp_path),
             session_engine=engine,
         )
+
         # Stub the EARLY advisory checkpoint (fires on the empty->non-empty
         # transition this test drives) so it makes no advisor LLM call — this
         # test is about the atomic tool shape and its `llm_calls == 3`
         # bookkeeping, not the advisor pass.
-        service._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
-            return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
-        )
+        async def _clean_advisor_checkpoint(*_args: object, **_kwargs: object) -> AdvisorCheckpointVerdict:
+            return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
+
+        service._run_advisor_checkpoint = _clean_advisor_checkpoint  # type: ignore[method-assign]
         state = _empty_state()
         user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
         user_message_id = _insert_user_message(engine, session_id, user_message_content)

@@ -701,6 +701,59 @@ class TestStep1SourceResolution:
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["guided_session"]["terminal"] is None
 
+    def test_step_1_actionable_false_tool_decline_retries_resolve_and_commits(self, composer_test_client) -> None:
+        """An actionable Step-1 source request must not loop on "re-send so tools work" prose.
+
+        Regression for staging session ee98e873: the resolve-equipped call saw
+        enough detail to build the source, but the model replied as though it
+        lacked tools. Returning that prose directly asks the user to re-send,
+        and the next send repeats the same path. The server should retry the
+        resolve-equipped call once with an explicit nudge, then commit the tool
+        result when the retry resolves.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_1_schema_form(composer_test_client, session_id)
+
+        calls: list[dict] = []
+        user_message = "Use this CSV path /tmp/orders.csv with headers order_id,url and discard invalid rows."
+        false_decline = (
+            "I don't have my tools available in this reply. "
+            "Please re-send your message, or just say 'go ahead', "
+            "so the tool-enabled version of me can pick it up."
+        )
+
+        async def fake_acompletion(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return _fake_llm_reply(false_decline)
+            return _fake_resolve_source_response_csv()
+
+        with patch(
+            _CHAT_SOLVER_ACOMPLETION,
+            new=fake_acompletion,
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message=user_message,
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert len(calls) == 2
+        assert all(any(tool["function"]["name"] == "resolve_source" for tool in call["tools"]) for call in calls)
+        assert any("do not ask the user to re-send" in m["content"].lower() for m in calls[1]["messages"])
+        assert body["assistant_message"] == "I set this up as a CSV source."
+        assert body["next_turn"]["type"] == "schema_form"
+        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        chat_history = body["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+        assert chat_history[0]["content"] == user_message
+        assert chat_history[1]["content"] == "I set this up as a CSV source."
+        assert false_decline not in [turn["content"] for turn in chat_history]
+        audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert [audit["status"] for audit in audits] == ["success", "success"]
+
     def test_step_1_advisory_call_carries_no_tools_addendum_as_belt_and_braces(self, composer_test_client) -> None:
         """Belt-and-braces: when the resolve call itself is genuinely unusable
         (empty response — no tool call, no content), the route still falls

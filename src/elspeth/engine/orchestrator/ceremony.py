@@ -84,7 +84,7 @@ class RunCeremony:
             original_error=type(error).__name__,
             target=target,
         ):
-            self._events.emit(PhaseError(phase=phase, error=error, target=target))
+            self._events.emit(PhaseError.from_exception(phase=phase, error=error, target=target))
 
     def safe_flush_telemetry(self) -> None:
         """Flush telemetry in a finally block, preserving any pending exception.

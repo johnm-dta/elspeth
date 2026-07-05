@@ -39,14 +39,38 @@ SECRET_FIELD_NAMES = frozenset(
 
 SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential", "_connection_string")
 
+# Exact-name exemptions from the suffix heuristic: structural (non-credential)
+# fields whose names happen to end in a secret suffix. The suffix set must
+# stay broad — real credential fields such as Langfuse tracing's
+# ``secret_key``/``public_key`` are matched only by the bare ``_key`` suffix,
+# so narrowing it would silently drop those from audit fingerprinting.
+# Exemptions are therefore exact lowercase names, never suffixes, and each
+# entry cites the plugin field it exists for. Failure asymmetry: a missing
+# exemption is a visible ``fabricated_secret`` block (add the name here); a
+# wrong exemption leaks a credential into the audit trail — keep this list
+# short and literal.
+STRUCTURAL_FIELD_EXEMPTIONS = frozenset(
+    {
+        # JSONSource.data_key / azure_blob_source data_key: the key that names
+        # the array to extract from a JSON document (e.g. "results").
+        "data_key",
+        # DataverseSink.alternate_key: the alternate-key *column name* used to
+        # route upserts (e.g. "crabc_code").
+        "alternate_key",
+    }
+)
+
 
 def is_secret_field(field_name: str) -> bool:
     """Return True when a field name represents a credential-bearing option.
 
     Case-insensitive: matches an exact name in ``SECRET_FIELD_NAMES`` or any
-    suffix in ``SECRET_FIELD_SUFFIXES``.
+    suffix in ``SECRET_FIELD_SUFFIXES``, unless the name is an exact
+    structural exemption in ``STRUCTURAL_FIELD_EXEMPTIONS``.
     """
     normalized = field_name.lower()
+    if normalized in STRUCTURAL_FIELD_EXEMPTIONS:
+        return False
     return normalized in SECRET_FIELD_NAMES or normalized.endswith(SECRET_FIELD_SUFFIXES)
 
 

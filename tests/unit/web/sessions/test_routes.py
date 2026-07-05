@@ -4637,6 +4637,44 @@ sinks:
         assert record.sources["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
 
     @pytest.mark.asyncio
+    async def test_post_state_yaml_allows_structural_key_literal(self, tmp_path) -> None:
+        """Regression (elspeth-61f2c0732e): a literal ``data_key`` — the JSON
+        source's structural extraction key — must import cleanly rather than
+        tripping the fabricated-literal-credential rejection via the bare
+        ``_key`` suffix heuristic."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: json
+    on_success: main
+    options:
+      path: /data/input.json
+      data_key: results
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 200, resp.text
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.sources["source"]["options"]["data_key"] == "results"
+
+    @pytest.mark.asyncio
     async def test_post_state_yaml_rejects_blob_storage_path_without_sidecar(self, tmp_path) -> None:
         """Path-only imports must not bypass source blob ownership checks."""
         app, service = _make_app(tmp_path)

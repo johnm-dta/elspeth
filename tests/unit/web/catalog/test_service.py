@@ -144,6 +144,17 @@ class TestListSinks:
         sinks = catalog.list_sinks()
         assert len(sinks) == len(plugin_manager.get_sinks())
 
+    def test_dataverse_alternate_key_not_a_secret_requirement(self, catalog: CatalogServiceImpl) -> None:
+        """Regression (elspeth-61f2c0732e): ``alternate_key`` is a required
+        *structural* field (the upsert routing column name) — the bare ``_key``
+        suffix heuristic must not advertise it as a required wired secret."""
+        sinks = catalog.list_sinks()
+        dataverse = next(s for s in sinks if s.name == "dataverse")
+
+        assert "alternate_key" not in {r.field for r in dataverse.secret_requirements}
+        schema_requirements = catalog.get_schema("sink", "dataverse").secret_requirements
+        assert "alternate_key" not in {r.field for r in schema_requirements}
+
 
 class TestGetSchema:
     """get_schema() returns full JSON schema for a plugin's config."""

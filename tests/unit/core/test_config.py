@@ -2798,6 +2798,33 @@ telemetry:
             assert "api_key" not in provider
             assert "api_key_fingerprint" in provider
 
+    def test_structural_key_fields_not_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Structural ``*_key`` fields stay plaintext in the audit config capture.
+
+        Regression for elspeth-61f2c0732e: ``data_key`` (JSON extraction key)
+        and ``alternate_key`` (Dataverse upsert column) are exempt from the
+        bare ``_key`` suffix heuristic. ``secret_key`` is the leak guard — a
+        real credential matched only by that suffix must keep fingerprinting.
+        """
+        from elspeth.core.config import _fingerprint_secrets
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        options = {
+            "data_key": "results",
+            "sink": {"alternate_key": "crabc_code"},
+            "secret_key": "sk-lf-1234",
+        }
+
+        result = _fingerprint_secrets(options)
+
+        assert result["data_key"] == "results"
+        assert "data_key_fingerprint" not in result
+        assert result["sink"]["alternate_key"] == "crabc_code"
+        assert "alternate_key_fingerprint" not in result["sink"]
+        assert "secret_key" not in result
+        assert "secret_key_fingerprint" in result
+
     # === Tests for fail-closed behavior ===
 
     def test_missing_key_raises_error_on_fingerprint(self, monkeypatch: pytest.MonkeyPatch) -> None:

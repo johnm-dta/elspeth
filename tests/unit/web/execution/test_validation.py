@@ -3090,6 +3090,64 @@ class TestValidatePipelineFabricatedCredentials:
 
         assert _check(result, "secret_refs").passed is True
 
+    def test_json_source_data_key_literal_passes(self) -> None:
+        """Regression (elspeth-61f2c0732e): ``data_key`` is a structural JSON
+        extraction key, not a credential — a literal value must not trip the
+        fabricated_secret check and block /validate + /execute."""
+        state = _make_state(
+            source_options={"path": "/tmp/test_data/blobs/data.json", "data_key": "results"},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        secret_svc = FakeSecretService(available_refs=set())
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        secret_check = _check(result, "secret_refs")
+        assert secret_check.passed is True, secret_check.detail
+        assert not any(e.error_code == "fabricated_secret" for e in result.errors)
+
+    def test_dataverse_alternate_key_literal_passes(self) -> None:
+        """Regression (elspeth-61f2c0732e): ``alternate_key`` names the
+        Dataverse upsert routing column — structural, never a credential."""
+        state = _make_state(
+            source_options={},
+            outputs=(
+                _make_output(
+                    name="dv_out",
+                    plugin="dataverse",
+                    options={"alternate_key": "crabc_code"},
+                ),
+            ),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        secret_svc = FakeSecretService(available_refs=set())
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        secret_check = _check(result, "secret_refs")
+        assert secret_check.passed is True, secret_check.detail
+        assert not any(e.error_code == "fabricated_secret" for e in result.errors)
+
     def test_non_credential_string_unaffected(self) -> None:
         """Literal strings in non-credential fields pass — only credential
         fields are scope of the fabrication check."""

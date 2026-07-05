@@ -517,6 +517,7 @@ def build_follower_processor(
         source_id_map=source_id_map,
         transform_id_map=graph.get_transform_id_map(),
         sink_id_map=graph.get_sink_id_map(),
+        aggregation_node_ids=frozenset(graph.get_aggregation_id_map().values()),
     )
 
     # Source node (first source in the graph).  Followers need this to

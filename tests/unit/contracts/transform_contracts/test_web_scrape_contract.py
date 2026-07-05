@@ -62,6 +62,7 @@ _SSRF_BLOCKED_CASES: tuple[tuple[str, str, str], ...] = (
     # ALWAYS_BLOCKED_RANGES (unconditional — no allowlist bypass)
     ("aws_metadata_v4", "169.254.169.254", "Always-blocked IP range"),
     ("ipv4_mapped_metadata", "::ffff:169.254.169.254", "Always-blocked IP range"),
+    ("aws_metadata_v6", "fd00:ec2::254", "Always-blocked IP range"),
     ("ipv6_link_local", "fe80::1", "Always-blocked IP range"),
     ("broadcast_v4", "255.255.255.255", "Always-blocked IP range"),
     ("multicast_v4", "224.0.0.1", "Always-blocked IP range"),

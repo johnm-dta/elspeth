@@ -75,6 +75,7 @@ BLOCKED_IP_RANGES = [
 ALWAYS_BLOCKED_RANGES = (
     ipaddress.ip_network("169.254.0.0/16"),  # IPv4 link-local (AWS/Azure/GCP metadata)
     ipaddress.ip_network("::ffff:169.254.0.0/112"),  # IPv4-mapped metadata endpoint
+    ipaddress.ip_network("fd00:ec2::254/128"),  # AWS EC2 IPv6 metadata endpoint
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local (same attack surface)
     ipaddress.ip_network("255.255.255.255/32"),  # IPv4 broadcast
     ipaddress.ip_network("224.0.0.0/4"),  # IPv4 multicast

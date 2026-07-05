@@ -63,9 +63,9 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import token_work_items_table
 from elspeth.engine.clock import MockClock
-from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.processor import DAGTraversalContext, RowProcessor
 from elspeth.engine.spans import SpanFactory
+from elspeth.engine.work_items import WorkItem
 from tests.fixtures.landscape import RecorderSetup, make_recorder_with_run, register_test_node
 
 NODE_ID = "normalize"

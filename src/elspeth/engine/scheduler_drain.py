@@ -62,8 +62,8 @@ if TYPE_CHECKING:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
     from elspeth.engine.barrier_coordination import _LiveBarrierHold
     from elspeth.engine.clock import Clock
-    from elspeth.engine.dag_navigator import WorkItem
     from elspeth.engine.scheduler_work_codec import SchedulerWorkCodec
+    from elspeth.engine.work_items import WorkItem
 
 # Iteration guard to prevent infinite loops from bugs.
 # This counts dequeued work items, so it must exceed the largest supported

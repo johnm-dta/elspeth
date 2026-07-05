@@ -33,7 +33,7 @@ from elspeth.contracts.types import BranchName, CoalesceName, NodeID
 from elspeth.core.config import GateSettings
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine._error_hash import compute_error_hash
-from elspeth.engine.dag_navigator import WorkItem
+from elspeth.engine.work_items import WorkItem
 
 if TYPE_CHECKING:
     from elspeth.engine.executors import GateOutcome
@@ -111,7 +111,7 @@ class TokenTraversalEngine:
             current_token: Token being processed through the DAG.
             ctx: Plugin context for the current run.
             node_id: Current DAG node ID (needed for deaggregation expand_token() and
-                child work item creation via create_continuation_work_item()).
+                child work item creation via WorkItemFactory.create_continuation()).
             child_items: Mutable list — deaggregation appends child work items here.
             coalesce_node_id: Coalesce barrier node for fork branches (or None).
             coalesce_name: Coalesce point name for fork branches (or None).
@@ -248,7 +248,7 @@ class TokenTraversalEngine:
             for child_token in child_tokens:
                 child_coalesce_name = coalesce_name if coalesce_name is not None and child_token.branch_name is not None else None
                 child_items.append(
-                    self._processor._nav.create_continuation_work_item(
+                    self._processor._work_items.create_continuation(
                         token=child_token,
                         current_node_id=node_id,
                         coalesce_name=child_coalesce_name,
@@ -552,14 +552,14 @@ class TokenTraversalEngine:
             # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
             if cfg_coalesce_name is None and cfg_branch_name and BranchName(cfg_branch_name) in self._processor._branch_to_sink:
                 child_items.append(
-                    self._processor._nav.create_work_item(
+                    self._processor._work_items.create(
                         token=child_token,
                         current_node_id=None,
                     )
                 )
             else:
                 child_items.append(
-                    self._processor._nav.create_continuation_work_item(
+                    self._processor._work_items.create_continuation(
                         token=child_token,
                         current_node_id=node_id,
                         coalesce_name=cfg_coalesce_name,

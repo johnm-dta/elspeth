@@ -45,7 +45,7 @@ from elspeth.contracts.scheduler import BatchMembershipSpec, BufferedOutcomeSpec
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine._error_hash import compute_error_hash
-from elspeth.engine.dag_navigator import WorkItem
+from elspeth.engine.work_items import WorkItem, WorkItemFactory
 
 if TYPE_CHECKING:
     from elspeth.contracts import Batch
@@ -194,6 +194,7 @@ class BarrierIntakeCoordinator:
         aggregation_executor: AggregationExecutor,
         coalesce_executor: CoalesceExecutor | None,
         nav: DAGNavigator,
+        work_items: WorkItemFactory,
         clock: Clock,
         aggregation_settings: Mapping[NodeID, AggregationSettings],
         coalesce_node_ids: Mapping[CoalesceName, NodeID],
@@ -214,6 +215,7 @@ class BarrierIntakeCoordinator:
         self._aggregation_executor = aggregation_executor
         self._coalesce_executor = coalesce_executor
         self._nav = nav
+        self._work_items = work_items
         self._clock = clock
         self._aggregation_settings = aggregation_settings
         self._coalesce_node_ids = coalesce_node_ids
@@ -538,7 +540,7 @@ class BarrierIntakeCoordinator:
                 kind=BarrierIntakeDispositionKind.PENDING_SINK,
                 results=(replace(terminal_result, scheduler_pending_sink=True),),
             )
-        merged_item = self._nav.create_work_item(
+        merged_item = self._work_items.create(
             token=outcome.merged_token,
             current_node_id=coalesce_node_id,
             coalesce_node_id=coalesce_node_id,

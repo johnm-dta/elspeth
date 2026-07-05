@@ -1245,6 +1245,52 @@ def test_get_unprocessed_row_data_non_dict_json_raises_audit_integrity(
         recovery_manager.get_unprocessed_row_data("run-non-dict", payload_store, source_schema_class=_SimpleSchema)
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_get_unprocessed_row_data_rejects_non_finite_json_constant(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+) -> None:
+    payload_ref = payload_store.store(f'{{"id": {constant}}}'.encode())
+    with db.connection() as conn:
+        _insert_run(conn, f"run-non-finite-{constant}", status=RunStatus.FAILED)
+        _insert_node(conn, f"run-non-finite-{constant}", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, f"run-non-finite-{constant}", "row-1", row_index=0, source_data_ref=payload_ref)
+
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+    with pytest.raises(AuditIntegrityError, match="non-finite JSON constant"):
+        recovery_manager.get_unprocessed_row_data(
+            f"run-non-finite-{constant}",
+            payload_store,
+            source_schema_class=_SimpleSchema,
+        )
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_get_unprocessed_row_data_by_source_rejects_non_finite_json_constant(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+) -> None:
+    payload_ref = payload_store.store(f'{{"id": {constant}}}'.encode())
+    with db.connection() as conn:
+        _insert_run(conn, f"run-by-source-non-finite-{constant}", status=RunStatus.FAILED)
+        _insert_node(conn, f"run-by-source-non-finite-{constant}", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, f"run-by-source-non-finite-{constant}", "row-1", row_index=0, source_data_ref=payload_ref)
+
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+    with pytest.raises(AuditIntegrityError, match="non-finite JSON constant"):
+        recovery_manager.get_unprocessed_row_data_by_source(
+            f"run-by-source-non-finite-{constant}",
+            payload_store,
+            source_schema_classes={NodeID("source-node"): _SimpleSchema},
+        )
+
+
 def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,

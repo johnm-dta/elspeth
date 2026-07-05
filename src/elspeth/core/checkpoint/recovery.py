@@ -63,6 +63,13 @@ _RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
 # same checkpoint row with mutated JSON cannot serve a stale deserialization.
 _CheckpointStateCacheKey = tuple[str, str | None]
 
+
+def _reject_source_row_json_constant(constant: str) -> Any:
+    raise AuditIntegrityError(
+        f"non-finite JSON constant {constant!r} - NaN/Infinity are not valid audit values"
+    )
+
+
 __all__ = [
     "IncompleteTokenSpec",
     "NonResumableRunError",
@@ -424,8 +431,11 @@ class RecoveryManager:
                 raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
 
             try:
-                degraded_data = json.loads(payload_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                degraded_data = json.loads(
+                    payload_bytes.decode("utf-8"),
+                    parse_constant=_reject_source_row_json_constant,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, AuditIntegrityError) as exc:
                 raise AuditIntegrityError(
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
                     f"cannot decode persisted row data (Tier 1 violation). "
@@ -536,8 +546,11 @@ class RecoveryManager:
                 raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
 
             try:
-                degraded_data = json.loads(payload_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                degraded_data = json.loads(
+                    payload_bytes.decode("utf-8"),
+                    parse_constant=_reject_source_row_json_constant,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, AuditIntegrityError) as exc:
                 raise AuditIntegrityError(
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
                     f"cannot decode persisted row data (Tier 1 violation). "

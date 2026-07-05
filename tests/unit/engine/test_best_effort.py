@@ -14,6 +14,14 @@ from elspeth.contracts.errors import (
 from elspeth.engine._best_effort import best_effort
 
 
+class _StrictWarningLogger:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.calls.append((event, kwargs))
+
+
 def test_best_effort_logs_exception_type_without_raw_message() -> None:
     """Ceremony failures must not leak raw exception detail into structured logs."""
     sensitive_detail = "SQL failed [parameters: {'tenant_internal_id': 'operator-only'}] /srv/private.db"
@@ -98,3 +106,26 @@ def test_best_effort_reserved_context_keys_cannot_mask_ceremony_failure() -> Non
     fields = slog.warning.call_args.kwargs
     assert fields["operation"] == "TokenCompleted telemetry"
     assert fields["error_type"] == "ValueError"
+
+
+def test_best_effort_remaps_caller_event_context_key() -> None:
+    """Caller ``event`` context must not collide with structlog's event argument."""
+    logger = _StrictWarningLogger()
+
+    with (
+        patch("elspeth.engine._best_effort._slog", new=logger),
+        best_effort("TokenCompleted telemetry", event="caller-event", run_id="run-1"),
+    ):
+        raise ValueError("primary ceremony failure")
+
+    assert logger.calls == [
+        (
+            "best-effort ceremony failed during error propagation; original event preserved",
+            {
+                "context_event": "caller-event",
+                "error_type": "ValueError",
+                "operation": "TokenCompleted telemetry",
+                "run_id": "run-1",
+            },
+        )
+    ]

@@ -75,11 +75,15 @@ def best_effort(operation: str, /, **context: Any) -> Iterator[None]:
     except contract_errors.TIER_1_ERRORS:
         raise
     except Exception as ceremony_failure:
-        fields = {
-            **context,
-            "operation": operation,
-            "error_type": type(ceremony_failure).__name__,
-        }
+        fields = dict(context)
+        if "event" in fields:
+            fields["context_event"] = fields.pop("event")
+        fields.update(
+            {
+                "operation": operation,
+                "error_type": type(ceremony_failure).__name__,
+            }
+        )
         with suppress(Exception):
             _slog.warning(
                 "best-effort ceremony failed during error propagation; original event preserved",

@@ -182,7 +182,7 @@ class SinkRequiredFieldsContract(DeclarationContract):
         inputs: BoundaryInputs,
         outputs: BoundaryOutputs,
     ) -> None:
-        declared_required_fields = inputs.plugin.declared_required_fields
+        declared_required_fields = inputs.static_contract
         sink_node_id = inputs.plugin.node_id
         if sink_node_id is None:
             raise OrchestrationInvariantError(
@@ -198,7 +198,7 @@ class SinkRequiredFieldsContract(DeclarationContract):
             row_data=cast(Mapping[str, object], inputs.row_data),
             row_contract=cast(SchemaContract | None, inputs.row_contract),
             plugin_name=inputs.plugin.name,
-            node_id=sink_node_id,
+            node_id=inputs.node_id,
             run_id=inputs.run_id,
             row_id=inputs.row_id,
             token_id=inputs.token_id,

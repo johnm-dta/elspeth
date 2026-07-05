@@ -8,6 +8,7 @@ This contract registers for ONE dispatch site:
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Any, ClassVar, cast
 
@@ -30,6 +31,11 @@ from elspeth.contracts.schema_contract import (
     FieldContract,
     SchemaContract,
 )
+
+_MAX_RUNTIME_OBSERVED_FIELDS = 20
+_MAX_RUNTIME_OBSERVED_FIELD_DISPLAY_CHARS = 64
+_MAX_RUNTIME_OBSERVED_OMITTED_HASHES = 20
+_FIELD_NAME_HASH_CHARS = 16
 
 
 def _build_contract(
@@ -59,6 +65,54 @@ def _build_contract(
         for name in optional_fields
     )
     return SchemaContract(mode="OBSERVED", fields=fields, locked=True)
+
+
+def _field_name_hash(field_name: str) -> str:
+    return hashlib.sha256(field_name.encode("utf-8", errors="surrogatepass")).hexdigest()[:_FIELD_NAME_HASH_CHARS]
+
+
+def _bounded_field_name(field_name: str) -> str:
+    if len(field_name) <= _MAX_RUNTIME_OBSERVED_FIELD_DISPLAY_CHARS:
+        return field_name
+    suffix = f"...#{_field_name_hash(field_name)}"
+    prefix_len = _MAX_RUNTIME_OBSERVED_FIELD_DISPLAY_CHARS - len(suffix)
+    return f"{field_name[:prefix_len]}{suffix}"
+
+
+def _bounded_runtime_observed_payload(runtime_observed: frozenset[str]) -> dict[str, object]:
+    sorted_observed = sorted(runtime_observed)
+    sample_names = sorted_observed[:_MAX_RUNTIME_OBSERVED_FIELDS]
+    omitted_names = sorted_observed[_MAX_RUNTIME_OBSERVED_FIELDS:]
+    payload: dict[str, object] = {
+        "runtime_observed": [_bounded_field_name(name) for name in sample_names],
+        "runtime_observed_count": len(sorted_observed),
+        "runtime_observed_truncated": bool(omitted_names),
+    }
+    if omitted_names:
+        omitted_hashes = [_field_name_hash(name) for name in omitted_names[:_MAX_RUNTIME_OBSERVED_OMITTED_HASHES]]
+        payload.update(
+            {
+                "runtime_observed_omitted_count": len(omitted_names),
+                "runtime_observed_omitted_hashes": omitted_hashes,
+                "runtime_observed_omitted_hashes_truncated": len(omitted_names) > len(omitted_hashes),
+            }
+        )
+    return payload
+
+
+def _runtime_observed_message(observed_payload: Mapping[str, object]) -> str:
+    observed_sample = observed_payload["runtime_observed"]
+    observed_count = observed_payload["runtime_observed_count"]
+    if observed_payload["runtime_observed_truncated"]:
+        omitted_count = observed_payload["runtime_observed_omitted_count"]
+        omitted_hashes = observed_payload["runtime_observed_omitted_hashes"]
+        hashes_truncated = observed_payload["runtime_observed_omitted_hashes_truncated"]
+        hash_note = "truncated " if hashes_truncated else ""
+        return (
+            f"{observed_count} runtime field(s), sampled {observed_sample!r}; "
+            f"omitted {omitted_count} field name(s), {hash_note}omitted hashes {omitted_hashes!r}"
+        )
+    return f"{observed_count} runtime field(s), sampled {observed_sample!r}"
 
 
 def verify_sink_required_fields(
@@ -92,6 +146,7 @@ def verify_sink_required_fields(
                 f"(likely from coalesce merge). Fix: ensure all branches produce these fields as required."
             )
 
+    observed_payload = _bounded_runtime_observed_payload(runtime_observed)
     raise SinkRequiredFieldsViolation(
         plugin=plugin_name,
         node_id=node_id,
@@ -100,13 +155,13 @@ def verify_sink_required_fields(
         token_id=token_id,
         payload={
             "declared": sorted(declared_required_fields),
-            "runtime_observed": sorted(runtime_observed),
+            **observed_payload,
             "missing": sorted(missing),
         },
         message=(
             f"Sink {plugin_name!r} (node {node_id!r}) declared required fields "
             f"{sorted(declared_required_fields)!r} but row {row_id!r} only exposed "
-            f"{sorted(runtime_observed)!r}; missing {sorted(missing)!r}.{contract_context}"
+            f"{_runtime_observed_message(observed_payload)}; missing {sorted(missing)!r}.{contract_context}"
         ),
     )
 

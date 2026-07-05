@@ -1139,6 +1139,11 @@ class SinkRequiredFieldsPayload(TypedDict):
 
     declared: Required[list[str]]
     runtime_observed: Required[list[str]]
+    runtime_observed_count: NotRequired[int]
+    runtime_observed_truncated: NotRequired[bool]
+    runtime_observed_omitted_count: NotRequired[int]
+    runtime_observed_omitted_hashes: NotRequired[list[str]]
+    runtime_observed_omitted_hashes_truncated: NotRequired[bool]
     missing: Required[list[str]]
 
 

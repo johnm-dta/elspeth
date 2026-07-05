@@ -244,6 +244,34 @@ def test_boundary_check_rejects_dispatcher_plugin_node_drift() -> None:
         contract.boundary_check(inputs, BoundaryOutputs())
 
 
+def test_boundary_check_bounds_runtime_observed_diagnostics() -> None:
+    contract = SinkRequiredFieldsContract()
+    long_suffix = "x" * 120
+    row_data = {f"field_{index:03d}_{long_suffix}": "v" for index in range(50)}
+    inputs = BoundaryInputs(
+        plugin=_plugin(node_id="n-1", declared_required_fields=frozenset({"required_field"})),
+        node_id="n-1",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        static_contract=frozenset({"required_field"}),
+        row_data=row_data,
+        row_contract=None,
+    )
+
+    with pytest.raises(SinkRequiredFieldsViolation) as exc_info:
+        contract.boundary_check(inputs, BoundaryOutputs())
+
+    payload = exc_info.value.payload
+    assert payload["runtime_observed_count"] == 50
+    assert payload["runtime_observed_truncated"] is True
+    assert len(payload["runtime_observed"]) == 20
+    assert all(len(name) <= 64 for name in payload["runtime_observed"])
+    assert payload["runtime_observed_omitted_count"] == 30
+    assert len(payload["runtime_observed_omitted_hashes"]) == 20
+    assert long_suffix not in str(exc_info.value)
+
+
 def test_boundary_check_returns_none_when_required_fields_present() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(

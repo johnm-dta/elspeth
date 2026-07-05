@@ -4,7 +4,7 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## 0.7.0 - 2026-06-28 (LLM-primary guided pipeline creation)
+## 0.7.0 - 2026-07-05 (LLM-primary guided pipeline creation)
 
 Guided pipeline creation becomes LLM-primary. The guided composer is
 reworked so each stage of a pipeline — source, then sink, then transforms,
@@ -64,17 +64,19 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   …) at the persist seam and block advancement until they are resolved,
   extending the interpretation-surfacing model into the guided flow with a
   backend run-tier backstop.
-- **Guided mode reframed as a conversational builder with live-graph
-  verification** — the guided surface is reworked into a docked chat
-  conversation paired with an always-visible verification panel: a
-  plain-language gloss and a validation summary sit above the live pipeline
-  graph so the operator can read what the model built as it is built, with a
-  `ComposingIndicator` during the build. Each interpretation decision renders
-  as a read-only summary card that leads with the model's own rationale,
-  carries an `Explain` button backed by grounded advisory context, and gates
-  advancement behind a two-stage View→Approve acknowledgement over a card
-  stack. Design:
-  `docs/superpowers/specs/2026-06-30-guided-mode-reframe-design.md` and
+#### Guided mode reframed as a conversational builder
+
+- **A docked chat paired with an always-visible verification panel** — the
+  guided surface is reworked into a docked chat conversation paired with an
+  always-visible verification panel: a plain-language gloss and a validation
+  summary sit above the live pipeline graph so the operator can read what the
+  model built as it is built, with a `ComposingIndicator` during the build.
+  Design: `docs/superpowers/specs/2026-06-30-guided-mode-reframe-design.md`.
+- **Read-only interpretation decision cards with a View→Approve gate** — each
+  interpretation decision renders as a read-only summary card that leads with
+  the model's own rationale, carries an `Explain` button backed by grounded
+  advisory context, and gates advancement behind a two-stage View→Approve
+  acknowledgement over a card stack. Design:
   `docs/superpowers/specs/2026-06-29-guided-decision-readonly-summary-design.md`.
 
 #### Always-on prompt-shield review

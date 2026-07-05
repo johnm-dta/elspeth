@@ -42,6 +42,23 @@ def _runtime_preflight_is_retryable(exc: BaseException) -> bool:
     return False
 
 
+class _RuntimePreflightRetryMetadata:
+    """Collect type-only retry metadata for the runtime preflight operation."""
+
+    def __init__(self) -> None:
+        self._retry_errors: list[dict[str, object]] = []
+
+    def record_retry(self, attempt: int, error: BaseException) -> None:
+        self._retry_errors.append({"attempt": attempt, "error_type": type(error).__name__})
+
+    def output_data(self) -> dict[str, object]:
+        return {
+            "attempt_count": len(self._retry_errors) + 1,
+            "retry_count": len(self._retry_errors),
+            "retry_errors": list(self._retry_errors),
+        }
+
+
 def run_transform_runtime_preflights(
     factory: RecorderFactory,
     run_id: str,
@@ -61,6 +78,7 @@ def run_transform_runtime_preflights(
         previous_node_id = ctx.node_id
         ctx.node_id = transform.node_id
         try:
+            retry_metadata = _RuntimePreflightRetryMetadata()
             with track_operation(
                 recorder=factory.execution,
                 run_id=run_id,
@@ -68,20 +86,24 @@ def run_transform_runtime_preflights(
                 operation_type="runtime_preflight",
                 ctx=ctx,
                 input_data={"transform_plugin": transform.name},
-            ):
-                if retry_manager is None:
-                    transform.runtime_preflight(ctx)
-                else:
-                    # Bind transform via default-argument capture (B023): the
-                    # closure is invoked synchronously within this iteration,
-                    # but the loop reassigns the name on each pass.
-                    def run_runtime_preflight(_transform: TransformProtocol = transform) -> None:
-                        _transform.runtime_preflight(ctx)
+            ) as handle:
+                try:
+                    if retry_manager is None:
+                        transform.runtime_preflight(ctx)
+                    else:
+                        # Bind transform via default-argument capture (B023): the
+                        # closure is invoked synchronously within this iteration,
+                        # but the loop reassigns the name on each pass.
+                        def run_runtime_preflight(_transform: TransformProtocol = transform) -> None:
+                            _transform.runtime_preflight(ctx)
 
-                    retry_manager.execute_with_retry(
-                        run_runtime_preflight,
-                        is_retryable=_runtime_preflight_is_retryable,
-                        shutdown_event=shutdown_event,
-                    )
+                        retry_manager.execute_with_retry(
+                            run_runtime_preflight,
+                            is_retryable=_runtime_preflight_is_retryable,
+                            on_retry=retry_metadata.record_retry,
+                            shutdown_event=shutdown_event,
+                        )
+                finally:
+                    handle.output_data = retry_metadata.output_data()
         finally:
             ctx.node_id = previous_node_id

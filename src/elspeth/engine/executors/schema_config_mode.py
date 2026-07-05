@@ -41,6 +41,8 @@ from elspeth.contracts.schema_contract import (
 )
 from elspeth.contracts.schema_contract_factory import create_contract_from_config, expected_runtime_output_contract
 
+_CANONICAL_RUNTIME_MODES = frozenset({"FIXED", "FLEXIBLE", "OBSERVED"})
+
 
 def _build_contract(
     fields: tuple[str, ...],
@@ -153,7 +155,9 @@ def verify_schema_config_mode(
         if emitted.contract is None:
             raise FrameworkBugError(f"Transform {plugin_name!r} emitted row with no contract. Framework invariant violated.")
 
-        observed_mode = emitted.contract.mode.lower()
+        observed_raw_mode = emitted.contract.mode
+        observed_mode = observed_raw_mode.lower()
+        noncanonical_runtime_mode = observed_raw_mode not in _CANONICAL_RUNTIME_MODES
         observed_locked = emitted.contract.locked
         runtime_row_fields = frozenset(emitted.keys())
         runtime_contract_fields = frozenset(fc.normalized_name for fc in emitted.contract.fields)
@@ -177,6 +181,7 @@ def verify_schema_config_mode(
 
         if (
             observed_mode == declared_mode
+            and not noncanonical_runtime_mode
             and observed_locked == declared_locked
             and undeclared_extra_fields is None
             and missing_required_fields is None
@@ -191,6 +196,8 @@ def verify_schema_config_mode(
             "observed_locked": observed_locked,
         }
         problem_details: list[str] = []
+        if noncanonical_runtime_mode:
+            problem_details.append(f"noncanonical runtime mode {observed_raw_mode!r}; expected canonical {expected_mode!r}")
         if observed_mode != declared_mode:
             problem_details.append(f"mode {observed_mode!r} != declared {declared_mode!r}")
         if observed_locked != declared_locked:

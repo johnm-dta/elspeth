@@ -304,8 +304,8 @@ class TestFinalizeSourceIterationContext:
         loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
 
         # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
-        # (orchestrator/aggregation.py), so the seam lives in that module now.
-        with patch("elspeth.engine.orchestrator.aggregation.flush_coalesce_pending") as flush_coalesce:
+        # (orchestrator/leader_drain.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.leader_drain.flush_coalesce_pending") as flush_coalesce:
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=_RecorderFactoryDouble(),
@@ -336,8 +336,8 @@ class TestFinalizeSourceIterationContext:
         loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
 
         # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
-        # (orchestrator/aggregation.py), so the seam lives in that module now.
-        with patch("elspeth.engine.orchestrator.aggregation.flush_coalesce_pending") as flush_coalesce:
+        # (orchestrator/leader_drain.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.leader_drain.flush_coalesce_pending") as flush_coalesce:
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=_RecorderFactoryDouble(),
@@ -368,8 +368,8 @@ class TestFinalizeSourceIterationContext:
         loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": _AggregationSettingSentinel()}
 
         # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
-        # (orchestrator/aggregation.py), so the seam lives in that module now.
-        with patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers") as flush_aggregation:
+        # (orchestrator/leader_drain.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.leader_drain.flush_remaining_aggregation_buffers") as flush_aggregation:
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=_RecorderFactoryDouble(),
@@ -400,8 +400,8 @@ class TestFinalizeSourceIterationContext:
         loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": _AggregationSettingSentinel()}
 
         # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
-        # (orchestrator/aggregation.py), so the seam lives in that module now.
-        with patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers") as flush_aggregation:
+        # (orchestrator/leader_drain.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.leader_drain.flush_remaining_aggregation_buffers") as flush_aggregation:
             flush_aggregation.return_value = ExecutionCounters().to_flush_result()
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,

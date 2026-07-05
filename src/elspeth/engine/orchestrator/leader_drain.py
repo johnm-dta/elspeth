@@ -35,9 +35,11 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
 )
 from elspeth.contracts.events import PhaseCompleted, PipelinePhase
+from elspeth.contracts.types import NodeID
+from elspeth.engine.orchestrator.aggregation import flush_remaining_aggregation_buffers
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.leader_follower_drain import LeaderFollowerDrain
-from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
+from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes, flush_coalesce_pending
 from elspeth.engine.orchestrator.runtime_preflight import run_transform_runtime_preflights
 from elspeth.engine.orchestrator.types import (
     ExecutionCounters,
@@ -49,21 +51,26 @@ from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_context import PluginContext
+    from elspeth.contracts.types import CoalesceName
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.events import EventBusProtocol
     from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
     from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
     from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
     from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
     from elspeth.engine.orchestrator.types import (
         GraphArtifacts,
+        PendingTokenMap,
         PipelineConfig,
+        RowProcessorHandle,
         RunResult,
     )
 
@@ -391,3 +398,101 @@ class LeaderDrainCoordinator:
 
         self._checkpoints.set_active_graph(None)
         return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
+
+
+# §D step-3 convergence valve: each iteration adopts every intake-pending
+# barrier row and force-resolves every flushable barrier, so legal pipelines
+# converge in a handful of rounds (one per barrier "layer" in the DAG).
+MAX_END_OF_INPUT_FLUSH_ITERATIONS = 1_000
+
+
+def run_end_of_input_barrier_flush(
+    *,
+    config: PipelineConfig,
+    processor: RowProcessorHandle,
+    ctx: PluginContext,
+    counters: ExecutionCounters,
+    pending_tokens: PendingTokenMap,
+    coalesce_executor: CoalesceExecutor | None,
+    coalesce_node_map: Mapping[CoalesceName, NodeID],
+) -> None:
+    """End-of-input barrier resolution per ADR-030 §D steps 2-3 (slice 3).
+
+    Step 2 — journal quiescence gate: the EOF flush may run ONLY when the
+    journal shows zero READY rows and zero LEASED rows (excluding
+    resume-recovered pending sinks, which legitimately stay LEASED until the
+    later sink write) — otherwise a still-in-flight work item could deposit a
+    barrier arrival AFTER the "final" batch flushed, silently splitting it.
+    At N=1 the predicate is trivially satisfied when the drain returns, so a
+    non-quiescent journal here is a scheduler bug and is refused loudly; the
+    multi-worker "leader waits, claiming what it can" loop lands with the
+    worker-pool slices (4/5).
+
+    Step 3 — loop ``{ journal-first intake -> trigger evaluation
+    (END_OF_SOURCE) -> flush }`` until no BLOCKED barrier holds remain: a
+    flush output can itself block at a downstream barrier (passthrough
+    members feeding a coalesce, coalesce merges feeding an aggregation), so
+    one pass is not exhaustive. Late-branch rejections are journal-released
+    INSIDE the loop by the intake's §E.3a arm. Terminates because step 2
+    guarantees nothing outside the loop can newly ``mark_blocked``.
+    """
+    if not config.aggregation_settings and coalesce_executor is None:
+        return
+
+    unquiesced = processor.count_unquiesced_scheduler_work()
+    if unquiesced:
+        summary = "; ".join(processor.summarize_unquiesced_scheduler_work()) or "<unknown>"
+        raise OrchestrationInvariantError(
+            f"End-of-input barrier flush refused for run '{processor.run_id}': {unquiesced} journal work "
+            "item(s) could still deposit new barrier arrivals (ADR-030 §D step 2 requires zero READY and "
+            "zero non-pending-sink LEASED rows before the final flush). At N=1 the drain returns quiesced; "
+            f"unquiesced work: {summary}."
+        )
+
+    for _ in range(MAX_END_OF_INPUT_FLUSH_ITERATIONS):
+        # §E.2 intake: adopt anything deposited by the final drains (and, on
+        # the takeover path, inherited intake-pending rows), release late
+        # arrivals (§E.3a), replay durable branch losses (§E.5) — all before
+        # the END_OF_SOURCE trigger evaluation below.
+        intake_results = processor.run_barrier_intake(ctx)
+        accumulate_row_outcomes(intake_results, counters, pending_tokens)
+
+        if config.aggregation_settings:
+            flush_result = flush_remaining_aggregation_buffers(
+                config=config,
+                processor=processor,
+                ctx=ctx,
+                pending_tokens=pending_tokens,
+            )
+            counters.accumulate_flush_result(flush_result)
+
+            # TERMINAL GUARANTEE: After end-of-source flush, all aggregation
+            # buffers must be empty. Any remaining tokens would be silently
+            # lost — never reaching a terminal state in the audit trail.
+            for agg_node_id_str in config.aggregation_settings:
+                remaining = processor.get_aggregation_buffer_count(NodeID(agg_node_id_str))
+                if remaining > 0:
+                    raise OrchestrationInvariantError(
+                        f"Aggregation buffer for node '{agg_node_id_str}' still has "
+                        f"{remaining} tokens after end-of-source flush. "
+                        f"These tokens would never reach a terminal state."
+                    )
+
+        if coalesce_executor is not None:
+            flush_coalesce_pending(
+                coalesce_executor=coalesce_executor,
+                coalesce_node_map=dict(coalesce_node_map),
+                processor=processor,
+                ctx=ctx,
+                counters=counters,
+                pending_tokens=pending_tokens,
+            )
+
+        if not processor.has_blocked_barrier_work():
+            return
+
+    raise OrchestrationInvariantError(
+        f"End-of-input barrier flush for run '{processor.run_id}' did not converge within "
+        f"{MAX_END_OF_INPUT_FLUSH_ITERATIONS} intake/flush rounds; durable BLOCKED barrier holds remain. "
+        "Possible barrier cycle or a flush that re-deposits its own inputs."
+    )

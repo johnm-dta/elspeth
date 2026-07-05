@@ -66,15 +66,12 @@ from elspeth.core.landscape.run_lifecycle_repository import _IMMUTABLE_SUCCESS_R
 from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.barrier_coordination import BarrierJournalRestoreContext
-from elspeth.engine.orchestrator.aggregation import (
-    check_aggregation_timeouts,
-    handle_incomplete_batches,
-    run_end_of_input_barrier_flush,
-)
+from elspeth.engine.orchestrator.aggregation import check_aggregation_timeouts
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import reconstruct_schema_from_json
 from elspeth.engine.orchestrator.graph_wiring import build_source_id_map, load_edge_map
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
+from elspeth.engine.orchestrator.leader_drain import run_end_of_input_barrier_flush
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
     handle_coalesce_timeouts,
@@ -108,6 +105,7 @@ if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.events import EventBusProtocol
     from elspeth.core.landscape import LandscapeDB
+    from elspeth.core.landscape.execution_repository import ExecutionRepository
     from elspeth.engine.orchestrator.ceremony import RunCeremony
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
     from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
@@ -1343,3 +1341,43 @@ class ResumeCoordinator:
 
         self._checkpoints.set_active_graph(None)
         return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
+
+
+def handle_incomplete_batches(
+    execution: ExecutionRepository,
+    run_id: str,
+) -> dict[str, str]:
+    """Find and handle incomplete batches for recovery.
+
+    - EXECUTING batches: Mark as failed (crash interrupted), then retry
+    - FAILED batches: Retry with incremented attempt
+    - DRAFT batches: Leave as-is (collection continues)
+
+    Args:
+        execution: ExecutionRepository for database operations
+        run_id: Run being recovered
+
+    Returns:
+        Mapping of old_batch_id to new_batch_id for retried batches.
+        Callers must use this to rebind batch_ids in restored checkpoint
+        state so that resumed execution references the retry batches,
+        not the dead originals.
+    """
+    from elspeth.contracts.enums import BatchStatus
+
+    incomplete = execution.get_incomplete_batches(run_id)
+    batch_id_mapping: dict[str, str] = {}
+
+    for batch in incomplete:
+        if batch.status == BatchStatus.EXECUTING:
+            # Crash interrupted mid-execution, mark failed then retry
+            execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+            retry = execution.retry_batch(batch.batch_id)
+            batch_id_mapping[batch.batch_id] = retry.batch_id
+        elif batch.status == BatchStatus.FAILED:
+            # Previous failure, retry
+            retry = execution.retry_batch(batch.batch_id)
+            batch_id_mapping[batch.batch_id] = retry.batch_id
+        # DRAFT batches continue normally (collection resumes)
+
+    return batch_id_mapping

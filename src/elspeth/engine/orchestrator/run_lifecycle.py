@@ -48,9 +48,7 @@ from elspeth.contracts.events import (
     PhaseStarted,
     PipelinePhase,
     RunCompletionStatus,
-    RunFinished,
     RunStarted,
-    RunSummary,
 )
 from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.factory import RecorderFactory
@@ -463,15 +461,12 @@ class RunLifecycleCoordinator:
                 factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
 
             # Emit telemetry AFTER Landscape finalize succeeds
-            run_duration_ms = (time.perf_counter() - run_start_time) * 1000
-            self._ceremony.emit_telemetry(
-                RunFinished(
-                    timestamp=datetime.now(UTC),
-                    run_id=run.run_id,
-                    status=terminal_status,
-                    row_count=result.rows_processed,
-                    duration_ms=run_duration_ms,
-                )
+            run_duration = time.perf_counter() - run_start_time
+            self._ceremony.emit_run_finished(
+                run_id=run.run_id,
+                status=terminal_status,
+                row_count=result.rows_processed,
+                duration_seconds=run_duration,
             )
 
             # EXPORT phase - post-run landscape export (if enabled)
@@ -490,20 +485,18 @@ class RunLifecycleCoordinator:
             # remains coherent with /api/runs/{rid}.
             cli_status, exit_code = cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - run_start_time
-            self._events.emit(
-                RunSummary(
-                    run_id=run.run_id,
-                    status=cli_status,
-                    total_rows=result.rows_processed,
-                    succeeded=result.rows_succeeded,
-                    failed=result.rows_failed,
-                    quarantined=result.rows_quarantined,
-                    duration_seconds=total_duration,
-                    exit_code=exit_code,
-                    routed_success=result.rows_routed_success,
-                    routed_failure=result.rows_routed_failure,
-                    routed_destinations=tuple(result.routed_destinations.items()),
-                )
+            self._ceremony.emit_run_summary(
+                run_id=run.run_id,
+                status=cli_status,
+                rows_processed=result.rows_processed,
+                rows_succeeded=result.rows_succeeded,
+                rows_failed=result.rows_failed,
+                rows_quarantined=result.rows_quarantined,
+                duration_seconds=total_duration,
+                exit_code=exit_code,
+                rows_routed_success=result.rows_routed_success,
+                rows_routed_failure=result.rows_routed_failure,
+                routed_destinations=result.routed_destinations,
             )
 
             return result
@@ -532,20 +525,18 @@ class RunLifecycleCoordinator:
                     # RunFinished was already emitted before the export attempt,
                     # so only emit the EventBus RunSummary here.
                     total_duration = time.perf_counter() - run_start_time
-                    self._events.emit(
-                        RunSummary(
-                            run_id=run.run_id,
-                            status=RunCompletionStatus.PARTIAL,
-                            total_rows=result.rows_processed,
-                            succeeded=result.rows_succeeded,
-                            failed=result.rows_failed,
-                            quarantined=result.rows_quarantined,
-                            duration_seconds=total_duration,
-                            exit_code=1,
-                            routed_success=result.rows_routed_success,
-                            routed_failure=result.rows_routed_failure,
-                            routed_destinations=tuple(result.routed_destinations.items()),
-                        )
+                    self._ceremony.emit_run_summary(
+                        run_id=run.run_id,
+                        status=RunCompletionStatus.PARTIAL,
+                        rows_processed=result.rows_processed,
+                        rows_succeeded=result.rows_succeeded,
+                        rows_failed=result.rows_failed,
+                        rows_quarantined=result.rows_quarantined,
+                        duration_seconds=total_duration,
+                        exit_code=1,
+                        rows_routed_success=result.rows_routed_success,
+                        rows_routed_failure=result.rows_routed_failure,
+                        routed_destinations=result.routed_destinations,
                     )
                 else:
                     self._ceremony.emit_failed_ceremony(
@@ -574,20 +565,18 @@ class RunLifecycleCoordinator:
                     # RunFinished was already emitted before the export attempt,
                     # so only emit the EventBus RunSummary here.
                     total_duration = time.perf_counter() - run_start_time
-                    self._events.emit(
-                        RunSummary(
-                            run_id=run.run_id,
-                            status=RunCompletionStatus.PARTIAL,
-                            total_rows=result.rows_processed,
-                            succeeded=result.rows_succeeded,
-                            failed=result.rows_failed,
-                            quarantined=result.rows_quarantined,
-                            duration_seconds=total_duration,
-                            exit_code=1,
-                            routed_success=result.rows_routed_success,
-                            routed_failure=result.rows_routed_failure,
-                            routed_destinations=tuple(result.routed_destinations.items()),
-                        )
+                    self._ceremony.emit_run_summary(
+                        run_id=run.run_id,
+                        status=RunCompletionStatus.PARTIAL,
+                        rows_processed=result.rows_processed,
+                        rows_succeeded=result.rows_succeeded,
+                        rows_failed=result.rows_failed,
+                        rows_quarantined=result.rows_quarantined,
+                        duration_seconds=total_duration,
+                        exit_code=1,
+                        rows_routed_success=result.rows_routed_success,
+                        rows_routed_failure=result.rows_routed_failure,
+                        routed_destinations=result.routed_destinations,
                     )
                 else:
                     self._ceremony.emit_failed_ceremony(run.run_id, factory, run_start_time, token=coordination_token)

@@ -619,12 +619,12 @@ def test_double_flush_guard_no_duplicate_leader_rows(tmp_path: Path) -> None:
     """When 4b accumulates follower results and re-flushes, the leader's own
     already-written tokens are NOT re-emitted.
 
-    The 4b clears pending_tokens before the second flush (write_pending_to_sinks
-    does not consume), so a re-flush would otherwise re-write every leader token
-    and hit the node_states UNIQUE constraint. We run a multi-row leader pipeline
-    that ALSO has a follower PENDING_SINK row to drain, forcing the second flush,
-    and assert: no exception (no node_states IntegrityError); every leader row
-    appears in the sink exactly once; no node_states row is duplicated.
+    write_pending_to_sinks consumes each successfully written pending group, so
+    a 4b re-flush must not re-write leader tokens and hit the node_states UNIQUE
+    constraint. We run a multi-row leader pipeline that ALSO has a follower
+    PENDING_SINK row to drain, forcing the second flush, and assert: no exception
+    (no node_states IntegrityError); every leader row appears in the sink exactly
+    once; no node_states row is duplicated.
     """
     orch, db, payload_store = _make_orch(tmp_path)
 

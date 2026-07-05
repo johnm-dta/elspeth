@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import groupby
+from unittest.mock import patch
 
 import pytest
 
@@ -439,3 +440,89 @@ class TestSinkNameValidation:
             edge_map={},
             sink_step=5,
         )
+
+
+class TestPendingTokenConsumption:
+    """Tests for consuming pending sink groups after durable writes."""
+
+    def _make_orchestrator(self) -> SinkFlushCoordinator:
+        """Build a coordinator with inert dependencies for direct method tests."""
+        return SinkFlushCoordinator(span_factory=object(), checkpoints=object())
+
+    def test_successful_write_consumes_live_pending_tokens(self) -> None:
+        """Successfully written groups are removed from the live pending map."""
+        from elspeth.engine.executors.sink import DiversionCounts
+
+        orchestrator = self._make_orchestrator()
+        recorder = _recorder_factory_fake()
+        config = _PipelineConfigFake(sinks={"output": _SinkFake()})
+        ctx = object()
+        tok_1 = make_token_info(token_id="tok-1")
+        tok_2 = make_token_info(token_id="tok-2")
+        pending_tokens = {
+            "output": [
+                (tok_1, _completed_pending()),
+                (tok_2, _completed_pending()),
+            ],
+        }
+
+        with patch("elspeth.engine.executors.sink.SinkExecutor", autospec=True) as sink_executor_cls:
+            sink_executor_cls.return_value.write.return_value = (None, DiversionCounts())
+
+            orchestrator.write_pending_to_sinks(
+                factory=recorder,
+                run_id="test-run",
+                config=config,
+                ctx=ctx,
+                counters=ExecutionCounters(),
+                pending_tokens=pending_tokens,
+                sink_id_map={"output": "node-1"},
+                edge_map={},
+                sink_step=5,
+            )
+
+        assert pending_tokens == {"output": []}
+
+    def test_callback_flush_failure_keeps_group_pending(self) -> None:
+        """Groups are retained when post-sink callback flush fails."""
+        from elspeth.engine.executors.sink import DiversionCounts
+
+        class _FailingFlushCallback:
+            def __call__(self, _token: TokenInfo) -> None:
+                return None
+
+            def flush(self) -> None:
+                raise RuntimeError("checkpoint flush failed")
+
+        orchestrator = self._make_orchestrator()
+        recorder = _recorder_factory_fake()
+        config = _PipelineConfigFake(sinks={"output": _SinkFake()})
+        ctx = object()
+        tok = make_token_info(token_id="tok-1")
+        pending_pair = (tok, _completed_pending())
+        pending_tokens = {"output": [pending_pair]}
+
+        def write_side_effect(*, tokens, on_token_written, **_kwargs):
+            assert on_token_written is not None
+            for token in tokens:
+                on_token_written(token)
+            return None, DiversionCounts()
+
+        with patch("elspeth.engine.executors.sink.SinkExecutor", autospec=True) as sink_executor_cls:
+            sink_executor_cls.return_value.write.side_effect = write_side_effect
+
+            with pytest.raises(RuntimeError, match="checkpoint flush failed"):
+                orchestrator.write_pending_to_sinks(
+                    factory=recorder,
+                    run_id="test-run",
+                    config=config,
+                    ctx=ctx,
+                    counters=ExecutionCounters(),
+                    pending_tokens=pending_tokens,
+                    sink_id_map={"output": "node-1"},
+                    edge_map={},
+                    sink_step=5,
+                    on_token_written_factory=lambda _sink_node_id: _FailingFlushCallback(),
+                )
+
+        assert pending_tokens == {"output": [pending_pair]}

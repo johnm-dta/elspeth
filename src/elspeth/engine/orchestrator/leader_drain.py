@@ -316,18 +316,15 @@ class LeaderDrainCoordinator:
             if not loop_result.interrupted:
 
                 def _drain_and_flush() -> bool:
-                    # The drain->clear->accumulate->flush coupling stays HERE (not in the
-                    # drain coordinator): write_pending_to_sinks does NOT consume
-                    # pending_tokens entries, so the leader's already-written tokens
-                    # remain. Accumulating follower results on top of them would re-write
-                    # every leader token -> the node_states UNIQUE constraint. Returns
-                    # True when this pass drained+flushed follower work so the coordinator
+                    # write_pending_to_sinks consumes each successfully written
+                    # pending group, so follower drains can accumulate directly
+                    # into loop_ctx.pending_tokens without rewriting the
+                    # leader's already-written tokens. Returns True when this
+                    # pass drained+flushed follower work so the coordinator
                     # re-checks immediately without sleeping.
                     follower_results = loop_ctx.processor.drain_scheduled_work(loop_ctx.ctx)
                     if not follower_results:
                         return False
-                    for _sink_list in loop_ctx.pending_tokens.values():
-                        _sink_list.clear()
                     accumulate_row_outcomes(follower_results, loop_ctx.counters, loop_ctx.pending_tokens)
                     self._sink_flush.flush_and_write_sinks(
                         factory,

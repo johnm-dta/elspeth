@@ -26,6 +26,7 @@ from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedSte
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
+    SinkOutputResolved,
     SinkResolved,
     SourceResolved,
     TerminalKind,
@@ -215,6 +216,23 @@ def _observed_columns_from_blob(blob: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _sink_options_with_step_2_schema_contract(output: SinkOutputResolved) -> dict[str, Any]:
+    """Merge Step-2 field selection into the sink's schema config."""
+    options = dict(output.options)
+    schema_key = "schema" if "schema" in options else "schema_config" if "schema_config" in options else "schema"
+    raw_schema = options.get(schema_key)
+    if raw_schema is not None and not isinstance(raw_schema, Mapping):
+        return options
+
+    schema = dict(raw_schema) if isinstance(raw_schema, Mapping) else {}
+    schema["mode"] = output.schema_mode
+    schema["required_fields"] = list(output.required_fields)
+    options.pop("schema", None)
+    options.pop("schema_config", None)
+    options["schema"] = schema
+    return options
+
+
 def handle_step_2_sink(
     *,
     state: CompositionState,
@@ -225,9 +243,10 @@ def handle_step_2_sink(
 ) -> StepHandlerResult:
     """Commit each resolved sink output via _execute_set_output.
 
-    Constructs the args dict the freeform handler expects and delegates
-    entirely to _execute_set_output. The handler does not validate or
-    coerce — validation is the tool handler's responsibility.
+    Constructs the args dict the freeform handler expects, translating the
+    guided field-selection decision into ``options.schema`` before delegating
+    to _execute_set_output. The handler does not validate or coerce —
+    validation is the tool handler's responsibility.
 
     MVP constraint: all outputs use sink_name="main" to match the
     source's on_success="main" wiring set in handle_step_1_source.
@@ -255,7 +274,7 @@ def handle_step_2_sink(
         args = {
             "plugin": output.plugin,
             "sink_name": "main",
-            "options": dict(output.options),
+            "options": _sink_options_with_step_2_schema_contract(output),
             "on_write_failure": "discard",
         }
         tool_result = _execute_set_output(args, current_state, ToolContext(catalog=catalog, data_dir=data_dir))

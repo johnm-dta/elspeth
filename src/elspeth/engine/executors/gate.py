@@ -172,21 +172,8 @@ class GateExecutor:
         reason: RoutingReason | None,
         mode: RoutingMode,
         fork_branches: list[str] | None,
-        continue_as_route: bool,
     ) -> _RouteDispatchOutcome:
-        """Dispatch CONTINUE/FORK/SINK/PROCESSING_NODE destinations."""
-        if destination.kind == RouteDestinationKind.CONTINUE:
-            if continue_as_route:
-                action = RoutingAction.route("continue", mode=mode, reason=reason)
-            else:
-                action = RoutingAction.continue_(reason=reason)
-            self._record_routing(
-                state_id=state_id,
-                node_id=node_id,
-                action=action,
-            )
-            return _RouteDispatchOutcome(action=action)
-
+        """Dispatch FORK/SINK/PROCESSING_NODE/DISCARD destinations."""
         if destination.kind == RouteDestinationKind.FORK:
             if fork_branches is None:
                 raise OrchestrationInvariantError(
@@ -219,15 +206,21 @@ class GateExecutor:
                 discarded=True,
             )
 
-        route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
-        self._record_routing(
-            state_id=state_id,
-            node_id=node_id,
-            action=route_action,
-        )
         if destination.kind == RouteDestinationKind.SINK:
+            route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
+            self._record_routing(
+                state_id=state_id,
+                node_id=node_id,
+                action=route_action,
+            )
             return _RouteDispatchOutcome(action=route_action, sink_name=destination.sink_name)
         if destination.kind == RouteDestinationKind.PROCESSING_NODE:
+            route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
+            self._record_routing(
+                state_id=state_id,
+                node_id=node_id,
+                action=route_action,
+            )
             return _RouteDispatchOutcome(action=route_action, next_node_id=destination.next_node_id)
 
         raise OrchestrationInvariantError(f"Unsupported route destination kind '{destination.kind}' for gate {node_id}")
@@ -341,7 +334,6 @@ class GateExecutor:
                 reason=reason,
                 mode=RoutingMode.MOVE,
                 fork_branches=gate_config.fork_to,
-                continue_as_route=False,
             )
             action = dispatch.action
             child_tokens = dispatch.child_tokens

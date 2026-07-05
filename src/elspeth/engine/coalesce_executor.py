@@ -5,7 +5,7 @@ Tokens are correlated by row_id (same source row that was forked).
 """
 
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -133,6 +133,290 @@ def _resolve_first_wins(
         new_merged[collision_field] = first_value
         new_origins[collision_field] = first_branch
     return new_merged, new_origins
+
+
+_MergeDataFn = Callable[
+    [CoalesceSettings, dict[str, _BranchEntry]],
+    tuple[
+        dict[str, Any],
+        dict[str, list[str]],
+        dict[str, str],
+        dict[str, list[tuple[str, Any]]],
+    ],
+]
+_MergeWithOriginalNamesFn = Callable[
+    [SchemaContract, dict[str, SchemaContract], dict[str, str]],
+    SchemaContract,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class CoalesceMergePlan:
+    """Pure merge plan produced before token or audit side effects."""
+
+    merged_data: PipelineRow
+    consumed_tokens: tuple[TokenInfo, ...]
+    metadata: CoalesceMetadata
+
+
+def _lost_branch_expected_fields(
+    branch_expected_fields: Mapping[str, tuple[str, ...]] | None,
+    lost_branches: Mapping[str, str],
+) -> dict[str, tuple[str, ...]] | None:
+    if branch_expected_fields is None:
+        return None
+    if not lost_branches:
+        return None
+
+    result: dict[str, tuple[str, ...]] = {}
+    for branch_name in lost_branches:
+        if branch_name in branch_expected_fields:
+            result[branch_name] = tuple(branch_expected_fields[branch_name])
+    return result if result else None
+
+
+def _merge_with_original_names(
+    precomputed: SchemaContract,
+    branch_contracts: dict[str, SchemaContract],
+    field_origins: dict[str, str],
+) -> SchemaContract:
+    """Merge precomputed schema semantics with original names from branch contracts."""
+    # Build lookup of (normalized_name, branch_name) -> original_name from all branches
+    # so we can retrieve original_name from the winning branch per field.
+    branch_original_names: dict[tuple[str, str], str] = {}
+    for branch_name, contract in branch_contracts.items():
+        for fc in contract.fields:
+            branch_original_names[(fc.normalized_name, branch_name)] = fc.original_name
+
+    # Fields not contributed by any arrived branch fall back to first-seen
+    # original names from arrived contracts, then normalized names.
+    fallback_original_names: dict[str, str] = {}
+    for contract in branch_contracts.values():
+        for fc in contract.fields:
+            if fc.normalized_name not in fallback_original_names:
+                fallback_original_names[fc.normalized_name] = fc.original_name
+
+    merged_fields: list[FieldContract] = []
+    for fc in precomputed.fields:
+        if fc.normalized_name in field_origins:
+            winning_branch = field_origins[fc.normalized_name]
+            original_name = branch_original_names[(fc.normalized_name, winning_branch)]
+        else:
+            original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
+        merged_fields.append(
+            FieldContract(
+                normalized_name=fc.normalized_name,
+                original_name=original_name,
+                python_type=fc.python_type,
+                required=fc.required,
+                source=fc.source,
+                nullable=fc.nullable,
+            )
+        )
+
+    return SchemaContract(
+        mode=precomputed.mode,
+        fields=tuple(merged_fields),
+        locked=precomputed.locked,
+    )
+
+
+def _merge_data(
+    settings: CoalesceSettings,
+    branches: dict[str, _BranchEntry],
+) -> tuple[
+    dict[str, Any],
+    dict[str, list[str]],
+    dict[str, str],
+    dict[str, list[tuple[str, Any]]],
+]:
+    """Merge row data from arrived tokens based on strategy."""
+    if settings.merge == "union":
+        # Combine all fields from all branches.
+        # On name collision, the last branch in settings.branches wins by default
+        # (union_collision_policy="last_wins"). field_origins and collision_values
+        # are always recorded so auditors can reconstruct lineage and inspect
+        # overwritten values. Policy enforcement happens in build_coalesce_merge().
+        merged: dict[str, Any] = {}
+        field_origins: dict[str, str] = {}
+        collisions: dict[str, list[str]] = {}
+        collision_values: dict[str, list[tuple[str, Any]]] = {}
+        for branch_name in settings.branches:
+            if branch_name in branches:
+                branch_data = branches[branch_name].token.row_data.to_dict()
+                for merge_field, value in branch_data.items():
+                    if merge_field in field_origins:
+                        if merge_field not in collisions:
+                            prior_branch = field_origins[merge_field]
+                            prior_value = merged[merge_field]
+                            collisions[merge_field] = [prior_branch]
+                            collision_values[merge_field] = [(prior_branch, prior_value)]
+                        collisions[merge_field].append(branch_name)
+                        collision_values[merge_field].append((branch_name, value))
+                    field_origins[merge_field] = branch_name
+                    merged[merge_field] = value
+        return merged, collisions, field_origins, collision_values
+
+    if settings.merge == "nested":
+        return (
+            {branch_name: branches[branch_name].token.row_data.to_dict() for branch_name in settings.branches if branch_name in branches},
+            {},
+            {},
+            {},
+        )
+
+    if settings.merge == "select":
+        if settings.select_branch is None:
+            raise RuntimeError(
+                f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
+            )
+        if settings.select_branch not in branches:
+            raise RuntimeError(
+                f"select_branch '{settings.select_branch}' not in arrived branches {list(branches.keys())}. "
+                f"This indicates a bug in _execute_merge validation (Bug 2ho fix should have caught this)."
+            )
+        return branches[settings.select_branch].token.row_data.to_dict(), {}, {}, {}
+
+    raise RuntimeError(f"Unknown merge strategy: {settings.merge!r}")
+
+
+def build_coalesce_merge(
+    *,
+    settings: CoalesceSettings,
+    pending: _PendingCoalesce,
+    coalesce_name: str,
+    now: float,
+    output_schema: SchemaContract | None,
+    branch_expected_fields: Mapping[str, tuple[str, ...]] | None,
+    merge_data: _MergeDataFn | None = None,
+    merge_with_original_names: _MergeWithOriginalNamesFn | None = None,
+) -> CoalesceMergePlan:
+    """Build the pure merge plan; callers apply token and audit side effects."""
+    merge_data_fn = merge_data or _merge_data
+    merge_with_original_names_fn = merge_with_original_names or _merge_with_original_names
+
+    merged_data_dict, union_collisions, field_origins, collision_values = merge_data_fn(settings, pending.branches)
+
+    branch_contracts: dict[str, SchemaContract] = {}
+    for branch_name, entry in pending.branches.items():
+        contract = entry.token.row_data.contract
+        if contract is None:
+            raise OrchestrationInvariantError(
+                f"Token {entry.token.token_id} on branch '{branch_name}' has no contract. "
+                f"Cannot coalesce without contracts on all parents. "
+                f"This indicates a bug in fork or transform execution."
+            )
+        branch_contracts[branch_name] = contract
+    contracts: list[SchemaContract] = list(branch_contracts.values())
+
+    if settings.merge == "union":
+        all_branches_observed = all(c.mode == "OBSERVED" for c in contracts)
+
+        if output_schema is not None:
+            precomputed = output_schema
+            use_precomputed = precomputed.mode != "OBSERVED"
+        else:
+            if not all_branches_observed:
+                raise OrchestrationInvariantError(
+                    f"Coalesce '{settings.name}' has typed branch contracts but no "
+                    f"output_schema for union merge. The DAG builder must provide "
+                    f"output_schema via register_coalesce(). "
+                    f"If this is a test, use TestCoalesceExecutor from conftest."
+                )
+            precomputed = None
+            use_precomputed = False
+
+        if use_precomputed:
+            merged_contract = merge_with_original_names_fn(precomputed, branch_contracts, field_origins)
+        else:
+            merged_contract = merge_union_contracts(
+                branch_contracts,
+                require_all=settings.has_all_branch_semantics,
+                collision_policy=settings.union_collision_policy,
+                branch_order=tuple(settings.branches),
+                coalesce_id=settings.name,
+            )
+
+    elif settings.merge == "nested":
+        branch_fields = tuple(
+            FieldContract(
+                original_name=branch_name,
+                normalized_name=branch_name,
+                python_type=object,
+                required=branch_name in pending.branches,
+                source="declared",
+            )
+            for branch_name in settings.branches
+        )
+        merged_contract = SchemaContract(
+            fields=branch_fields,
+            mode="FIXED",
+            locked=True,
+        )
+
+    elif settings.merge == "select":
+        if settings.select_branch is None:
+            raise RuntimeError(
+                f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
+            )
+        selected_entry = pending.branches[settings.select_branch]
+        selected_contract = selected_entry.token.row_data.contract
+        if selected_contract is None:
+            raise OrchestrationInvariantError(
+                f"Token {selected_entry.token.token_id} on branch '{settings.select_branch}' has no contract. "
+                f"Cannot coalesce without contracts on all parents. "
+                f"This indicates a bug in fork or transform execution."
+            )
+        merged_contract = selected_contract
+
+    else:
+        raise RuntimeError(f"Unknown merge strategy: {settings.merge}")
+
+    coalesce_metadata = CoalesceMetadata.for_merge(
+        policy=CoalescePolicy(settings.policy),
+        merge_strategy=MergeStrategy(settings.merge),
+        expected_branches=tuple(settings.branches),
+        branches_arrived=tuple(pending.branches.keys()),
+        branches_lost=pending.lost_branches,
+        lost_branch_expected_fields=_lost_branch_expected_fields(branch_expected_fields, pending.lost_branches),
+        arrival_order=[
+            ArrivalOrderEntry(
+                branch=branch,
+                arrival_offset_ms=(entry.arrival_time - pending.first_arrival) * 1000,
+            )
+            for branch, entry in sorted(pending.branches.items(), key=lambda x: x[1].arrival_time)
+        ],
+        wait_duration_ms=(now - pending.first_arrival) * 1000,
+    )
+
+    if settings.merge == "union":
+        coalesce_metadata = CoalesceMetadata.with_union_result(
+            coalesce_metadata,
+            field_origins=field_origins,
+            collisions=union_collisions if union_collisions else None,
+            collision_values=collision_values if collision_values else None,
+        )
+
+        if union_collisions:
+            if settings.union_collision_policy == "fail":
+                raise CoalesceCollisionError(
+                    f"union merge collisions in coalesce '{coalesce_name}': {sorted(union_collisions)}",
+                    metadata=coalesce_metadata,
+                )
+            if settings.union_collision_policy == "first_wins":
+                merged_data_dict, first_wins_origins = _resolve_first_wins(merged_data_dict, field_origins, collision_values)
+                if use_precomputed:
+                    merged_contract = merge_with_original_names_fn(precomputed, branch_contracts, first_wins_origins)
+                coalesce_metadata = replace(
+                    coalesce_metadata,
+                    union_field_origins=first_wins_origins,
+                )
+
+    return CoalesceMergePlan(
+        merged_data=PipelineRow(merged_data_dict, merged_contract),
+        consumed_tokens=tuple(e.token for e in pending.branches.values()),
+        metadata=coalesce_metadata,
+    )
 
 
 class CoalesceExecutor:
@@ -820,190 +1104,29 @@ class CoalesceExecutor:
         # for early failures (e.g., contract merge) where no metadata exists yet.
         metadata_for_audit: CoalesceMetadata | None = None
         try:
-            # ─────────────────────────────────────────────────────────────────────
-            # Merge row data according to strategy (returns dict)
-            # We do this FIRST so we can derive contract from actual data shape
-            # ─────────────────────────────────────────────────────────────────────
-            merged_data_dict, union_collisions, field_origins, collision_values = self._merge_data(settings, pending.branches)
-
-            # ─────────────────────────────────────────────────────────────────────
-            # Build contract based on merge strategy and actual data shape
-            # ─────────────────────────────────────────────────────────────────────
-            # Keyed by branch name so _merge_with_original_names can look up winning branch
-            branch_contracts: dict[str, SchemaContract] = {
-                branch_name: e.token.row_data.contract for branch_name, e in pending.branches.items()
-            }
-            contracts: list[SchemaContract] = list(branch_contracts.values())
-
-            if settings.merge == "union":
-                # Both union paths derive from one canonical algorithm
-                # (elspeth.contracts.union_merge.merge_union_field_flags):
-                # - Typed schemas use the precomputed build-time result of
-                #   merge_union_fields(), overlaid with branch original_names
-                #   via _merge_with_original_names (P2 alignment guarantee).
-                # - All-OBSERVED schemas have an empty precomputed contract
-                #   (types are inferred at runtime), so the branch contracts
-                #   are merged directly with merge_union_contracts().
-                all_branches_observed = all(c.mode == "OBSERVED" for c in contracts)
-
-                if settings.name in self._output_schemas:
-                    precomputed = self._output_schemas[settings.name]
-                    # Use precomputed only for typed schemas (mode != OBSERVED)
-                    use_precomputed = precomputed.mode != "OBSERVED"
-                else:
-                    # No precomputed registered. Only allowed for all-OBSERVED branches.
-                    if not all_branches_observed:
-                        raise OrchestrationInvariantError(
-                            f"Coalesce '{settings.name}' has typed branch contracts but no "
-                            f"output_schema for union merge. The DAG builder must provide "
-                            f"output_schema via register_coalesce(). "
-                            f"If this is a test, use TestCoalesceExecutor from conftest."
-                        )
-                    use_precomputed = False
-
-                if use_precomputed:
-                    # Typed schemas: use precomputed semantics (required/nullable/type) but
-                    # preserve original_name from branch contracts. The precomputed contract
-                    # only has normalized names (from config); branch contracts carry the
-                    # original headers from the source.
-                    # P2 fix: use field_origins to pick original_name from winning branch,
-                    # not first-arrived branch.
-                    merged_contract = self._merge_with_original_names(precomputed, branch_contracts, field_origins)
-                else:
-                    # All-OBSERVED (or observed-mode precomputed): merge branch
-                    # contracts directly with the policy-aware union algorithm.
-                    # Type conflicts are still possible when types are inferred
-                    # from data.
-                    try:
-                        merged_contract = merge_union_contracts(
-                            branch_contracts,
-                            require_all=settings.has_all_branch_semantics,
-                            collision_policy=settings.union_collision_policy,
-                            branch_order=tuple(settings.branches),
-                            coalesce_id=settings.name,
-                        )
-                    except ContractMergeError as e:
-                        # Type conflict between branches — fail this row gracefully.
-                        return self._fail_pending(
-                            settings=settings,
-                            key=key,
-                            step=step,
-                            failure_reason=f"contract_type_conflict: {e}",
-                        )
-
-            elif settings.merge == "nested":
-                # Nested: Contract declares branch keys with object type
-                # Data shape is {branch_a: {...}, branch_b: {...}} where each value
-                # is the full row data from that branch as a plain dict.
-                # We use object (the "any" type in VALID_FIELD_TYPES) because dict
-                # is not a valid FieldContract type and the contract only needs to
-                # declare that the field exists, not constrain its inner structure.
-                branch_fields = tuple(
-                    FieldContract(
-                        original_name=branch_name,
-                        normalized_name=branch_name,
-                        python_type=object,
-                        required=branch_name in pending.branches,
-                        source="declared",
-                    )
-                    for branch_name in settings.branches
+            try:
+                plan = build_coalesce_merge(
+                    settings=settings,
+                    pending=pending,
+                    coalesce_name=coalesce_name,
+                    now=now,
+                    output_schema=self._output_schemas.get(settings.name),
+                    branch_expected_fields=self._branch_expected_fields.get(coalesce_name),
+                    merge_data=self._merge_data,
+                    merge_with_original_names=self._merge_with_original_names,
                 )
-                merged_contract = SchemaContract(
-                    fields=branch_fields,
-                    mode="FIXED",
-                    locked=True,
+            except ContractMergeError as e:
+                # Type conflict between branches -- fail this row gracefully.
+                return self._fail_pending(
+                    settings=settings,
+                    key=key,
+                    step=step,
+                    failure_reason=f"contract_type_conflict: {e}",
                 )
-
-            elif settings.merge == "select":
-                # Select: Use selected branch's contract directly (data has only those fields)
-                # Find the selected branch's contract
-                if settings.select_branch is None:
-                    raise RuntimeError(
-                        f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
-                    )
-
-                # Get the token for the selected branch
-                selected_entry = pending.branches[settings.select_branch]
-                merged_contract = selected_entry.token.row_data.contract
-
-            else:
-                # Unreachable - config validation ensures merge is one of the above
-                raise RuntimeError(f"Unknown merge strategy: {settings.merge}")
-
-            # Build audit metadata BEFORE token creation so union_collision_policy
-            # enforcement can attach collision provenance to failures, and so
-            # first_wins resolution rewrites the merged data before the token is minted.
-            # (Bug l4h fix retained: metadata is still finalized before node-state completion.)
-            coalesce_metadata = CoalesceMetadata.for_merge(
-                policy=CoalescePolicy(settings.policy),
-                merge_strategy=MergeStrategy(settings.merge),
-                expected_branches=tuple(settings.branches),
-                branches_arrived=tuple(pending.branches.keys()),
-                branches_lost=pending.lost_branches,
-                lost_branch_expected_fields=self._get_lost_branch_expected_fields(coalesce_name, pending.lost_branches),
-                arrival_order=[
-                    ArrivalOrderEntry(
-                        branch=branch,
-                        arrival_offset_ms=(entry.arrival_time - pending.first_arrival) * 1000,
-                    )
-                    for branch, entry in sorted(pending.branches.items(), key=lambda x: x[1].arrival_time)
-                ],
-                wait_duration_ms=(now - pending.first_arrival) * 1000,
-            )
-
-            # Layer union-merge provenance onto metadata. field_origins is always
-            # recorded; collisions/collision_values populate only when the union
-            # merge produced overlapping fields. CoalesceMetadata redacts raw
-            # collision_values into value fingerprints before audit serialization.
-            if settings.merge == "union":
-                coalesce_metadata = CoalesceMetadata.with_union_result(
-                    coalesce_metadata,
-                    field_origins=field_origins,
-                    collisions=union_collisions if union_collisions else None,
-                    collision_values=collision_values if collision_values else None,
-                )
-                # Capture enriched metadata for the failure handler so a subsequent
-                # CoalesceCollisionError (fail policy) can persist the redacted
-                # collision record to complete_node_state(context_after=...).
-                metadata_for_audit = coalesce_metadata
-
-                # Apply union_collision_policy — only meaningful when collisions occurred.
-                if union_collisions:
-                    if settings.union_collision_policy == "fail":
-                        # Metadata is captured; raise with it attached so the orchestrator's
-                        # failure path can persist collision provenance to the audit trail.
-                        raise CoalesceCollisionError(
-                            f"union merge collisions in coalesce '{coalesce_name}': {sorted(union_collisions)}",
-                            metadata=coalesce_metadata,
-                        )
-                    if settings.union_collision_policy == "first_wins":
-                        merged_data_dict, first_wins_origins = _resolve_first_wins(merged_data_dict, field_origins, collision_values)
-                        # Rebuild contract with first_wins origins so original_name
-                        # mapping matches the winning branch, not last-wins default.
-                        # (P2 fix: _merge_with_original_names was called with field_origins
-                        # before _resolve_first_wins computed the correct origins.)
-                        if use_precomputed:
-                            merged_contract = self._merge_with_original_names(precomputed, branch_contracts, first_wins_origins)
-                        # Rebuild metadata with the updated origins; collision
-                        # fingerprints unchanged (still records every contributing
-                        # branch in order).
-                        coalesce_metadata = replace(
-                            coalesce_metadata,
-                            union_field_origins=first_wins_origins,
-                        )
-                        metadata_for_audit = coalesce_metadata
-                    # last_wins: no-op; merged_data_dict already reflects last-wins.
-            else:
-                # nested/select: capture the base metadata so any post-build failure
-                # still propagates branches_arrived/arrival_order to the audit trail.
-                metadata_for_audit = coalesce_metadata
-
-            # Create PipelineRow with strategy-appropriate contract (after any
-            # first_wins rewrite so the merged token reflects the resolved data).
-            merged_data = PipelineRow(merged_data_dict, merged_contract)
-
-            # Get list of consumed tokens
-            consumed_tokens = tuple(e.token for e in pending.branches.values())
+            coalesce_metadata = plan.metadata
+            metadata_for_audit = coalesce_metadata
+            merged_data = plan.merged_data
+            consumed_tokens = plan.consumed_tokens
 
             # Create merged token via TokenManager
             merged_token = self._token_manager.coalesce_tokens(
@@ -1072,6 +1195,8 @@ class CoalesceExecutor:
             # recording any further FAILED states to the untrustworthy DB.
             raise
         except Exception as merge_exc:
+            if metadata_for_audit is None and isinstance(merge_exc, CoalesceCollisionError):
+                metadata_for_audit = merge_exc.metadata
             # Generate error_hash once for all branches (consistent audit trail).
             error_hash = compute_error_hash(str(merge_exc), exception_type=type(merge_exc).__name__)
 
@@ -1123,74 +1248,8 @@ class CoalesceExecutor:
         branch_contracts: dict[str, SchemaContract],
         field_origins: dict[str, str],
     ) -> SchemaContract:
-        """Merge precomputed schema semantics with original names from branch contracts.
-
-        The precomputed contract has correct required/nullable/type semantics from
-        build-time analysis, but only has normalized names (original_name == normalized_name).
-        Branch contracts carry the actual original→normalized mapping from the source.
-
-        This method creates a new contract that preserves:
-        - Field definitions (type, required, nullable, source) from precomputed
-        - original_name from the winning branch per field_origins (policy-aware)
-
-        Args:
-            precomputed: Contract from create_contract_from_config() with build-time semantics
-            branch_contracts: Map of branch_name -> contract from branch tokens
-            field_origins: Map of field_name -> winning branch_name (from _merge_data)
-
-        Returns:
-            Merged contract with preserved original names
-        """
-        # Build lookup of (normalized_name, branch_name) -> original_name from all branches
-        # This allows us to retrieve original_name from the winning branch per field
-        branch_original_names: dict[tuple[str, str], str] = {}
-        for branch_name, contract in branch_contracts.items():
-            for fc in contract.fields:
-                branch_original_names[(fc.normalized_name, branch_name)] = fc.original_name
-
-        # Fallback lookup for fields not in field_origins (e.g., non-colliding fields)
-        # Uses first-seen semantics across all branches
-        fallback_original_names: dict[str, str] = {}
-        for contract in branch_contracts.values():
-            for fc in contract.fields:
-                if fc.normalized_name not in fallback_original_names:
-                    fallback_original_names[fc.normalized_name] = fc.original_name
-
-        # Rebuild precomputed fields with original names from winning branches
-        merged_fields: list[FieldContract] = []
-        for fc in precomputed.fields:
-            # _merge_data populates field_origins[name] for every contributed field
-            # under union semantics (not just collisions — it tracks the winning
-            # branch for every field). branch_original_names is built from the same
-            # branch contracts, so (normalized_name, winning_branch) MUST be present
-            # whenever the field is in field_origins. Direct indexing — a missing
-            # key would be an audit-load-bearing schema/contract integrity violation
-            # (precomputed and branch contracts diverged) and must crash, not coerce.
-            if fc.normalized_name in field_origins:
-                winning_branch = field_origins[fc.normalized_name]
-                original_name = branch_original_names[(fc.normalized_name, winning_branch)]
-            else:
-                # Precomputed-declared field not contributed by any branch
-                # (e.g., optional field from a branch lost under a partial
-                # policy). When no arrived branch contract can supply its source
-                # header, keep the normalized name from the precomputed schema.
-                original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
-            merged_fields.append(
-                FieldContract(
-                    normalized_name=fc.normalized_name,
-                    original_name=original_name,
-                    python_type=fc.python_type,
-                    required=fc.required,
-                    source=fc.source,
-                    nullable=fc.nullable,
-                )
-            )
-
-        return SchemaContract(
-            mode=precomputed.mode,
-            fields=tuple(merged_fields),
-            locked=precomputed.locked,
-        )
+        """Compatibility adapter for tests that patch executor internals."""
+        return _merge_with_original_names(precomputed, branch_contracts, field_origins)
 
     def _merge_data(
         self,
@@ -1202,88 +1261,8 @@ class CoalesceExecutor:
         dict[str, str],
         dict[str, list[tuple[str, Any]]],
     ]:
-        """Merge row data from arrived tokens based on strategy.
-
-        Note: row_data is PipelineRow, so we use to_dict() to get raw dict.
-
-        Returns:
-            Tuple of ``(merged_data, union_collisions, field_origins, collision_values)``:
-
-            * ``merged_data``: the merged dict to wrap in a PipelineRow.
-            * ``union_collisions``: field name -> list of contributing branch names,
-              populated only for union merges where field names overlap.
-            * ``field_origins``: field name -> the branch that produced the winning
-              value under ``last_wins`` semantics. Populated for every union merge;
-              empty dict for nested/select.
-            * ``collision_values``: field name -> ordered list of ``(branch, value)``
-              entries for every contributing branch. Populated only for union
-              merges that actually collided; empty dict otherwise.
-        """
-        if settings.merge == "union":
-            # Combine all fields from all branches.
-            # On name collision, the last branch in settings.branches wins by default
-            # (union_collision_policy="last_wins"). field_origins and collision_values
-            # are always recorded so auditors can reconstruct lineage and inspect
-            # overwritten values. Policy enforcement happens at the call site.
-            merged: dict[str, Any] = {}
-            field_origins: dict[str, str] = {}
-            collisions: dict[str, list[str]] = {}
-            collision_values: dict[str, list[tuple[str, Any]]] = {}
-            for branch_name in settings.branches:
-                if branch_name in branches:
-                    branch_data = branches[branch_name].token.row_data.to_dict()
-                    for merge_field, value in branch_data.items():
-                        if merge_field in field_origins:
-                            # Collision: capture the prior branch's value before overwriting.
-                            if merge_field not in collisions:
-                                prior_branch = field_origins[merge_field]
-                                prior_value = merged[merge_field]
-                                # Seed with the prior entry now; the current branch's
-                                # entry is appended immediately below. This guarantees
-                                # collision_values[merge_field] always has >= 2 entries
-                                # on first detection — an invariant that _resolve_first_wins
-                                # relies on when it unconditionally indexes entries[0].
-                                collisions[merge_field] = [prior_branch]
-                                collision_values[merge_field] = [(prior_branch, prior_value)]
-                            collisions[merge_field].append(branch_name)
-                            collision_values[merge_field].append((branch_name, value))
-                        field_origins[merge_field] = branch_name
-                        merged[merge_field] = value
-            return merged, collisions, field_origins, collision_values
-
-        elif settings.merge == "nested":
-            # Each branch as nested object (use to_dict() for serializable dict)
-            return (
-                {
-                    branch_name: branches[branch_name].token.row_data.to_dict()
-                    for branch_name in settings.branches
-                    if branch_name in branches
-                },
-                {},
-                {},
-                {},
-            )
-
-        elif settings.merge == "select":
-            # Take specific branch output
-            # Note: _execute_merge validates select_branch presence before calling this method
-            # If we get here without select_branch, it's a bug in our code
-            if settings.select_branch is None:
-                raise RuntimeError(
-                    f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
-                )
-            if settings.select_branch not in branches:
-                # This should be unreachable - _execute_merge catches this case first
-                # Per "Plugin Ownership" principle: crash on our bugs, don't hide them
-                raise RuntimeError(
-                    f"select_branch '{settings.select_branch}' not in arrived branches {list(branches.keys())}. "
-                    f"This indicates a bug in _execute_merge validation (Bug 2ho fix should have caught this)."
-                )
-            # Return copy of dict (to_dict() returns a copy already)
-            return branches[settings.select_branch].token.row_data.to_dict(), {}, {}, {}
-
-        else:
-            raise RuntimeError(f"Unknown merge strategy: {settings.merge!r}")
+        """Compatibility adapter for tests that patch executor internals."""
+        return _merge_data(settings, branches)
 
     def _resolve_pending(
         self,

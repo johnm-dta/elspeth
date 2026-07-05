@@ -31,16 +31,33 @@ Example:
     result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 """
 
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
 from elspeth.contracts.errors import MaxRetriesExceeded
-from elspeth.engine.orchestrator import (
-    AggregationFlushResult,
-    ExecutionCounters,
-    Orchestrator,
-    PipelineConfig,
-    RouteValidationError,
-    RowPlugin,
-    RunResult,
-)
+
+if TYPE_CHECKING:
+    from elspeth.engine.orchestrator import (
+        AggregationFlushResult,
+        ExecutionCounters,
+        Orchestrator,
+        PipelineConfig,
+        RouteValidationError,
+        RowPlugin,
+        RunResult,
+    )
+
+_ORCHESTRATOR_EXPORTS = {
+    "AggregationFlushResult",
+    "ExecutionCounters",
+    "Orchestrator",
+    "PipelineConfig",
+    "RouteValidationError",
+    "RowPlugin",
+    "RunResult",
+}
 
 __all__ = [
     "AggregationFlushResult",
@@ -52,3 +69,11 @@ __all__ = [
     "RowPlugin",
     "RunResult",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in _ORCHESTRATOR_EXPORTS:
+        value = getattr(import_module("elspeth.engine.orchestrator"), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1702,6 +1702,34 @@ class TestGateExecutor:
 
         _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
+    def test_config_gate_unknown_route_label_error_redacts_row_derived_value(self) -> None:
+        """Unknown row-derived route labels must not leak raw values to audit text."""
+        from elspeth.contracts.errors import ExecutionError
+
+        secret_label = "sk-or-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + ("x" * 100)
+        factory = _make_factory()
+        executor = GateExecutor(factory.execution, _make_span_factory(), _make_step_resolver())
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="row['route_label']",
+            routes={"known": "next_conn"},
+        )
+        token = _make_token(data={"value": "test", "route_label": secret_label}, contract=_make_contract())
+        ctx = make_context()
+
+        with pytest.raises(ValueError) as exc_info:
+            executor.execute_config_gate(config, "cg_1", token, ctx)
+
+        assert secret_label not in str(exc_info.value)
+        assert "type=str" in str(exc_info.value)
+        assert "sha256=" in str(exc_info.value)
+
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        error_obj = failed_kwargs.get("error")
+        assert isinstance(error_obj, ExecutionError)
+        assert secret_label not in error_obj.exception
+
     def test_config_gate_fork_destination_creates_children(self) -> None:
         """Config gate with 'fork' destination creates child tokens."""
         factory = _make_factory()
@@ -1936,6 +1964,38 @@ class TestGateExecutor:
 
         with pytest.raises(TypeError, match="int"):
             executor.execute_config_gate(config, "cg_1", token, ctx)
+
+    def test_config_gate_type_error_redacts_untrusted_eval_result(self) -> None:
+        """Unsupported route values must be described with bounded metadata."""
+        from elspeth.contracts.errors import ExecutionError
+
+        secret_value = "sk-or-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" + ("y" * 100)
+        factory = _make_factory()
+        executor = GateExecutor(factory.execution, _make_span_factory(), _make_step_resolver())
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="row['route_payload']",
+            routes={"true": "next_conn", "false": "error_sink"},
+        )
+        token = _make_token(
+            data={"value": "test", "route_payload": {"secret": secret_value}},
+            contract=_make_contract(),
+        )
+        ctx = make_context()
+
+        with pytest.raises(TypeError) as exc_info:
+            executor.execute_config_gate(config, "cg_1", token, ctx)
+
+        message = str(exc_info.value)
+        assert secret_value not in message
+        assert "type=mappingproxy" in message
+        assert "sha256=" in message
+
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        error_obj = failed_kwargs.get("error")
+        assert isinstance(error_obj, ExecutionError)
+        assert secret_value not in error_obj.exception
 
     # --- context_after wiring ---
 

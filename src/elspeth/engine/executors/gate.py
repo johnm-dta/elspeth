@@ -1,9 +1,10 @@
 """GateExecutor - wraps config-driven gates with audit recording and routing."""
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -24,6 +25,7 @@ from elspeth.contracts.enums import (
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.node_state_context import GateEvaluationContext
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
 from elspeth.core.config import GateSettings
@@ -43,6 +45,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 slog = structlog.get_logger(__name__)
+
+_GATE_VALUE_PREVIEW_CHARS = 80
+
+
+def _describe_untrusted_gate_value(value: Any) -> str:
+    """Return bounded metadata for row-derived gate expression results."""
+    if isinstance(value, str):
+        raw_text = value
+    else:
+        try:
+            raw_text = repr(value)
+        except Exception:
+            raw_text = f"<unrepresentable {type(value).__name__}>"
+    scrubbed = scrub_text_for_audit(raw_text)
+    if len(scrubbed) > _GATE_VALUE_PREVIEW_CHARS:
+        preview = scrubbed[:_GATE_VALUE_PREVIEW_CHARS] + "..."
+    else:
+        preview = scrubbed
+    digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"type={type(value).__name__}, length={len(raw_text)}, sha256={digest}, preview={preview!r}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,15 +304,16 @@ class GateExecutor:
                 route_label = eval_result
             else:
                 raise TypeError(
-                    f"Gate '{gate_config.name}' expression returned {type(eval_result).__name__} "
-                    f"({eval_result!r}), expected bool or str. "
+                    f"Gate '{gate_config.name}' expression returned unsupported route value "
+                    f"({_describe_untrusted_gate_value(eval_result)}), expected bool or str. "
                     f"Expression: {gate_config.condition}"
                 )
 
             # Look up destination in routes config
             if route_label not in gate_config.routes:
                 raise ValueError(
-                    f"Gate '{gate_config.name}' condition returned '{route_label}' which is not in routes: {list(gate_config.routes.keys())}"
+                    f"Gate '{gate_config.name}' condition returned unconfigured route label "
+                    f"({_describe_untrusted_gate_value(route_label)}); configured routes: {list(gate_config.routes.keys())}"
                 )
 
             # Build routing action and process based on destination

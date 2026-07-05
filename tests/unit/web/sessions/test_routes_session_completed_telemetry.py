@@ -143,8 +143,8 @@ async def test_export_yaml_route_emits_completion_counter(tmp_path: Path) -> Non
         provenance="session_seed",
     )
 
-    async def _pass_preflight(state, *, settings, secret_service, user_id):  # type: ignore[no-untyped-def]
-        del state, settings, secret_service, user_id
+    async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):  # type: ignore[no-untyped-def]
+        del state, settings, secret_service, user_id, session_id
         return ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())
 
     # Baseline.
@@ -196,8 +196,8 @@ async def test_export_yaml_route_runtime_preflight_failure_does_not_emit(tmp_pat
         provenance="session_seed",
     )
 
-    async def _fail_preflight(state, *, settings, secret_service, user_id):  # type: ignore[no-untyped-def]
-        del state, settings, secret_service, user_id
+    async def _fail_preflight(state, *, settings, secret_service, user_id, session_id):  # type: ignore[no-untyped-def]
+        del state, settings, secret_service, user_id, session_id
         return ValidationResult(
             is_valid=False,
             checks=[],

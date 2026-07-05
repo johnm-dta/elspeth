@@ -15,9 +15,9 @@ UUIDs that wouldn't match stored checkpoints, breaking the resume flow.
 """
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -67,6 +67,14 @@ def _runtime_val_manifest_json() -> str:
 def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
     """Build a FIXED SchemaContract; return (audit_record_json, version_hash)."""
     from elspeth.contracts.contract_records import ContractAuditRecord
+
+    contract = _make_fixed_schema_contract(fields)
+    audit_record = ContractAuditRecord.from_contract(contract)
+    return audit_record.to_json(), contract.version_hash()
+
+
+def _make_fixed_schema_contract(fields: list[tuple[str, type]]) -> Any:
+    """Build a real FIXED SchemaContract object for direct resume-loop tests."""
     from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
     field_contracts = tuple(
@@ -79,9 +87,7 @@ def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
         )
         for name, py_type in fields
     )
-    contract = SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
-    audit_record = ContractAuditRecord.from_contract(contract)
-    return audit_record.to_json(), contract.version_hash()
+    return SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
 
 
 def _build_two_source_failed_run(
@@ -257,6 +263,47 @@ def _two_source_resume_pipeline(tmp_path: Any, name: str) -> tuple[PipelineConfi
         sinks={"default": inject_write_failure(sink)},
     )
     return config, output_path
+
+
+@dataclass(frozen=True, slots=True)
+class _PipelinePluginFake:
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _UnusedResumeDependencyFake:
+    name: str
+
+
+@dataclass(slots=True)
+class _ResumeLoopContextFake:
+    contract: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumeLoopProcessorFake:
+    run_id: str
+
+    def has_scheduled_work(self) -> bool:
+        return False
+
+    def process_existing_row(
+        self,
+        *,
+        row_id: str,
+        row_data: Any,
+        transforms: Any,
+        ctx: Any,
+        source_node_id: NodeID,
+        source_on_success: str,
+    ) -> list[Any]:
+        assert row_id
+        assert row_data["order_id"] == 1
+        assert ctx.contract is not None
+        assert transforms == ()
+        assert source_node_id == NodeID("source-orders")
+        assert source_on_success == "default"
+        return []
 
 
 class TestResumeComprehensive:
@@ -2481,27 +2528,28 @@ class TestMultiSourceResumeContractDispatch:
         from elspeth.engine.orchestrator.resume import run_resume_processing_loop
         from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext
 
-        processor = MagicMock()
-        processor.has_scheduled_work.return_value = False
-        processor.process_existing_row.return_value = []
+        processor = _ResumeLoopProcessorFake(run_id="run-missing-source-contract")
 
         config = PipelineConfig(
-            sources={"orders": MagicMock(), "refunds": MagicMock()},
+            sources={
+                "orders": _PipelinePluginFake("orders-source"),
+                "refunds": _PipelinePluginFake("refunds-source"),
+            },
             transforms=(),
-            sinks={"default": MagicMock()},
+            sinks={"default": _PipelinePluginFake("default-sink")},
         )
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
             pending_tokens={"default": []},
             processor=processor,
-            ctx=MagicMock(),
+            ctx=_ResumeLoopContextFake(),
             config=config,
             agg_transform_lookup={},
             coalesce_executor=None,
             coalesce_node_map={},
         )
 
-        orders_contract = MagicMock(name="orders-contract")
+        orders_contract = _make_fixed_schema_contract([("order_id", int)])
         rows = (
             ResumedRow(
                 row_id="row-orders",
@@ -2525,8 +2573,8 @@ class TestMultiSourceResumeContractDispatch:
                 loop_ctx,
                 rows,
                 incomplete_by_row={},
-                recovery_manager=MagicMock(),
-                payload_store=MagicMock(),
+                recovery_manager=_UnusedResumeDependencyFake("recovery-manager"),
+                payload_store=_UnusedResumeDependencyFake("payload-store"),
                 run_id="run-missing-source-contract",
                 resume_checkpoint_id="checkpoint-missing-source-contract",
                 schema_contracts_by_source={NodeID("source-orders"): orders_contract},

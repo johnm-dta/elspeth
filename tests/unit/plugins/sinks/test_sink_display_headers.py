@@ -7,7 +7,7 @@ that controls output header naming (normalized, original, or custom mapping).
 import csv
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -15,6 +15,21 @@ from elspeth.contracts.plugin_context import PluginContext
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
+
+
+class _FieldResolutionLandscape:
+    def __init__(self, *outcomes: dict[str, str] | None | Exception) -> None:
+        self._outcomes = list(outcomes)
+        self.get_source_field_resolution_call_count = 0
+
+    def get_source_field_resolution(self, _run_id: str) -> dict[str, str] | None:
+        self.get_source_field_resolution_call_count += 1
+        if not self._outcomes:
+            return None
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class TestCSVSinkHeaders:
@@ -99,14 +114,14 @@ class TestCSVSinkHeaders:
             )
         )
 
-        # Mock Landscape with field resolution
-        mock_landscape = MagicMock()
-        mock_landscape.get_source_field_resolution.return_value = {
-            "User ID": "user_id",
-            "case StUdY --- 1!!": "case_study_1",
-        }
+        landscape = _FieldResolutionLandscape(
+            {
+                "User ID": "user_id",
+                "case StUdY --- 1!!": "case_study_1",
+            }
+        )
 
-        ctx = make_context(landscape=mock_landscape)
+        ctx = make_context(landscape=landscape)
 
         # on_start fetches the mapping
         sink.on_start(ctx)
@@ -169,10 +184,9 @@ class TestCSVSinkHeaders:
             )
         )
 
-        mock_landscape = MagicMock()
-        mock_landscape.get_source_field_resolution.return_value = None
+        landscape = _FieldResolutionLandscape(None)
 
-        ctx = make_context(landscape=mock_landscape)
+        ctx = make_context(landscape=landscape)
 
         # on_start is now a no-op for original headers (lazy resolution)
         sink.on_start(ctx)
@@ -196,13 +210,10 @@ class TestCSVSinkHeaders:
             )
         )
 
-        mock_landscape = MagicMock()
         # Source only had user_id, computed_score was added by transform
-        mock_landscape.get_source_field_resolution.return_value = {
-            "User ID": "user_id",
-        }
+        landscape = _FieldResolutionLandscape({"User ID": "user_id"})
 
-        ctx = make_context(landscape=mock_landscape)
+        ctx = make_context(landscape=landscape)
         sink.on_start(ctx)
 
         sink.write([{"user_id": "u1", "computed_score": 0.95}], ctx)
@@ -324,13 +335,14 @@ class TestJSONSinkHeaders:
             )
         )
 
-        mock_landscape = MagicMock()
-        mock_landscape.get_source_field_resolution.return_value = {
-            "User ID": "user_id",
-            "Amount (USD)": "amount_usd",
-        }
+        landscape = _FieldResolutionLandscape(
+            {
+                "User ID": "user_id",
+                "Amount (USD)": "amount_usd",
+            }
+        )
 
-        ctx = make_context(landscape=mock_landscape)
+        ctx = make_context(landscape=landscape)
         sink.on_start(ctx)
 
         sink.write([{"user_id": "u1", "amount_usd": 99.99}], ctx)
@@ -356,13 +368,12 @@ class TestJSONSinkHeaders:
             )
         )
 
-        mock_landscape = MagicMock()
-        mock_landscape.get_source_field_resolution.side_effect = [
+        landscape = _FieldResolutionLandscape(
             RuntimeError("Landscape DB locked"),
             {"User ID": "user_id"},
-        ]
+        )
 
-        ctx = make_context(landscape=mock_landscape)
+        ctx = make_context(landscape=landscape)
         sink.on_start(ctx)
 
         with pytest.raises(RuntimeError, match="Landscape DB locked"):
@@ -375,7 +386,7 @@ class TestJSONSinkHeaders:
         sink.flush()
         sink.close()
 
-        assert mock_landscape.get_source_field_resolution.call_count == 2
+        assert landscape.get_source_field_resolution_call_count == 2
         assert sink._display_headers_resolved is True
         with open(output_file) as f:
             row = json.loads(f.readline())
@@ -397,9 +408,8 @@ class TestJSONSinkHeaders:
             )
         )
 
-        mock_landscape = MagicMock()
-        mock_landscape.get_source_field_resolution.return_value = {"User ID": "user_id"}
-        ctx = make_context(landscape=mock_landscape)
+        landscape = _FieldResolutionLandscape({"User ID": "user_id"})
+        ctx = make_context(landscape=landscape)
         sink.on_start(ctx)
 
         sink.write([{"user_id": "u1"}], ctx)
@@ -417,7 +427,7 @@ class TestJSONSinkHeaders:
         sink.write([{"user_id": "u3"}], ctx)
         sink.close()
 
-        assert mock_landscape.get_source_field_resolution.call_count == 1
+        assert landscape.get_source_field_resolution_call_count == 1
         assert json.loads(output_file.read_text()) == [{"User ID": "u1"}, {"User ID": "u3"}]
 
     def test_no_headers_option_uses_normalized(self, tmp_path: Path, ctx: PluginContext) -> None:

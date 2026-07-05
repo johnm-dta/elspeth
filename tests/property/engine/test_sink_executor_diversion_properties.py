@@ -10,61 +10,141 @@ in the spec). That is a known P1 follow-up, not a property violation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import PendingOutcome, TerminalOutcome, TerminalPath, TokenInfo
+from elspeth.contracts import Artifact, PendingOutcome, PipelineRow, PluginSchema, SchemaContract, TerminalOutcome, TerminalPath, TokenInfo
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
 
 
-def _make_token(token_id: str, row_data: dict[str, object] | None = None) -> MagicMock:
-    token = MagicMock(spec=TokenInfo)
-    token.token_id = token_id
-    token.row_id = f"row-{token_id}"
-    mock_row = MagicMock()
-    mock_row.to_dict.return_value = row_data or {"field": "value"}
-    mock_row.contract = MagicMock()
-    mock_row.contract.merge_for_batch.return_value = mock_row.contract
-    token.row_data = mock_row
-    return token
+class _PermissiveSchema(PluginSchema):
+    """Accept arbitrary sink rows for executor plumbing properties."""
 
 
-def _make_executor() -> tuple[SinkExecutor, MagicMock, MagicMock]:
-    execution = MagicMock()
-    data_flow = MagicMock()
+@dataclass(frozen=True)
+class _RecordedCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args=args, kwargs=dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+        effect = self.side_effect
+        if isinstance(effect, list):
+            effect = effect.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+
+class _SpanContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+
+class _SpanFactoryDouble:
+    def __init__(self) -> None:
+        self.sink_span = _CallRecorder(return_value=_SpanContext())
+
+
+class _SinkDouble:
+    def __init__(
+        self,
+        *,
+        name: str,
+        node_id: str,
+        artifact: ArtifactDescriptor,
+        diversions: tuple[RowDiversion, ...] = (),
+        on_write_failure: str = "discard",
+    ) -> None:
+        self.name = name
+        self.node_id = node_id
+        self.input_schema = _PermissiveSchema
+        self.declared_guaranteed_fields = frozenset()
+        self.declared_required_fields = frozenset()
+        self._on_write_failure = on_write_failure
+        self._reset_diversion_log = _CallRecorder()
+        self.write = _CallRecorder(return_value=SinkWriteResult(artifact=artifact, diversions=diversions))
+        self.flush = _CallRecorder()
+
+
+_TEST_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+
+
+def _make_token(token_id: str, row_data: dict[str, object] | None = None) -> TokenInfo:
+    pipeline_row = PipelineRow(row_data or {"field": "value"}, _TEST_CONTRACT)
+    return TokenInfo(row_id=f"row-{token_id}", token_id=token_id, row_data=pipeline_row)
+
+
+def _make_context() -> SimpleNamespace:
+    return SimpleNamespace(run_id="run-1", operation_id=None)
+
+
+def _make_executor() -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
     state_counter = [0]
+    artifact_counter = [0]
 
-    def _begin_state(**kwargs: Any) -> MagicMock:
+    def _begin_state(**kwargs: Any) -> SimpleNamespace:
+        del kwargs
         state_counter[0] += 1
-        state = MagicMock()
-        state.state_id = f"state-{state_counter[0]}"
-        return state
+        return SimpleNamespace(state_id=f"state-{state_counter[0]}")
 
-    execution.begin_node_state.side_effect = _begin_state
-    spans = MagicMock()
-    spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
-    spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
+    def _register_artifact(**kwargs: Any) -> Artifact:
+        artifact_counter[0] += 1
+        return Artifact(
+            artifact_id=f"artifact-{artifact_counter[0]}",
+            run_id=kwargs["run_id"],
+            produced_by_state_id=kwargs["state_id"],
+            sink_node_id=kwargs["sink_node_id"],
+            artifact_type=kwargs["artifact_type"],
+            path_or_uri=kwargs["path"],
+            content_hash=kwargs["content_hash"],
+            size_bytes=kwargs["size_bytes"],
+            created_at=datetime.now(UTC),
+            idempotency_key=kwargs.get("idempotency_key"),
+        )
+
+    execution = SimpleNamespace(
+        begin_node_state=_CallRecorder(side_effect=_begin_state),
+        complete_node_state=_CallRecorder(),
+        register_artifact=_CallRecorder(side_effect=_register_artifact),
+        record_routing_event=_CallRecorder(),
+        begin_operation=_CallRecorder(return_value=SimpleNamespace(operation_id="op-1")),
+        complete_operation=_CallRecorder(),
+    )
+    data_flow = SimpleNamespace(record_token_outcome=_CallRecorder())
+    spans = _SpanFactoryDouble()
     return SinkExecutor(execution, data_flow, spans, run_id="run-1"), execution, data_flow
 
 
-def _build_scenario(batch_size: int, diverted_indices: set[int]) -> tuple[list[MagicMock], MagicMock]:
+def _build_scenario(batch_size: int, diverted_indices: set[int]) -> tuple[list[TokenInfo], _SinkDouble]:
     """Build tokens and a sink mock for a given batch/diversion scenario."""
     tokens = [_make_token(f"t{i}") for i in range(batch_size)]
     diversions = tuple(RowDiversion(row_index=i, reason=f"reason-{i}", row_data={"i": i}) for i in sorted(diverted_indices))
     artifact = ArtifactDescriptor.for_file(path="/tmp/p", content_hash="a" * 64, size_bytes=0)
-    sink = MagicMock()
-    sink.name = "primary"
-    sink.node_id = "node-primary"
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink._on_write_failure = "discard"
-    sink._reset_diversion_log = MagicMock()
-    sink.write.return_value = SinkWriteResult(artifact=artifact, diversions=diversions)
+    sink = _SinkDouble(name="primary", node_id="node-primary", artifact=artifact, diversions=diversions)
     return tokens, sink
 
 
@@ -81,8 +161,8 @@ def test_partition_completeness(batch_size: int, diverted_indices_raw: list[int]
 
     executor.write(
         sink=sink,
-        tokens=tokens,  # type: ignore[arg-type]
-        ctx=MagicMock(run_id="run-1"),
+        tokens=tokens,
+        ctx=_make_context(),
         step_in_pipeline=5,
         sink_name="primary",
         pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
@@ -122,8 +202,8 @@ def test_exactly_once_terminal_state(batch_size: int, diverted_indices_raw: list
 
     executor.write(
         sink=sink,
-        tokens=tokens,  # type: ignore[arg-type]
-        ctx=MagicMock(run_id="run-1"),
+        tokens=tokens,
+        ctx=_make_context(),
         step_in_pipeline=5,
         sink_name="primary",
         pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
@@ -142,27 +222,20 @@ def test_exactly_once_terminal_state(batch_size: int, diverted_indices_raw: list
 # =============================================================================
 
 
-def _build_failsink_scenario(batch_size: int, diverted_indices: set[int]) -> tuple[list[MagicMock], MagicMock, MagicMock]:
+def _build_failsink_scenario(batch_size: int, diverted_indices: set[int]) -> tuple[list[TokenInfo], _SinkDouble, _SinkDouble]:
     """Build tokens, primary sink, and failsink for a failsink-mode scenario."""
     tokens = [_make_token(f"t{i}") for i in range(batch_size)]
     diversions = tuple(RowDiversion(row_index=i, reason=f"reason-{i}", row_data={"i": i}) for i in sorted(diverted_indices))
     artifact = ArtifactDescriptor.for_file(path="/tmp/p", content_hash="a" * 64, size_bytes=0)
     failsink_artifact = ArtifactDescriptor.for_file(path="/tmp/f", content_hash="b" * 64, size_bytes=0)
-    sink = MagicMock()
-    sink.name = "primary"
-    sink.node_id = "node-primary"
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink._on_write_failure = "csv_failsink"
-    sink._reset_diversion_log = MagicMock()
-    sink.write.return_value = SinkWriteResult(artifact=artifact, diversions=diversions)
-    failsink = MagicMock()
-    failsink.name = "csv_failsink"
-    failsink.node_id = "node-failsink"
-    failsink.declared_guaranteed_fields = frozenset()
-    failsink.declared_required_fields = frozenset()
-    failsink.write.return_value = SinkWriteResult(artifact=failsink_artifact)
-    failsink._reset_diversion_log = MagicMock()
+    sink = _SinkDouble(
+        name="primary",
+        node_id="node-primary",
+        artifact=artifact,
+        diversions=diversions,
+        on_write_failure="csv_failsink",
+    )
+    failsink = _SinkDouble(name="csv_failsink", node_id="node-failsink", artifact=failsink_artifact)
     return tokens, sink, failsink
 
 
@@ -179,8 +252,8 @@ def test_failsink_partition_completeness(batch_size: int, diverted_indices_raw: 
 
     executor.write(
         sink=sink,
-        tokens=tokens,  # type: ignore[arg-type]
-        ctx=MagicMock(run_id="run-1"),
+        tokens=tokens,
+        ctx=_make_context(),
         step_in_pipeline=5,
         sink_name="primary",
         pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
@@ -219,8 +292,8 @@ def test_failsink_exactly_once_terminal_state(batch_size: int, diverted_indices_
 
     executor.write(
         sink=sink,
-        tokens=tokens,  # type: ignore[arg-type]
-        ctx=MagicMock(run_id="run-1"),
+        tokens=tokens,
+        ctx=_make_context(),
         step_in_pipeline=5,
         sink_name="primary",
         pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),

@@ -603,6 +603,7 @@ def register_message_routes(router: APIRouter) -> None:
                             settings=settings,
                             secret_service=request.app.state.scoped_secret_resolver,
                             user_id=str(user.user_id),
+                            session_id=session.id,
                             runtime_preflight=result.runtime_preflight,
                             preflight_exception_policy="raise",
                             initial_version=state.version,

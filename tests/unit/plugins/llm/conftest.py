@@ -7,10 +7,11 @@ import itertools
 import json
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 if TYPE_CHECKING:
     import httpx
@@ -24,6 +25,52 @@ from tests.fixtures.chaosllm import chaosllm_server  # noqa: F401
 
 # Common schema config used across LLM tests
 DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _SyncCallRecorder:
+    def __init__(self, return_value: Any = None, side_effect: Callable[..., Any] | Exception | None = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if isinstance(self.side_effect, Exception):
+            raise self.side_effect
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+
+class _AzureOpenAIClientDouble:
+    def __init__(self, create_response: Callable[..., Any]) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_SyncCallRecorder(side_effect=create_response)))
+        self.close = _SyncCallRecorder()
+
+
+class _OpenRouterHTTPClientDouble:
+    def __init__(self, post_response: Callable[..., Any]) -> None:
+        self.post = _SyncCallRecorder(side_effect=post_response)
+        self.close = _SyncCallRecorder()
+
+    def __enter__(self) -> _OpenRouterHTTPClientDouble:
+        return self
+
+    def __exit__(self, *_args: Any) -> bool:
+        return False
 
 
 def make_token(row_id: str = "row-1", token_id: str | None = None) -> TokenInfo:
@@ -42,7 +89,7 @@ def _build_chaosllm_response(
     mode_override: str | None = None,
     template_override: str | None = None,
     usage_override: dict[str, int] | None = None,
-) -> Mock:
+) -> SimpleNamespace:
     response_dict = chaosllm_server.server._response_generator.generate(
         request,
         mode_override=mode_override,
@@ -55,22 +102,20 @@ def _build_chaosllm_response(
             "completion_tokens": usage_override["completion_tokens"],
         }
 
-    mock_usage = Mock()
-    mock_usage.prompt_tokens = response_dict["usage"]["prompt_tokens"]
-    mock_usage.completion_tokens = response_dict["usage"]["completion_tokens"]
-
-    mock_message = Mock()
-    mock_message.content = response_dict["choices"][0]["message"]["content"]
-
-    mock_choice = Mock()
-    mock_choice.message = mock_message
-
-    mock_response = Mock()
-    mock_response.choices = [mock_choice]
-    mock_response.model = response_dict["model"]
-    mock_response.usage = mock_usage
-    mock_response.model_dump = Mock(return_value=response_dict)
-    return mock_response
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=response_dict["choices"][0]["message"]["content"]),
+                finish_reason=response_dict["choices"][0].get("finish_reason"),
+            )
+        ],
+        model=response_dict["model"],
+        usage=SimpleNamespace(
+            prompt_tokens=response_dict["usage"]["prompt_tokens"],
+            completion_tokens=response_dict["usage"]["completion_tokens"],
+        ),
+        model_dump=lambda *_args, **_kwargs: response_dict,
+    )
 
 
 @contextmanager
@@ -81,10 +126,10 @@ def chaosllm_azure_openai_client(
     template_override: str | None = None,
     usage_override: dict[str, int] | None = None,
     side_effect: Exception | None = None,
-) -> Iterator[Mock]:
+) -> Iterator[_AzureOpenAIClientDouble]:
     """Patch AzureOpenAI to use ChaosLLM response generation (no HTTP)."""
 
-    def make_response(**kwargs: Any) -> Mock:
+    def make_response(**kwargs: Any) -> SimpleNamespace:
         if side_effect is not None:
             raise side_effect
         request = {
@@ -103,8 +148,7 @@ def chaosllm_azure_openai_client(
         )
 
     with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = make_response
+        mock_client = _AzureOpenAIClientDouble(make_response)
         mock_azure_class.return_value = mock_client
         yield mock_client
 
@@ -115,12 +159,12 @@ def chaosllm_azure_openai_responses(
     responses: list[dict[str, Any] | str],
     *,
     usage_override: dict[str, int] | None = None,
-) -> Iterator[Mock]:
+) -> Iterator[_AzureOpenAIClientDouble]:
     """Patch AzureOpenAI to return a sequence of ChaosLLM-generated JSON responses."""
     response_cycle = itertools.cycle(responses)
     lock = threading.Lock()
 
-    def make_response(**kwargs: Any) -> Mock:
+    def make_response(**kwargs: Any) -> SimpleNamespace:
         with lock:
             payload = next(response_cycle)
         template_override = payload if isinstance(payload, str) else json.dumps(payload)
@@ -140,8 +184,7 @@ def chaosllm_azure_openai_responses(
         )
 
     with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = make_response
+        mock_client = _AzureOpenAIClientDouble(make_response)
         mock_azure_class.return_value = mock_client
         yield mock_client
 
@@ -152,12 +195,12 @@ def chaosllm_azure_openai_sequence(
     response_factory,
     *,
     usage_override: dict[str, int] | None = None,
-) -> Iterator[tuple[Mock, list[int], Mock]]:
+) -> Iterator[tuple[_AzureOpenAIClientDouble, list[int], Any]]:
     """Patch AzureOpenAI with a response factory (supports delays)."""
     call_count = [0]
     lock = threading.Lock()
 
-    def make_response(**kwargs: Any) -> Mock:
+    def make_response(**kwargs: Any) -> SimpleNamespace:
         with lock:
             call_count[0] += 1
             current = call_count[0]
@@ -186,8 +229,7 @@ def chaosllm_azure_openai_sequence(
         )
 
     with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = make_response
+        mock_client = _AzureOpenAIClientDouble(make_response)
         mock_azure_class.return_value = mock_client
         yield mock_client, call_count, mock_azure_class
 
@@ -245,7 +287,7 @@ def chaosllm_openrouter_http_responses(
     headers: dict[str, str] | None = None,
     usage_override: dict[str, int] | None = None,
     side_effect: Exception | None = None,
-) -> Iterator[Mock]:
+) -> Iterator[_OpenRouterHTTPClientDouble]:
     """Patch httpx.Client to return ChaosLLM-generated responses (no HTTP)."""
     import httpx
 
@@ -284,10 +326,8 @@ def chaosllm_openrouter_http_responses(
         # 1. Direct: self._client = httpx.Client(...)  (AuditedHTTPClient)
         # 2. Context manager: with httpx.Client(...) as client:  (openrouter_batch)
         # Both must route to the same mock with side_effects configured.
-        mock_client = mock_client_class.return_value
-        mock_client.__enter__ = Mock(return_value=mock_client)
-        mock_client.__exit__ = Mock(return_value=False)
-        mock_client.post.side_effect = make_response
+        mock_client = _OpenRouterHTTPClientDouble(make_response)
+        mock_client_class.return_value = mock_client
         yield mock_client
 
 

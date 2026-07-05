@@ -14,16 +14,38 @@ These tests verify:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import groupby
-from unittest.mock import Mock
 
 import pytest
 
 from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
 from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.testing import make_token_info
+
+
+@dataclass(frozen=True)
+class _RecorderFactoryFake:
+    execution: object
+    data_flow: object
+
+
+@dataclass(frozen=True)
+class _SinkFake:
+    _on_write_failure: str | None = None
+
+
+@dataclass(frozen=True)
+class _PipelineConfigFake:
+    sinks: dict[str, _SinkFake]
+
+
+def _recorder_factory_fake() -> _RecorderFactoryFake:
+    return _RecorderFactoryFake(execution=object(), data_flow=object())
+
 
 # =============================================================================
 # Helpers — replicate the sort key from sink_flush.py for isolated testing
@@ -362,25 +384,17 @@ class TestPendingGrouping:
 class TestSinkNameValidation:
     """Tests for the OrchestrationInvariantError when sink_name is missing from config."""
 
-    def _make_orchestrator(self) -> Mock:
-        """Build a minimal mock SinkFlushCoordinator with write_pending_to_sinks accessible."""
-        # Import the actual method to test it directly
-        from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
-
-        orchestrator = Mock(spec=SinkFlushCoordinator)
-        orchestrator._span_factory = Mock()
-        # Bind the real method
-        orchestrator.write_pending_to_sinks = SinkFlushCoordinator.write_pending_to_sinks.__get__(orchestrator)
-        return orchestrator
+    def _make_orchestrator(self) -> SinkFlushCoordinator:
+        """Build a coordinator with inert dependencies for direct method tests."""
+        return SinkFlushCoordinator(span_factory=object(), checkpoints=object())
 
     def test_missing_sink_name_raises_orchestration_invariant_error(self) -> None:
         """If pending_tokens references a sink not in config.sinks, raise OrchestrationInvariantError."""
         orchestrator = self._make_orchestrator()
 
-        recorder = Mock()
-        config = Mock()
-        config.sinks = {"output": Mock()}  # Only "output" exists
-        ctx = Mock()
+        recorder = _recorder_factory_fake()
+        config = _PipelineConfigFake(sinks={"output": _SinkFake()})  # Only "output" exists
+        ctx = object()
 
         tok = make_token_info(token_id="tok-1")
         pending_tokens = {
@@ -404,11 +418,10 @@ class TestSinkNameValidation:
         """A sink with an empty token list should be skipped without error."""
         orchestrator = self._make_orchestrator()
 
-        recorder = Mock()
-        config = Mock()
+        recorder = _recorder_factory_fake()
         # Even if the sink doesn't exist in config, empty list means we skip before checking
-        config.sinks = {}
-        ctx = Mock()
+        config = _PipelineConfigFake(sinks={})
+        ctx = object()
 
         pending_tokens: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {
             "nonexistent_sink": [],

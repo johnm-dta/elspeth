@@ -13,8 +13,9 @@ import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Literal
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -79,6 +80,54 @@ def _next_state_id() -> str:
     return f"state_{next(_state_counter):04d}"
 
 
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, side_effect: Any = None) -> None:
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if self.side_effect is None:
+            return None
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        return self.side_effect(*args, **kwargs)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _TokenManagerDouble:
+    def __init__(self) -> None:
+        self.coalesce_tokens = _CallRecorder(_coalesce_tokens_impl)
+
+
+class _SpanFactorySentinel:
+    pass
+
+
+def _coalesce_tokens_impl(parents: list[TokenInfo], merged_data: PipelineRow, node_id: NodeID, run_id: str) -> TokenInfo:
+    return TokenInfo(
+        row_id=parents[0].row_id,
+        token_id=f"merged_{uuid4().hex[:8]}",
+        row_data=merged_data,
+        join_group_id=f"join_{uuid4().hex[:8]}",
+    )
+
+
 def _make_contract(
     fields: list[Any] | None = None,
     *,
@@ -126,30 +175,20 @@ def _make_token(
 
 def _make_executor(
     clock: MockClock | None = None, max_completed_keys: int = 10000
-) -> tuple[CoalesceExecutor, MagicMock, MagicMock, MagicMock, MockClock]:
+) -> tuple[CoalesceExecutor, MagicMock, MagicMock, _TokenManagerDouble, MockClock]:
     """Build a CoalesceExecutor with mocked dependencies.
 
     Returns (executor, execution, data_flow, token_manager, clock).
     """
     execution = MagicMock(spec=ExecutionRepository)
-    execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
+    execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id=_next_state_id())
     # Default: Landscape returns no completed coalesces (unit tests don't have a real DB).
     # Tests that exercise Landscape-based restoration override this per-test.
     execution.get_completed_row_ids_for_nodes.return_value = set()
     execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
-    span_factory = MagicMock()
-    token_manager = MagicMock()
-
-    def coalesce_tokens_impl(parents, merged_data, node_id, run_id):
-        return TokenInfo(
-            row_id=parents[0].row_id,
-            token_id=f"merged_{uuid4().hex[:8]}",
-            row_data=merged_data,
-            join_group_id=f"join_{uuid4().hex[:8]}",
-        )
-
-    token_manager.coalesce_tokens.side_effect = coalesce_tokens_impl
+    span_factory = _SpanFactorySentinel()
+    token_manager = _TokenManagerDouble()
 
     if clock is None:
         clock = MockClock(start=100.0)
@@ -172,25 +211,15 @@ def _make_executor(
 
 def _make_raw_executor(
     clock: MockClock | None = None, max_completed_keys: int = 10000
-) -> tuple[CoalesceExecutor, MagicMock, MagicMock, MagicMock, MockClock]:
+) -> tuple[CoalesceExecutor, MagicMock, MagicMock, _TokenManagerDouble, MockClock]:
     """Build the production CoalesceExecutor without the test on_success shim."""
     execution = MagicMock(spec=ExecutionRepository)
-    execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
+    execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id=_next_state_id())
     execution.get_completed_row_ids_for_nodes.return_value = set()
     execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
-    span_factory = MagicMock()
-    token_manager = MagicMock()
-
-    def coalesce_tokens_impl(parents, merged_data, node_id, run_id):
-        return TokenInfo(
-            row_id=parents[0].row_id,
-            token_id=f"merged_{uuid4().hex[:8]}",
-            row_data=merged_data,
-            join_group_id=f"join_{uuid4().hex[:8]}",
-        )
-
-    token_manager.coalesce_tokens.side_effect = coalesce_tokens_impl
+    span_factory = _SpanFactorySentinel()
+    token_manager = _TokenManagerDouble()
 
     if clock is None:
         clock = MockClock(start=100.0)
@@ -1154,7 +1183,11 @@ class TestUnionMerge:
         executor.register_coalesce(s, "node_1")
 
         # Inject audit-DB compromise at the first step inside the merge try-body.
-        executor._merge_data = Mock(side_effect=AuditIntegrityError("audit DB unreadable mid-merge"))
+        def fail_merge_data(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise AuditIntegrityError("audit DB unreadable mid-merge")
+
+        executor._merge_data = fail_merge_data
 
         t1 = _make_token(branch_name="a", token_id="t1", data={"x": 1})
         t2 = _make_token(branch_name="b", token_id="t2", data={"y": 2})
@@ -2080,11 +2113,11 @@ class TestDefaultClock:
         from elspeth.engine.clock import DEFAULT_CLOCK
 
         execution = MagicMock(spec=ExecutionRepository)
-        execution.begin_node_state.side_effect = lambda **kw: Mock(state_id="s1")
+        execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id="s1")
         executor = CoalesceExecutor(
             execution,
-            MagicMock(),
-            MagicMock(),
+            _SpanFactorySentinel(),
+            _TokenManagerDouble(),
             "run_1",
             step_resolver=lambda n: 0,
             clock=None,
@@ -2095,11 +2128,11 @@ class TestDefaultClock:
     def test_uses_injected_clock(self):
         clock = MockClock(start=42.0)
         execution = MagicMock(spec=ExecutionRepository)
-        execution.begin_node_state.side_effect = lambda **kw: Mock(state_id="s1")
+        execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id="s1")
         executor = CoalesceExecutor(
             execution,
-            MagicMock(),
-            MagicMock(),
+            _SpanFactorySentinel(),
+            _TokenManagerDouble(),
             "run_1",
             step_resolver=lambda n: 0,
             clock=clock,

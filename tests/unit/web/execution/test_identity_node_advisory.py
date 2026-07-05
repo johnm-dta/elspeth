@@ -9,6 +9,7 @@ and is not on a gate-fork branch. See plan:
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -334,6 +335,32 @@ def _allowlisted_observed_sink(
     )
 
 
+class _YamlGeneratorDouble:
+    def generate_yaml(self, state: CompositionState) -> str:
+        return "source:\n  plugin: csv_source\n  options: {}"
+
+
+def _runtime_bundle_double() -> Any:
+    return SimpleNamespace(
+        source=object(),
+        sources={"source": object()},
+        source_settings=object(),
+        transforms=(),
+        sinks={"json_out": object()},
+        aggregations={},
+    )
+
+
+class _RuntimeGraphDouble:
+    validation_warnings: tuple[Any, ...] = ()
+
+    def validate(self) -> None:
+        pass
+
+    def validate_edge_compatibility(self) -> None:
+        pass
+
+
 @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
 @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
 @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
@@ -346,20 +373,11 @@ def test_validate_pipeline_emits_advisory_on_happy_path(
 ) -> None:
     """End-to-end: helper output appears in validate_pipeline()'s ValidationResult.checks
     when validation otherwise succeeds, with the expected detail-string content."""
-    mock_yaml_gen = MagicMock()
-    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-    mock_settings = MagicMock()
-    mock_load.return_value = mock_settings
-
-    mock_bundle = MagicMock()
-    mock_bundle.source = MagicMock()
-    mock_bundle.source_settings = MagicMock()
-    mock_bundle.transforms = ()
-    mock_bundle.sinks = {"json_out": MagicMock()}
-    mock_bundle.aggregations = {}
-    mock_instantiate.return_value = mock_bundle
-    mock_build_graph.return_value = MagicMock()
-    mock_assemble.return_value = MagicMock()
+    yaml_gen = _YamlGeneratorDouble()
+    mock_load.return_value = object()
+    mock_instantiate.return_value = _runtime_bundle_double()
+    mock_build_graph.return_value = _RuntimeGraphDouble()
+    mock_assemble.return_value = object()
 
     state = _make_state_with(
         source=_allowlisted_source(),
@@ -369,7 +387,7 @@ def test_validate_pipeline_emits_advisory_on_happy_path(
         ),
         outputs=(_allowlisted_observed_sink(),),
     )
-    result = validate_pipeline(state, _make_settings(), mock_yaml_gen)
+    result = validate_pipeline(state, _make_settings(), yaml_gen)
 
     assert result.is_valid is True, "Advisory must not block is_valid"
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
@@ -395,26 +413,18 @@ def test_validate_pipeline_emits_no_advisory_when_clean(
     mock_assemble: MagicMock,
 ) -> None:
     """A pipeline with no identity passthrough gets no advisory entries."""
-    mock_yaml_gen = MagicMock()
-    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-    mock_load.return_value = MagicMock()
-
-    mock_bundle = MagicMock()
-    mock_bundle.source = MagicMock()
-    mock_bundle.source_settings = MagicMock()
-    mock_bundle.transforms = ()
-    mock_bundle.sinks = {"json_out": MagicMock()}
-    mock_bundle.aggregations = {}
-    mock_instantiate.return_value = mock_bundle
-    mock_build_graph.return_value = MagicMock()
-    mock_assemble.return_value = MagicMock()
+    yaml_gen = _YamlGeneratorDouble()
+    mock_load.return_value = object()
+    mock_instantiate.return_value = _runtime_bundle_double()
+    mock_build_graph.return_value = _RuntimeGraphDouble()
+    mock_assemble.return_value = object()
 
     state = _make_state_with(
         source=_allowlisted_source(),
         nodes=(_make_real_transform_node(on_success="json_out"),),
         outputs=(_allowlisted_observed_sink(),),
     )
-    result = validate_pipeline(state, _make_settings(), mock_yaml_gen)
+    result = validate_pipeline(state, _make_settings(), yaml_gen)
 
     assert result.is_valid is True
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
@@ -440,8 +450,7 @@ def test_validate_pipeline_suppresses_advisory_on_failure_path() -> None:
         outputs=(_make_observed_sink(),),
     )
     settings = _make_settings(data_dir="/tmp/test_data")
-    mock_yaml_gen = MagicMock()
-    result = validate_pipeline(state, settings, mock_yaml_gen)
+    result = validate_pipeline(state, settings, _YamlGeneratorDouble())
 
     assert result.is_valid is False, "path_allowlist must block this pipeline"
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]

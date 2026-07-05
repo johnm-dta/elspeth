@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -30,28 +31,105 @@ def make_token(row_id: str = "row-1", token_id: str | None = None) -> TokenInfo:
     )
 
 
-def _create_mock_http_response(response_data: dict[str, Any]) -> Mock:
-    """Create a mock HTTP response with the given JSON data."""
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = response_data
-    response.raise_for_status = Mock()
-    response.headers = {"content-type": "application/json"}
-    response.text = json.dumps(response_data)
-    response.content = response.text.encode("utf-8")
-    return response
+class _AzureHTTPResponse:
+    """Minimal HTTP response contract used by AuditedHTTPClient and the transform."""
+
+    def __init__(
+        self,
+        response_data: dict[str, Any],
+        *,
+        body: str | None = None,
+        status_code: int = 200,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": "application/json"}
+        self.text = body if body is not None else json.dumps(response_data)
+        self.content = self.text.encode("utf-8")
+        self._response_data = response_data
+
+    def json(self) -> dict[str, Any]:
+        return self._response_data
+
+    def raise_for_status(self) -> None:
+        return None
 
 
-def _create_mock_http_response_body(body: str, *, json_fallback: dict[str, Any]) -> Mock:
+class _PostCallRecorder:
+    """Scriptable replacement for httpx.Client.post with call inspection."""
+
+    def __init__(self) -> None:
+        self.return_value: Any = None
+        self.side_effect: Any = None
+        self.call_args: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+        self.call_args_list: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args = (args, kwargs)
+        self.call_args_list.append(self.call_args)
+
+        if self.side_effect is None:
+            return self.return_value
+
+        if isinstance(self.side_effect, list):
+            next_result = self.side_effect.pop(0)
+            if isinstance(next_result, BaseException):
+                raise next_result
+            return next_result
+
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+
+        if callable(self.side_effect):
+            return self.side_effect(*args, **kwargs)
+
+        raise TypeError(f"Unsupported side_effect type: {type(self.side_effect).__name__}")
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _RecordingHTTPXClient:
+    """Fake underlying httpx.Client used by AuditedHTTPClient in these tests."""
+
+    def __init__(self) -> None:
+        self.post = _PostCallRecorder()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_httpx_client() -> Generator[_RecordingHTTPXClient, None, None]:
+    with patch("httpx.Client") as client_factory:
+        client = _RecordingHTTPXClient()
+        client_factory.return_value = client
+        yield client
+
+
+def _create_mock_http_response(response_data: dict[str, Any]) -> _AzureHTTPResponse:
+    """Create an HTTP response double with the given JSON data."""
+    return _AzureHTTPResponse(response_data)
+
+
+def _create_mock_http_response_body(body: str, *, json_fallback: dict[str, Any]) -> _AzureHTTPResponse:
     """Create a response whose raw body must be parsed instead of .json()."""
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = json_fallback
-    response.raise_for_status = Mock()
-    response.headers = {"content-type": "application/json"}
-    response.text = body
-    response.content = body.encode("utf-8")
-    return response
+    return _AzureHTTPResponse(json_fallback, body=body)
+
+
+def _http_status_error(message: str, status_code: int) -> BaseException:
+    import httpx
+
+    request = httpx.Request("POST", "https://test.cognitiveservices.azure.com/contentsafety/text:shieldPrompt")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(message, request=request, response=response)
+
+
+class _RecorderSentinel:
+    pass
 
 
 class TestAzurePromptShieldConfig:
@@ -241,10 +319,7 @@ class TestPromptShieldBatchProcessing:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
     def test_connect_output_required_before_accept(self) -> None:
         """accept() raises RuntimeError if connect_output() not called."""
@@ -288,7 +363,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_clean_content_passes(self, mock_httpx_client: MagicMock) -> None:
+    def test_clean_content_passes(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Content without attacks passes through."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -329,7 +404,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_user_prompt_attack_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_user_prompt_attack_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """User prompt attack detection returns error."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -372,7 +447,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_document_attack_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_document_attack_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Document attack detection returns error."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -413,7 +488,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_both_attacks_detected(self, mock_httpx_client: MagicMock) -> None:
+    def test_both_attacks_detected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Both attack types can be detected simultaneously."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -455,7 +530,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_missing_configured_field_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_missing_configured_field_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Missing value in explicitly-configured field fails CLOSED."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -500,7 +575,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_non_string_configured_field_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_non_string_configured_field_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Non-string value in explicitly-configured field fails CLOSED.
 
         Security transform cannot analyze non-string content. Silently skipping
@@ -550,7 +625,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_all_mode_ignores_non_string_fields(self, mock_httpx_client: MagicMock) -> None:
+    def test_all_mode_ignores_non_string_fields(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """When fields='all', non-string fields are correctly ignored (not scanned).
 
         In 'all' mode, _get_fields_to_scan pre-filters to string-valued fields,
@@ -597,7 +672,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_malformed_api_response_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_malformed_api_response_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Malformed API responses return error (fail-closed security posture)."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -656,7 +731,7 @@ class TestPromptShieldBatchProcessing:
     )
     def test_raw_json_body_parse_failures_return_malformed_error(
         self,
-        mock_httpx_client: MagicMock,
+        mock_httpx_client: _RecordingHTTPXClient,
         body: str,
         message_fragment: str,
     ) -> None:
@@ -703,7 +778,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_partial_api_response_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_partial_api_response_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Partial API responses return error (fail-closed security posture)."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -742,7 +817,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_null_attack_detected_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_null_attack_detected_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """attackDetected=null fails closed (not treated as False).
 
         This is the critical security bug: if Azure returns null instead of a bool,
@@ -791,7 +866,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_string_attack_detected_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_string_attack_detected_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """attackDetected="true" (string) fails closed.
 
         Even though the string is truthy and would "pass" the attack check,
@@ -840,7 +915,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_document_null_attack_detected_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_document_null_attack_detected_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Document attackDetected=null fails closed."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -884,7 +959,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_document_as_non_dict_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_document_as_non_dict_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Document entry that is not a dict fails closed."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -928,7 +1003,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_all_fields_mode_scans_all_string_fields(self, mock_httpx_client: MagicMock) -> None:
+    def test_all_fields_mode_scans_all_string_fields(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """When fields='all', all string fields are scanned."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -970,7 +1045,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_multiple_documents_analysis_rejected_as_malformed(self, mock_httpx_client: MagicMock) -> None:
+    def test_multiple_documents_analysis_rejected_as_malformed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Response with multiple document analyses is rejected (we submit exactly 1 document)."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -1017,7 +1092,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_api_called_with_correct_endpoint_and_headers(self, mock_httpx_client: MagicMock) -> None:
+    def test_api_called_with_correct_endpoint_and_headers(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """API is called with correct endpoint URL and headers."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -1067,7 +1142,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_multiple_rows_fifo_order(self, mock_httpx_client: MagicMock) -> None:
+    def test_multiple_rows_fifo_order(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Multiple rows are processed and returned in FIFO order."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -1119,7 +1194,7 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_audit_trail_records_api_calls(self, mock_httpx_client: MagicMock) -> None:
+    def test_audit_trail_records_api_calls(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """API calls are recorded to audit trail."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -1151,9 +1226,7 @@ class TestPromptShieldBatchProcessing:
             transform.accept(row, ctx)
             transform.flush_batch_processing(timeout=10.0)
 
-            # Verify record_call was invoked (landscape is a Mock in this test)
             recorder = ctx.landscape
-            assert isinstance(recorder, Mock)
             assert recorder.record_call.call_count == 1
         finally:
             transform.close()
@@ -1161,20 +1234,14 @@ class TestPromptShieldBatchProcessing:
     @pytest.mark.parametrize("status_code", [429, 503, 529])
     def test_capacity_http_status_retries_with_configured_budget_in_batch_adapter(
         self,
-        mock_httpx_client: MagicMock,
+        mock_httpx_client: _RecordingHTTPXClient,
         status_code: int,
     ) -> None:
         """Capacity HTTP statuses are retried inside the configured budget."""
-        import httpx
-
         from elspeth.engine.batch_adapter import SharedBatchAdapter
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
-        capacity_error = httpx.HTTPStatusError(
-            f"Capacity limited ({status_code})",
-            request=Mock(),
-            response=Mock(status_code=status_code),
-        )
+        capacity_error = _http_status_error(f"Capacity limited ({status_code})", status_code)
         mock_httpx_client.post.side_effect = [
             capacity_error,
             _create_mock_http_response(
@@ -1220,22 +1287,13 @@ class TestPromptShieldInternalProcessing:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
-    def test_process_single_with_state_retries_rate_limit_with_configured_budget(self, mock_httpx_client: MagicMock) -> None:
+    def test_process_single_with_state_retries_rate_limit_with_configured_budget(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Rate limit errors retry locally before producing the row result."""
-        import httpx
-
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
-        capacity_error = httpx.HTTPStatusError(
-            "Rate limited",
-            request=Mock(),
-            response=Mock(status_code=429),
-        )
+        capacity_error = _http_status_error("Rate limited", 429)
         mock_httpx_client.post.side_effect = [
             capacity_error,
             _create_mock_http_response(
@@ -1398,17 +1456,11 @@ class TestPromptShieldInternalProcessing:
         assert result.reason is not None
         assert result.reason["reason"] == "shutdown_requested"
 
-    def test_process_single_with_state_returns_error_on_non_rate_limit_http_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_process_single_with_state_returns_error_on_non_rate_limit_http_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Non-429 HTTP errors return TransformResult.error (not retryable)."""
-        import httpx
-
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
-        mock_httpx_client.post.side_effect = httpx.HTTPStatusError(
-            "Bad Request",
-            request=Mock(),
-            response=Mock(status_code=400),
-        )
+        mock_httpx_client.post.side_effect = _http_status_error("Bad Request", 400)
 
         transform = AzurePromptShield(
             {
@@ -1431,7 +1483,7 @@ class TestPromptShieldInternalProcessing:
         assert result.reason["reason"] == "api_error"
         assert result.retryable is False
 
-    def test_process_single_with_state_raises_retryable_on_network_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_process_single_with_state_raises_retryable_on_network_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Network errors raise PluginRetryableError for engine retry."""
         import httpx
 
@@ -1466,8 +1518,7 @@ class TestResourceCleanup:
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
         with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
+            mock_client_class.return_value = _RecordingHTTPXClient()
 
             transform = AzurePromptShield(
                 {
@@ -1524,7 +1575,7 @@ class TestResourceCleanup:
             }
         )
 
-        mock_recorder = MagicMock()
+        mock_recorder = _RecorderSentinel()
         ctx = make_context()
         ctx.landscape = mock_recorder
 
@@ -1551,10 +1602,7 @@ class TestPromptShieldEmptyDocumentsAnalysis:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
     def _make_transform(self, analysis_type: str = "both"):
         """Create a Prompt Shield transform with specified analysis_type."""
@@ -1573,7 +1621,7 @@ class TestPromptShieldEmptyDocumentsAnalysis:
         transform.on_start(ctx)
         return transform
 
-    def test_empty_documents_analysis_both_mode_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_empty_documents_analysis_both_mode_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Empty documentsAnalysis=[] with analysis_type="both" must fail CLOSED.
 
         Before the fix, empty list was iterated over (no items = no attacks),
@@ -1608,7 +1656,7 @@ class TestPromptShieldEmptyDocumentsAnalysis:
         finally:
             transform.close()
 
-    def test_empty_documents_analysis_document_mode_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_empty_documents_analysis_document_mode_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Empty documentsAnalysis=[] with analysis_type="document" must fail CLOSED."""
         mock_response = _create_mock_http_response(
             {
@@ -1638,7 +1686,7 @@ class TestPromptShieldEmptyDocumentsAnalysis:
         finally:
             transform.close()
 
-    def test_empty_documents_analysis_user_prompt_mode_irrelevant(self, mock_httpx_client: MagicMock) -> None:
+    def test_empty_documents_analysis_user_prompt_mode_irrelevant(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """With analysis_type="user_prompt", documentsAnalysis is not checked.
 
         In user_prompt mode, the code skips document analysis validation
@@ -1669,7 +1717,7 @@ class TestPromptShieldEmptyDocumentsAnalysis:
         finally:
             transform.close()
 
-    def test_single_document_analysis_accepted(self, mock_httpx_client: MagicMock) -> None:
+    def test_single_document_analysis_accepted(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """documentsAnalysis with exactly 1 entry is valid (matching our 1 submitted doc)."""
         mock_response = _create_mock_http_response(
             {
@@ -1822,12 +1870,9 @@ class TestPromptShieldRetryRaceCondition:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
-    def test_cleanup_uses_captured_state_id_not_ctx(self, mock_httpx_client: MagicMock) -> None:
+    def test_cleanup_uses_captured_state_id_not_ctx(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Cleanup uses the local state_id captured at method entry, not ctx.state_id.
 
         If ctx.state_id changes during processing (e.g., retry with new state),
@@ -1865,7 +1910,7 @@ class TestPromptShieldRetryRaceCondition:
         # Verify the original state_id was cleaned up (popped from cache)
         assert original_state_id not in transform._http_clients
 
-    def test_mutated_ctx_state_id_does_not_affect_cleanup(self, mock_httpx_client: MagicMock) -> None:
+    def test_mutated_ctx_state_id_does_not_affect_cleanup(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Even if ctx.state_id is mutated mid-flight, cleanup targets original state_id.
 
         This simulates the retry race: ctx.state_id changes after _process_row starts

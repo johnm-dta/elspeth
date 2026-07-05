@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
 
@@ -20,6 +21,14 @@ from tests.integration.web.composer.guided.test_step_3_e2e import (
 )
 from tests.integration.web.composer.guided.test_step_chat import _chat_turn_audit_bodies
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+
+@dataclass(frozen=True)
+class _AsyncCompletionFake:
+    response: object
+
+    async def __call__(self, *_args: object, **_kwargs: object) -> object:
+        return self.response
 
 
 def _post_chat(client: TestClient, session_id: str, *, message: str, step_index: str):
@@ -127,7 +136,7 @@ def test_step_2_chat_applies_sink_in_place(composer_test_client: TestClient) -> 
     out = _outputs_path(client, "chat_out.jsonl")
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=_fake_resolve_sink_response(out)),
+        new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
     ):
         status, body = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
     assert status == 200, body
@@ -154,7 +163,7 @@ def test_step_2_chat_apply_then_get_render_the_same_step_2_turn(composer_test_cl
     out = _outputs_path(client, "equality_out.jsonl")
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=_fake_resolve_sink_response(out)),
+        new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
     ):
         status, applied = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
     assert status == 200, applied
@@ -177,7 +186,7 @@ def test_step_2_chat_prose_is_advisory_no_mutation(composer_test_client: TestCli
     prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A sink writes rows out.", tool_calls=None))])
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=prose),
+        new=_AsyncCompletionFake(prose),
     ):
         status, body = _post_chat(client, session_id, message="what is a sink?", step_index="step_2_sink")
     assert status == 200, body
@@ -203,7 +212,7 @@ def test_step_2_chat_from_schema_form_stamps_prior_record_answered(composer_test
     out = _outputs_path(client, "answered_out.jsonl")
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=_fake_resolve_sink_response(out)),
+        new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
     ):
         status, body = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
     assert status == 200, body
@@ -235,7 +244,7 @@ def test_step_2_chat_handler_rejection_falls_back_to_advisory_no_mutation(compos
     with (
         patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=_fake_resolve_sink_response(out)),
+            new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
         ),
         patch(
             "elspeth.web.sessions.routes.composer.guided.handle_step_2_sink",
@@ -309,8 +318,8 @@ def test_step_1_chat_resend_strips_server_owned_keys_and_recommits(composer_test
     # the server-owned blob_ref by handle_step_1_source.
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(
-            return_value=_fake_resolve_source_response(
+        new=_AsyncCompletionFake(
+            _fake_resolve_source_response(
                 options={"schema": {"mode": "observed"}},
                 assistant_message="Built the URL source.",
             )
@@ -326,8 +335,8 @@ def test_step_1_chat_resend_strips_server_owned_keys_and_recommits(composer_test
     echoed = "Rebuilt the URL source."
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(
-            return_value=_fake_resolve_source_response(
+        new=_AsyncCompletionFake(
+            _fake_resolve_source_response(
                 options={
                     "schema": {"mode": "observed"},
                     "blob_ref": "deadbeefdeadbeefdeadbeefdeadbeef",
@@ -373,8 +382,8 @@ def test_step_1_chat_handler_rejection_degrades_to_advisory_and_audits_classifie
     with (
         patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(
-                return_value=_fake_resolve_source_response(
+            new=_AsyncCompletionFake(
+                _fake_resolve_source_response(
                     options={"schema": {"mode": "observed"}},
                     assistant_message="Built the URL source.",
                 )
@@ -407,14 +416,13 @@ def test_step_3_chat_reproposes_in_place_without_committing(composer_test_client
     # the end of this block), so it does NOT nest with this test's patch below.
     with patch(
         "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
-        new_callable=AsyncMock,
-        return_value=_fake_llm_response_for_passthrough(),
+        new=_AsyncCompletionFake(_fake_llm_response_for_passthrough()),
     ):
         _drive_to_step_3_propose_chain(client, session_id)
     # Now a fresh, non-nested patch controls the STEP_3 chat re-solve.
     with patch(
         "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
-        new=AsyncMock(return_value=_fake_chain_response()),
+        new=_AsyncCompletionFake(_fake_chain_response()),
     ):
         status, body = _post_chat(client, session_id, message="actually just pass the rows through", step_index="step_3_transforms")
     assert status == 200, body

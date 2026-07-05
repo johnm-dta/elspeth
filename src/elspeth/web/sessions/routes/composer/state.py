@@ -438,6 +438,7 @@ async def import_state_yaml(
             settings=request.app.state.settings,
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
+            session_id=session.id,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=imported_state.version,
@@ -534,6 +535,7 @@ async def get_state_yaml(
             settings=request.app.state.settings,
             secret_service=None,
             user_id=None,
+            session_id=session.id,
         )
     except (
         TimeoutError,

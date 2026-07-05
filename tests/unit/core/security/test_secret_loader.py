@@ -5,8 +5,8 @@ from __future__ import annotations
 import builtins
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import ModuleType
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,6 +55,26 @@ def _install_fake_azure_modules(monkeypatch: pytest.MonkeyPatch) -> type[Excepti
     monkeypatch.setitem(sys.modules, "azure.core", core_module)
     monkeypatch.setitem(sys.modules, "azure.core.exceptions", core_exceptions_module)
     return FakeResourceNotFoundError
+
+
+@dataclass(frozen=True, slots=True)
+class _KeyVaultSecretDouble:
+    value: str | None
+
+
+class _KeyVaultClientDouble:
+    def __init__(self, *, secret: _KeyVaultSecretDouble | None = None, error: Exception | None = None) -> None:
+        self._secret = secret
+        self._error = error
+        self.calls: list[str] = []
+
+    def get_secret(self, name: str) -> _KeyVaultSecretDouble:
+        self.calls.append(name)
+        if self._error is not None:
+            raise self._error
+        if self._secret is None:
+            raise AssertionError("Key Vault client double needs a secret or an error")
+        return self._secret
 
 
 def test_get_keyvault_client_creates_secret_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,9 +135,12 @@ class TestKeyVaultSecretLoader:
     def test_get_secret_caches_successful_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://cache-test.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="from-vault")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value="from-vault"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         first_value, first_ref = loader.get_secret("API_KEY")
         second_value, second_ref = loader.get_secret("API_KEY")
@@ -126,21 +149,28 @@ class TestKeyVaultSecretLoader:
         assert second_value == "from-vault"
         assert first_ref.source == "keyvault"
         assert second_ref.source == "keyvault"
-        assert client.get_secret.call_count == 1
+        assert client.calls == ["API_KEY"]
 
     def test_get_secret_none_value_raises_secret_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://empty-secret.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value=None)
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value=None))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         with pytest.raises(SecretNotFoundError, match="has no value"):
             loader.get_secret("EMPTY_SECRET")
 
     def test_get_secret_import_error_from_client_creation_propagates(self) -> None:
         loader = KeyVaultSecretLoader("https://imports.vault.azure.net")
-        loader._get_client = MagicMock(side_effect=ImportError("azure unavailable"))  # type: ignore[method-assign]
+
+        def get_client() -> object:
+            raise ImportError("azure unavailable")
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         with pytest.raises(ImportError, match="azure unavailable"):
             loader.get_secret("API_KEY")
@@ -148,9 +178,12 @@ class TestKeyVaultSecretLoader:
     def test_get_secret_translates_azure_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_not_found = _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://missing-secret.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.side_effect = fake_not_found("404")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(error=fake_not_found("404"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         with pytest.raises(SecretNotFoundError, match="not found in Key Vault"):
             loader.get_secret("DOES_NOT_EXIST")
@@ -165,9 +198,12 @@ class TestKeyVaultSecretLoader:
         _install_fake_azure_modules(monkeypatch)
 
         loader = KeyVaultSecretLoader("https://sdk-present.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="vault-success")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value="vault-success"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         value, ref = loader.get_secret("ANY_SECRET")
 
@@ -177,15 +213,18 @@ class TestKeyVaultSecretLoader:
     def test_clear_cache_forces_refetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://clear-cache.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="refetch-me")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value="refetch-me"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         loader.get_secret("REFRESH")
         loader.clear_cache()
         loader.get_secret("REFRESH")
 
-        assert client.get_secret.call_count == 2
+        assert client.calls == ["REFRESH", "REFRESH"]
 
 
 class _CountingLoader:

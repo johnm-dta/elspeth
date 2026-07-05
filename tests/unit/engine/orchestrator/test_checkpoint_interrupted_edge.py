@@ -22,19 +22,33 @@ serializes NULL when ``has_state`` is False). What these tests pin:
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.types import NodeID
+from elspeth.core.checkpoint import CheckpointManager
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 
 
+@dataclass(frozen=True, slots=True)
+class _ScalarProcessor:
+    barrier_scalars: BarrierScalars
+
+    def get_barrier_scalars(self) -> BarrierScalars:
+        return self.barrier_scalars
+
+
 def _make_coordinator(run_id: str) -> CheckpointCoordinator:
-    config = Mock()
-    config.enabled = True
-    coordinator = CheckpointCoordinator(checkpoint_manager=Mock(), checkpoint_config=config)
-    coordinator.set_active_graph(Mock())
+    config = RuntimeCheckpointConfig(enabled=True, frequency=1, checkpoint_interval=None)
+    coordinator = CheckpointCoordinator(
+        checkpoint_manager=create_autospec(CheckpointManager, instance=True, spec_set=True),
+        checkpoint_config=config,
+    )
+    coordinator.set_active_graph(SimpleNamespace(name="test-graph"))
     # Checkpoint writes fail closed without a leader token bound to the run
     # being written (elspeth-fab455790d).
     coordinator.bind_coordination(CoordinationToken(run_id=run_id, worker_id="test-leader", leader_epoch=1))
@@ -45,17 +59,18 @@ def _loop_ctx(
     aggregation_scalars: dict[NodeID, AggregationNodeScalars],
     *,
     pending_tokens: dict[str, list] | None = None,
-) -> Mock:
-    processor = Mock()
-    processor.get_barrier_scalars.return_value = BarrierScalars(
-        aggregation={str(node_id): scalars for node_id, scalars in aggregation_scalars.items()},
-        coalesce={},
+) -> SimpleNamespace:
+    processor = _ScalarProcessor(
+        BarrierScalars(
+            aggregation={str(node_id): scalars for node_id, scalars in aggregation_scalars.items()},
+            coalesce={},
+        )
     )
 
-    loop_ctx = Mock()
-    loop_ctx.processor = processor
-    loop_ctx.pending_tokens = pending_tokens if pending_tokens is not None else {"default": []}
-    return loop_ctx
+    return SimpleNamespace(
+        processor=processor,
+        pending_tokens=pending_tokens if pending_tokens is not None else {"default": []},
+    )
 
 
 class TestFlushEmptiedAggregationCheckpoints:

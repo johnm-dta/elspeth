@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,42 @@ from elspeth.contracts.run_result import RunResult
 from elspeth.core.dependency_config import DependencyConfig
 from elspeth.engine.dependency_resolver import _hash_settings_file, _load_depends_on, detect_cycles, resolve_dependencies
 from tests.fixtures.audit_hashing import assert_prefixed_canonical_sha256
+
+
+def _run_result(run_id: str, status: RunStatus) -> RunResult:
+    return RunResult(
+        run_id=run_id,
+        status=status,
+        rows_processed=1,
+        rows_succeeded=1 if status is RunStatus.COMPLETED else 0,
+        rows_failed=0 if status is RunStatus.COMPLETED else 1,
+        rows_routed_success=0,
+        rows_routed_failure=0,
+    )
+
+
+class _RunnerDouble:
+    def __init__(
+        self,
+        *,
+        result: RunResult | None = None,
+        error: BaseException | None = None,
+        side_effect: Callable[[Path], RunResult] | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.side_effect = side_effect
+        self.paths: list[Path] = []
+
+    def __call__(self, path: Path) -> RunResult:
+        self.paths.append(path)
+        if self.error is not None:
+            raise self.error
+        if self.side_effect is not None:
+            return self.side_effect(path)
+        if self.result is None:
+            raise AssertionError("RunnerDouble result was not configured")
+        return self.result
 
 
 class TestLoadDependsOnValidation:
@@ -191,11 +228,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.run_id = "dep-run-123"
-
-        mock_runner = MagicMock(return_value=mock_result)
+        mock_runner = _RunnerDouble(result=_run_result("dep-run-123", RunStatus.COMPLETED))
 
         with patch("elspeth.engine.dependency_resolver._hash_settings_file", return_value="sha256:abc"):
             results = resolve_dependencies(
@@ -242,11 +275,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.FAILED
-        mock_result.run_id = "dep-run-fail"
-
-        mock_runner = MagicMock(return_value=mock_result)
+        mock_runner = _RunnerDouble(result=_run_result("dep-run-fail", RunStatus.FAILED))
 
         with pytest.raises(DependencyFailedError, match="index"):
             resolve_dependencies(
@@ -259,7 +288,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=KeyboardInterrupt())
+        mock_runner = _RunnerDouble(error=KeyboardInterrupt())
 
         with pytest.raises(KeyboardInterrupt):
             resolve_dependencies(
@@ -273,7 +302,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=RuntimeError("config loading failed"))
+        mock_runner = _RunnerDouble(error=RuntimeError("config loading failed"))
 
         with pytest.raises(DependencyFailedError, match="RuntimeError") as exc_info:
             resolve_dependencies(
@@ -292,7 +321,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=FrameworkBugError("invariant violated"))
+        mock_runner = _RunnerDouble(error=FrameworkBugError("invariant violated"))
 
         with pytest.raises(FrameworkBugError, match="invariant violated"):
             resolve_dependencies(
@@ -308,7 +337,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=AuditIntegrityError("corrupt audit trail"))
+        mock_runner = _RunnerDouble(error=AuditIntegrityError("corrupt audit trail"))
 
         with pytest.raises(AuditIntegrityError, match="corrupt audit trail"):
             resolve_dependencies(
@@ -322,7 +351,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=TypeError("bad argument"))
+        mock_runner = _RunnerDouble(error=TypeError("bad argument"))
 
         with pytest.raises(TypeError, match="bad argument"):
             resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
@@ -332,7 +361,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=AttributeError("no such attr"))
+        mock_runner = _RunnerDouble(error=AttributeError("no such attr"))
 
         with pytest.raises(AttributeError, match="no such attr"):
             resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
@@ -345,14 +374,11 @@ class TestResolveDependencies:
         parent_path = tmp_path / "main.yaml"
         call_order: list[str] = []
 
-        def track_calls(path: Path) -> MagicMock:
+        def track_calls(path: Path) -> RunResult:
             call_order.append(path.name)
-            result = MagicMock()
-            result.status = RunStatus.COMPLETED
-            result.run_id = f"run-{path.name}"
-            return result
+            return _run_result(f"run-{path.name}", RunStatus.COMPLETED)
 
-        mock_runner = MagicMock(side_effect=track_calls)
+        mock_runner = _RunnerDouble(side_effect=track_calls)
 
         with patch("elspeth.engine.dependency_resolver._hash_settings_file", return_value="sha256:abc"):
             resolve_dependencies(depends_on=deps, parent_settings_path=parent_path, runner=mock_runner)
@@ -361,7 +387,7 @@ class TestResolveDependencies:
 
     def test_empty_depends_on_returns_empty(self, tmp_path: Path) -> None:
         parent_path = tmp_path / "main.yaml"
-        mock_runner = MagicMock()
+        mock_runner = _RunnerDouble(result=_run_result("unused", RunStatus.COMPLETED))
         results = resolve_dependencies(depends_on=[], parent_settings_path=parent_path, runner=mock_runner)
         assert results == []
 

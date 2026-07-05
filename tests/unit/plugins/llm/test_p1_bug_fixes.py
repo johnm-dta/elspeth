@@ -13,8 +13,10 @@ transforms and were removed alongside ADR-020.)
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.transforms.llm import (
@@ -25,6 +27,48 @@ from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
 
 from .conftest import DYNAMIC_SCHEMA
+
+
+@dataclass
+class RecordingAzureMonitorConfigurator:
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+@dataclass
+class RecordingAIInferenceInstrumentor:
+    instrument_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def instrument(self, **kwargs: Any) -> None:
+        self.instrument_calls.append(kwargs)
+
+
+@dataclass
+class RecordingAIInferenceInstrumentorFactory:
+    instances: list[RecordingAIInferenceInstrumentor] = field(default_factory=list)
+
+    def __call__(self) -> RecordingAIInferenceInstrumentor:
+        instance = RecordingAIInferenceInstrumentor()
+        self.instances.append(instance)
+        return instance
+
+
+def _tracing_module_with(
+    instrumentor_factory: RecordingAIInferenceInstrumentorFactory,
+) -> ModuleType:
+    tracing_module = ModuleType("azure.ai.inference.tracing")
+    tracing_module.AIInferenceInstrumentor = instrumentor_factory
+    return tracing_module
+
+
+def _only_instrumentor(
+    instrumentor_factory: RecordingAIInferenceInstrumentorFactory,
+) -> RecordingAIInferenceInstrumentor:
+    assert len(instrumentor_factory.instances) == 1
+    return instrumentor_factory.instances[0]
+
 
 # ---------------------------------------------------------------------------
 # Bug 1: Azure process_row uses mutable ctx.state_id in cleanup
@@ -164,28 +208,28 @@ class TestEnableContentRecording:
             enable_live_metrics=False,
         )
 
-        mock_instrumentor_instance = Mock()
-        mock_instrumentor_class = Mock(return_value=mock_instrumentor_instance)
+        azure_monitor = RecordingAzureMonitorConfigurator()
+        instrumentor_factory = RecordingAIInferenceInstrumentorFactory()
 
         # Inject a fake azure.ai.inference.tracing module so the local import succeeds
-        mock_tracing_module = Mock()
-        mock_tracing_module.AIInferenceInstrumentor = mock_instrumentor_class
+        tracing_module = _tracing_module_with(instrumentor_factory)
 
         try:
             with (
-                patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor") as mock_az_monitor,
-                patch.dict(sys.modules, {"azure.ai.inference.tracing": mock_tracing_module}),
+                patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor", new=azure_monitor),
+                patch.dict(sys.modules, {"azure.ai.inference.tracing": tracing_module}),
             ):
                 result = _configure_azure_monitor(config)
 
             assert result is True
-            mock_az_monitor.assert_called_once_with(
-                connection_string="InstrumentationKey=test-key",
-                enable_live_metrics=False,
-            )
-            mock_instrumentor_instance.instrument.assert_called_once_with(
-                enable_content_recording=True,
-            )
+            assert azure_monitor.calls == [
+                {
+                    "connection_string": "InstrumentationKey=test-key",
+                    "enable_live_metrics": False,
+                }
+            ]
+            instrumentor = _only_instrumentor(instrumentor_factory)
+            assert instrumentor.instrument_calls == [{"enable_content_recording": True}]
         finally:
             _reset_azure_monitor_state()
 
@@ -207,22 +251,26 @@ class TestEnableContentRecording:
             enable_live_metrics=False,
         )
 
-        mock_instrumentor_instance = Mock()
-        mock_instrumentor_class = Mock(return_value=mock_instrumentor_instance)
+        azure_monitor = RecordingAzureMonitorConfigurator()
+        instrumentor_factory = RecordingAIInferenceInstrumentorFactory()
 
-        mock_tracing_module = Mock()
-        mock_tracing_module.AIInferenceInstrumentor = mock_instrumentor_class
+        tracing_module = _tracing_module_with(instrumentor_factory)
 
         try:
             with (
-                patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor"),
-                patch.dict(sys.modules, {"azure.ai.inference.tracing": mock_tracing_module}),
+                patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor", new=azure_monitor),
+                patch.dict(sys.modules, {"azure.ai.inference.tracing": tracing_module}),
             ):
                 _configure_azure_monitor(config)
 
-            mock_instrumentor_instance.instrument.assert_called_once_with(
-                enable_content_recording=False,
-            )
+            assert azure_monitor.calls == [
+                {
+                    "connection_string": "InstrumentationKey=test-key",
+                    "enable_live_metrics": False,
+                }
+            ]
+            instrumentor = _only_instrumentor(instrumentor_factory)
+            assert instrumentor.instrument_calls == [{"enable_content_recording": False}]
         finally:
             _reset_azure_monitor_state()
 
@@ -252,10 +300,17 @@ class TestEnableContentRecording:
         # Remove any injected mock from previous tests to ensure ImportError path
         env_key = "AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED"
         old_value = os.environ.pop(env_key, None)
+        azure_monitor = RecordingAzureMonitorConfigurator()
         try:
-            with patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor"):
+            with patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor", new=azure_monitor):
                 _configure_azure_monitor(config)
 
+            assert azure_monitor.calls == [
+                {
+                    "connection_string": "InstrumentationKey=test-key",
+                    "enable_live_metrics": False,
+                }
+            ]
             assert os.environ.get(env_key) == "true"
         finally:
             # Clean up
@@ -287,24 +342,27 @@ class TestEnableContentRecording:
             enable_live_metrics=True,
         )
 
-        mock_instrumentor_instance = Mock()
-        mock_instrumentor_class = Mock(return_value=mock_instrumentor_instance)
+        azure_monitor = RecordingAzureMonitorConfigurator()
+        instrumentor_factory = RecordingAIInferenceInstrumentorFactory()
 
-        mock_tracing_module = Mock()
-        mock_tracing_module.AIInferenceInstrumentor = mock_instrumentor_class
+        tracing_module = _tracing_module_with(instrumentor_factory)
 
         try:
             with (
-                patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor") as mock_az_monitor,
-                patch.dict(sys.modules, {"azure.ai.inference.tracing": mock_tracing_module}),
+                patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor", new=azure_monitor),
+                patch.dict(sys.modules, {"azure.ai.inference.tracing": tracing_module}),
             ):
                 result = _configure_azure_monitor(config)
 
             assert result is True
-            mock_az_monitor.assert_called_once_with(
-                connection_string="InstrumentationKey=test-key",
-                enable_live_metrics=True,
-            )
+            assert azure_monitor.calls == [
+                {
+                    "connection_string": "InstrumentationKey=test-key",
+                    "enable_live_metrics": True,
+                }
+            ]
+            instrumentor = _only_instrumentor(instrumentor_factory)
+            assert instrumentor.instrument_calls == [{"enable_content_recording": False}]
         finally:
             _reset_azure_monitor_state()
 
@@ -328,10 +386,17 @@ class TestEnableContentRecording:
 
         env_key = "AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED"
         old_value = os.environ.pop(env_key, None)
+        azure_monitor = RecordingAzureMonitorConfigurator()
         try:
-            with patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor"):
+            with patch("elspeth.plugins.transforms.llm.providers.azure.configure_azure_monitor", new=azure_monitor):
                 _configure_azure_monitor(config)
 
+            assert azure_monitor.calls == [
+                {
+                    "connection_string": "InstrumentationKey=test-key",
+                    "enable_live_metrics": False,
+                }
+            ]
             assert os.environ.get(env_key) == "false"
         finally:
             # Clean up

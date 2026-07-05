@@ -40,9 +40,11 @@ FollowerProcessor correctly:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -50,6 +52,7 @@ from elspeth.contracts.coordination import (
     CoordinationToken,
     LeaderInfo,
 )
+from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FollowerSeatDeadError, RunWorkerEvictedError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.orchestrator.follower import FollowerProcessor, _SeatDeadError
@@ -67,6 +70,104 @@ LIVENESS_WINDOW = 80.0
 # ---------------------------------------------------------------------------
 # Stubs
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _RunStatusRecord:
+    status: RunStatus
+
+
+@dataclass(frozen=True, slots=True)
+class _FollowerDrainResult:
+    label: str = "work-found"
+
+
+class _UnusedScheduler:
+    """Scheduler surface required for RowProcessor construction in focused tests."""
+
+    @staticmethod
+    def serialize_row_payload(row: Any) -> str:
+        from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+        return TokenSchedulerRepository.serialize_row_payload(row)
+
+    @staticmethod
+    def deserialize_row_payload(row_payload_json: str) -> Any:
+        from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+        return TokenSchedulerRepository.deserialize_row_payload(row_payload_json)
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"scheduler method {name!r} should not be used in this focused processor test")
+
+
+class _UncalledBatchTransform:
+    """Concrete TransformProtocol-compatible fake that must not be executed."""
+
+    def __init__(self, *, node_id: str) -> None:
+        self.name = "batch-agg-transform"
+        self.input_schema = object
+        self.output_schema = object
+        self.node_id = node_id
+        self.config: dict[str, Any] = {}
+        self.determinism = None
+        self.plugin_version = "1.0"
+        self.source_file_hash = None
+        self.usage_when_to_use = None
+        self.usage_when_not_to_use = None
+        self.example_use = None
+        self.capability_tags: tuple[str, ...] = ()
+        self.audit_characteristics = frozenset()
+        self.discovery_secret_requirements = MappingProxyType({})
+        self._on_start_called = True
+        self._on_complete_called = False
+        self.is_batch_aware = True
+        self.supports_row_mode_when_batch_aware = False
+        self.creates_tokens = False
+        self.passes_through_input = False
+        self.can_drop_rows = False
+        self.declared_output_fields = frozenset()
+        self.declared_input_fields = frozenset()
+        self.requires_runtime_preflight = False
+        self._output_schema_config = None
+        self.on_error = "discard"
+        self.on_success = None
+        self.process_called = False
+
+    def effective_static_contract(self) -> frozenset[str]:
+        return self.declared_output_fields
+
+    def process(self, row: Any, ctx: Any) -> Any:
+        self.process_called = True
+        raise AssertionError("follower barrier test must not execute the batch transform")
+
+    def close(self) -> None:
+        raise AssertionError("follower barrier test must not close the transform")
+
+    def on_start(self, ctx: Any) -> None:
+        raise AssertionError("follower barrier test must not start the transform")
+
+    def on_complete(self, ctx: Any) -> None:
+        raise AssertionError("follower barrier test must not complete the transform")
+
+    def runtime_preflight(self, ctx: Any) -> None:
+        raise AssertionError("follower barrier test must not preflight the transform")
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> None:
+        return None
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        return {}
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> None:
+        return None
+
+    @classmethod
+    def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+        return ()
 
 
 class _StubHeartbeat:
@@ -159,14 +260,12 @@ class _StubRunLifecycle:
         self.get_run_results: list[Any] = []
 
     def get_run(self, run_id: str) -> Any:
-        from elspeth.contracts.enums import RunStatus
-
         if self.get_run_results:
             return self.get_run_results.pop(0)
 
-        result = MagicMock()
-        result.status = RunStatus.RUNNING if self._running else RunStatus.COMPLETED
-        return result
+        return _RunStatusRecord(
+            status=RunStatus.RUNNING if self._running else RunStatus.COMPLETED,
+        )
 
 
 class _StubFactory:
@@ -431,17 +530,13 @@ class TestFollowerSeatDead:
                 for _ in range(3):
                     before_claim()
                     self.claim_checks += 1
-                return [MagicMock()]
-
-        from elspeth.contracts.enums import RunStatus
+                return [_FollowerDrainResult()]
 
         processor = _ManyClaimDrainProcessor()
         coord_repo = _StubRunCoordRepo()
         factory = _StubFactory(running=True)
-        run_result_running = MagicMock()
-        run_result_running.status = RunStatus.RUNNING
-        run_result_completed = MagicMock()
-        run_result_completed.status = RunStatus.COMPLETED
+        run_result_running = _RunStatusRecord(status=RunStatus.RUNNING)
+        run_result_completed = _RunStatusRecord(status=RunStatus.COMPLETED)
         factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
         heartbeat = _StubHeartbeat()
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
@@ -477,9 +572,7 @@ class TestFollowerSeatDead:
                 self.claim_checks += 1
                 before_claim()
                 self.claim_checks += 1
-                return [MagicMock()]
-
-        from elspeth.contracts.enums import RunStatus
+                return [_FollowerDrainResult()]
 
         processor = _CallbackDrainProcessor()
         coord_repo = _StubRunCoordRepo()
@@ -501,10 +594,8 @@ class TestFollowerSeatDead:
             None,
         ]
         factory = _StubFactory(running=True)
-        run_result_running = MagicMock()
-        run_result_running.status = RunStatus.RUNNING
-        run_result_completed = MagicMock()
-        run_result_completed.status = RunStatus.COMPLETED
+        run_result_running = _RunStatusRecord(status=RunStatus.RUNNING)
+        run_result_completed = _RunStatusRecord(status=RunStatus.COMPLETED)
         factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
         heartbeat = _StubHeartbeat()
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
@@ -541,7 +632,7 @@ class TestFollowerSeatDead:
                 self.claim_checks += 1
                 before_claim()
                 self.claim_checks += 1
-                return [MagicMock()]
+                return [_FollowerDrainResult()]
 
         processor = _CallbackDrainProcessor()
         coord_repo = _StubRunCoordRepo()
@@ -700,15 +791,9 @@ class TestFollowerEvictionFinalizeDepartureRace:
 
         # get_run sequence: first call (top-of-loop check, returns RUNNING so loop continues),
         # second call (in the except arm recheck, returns COMPLETED → clean exit).
-        from unittest.mock import MagicMock
-
-        from elspeth.contracts.enums import RunStatus
-
         factory = _StubFactory(running=True)
-        run_result_running = MagicMock()
-        run_result_running.status = RunStatus.RUNNING
-        run_result_completed = MagicMock()
-        run_result_completed.status = RunStatus.COMPLETED
+        run_result_running = _RunStatusRecord(status=RunStatus.RUNNING)
+        run_result_completed = _RunStatusRecord(status=RunStatus.COMPLETED)
         factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
@@ -944,7 +1029,7 @@ class TestFollowerDrainedBehavior:
 
         # First drain: returns work.  Second drain: idle → triggers terminal.
         processor.drain_results = [
-            [MagicMock()],  # iteration 1: work found
+            [_FollowerDrainResult()],  # iteration 1: work found
             [],  # iteration 2: idle
         ]
 
@@ -979,9 +1064,9 @@ class TestFollowerDrainedBehavior:
         waits: list[float] = []
 
         processor.drain_results = [
-            [MagicMock()],  # work
-            [MagicMock()],  # work
-            [MagicMock()],  # work
+            [_FollowerDrainResult()],  # work
+            [_FollowerDrainResult()],  # work
+            [_FollowerDrainResult()],  # work
             [],  # idle
         ]
 
@@ -1329,9 +1414,6 @@ class TestFollowerBarrierNodeIds:
 
         Returns (processor, agg_node_id, transform, token).
         """
-        from unittest.mock import MagicMock, Mock
-
-        from elspeth.contracts import TransformProtocol
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.contracts.types import NodeID
         from elspeth.engine.processor import DAGTraversalContext, RowProcessor
@@ -1365,15 +1447,7 @@ class TestFollowerBarrierNodeIds:
         )
 
         # A batch-aware transform that must NOT be called on a follower.
-        transform = Mock(spec=TransformProtocol)
-        transform.node_id = str(agg_node_id)
-        transform.is_batch_aware = True
-        transform.name = "batch-agg-transform"
-        transform.on_error = "discard"
-        transform.on_success = None
-        transform.creates_tokens = False
-        transform.declared_output_fields = frozenset()
-        transform.declared_input_fields = frozenset()
+        transform = _UncalledBatchTransform(node_id=str(agg_node_id))
 
         traversal = DAGTraversalContext(
             node_step_map={source_node_id: 0, agg_node_id: 1},
@@ -1385,7 +1459,7 @@ class TestFollowerBarrierNodeIds:
         # Stub scheduler — mark_blocked / claim_ready are not called by
         # _process_single_token directly; we only call the method and inspect
         # the return value.
-        stub_scheduler = MagicMock()
+        stub_scheduler = _UnusedScheduler()
 
         from tests.fixtures.landscape import leader_coordination_token
 
@@ -1439,7 +1513,7 @@ class TestFollowerBarrierNodeIds:
         assert child_items == [], f"Expected no child items, got {child_items!r}"
 
         # The transform must NOT have been called (process() is the TransformProtocol method).
-        transform.process.assert_not_called()
+        assert not transform.process_called
 
     def test_non_batch_aware_transform_not_intercepted_by_follower_barrier(self) -> None:
         """A non-batch-aware transform is NEVER intercepted by follower_barrier_node_ids,
@@ -1483,8 +1557,6 @@ class TestFollowerBarrierNodeIds:
         in follower_barrier_node_ids, matching the leader's barrier_key so the
         adoption verb finds the correct row.
         """
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.types import NodeID
         from elspeth.engine.dag_navigator import WorkItem
         from elspeth.engine.processor import DAGTraversalContext, RowProcessor
@@ -1510,7 +1582,7 @@ class TestFollowerBarrierNodeIds:
             coalesce_node_map={},
         )
 
-        stub_scheduler = MagicMock()
+        stub_scheduler = _UnusedScheduler()
 
         processor = RowProcessor(
             execution=factory.execution,

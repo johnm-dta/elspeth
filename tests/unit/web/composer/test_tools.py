@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -66,6 +66,45 @@ from elspeth.web.sessions.schema import initialize_session_schema
 _STUB_SHA256 = "a" * 64
 _STUB_SHA256_ALT = "b" * 64
 EXPECTED_REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _SyncCallRecorder:
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value = return_value
+        self.side_effect: Callable[..., object] | BaseException | None = None
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self.call_args_list) == 1
+        record = self.call_args_list[0]
+        assert record.args == args
+        assert record.kwargs == kwargs
+
+    def assert_called_once(self) -> None:
+        assert len(self.call_args_list) == 1
+
+
+class _SecretServiceDouble:
+    def __init__(self) -> None:
+        self.list_refs = _SyncCallRecorder([])
+        self.has_ref = _SyncCallRecorder(False)
 
 
 def _empty_state() -> CompositionState:
@@ -2340,7 +2379,7 @@ class TestDiscoveryTools:
                 secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
             ),
         ]
-        secret_service = MagicMock()
+        secret_service = _SecretServiceDouble()
         secret_service.list_refs.return_value = [
             SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
         ]
@@ -2377,7 +2416,7 @@ class TestDiscoveryTools:
                 secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
             ),
         ]
-        secret_service = MagicMock()
+        secret_service = _SecretServiceDouble()
         secret_service.list_refs.return_value = [
             SecretInventoryItem(name="AZURE_CONTENT_SAFETY_KEY", scope="server", available=True),
         ]
@@ -2413,7 +2452,7 @@ class TestDiscoveryTools:
             knob_schema={"fields": []},
             secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
         )
-        secret_service = MagicMock()
+        secret_service = _SecretServiceDouble()
         secret_service.has_ref.return_value = False
 
         result = execute_tool(
@@ -2446,7 +2485,7 @@ class TestDiscoveryTools:
             knob_schema={"fields": []},
             secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
         )
-        secret_service = MagicMock()
+        secret_service = _SecretServiceDouble()
         secret_service.has_ref.return_value = False
 
         result = execute_tool(
@@ -5403,10 +5442,10 @@ class TestSecretTools:
     - wire_secret_ref sets a secret_ref marker in source options
     """
 
-    def _mock_secret_service(self) -> MagicMock:
+    def _mock_secret_service(self) -> _SecretServiceDouble:
         from elspeth.contracts.secrets import SecretInventoryItem
 
-        svc = MagicMock()
+        svc = _SecretServiceDouble()
         svc.list_refs.return_value = [
             SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
             SecretInventoryItem(name="DB_PASSWORD", scope="server", available=True),
@@ -5446,7 +5485,7 @@ class TestSecretTools:
 
         state = _empty_state()
         catalog = _mock_catalog()
-        svc = MagicMock()
+        svc = _SecretServiceDouble()
         svc.list_refs.return_value = [
             SecretInventoryItem(
                 name="OPENROUTER_API_KEY",
@@ -5500,7 +5539,7 @@ class TestSecretTools:
 
         state = _empty_state()
         catalog = _mock_catalog()
-        svc = MagicMock()
+        svc = _SecretServiceDouble()
         svc.has_ref.return_value = False
         svc.list_refs.return_value = [
             SecretInventoryItem(
@@ -5536,7 +5575,7 @@ class TestSecretTools:
 
         state = _empty_state()
         catalog = _mock_catalog()
-        svc = MagicMock()
+        svc = _SecretServiceDouble()
         svc.has_ref.return_value = False
         svc.list_refs.return_value = [
             SecretInventoryItem(
@@ -5901,10 +5940,10 @@ class TestSecretToolsArgumentValidation:
     handler dispatch without echoing attacker-controlled values.
     """
 
-    def _svc(self) -> MagicMock:
+    def _svc(self) -> _SecretServiceDouble:
         from elspeth.contracts.secrets import SecretInventoryItem
 
-        svc = MagicMock()
+        svc = _SecretServiceDouble()
         svc.list_refs.return_value = [
             SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
         ]
@@ -9898,8 +9937,8 @@ class TestPreviewPipeline:
             )
         )
         catalog = _mock_catalog()
-        runtime_preflight = MagicMock(
-            return_value=ValidationResult(
+        runtime_preflight = _SyncCallRecorder(
+            ValidationResult(
                 is_valid=False,
                 checks=[
                     ValidationCheck(

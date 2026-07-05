@@ -9,8 +9,9 @@ creation).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,6 +28,27 @@ from elspeth.plugins.transforms.llm.transform import LLMTransform
 # ---------------------------------------------------------------------------
 
 DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+class FakeAuditRecorder:
+    """Concrete lifecycle recorder sentinel for provider construction tests."""
+
+
+def _ignore_telemetry(event: Any) -> None:
+    pass
+
+
+@dataclass(slots=True)
+class FakeLifecycleContext:
+    run_id: str = "test-run"
+    landscape: FakeAuditRecorder | None = None
+    telemetry_emit: Callable[[Any], None] = _ignore_telemetry
+    rate_limit_registry: Any = None
+    node_id: str | None = None
+    operation_id: str | None = None
+    payload_store: Any = None
+    concurrency_config: Any = None
+    shutdown_event: Any = None
 
 
 def _make_azure_config() -> dict[str, Any]:
@@ -61,9 +83,9 @@ def _prepare_transform_for_provider_creation(transform: LLMTransform) -> None:
     without going through the full lifecycle. This lets us test
     _create_provider() in isolation.
     """
-    transform._recorder = MagicMock()
+    transform._recorder = FakeAuditRecorder()
     transform._run_id = "test-run"
-    transform._telemetry_emit = lambda event: None
+    transform._telemetry_emit = _ignore_telemetry
 
 
 # ---------------------------------------------------------------------------
@@ -137,14 +159,9 @@ class TestOnStartSetsProvider:
         # Before on_start, provider is None
         assert transform._provider is None
 
-        # Create a mock LifecycleContext with the required attributes
-        mock_ctx = MagicMock()
-        mock_ctx.landscape = MagicMock()
-        mock_ctx.run_id = "test-run"
-        mock_ctx.telemetry_emit = lambda event: None
-        mock_ctx.rate_limit_registry = None
+        ctx = FakeLifecycleContext(landscape=FakeAuditRecorder())
 
-        transform.on_start(mock_ctx)
+        transform.on_start(ctx)
 
         assert transform._provider is not None
         # _provider is typed as LLMProvider (Protocol), but at runtime it's a concrete
@@ -159,13 +176,9 @@ class TestOnStartSetsProvider:
 
         assert transform._provider is None
 
-        mock_ctx = MagicMock()
-        mock_ctx.landscape = MagicMock()
-        mock_ctx.run_id = "test-run"
-        mock_ctx.telemetry_emit = lambda event: None
-        mock_ctx.rate_limit_registry = None
+        ctx = FakeLifecycleContext(landscape=FakeAuditRecorder())
 
-        transform.on_start(mock_ctx)
+        transform.on_start(ctx)
 
         assert transform._provider is not None
         # Same as above — verifying concrete provider type behind Protocol interface.
@@ -175,15 +188,11 @@ class TestOnStartSetsProvider:
     def test_on_start_stores_recorder(self) -> None:
         """on_start() should capture the recorder from context."""
         transform = LLMTransform(_make_azure_config())
-        mock_landscape = MagicMock()
+        landscape = FakeAuditRecorder()
 
-        mock_ctx = MagicMock()
-        mock_ctx.landscape = mock_landscape
-        mock_ctx.run_id = "test-run-123"
-        mock_ctx.telemetry_emit = lambda event: None
-        mock_ctx.rate_limit_registry = None
+        ctx = FakeLifecycleContext(landscape=landscape, run_id="test-run-123")
 
-        transform.on_start(mock_ctx)
+        transform.on_start(ctx)
 
-        assert transform._recorder is mock_landscape
+        assert transform._recorder is landscape
         assert transform._run_id == "test-run-123"

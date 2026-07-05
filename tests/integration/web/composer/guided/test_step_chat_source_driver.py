@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -60,7 +60,7 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
 
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(side_effect=_capture),
+        new=_capture,
     ):
         outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -140,7 +140,7 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
 
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(side_effect=_echo_server_owned_keys),
+        new=_echo_server_owned_keys,
     ):
         outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -188,9 +188,13 @@ async def test_source_driver_captures_prose_reply_on_decline() -> None:
     route) uses this to answer without a second, tool-less call (C-1 fix).
     """
     prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Here is some advice.", tool_calls=None))])
+
+    async def _decline_with_prose(**kwargs):
+        return prose
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=prose),
+        new=_decline_with_prose,
     ):
         outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -225,10 +229,14 @@ async def test_source_driver_rejects_scaffold_leak_in_declined_prose() -> None:
             )
         ]
     )
+
+    async def _decline_with_scaffold_leak(**kwargs):
+        return scaffold_reply
+
     with (
         patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=scaffold_reply),
+            new=_decline_with_scaffold_leak,
         ),
         pytest.raises(AssistantScaffoldLeakError, match="user-facing prose"),
     ):
@@ -264,9 +272,13 @@ async def test_source_driver_declines_prose_beside_hallucinated_tool_call() -> N
             )
         ]
     )
+
+    async def _decline_with_hallucinated_tool_call(**kwargs):
+        return hallucinated
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=hallucinated),
+        new=_decline_with_hallucinated_tool_call,
     ):
         outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -286,9 +298,13 @@ async def test_source_driver_returns_both_none_on_empty_response() -> None:
     case, unchanged from before the salvage — the caller falls back to the
     advisory chat path (which raises InvariantError on this)."""
     empty = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=None))])
+
+    async def _empty_response(**kwargs):
+        return empty
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=empty),
+        new=_empty_response,
     ):
         outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",

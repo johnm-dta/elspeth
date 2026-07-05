@@ -34,9 +34,12 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -69,6 +72,29 @@ class Widget:
 _TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
 
 
+@dataclass(frozen=True, slots=True)
+class _RecordedCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class _CompletionCreateRecorder:
+    def __init__(self, completion: Any) -> None:
+        self._completion = completion
+        self.call_count = 0
+        self.call_args: _RecordedCall | None = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_count += 1
+        self.call_args = _RecordedCall(args=args, kwargs=kwargs)
+        return self._completion
+
+
+class _FakeOpenAIClient:
+    def __init__(self, completion: Any) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CompletionCreateRecorder(completion)))
+
+
 def _build_source_tree(tmp_path: Path) -> tuple[Path, Path]:
     """Lay out a minimal source root with one finding-producing file.
 
@@ -92,21 +118,18 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
     return allowlist_dir
 
 
-def _mock_openrouter_completion(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> MagicMock:
-    """OpenAI-shape chat-completion mock for OpenRouter routing."""
-    message = MagicMock()
-    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
-    choice = MagicMock()
-    choice.message = message
-    completion = MagicMock()
-    completion.choices = [choice]
-    completion.model = DEFAULT_JUDGE_MODEL
-    completion.usage = MagicMock(prompt_tokens=4000, prompt_tokens_details=MagicMock(cached_tokens=0))
-    return completion
+def _mock_openrouter_completion(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> SimpleNamespace:
+    """OpenAI-shape chat-completion fake for OpenRouter routing."""
+    message = SimpleNamespace(
+        content=json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
+    )
+    choice = SimpleNamespace(message=message)
+    usage = SimpleNamespace(prompt_tokens=4000, prompt_tokens_details=SimpleNamespace(cached_tokens=0))
+    return SimpleNamespace(choices=[choice], model=DEFAULT_JUDGE_MODEL, usage=usage)
 
 
 @contextmanager
-def _mock_judge_call(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> Iterator[MagicMock]:
+def _mock_judge_call(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> Iterator[Any]:
     """Patch ``openai.OpenAI`` so the judge call runs offline.
 
     Yields the patched OpenAI class so tests can inspect what prompt
@@ -115,8 +138,7 @@ def _mock_judge_call(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> Ite
     secret.
     """
     fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _FakeOpenAIClient(fake_completion)
     with (
         patch.dict(
             os.environ,
@@ -131,7 +153,7 @@ def _mock_judge_call(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> Ite
         yield client_class
 
 
-def _captured_user_prompt(client_class: MagicMock) -> str:
+def _captured_user_prompt(client_class: Any) -> str:
     """Extract the user-message text from a single recorded OpenAI call.
 
     The judge sends two messages: a static system block (the policy)
@@ -143,6 +165,7 @@ def _captured_user_prompt(client_class: MagicMock) -> str:
     fake_client = client_class.return_value
     assert fake_client.chat.completions.create.call_count == 1
     call = fake_client.chat.completions.create.call_args
+    assert call is not None
     messages = call.kwargs["messages"]
     user_message = next(m for m in messages if m["role"] == "user")
     return "\n".join(str(block["text"]) for block in user_message["content"])

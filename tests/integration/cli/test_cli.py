@@ -21,6 +21,22 @@ _JOIN_NOW = datetime(2026, 6, 13, 12, 0, 0, tzinfo=UTC)
 _JOIN_WINDOW = 80.0
 
 
+class _CallRecorder:
+    def __init__(self, return_value=None, side_effect=None):
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    def assert_called_once(self):
+        assert len(self.calls) == 1
+
+
 class TestCLIIntegration:
     """End-to-end CLI integration tests."""
 
@@ -613,7 +629,7 @@ class TestJoinCommand:
     def test_join_startup_failure_departs_admitted_worker_and_cleans_plugins(self, tmp_path: Path) -> None:
         """A follower plugin on_start failure after admission must still depart and tear down."""
         from types import SimpleNamespace
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from sqlalchemy import select
 
@@ -671,9 +687,9 @@ class TestJoinCommand:
 
         failing_sink = SimpleNamespace(
             name="failing_sink",
-            on_start=MagicMock(side_effect=RuntimeError("sink startup failed")),
-            on_complete=MagicMock(),
-            close=MagicMock(),
+            on_start=_CallRecorder(side_effect=RuntimeError("sink startup failed")),
+            on_complete=_CallRecorder(),
+            close=_CallRecorder(),
         )
         plugins = SimpleNamespace(
             sources={"primary": object()},
@@ -682,12 +698,11 @@ class TestJoinCommand:
             aggregations={},
             sinks={"default": failing_sink},
         )
-        execution_graph = MagicMock()
-        execution_graph.get_aggregation_id_map.return_value = {}
+        execution_graph = SimpleNamespace(get_aggregation_id_map=_CallRecorder({}))
 
         with (
             patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=plugins),
-            patch("elspeth.cli._build_resume_graphs", return_value=(MagicMock(), execution_graph)),
+            patch("elspeth.cli._build_resume_graphs", return_value=(object(), execution_graph)),
             patch("elspeth.engine.orchestrator.follower.build_follower_processor") as mock_build_follower,
         ):
             result = runner.invoke(
@@ -850,7 +865,8 @@ class TestRunResumeEviction:
         PRE-FIX behaviour: exit 4, event=error (falls through to except Exception).
         POST-FIX behaviour: exit 3, event=evicted (dedicated arm before TIER_1_ERRORS).
         """
-        from unittest.mock import MagicMock, patch
+        from types import SimpleNamespace
+        from unittest.mock import patch
 
         from elspeth.cli import app
         from elspeth.contracts.checkpoint import ResumeCheck
@@ -869,9 +885,7 @@ class TestRunResumeEviction:
 
         eviction_exc = RunWorkerEvictedError(worker_id="worker:resume-x:xyz", run_id=run_id)
 
-        mock_resume_point = MagicMock()
-        mock_resume_point.sequence_number = 0
-        mock_resume_point.barrier_scalars = None
+        mock_resume_point = SimpleNamespace(sequence_number=0, barrier_scalars=None)
 
         with (
             patch(

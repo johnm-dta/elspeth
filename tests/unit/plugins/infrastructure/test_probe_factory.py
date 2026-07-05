@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from dataclasses import dataclass
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +11,38 @@ from pydantic import ValidationError
 from elspeth.contracts.probes import CollectionProbe
 from elspeth.core.dependency_config import CollectionProbeConfig
 from elspeth.plugins.infrastructure.probe_factory import ChromaCollectionProbe, build_collection_probes
+
+
+@dataclass(slots=True)
+class _FakeChromaCollection:
+    document_count: int
+
+    def count(self) -> int:
+        return self.document_count
+
+
+class _FakeChromaClient:
+    def __init__(
+        self,
+        collection: _FakeChromaCollection | None = None,
+        *,
+        get_collection_error: Exception | None = None,
+    ) -> None:
+        self._collection = collection
+        self._get_collection_error = get_collection_error
+        self.get_collection_calls: list[str] = []
+        self.close_calls = 0
+
+    def get_collection(self, name: str) -> _FakeChromaCollection:
+        self.get_collection_calls.append(name)
+        if self._get_collection_error is not None:
+            raise self._get_collection_error
+        if self._collection is None:
+            raise AssertionError("test fake requires a collection or get_collection_error")
+        return self._collection
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class TestBuildCollectionProbes:
@@ -65,13 +98,10 @@ class TestChromaCollectionProbeBehavior:
     def test_collection_found_with_documents(self) -> None:
         probe = ChromaCollectionProbe("science", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 42
+        fake_collection = _FakeChromaCollection(document_count=42)
+        fake_client = _FakeChromaClient(collection=fake_collection)
 
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_collection
-
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is True
@@ -81,13 +111,10 @@ class TestChromaCollectionProbeBehavior:
     def test_collection_found_but_empty(self) -> None:
         probe = ChromaCollectionProbe("empty", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 0
+        fake_collection = _FakeChromaCollection(document_count=0)
+        fake_client = _FakeChromaClient(collection=fake_collection)
 
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_collection
-
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is True
@@ -99,10 +126,9 @@ class TestChromaCollectionProbeBehavior:
 
         probe = ChromaCollectionProbe("missing", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("not found")
+        fake_client = _FakeChromaClient(get_collection_error=chromadb.errors.NotFoundError("not found"))
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is True
@@ -115,10 +141,9 @@ class TestChromaCollectionProbeBehavior:
 
         probe = ChromaCollectionProbe("secret", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = chromadb.errors.AuthorizationError("forbidden")
+        fake_client = _FakeChromaClient(get_collection_error=chromadb.errors.AuthorizationError("forbidden"))
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         # Auth error falls through to outer handler → reachable=False
@@ -128,10 +153,9 @@ class TestChromaCollectionProbeBehavior:
     def test_connection_failure_reports_unreachable(self) -> None:
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = ConnectionError("refused")
+        fake_client = _FakeChromaClient(get_collection_error=ConnectionError("refused"))
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is False
@@ -141,7 +165,7 @@ class TestChromaCollectionProbeBehavior:
         """Infrastructure failure during client creation is 'unreachable', not a bug."""
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "/nonexistent/path"})
 
-        with patch("chromadb.PersistentClient", side_effect=OSError("Permission denied")):
+        with patch("chromadb.PersistentClient", autospec=True, side_effect=OSError("Permission denied")):
             result = probe.probe()
 
         assert result.reachable is False
@@ -151,13 +175,10 @@ class TestChromaCollectionProbeBehavior:
         """Client mode should use HttpClient instead of PersistentClient."""
         probe = ChromaCollectionProbe("remote", {"mode": "client", "host": "localhost", "port": 8000, "ssl": True})
 
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 5
+        fake_collection = _FakeChromaCollection(document_count=5)
+        fake_client = _FakeChromaClient(collection=fake_collection)
 
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_collection
-
-        with patch("chromadb.HttpClient", return_value=mock_client) as mock_http_cls:
+        with patch("chromadb.HttpClient", autospec=True, return_value=fake_client) as mock_http_cls:
             result = probe.probe()
 
         mock_http_cls.assert_called_once_with(host="localhost", port=8000, ssl=True)
@@ -204,11 +225,10 @@ class TestChromaCollectionProbeCrashThrough:
         """TypeError from bad config usage must not be caught."""
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = TypeError("bad argument type")
+        fake_client = _FakeChromaClient(get_collection_error=TypeError("bad argument type"))
 
         with (
-            patch("chromadb.PersistentClient", return_value=mock_client),
+            patch("chromadb.PersistentClient", autospec=True, return_value=fake_client),
             pytest.raises(TypeError, match="bad argument type"),
         ):
             probe.probe()
@@ -217,11 +237,10 @@ class TestChromaCollectionProbeCrashThrough:
         """AttributeError from code bug must not be caught."""
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = AttributeError("no such attr")
+        fake_client = _FakeChromaClient(get_collection_error=AttributeError("no such attr"))
 
         with (
-            patch("chromadb.PersistentClient", return_value=mock_client),
+            patch("chromadb.PersistentClient", autospec=True, return_value=fake_client),
             pytest.raises(AttributeError, match="no such attr"),
         ):
             probe.probe()
@@ -247,10 +266,9 @@ class TestChromaProbeWidenedExceptSet:
 
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = ValueError("Could not connect to a Chroma server")
+        fake_client = _FakeChromaClient(get_collection_error=ValueError("Could not connect to a Chroma server"))
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is False
@@ -262,10 +280,9 @@ class TestChromaProbeWidenedExceptSet:
 
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = httpx.ConnectError("connection refused")
+        fake_client = _FakeChromaClient(get_collection_error=httpx.ConnectError("connection refused"))
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is False
@@ -275,26 +292,23 @@ class TestChromaProbeWidenedExceptSet:
         """The httpx client must be closed after a successful probe (leaked-client fix)."""
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 3
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_collection
+        fake_collection = _FakeChromaCollection(document_count=3)
+        fake_client = _FakeChromaClient(collection=fake_collection)
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is True
-        mock_client.close.assert_called_once()
+        assert fake_client.close_calls == 1
 
     def test_client_is_closed_after_unreachable_probe(self) -> None:
         """The httpx client must be closed even when the probe reports reachable=False."""
         probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
 
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = ConnectionError("refused")
+        fake_client = _FakeChromaClient(get_collection_error=ConnectionError("refused"))
 
-        with patch("chromadb.PersistentClient", return_value=mock_client):
+        with patch("chromadb.PersistentClient", autospec=True, return_value=fake_client):
             result = probe.probe()
 
         assert result.reachable is False
-        mock_client.close.assert_called_once()
+        assert fake_client.close_calls == 1

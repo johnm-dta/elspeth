@@ -1,8 +1,6 @@
 # tests/unit/engine/test_token_manager_pipeline_row.py
 """Tests for TokenManager with PipelineRow support."""
 
-from unittest.mock import MagicMock, Mock
-
 import pytest
 
 from elspeth.contracts.identity import TokenInfo
@@ -29,11 +27,62 @@ def _make_contract() -> SchemaContract:
     )
 
 
-def _make_mock_recorder() -> MagicMock:
-    """Create a mock ExecutionRepository."""
-    recorder = MagicMock()
-    recorder.create_row_with_token.return_value = (Mock(row_id="row_001"), Mock(token_id="token_001"))
-    return recorder
+class _CallRecord:
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value = return_value
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self.call_args_list) == 1
+
+
+class _CreatedRow:
+    def __init__(self, row_id: str) -> None:
+        self.row_id = row_id
+
+
+class _CreatedToken:
+    def __init__(
+        self,
+        token_id: str,
+        *,
+        branch_name: str | None = None,
+        fork_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        join_group_id: str | None = None,
+    ) -> None:
+        self.token_id = token_id
+        self.branch_name = branch_name
+        self.fork_group_id = fork_group_id
+        self.expand_group_id = expand_group_id
+        self.join_group_id = join_group_id
+
+
+class _RecorderDouble:
+    def __init__(self) -> None:
+        self.create_row_with_token = _CallRecorder((_CreatedRow("row_001"), _CreatedToken("token_001")))
+        self.fork_token = _CallRecorder()
+        self.expand_token = _CallRecorder()
+        self.coalesce_tokens = _CallRecorder()
+        self.create_token = _CallRecorder()
+
+
+def _make_recorder() -> _RecorderDouble:
+    """Create an ExecutionRepository double."""
+    return _RecorderDouble()
 
 
 class TestTokenManagerCreateInitialToken:
@@ -44,7 +93,7 @@ class TestTokenManagerCreateInitialToken:
         from elspeth.engine.tokens import TokenManager
 
         contract = _make_contract()
-        recorder = _make_mock_recorder()
+        recorder = _make_recorder()
         manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
         source_row = make_source_row({"amount": 100}, contract=contract)
@@ -78,7 +127,7 @@ class TestTokenManagerCreateInitialToken:
         from elspeth.contracts import SourceRow
         from elspeth.engine.tokens import TokenManager
 
-        recorder = _make_mock_recorder()
+        recorder = _make_recorder()
         TokenManager(recorder, step_resolver=_make_step_resolver())
 
         # Since elspeth-a27e71979f, SourceRow.__post_init__ rejects contract=None
@@ -96,10 +145,10 @@ class TestTokenManagerForkToken:
         from elspeth.engine.tokens import TokenManager
 
         contract = _make_contract()
-        recorder = _make_mock_recorder()
+        recorder = _make_recorder()
         # Mock fork_token to return children with branch names
-        child1 = Mock(token_id="child_001", branch_name="branch_a", fork_group_id="fork_group_001")
-        child2 = Mock(token_id="child_002", branch_name="branch_b", fork_group_id="fork_group_001")
+        child1 = _CreatedToken("child_001", branch_name="branch_a", fork_group_id="fork_group_001")
+        child2 = _CreatedToken("child_002", branch_name="branch_b", fork_group_id="fork_group_001")
         recorder.fork_token.return_value = ([child1, child2], "fork_group_001")
         manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
@@ -135,10 +184,10 @@ class TestTokenManagerExpandToken:
         from elspeth.engine.tokens import TokenManager
 
         contract = _make_contract()
-        recorder = _make_mock_recorder()
+        recorder = _make_recorder()
         # Mock expand_token to return children
-        child1 = Mock(token_id="child_001", expand_group_id="eg_001")
-        child2 = Mock(token_id="child_002", expand_group_id="eg_001")
+        child1 = _CreatedToken("child_001", expand_group_id="eg_001")
+        child2 = _CreatedToken("child_002", expand_group_id="eg_001")
         recorder.expand_token.return_value = ([child1, child2], "eg_001")
         manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
@@ -184,12 +233,9 @@ class TestTokenManagerCoalesceTokens:
         from elspeth.engine.tokens import TokenManager
 
         contract = _make_contract()
-        recorder = _make_mock_recorder()
+        recorder = _make_recorder()
         # Mock coalesce_tokens return
-        recorder.coalesce_tokens.return_value = Mock(
-            token_id="merged_001",
-            join_group_id="join_001",
-        )
+        recorder.coalesce_tokens.return_value = _CreatedToken("merged_001", join_group_id="join_001")
         manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
         # Create parent tokens with PipelineRow
@@ -307,8 +353,8 @@ class TestTokenManagerCreateTokenForExistingRow:
         from elspeth.engine.tokens import TokenManager
 
         contract = _make_contract()
-        recorder = _make_mock_recorder()
-        recorder.create_token.return_value = Mock(token_id="new_token_001")
+        recorder = _make_recorder()
+        recorder.create_token.return_value = _CreatedToken("new_token_001")
         manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
         row_data = make_row({"amount": 100}, contract=contract)

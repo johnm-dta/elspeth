@@ -31,8 +31,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -81,30 +82,43 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
     return allowlist_dir
 
 
-def _mock_openrouter_completion(*, verdict: str, rationale: str) -> MagicMock:
+class _FakeChatCompletions:
+    def __init__(self, completion: SimpleNamespace) -> None:
+        self._completion = completion
+
+    def create(self, **_kwargs: Any) -> SimpleNamespace:
+        return self._completion
+
+
+def _mock_openrouter_completion(*, verdict: str, rationale: str) -> SimpleNamespace:
     import json as _json
 
-    completion = MagicMock()
-    completion.choices = [MagicMock()]
-    completion.choices[0].message = MagicMock()
-    completion.choices[0].message.content = _json.dumps(
-        {"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None}
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=_json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
+                )
+            )
+        ],
+        model=DEFAULT_JUDGE_MODEL,
+        usage=SimpleNamespace(
+            prompt_tokens=4000,
+            completion_tokens=50,
+            total_tokens=4050,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        ),
     )
-    completion.model = DEFAULT_JUDGE_MODEL
-    completion.usage = MagicMock()
-    completion.usage.prompt_tokens = 4000
-    completion.usage.completion_tokens = 50
-    completion.usage.total_tokens = 4050
-    completion.usage.prompt_tokens_details = MagicMock()
-    completion.usage.prompt_tokens_details.cached_tokens = 0
-    return completion
 
 
 @contextmanager
-def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
+def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[None]:
     fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeChatCompletions(fake_completion)))
+
+    def fake_openai_constructor(**_kwargs: Any) -> SimpleNamespace:
+        return fake_client
+
     with (
         patch.dict(
             os.environ,
@@ -114,9 +128,9 @@ def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
             },
             clear=False,
         ),
-        patch("openai.OpenAI", return_value=fake_client) as client_class,
+        patch("openai.OpenAI", new=fake_openai_constructor),
     ):
-        yield client_class
+        yield
 
 
 def _emit_and_reload_scalar(value: str) -> Any:

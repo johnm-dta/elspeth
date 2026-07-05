@@ -33,7 +33,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -129,6 +128,55 @@ class _StateRecord:
 class _SessionRecord:
     id: UUID
     user_id: str
+
+
+@dataclass(slots=True)
+class _FakeSessionService:
+    current_state: _StateRecord | None
+    session: _SessionRecord | None
+    get_current_state_await_count: int = 0
+    get_session_await_count: int = 0
+
+    async def get_current_state(self, session_id: UUID) -> _StateRecord | None:
+        self.get_current_state_await_count += 1
+        return self.current_state
+
+    async def get_session(self, session_id: UUID) -> _SessionRecord | None:
+        self.get_session_await_count += 1
+        return self.session
+
+
+@dataclass(slots=True)
+class _FakeExecutionService:
+    validation: ValidationResult
+    validate_await_count: int = 0
+    validate_state_await_count: int = 0
+
+    async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult:
+        self.validate_await_count += 1
+        return self.validation
+
+    async def validate_state(self, state: Any, *, user_id: str | None = None) -> ValidationResult:
+        self.validate_state_await_count += 1
+        return self.validation
+
+
+@dataclass(slots=True)
+class _FakeReadinessService:
+    snapshot: AuditReadinessSnapshot
+    compute_snapshot_await_count: int = 0
+
+    async def compute_snapshot(self, *, session_id: UUID, user_id: str) -> AuditReadinessSnapshot:
+        self.compute_snapshot_await_count += 1
+        return self.snapshot
+
+    def reset_counts(self) -> None:
+        self.compute_snapshot_await_count = 0
+
+
+@dataclass(slots=True)
+class _FakeSettings:
+    shareable_link_lifetime_seconds: int = 30 * 24 * 3600
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -303,20 +351,11 @@ def _build_service(
     state_record: _StateRecord,
     validation: ValidationResult,
     readiness: AuditReadinessSnapshot,
-) -> tuple[ShareableReviewService, MagicMock, MagicMock, MagicMock]:
-    session_service = MagicMock()
-    session_service.get_current_state = AsyncMock(return_value=state_record)
-    session_service.get_session = AsyncMock(return_value=session_record)
-
-    execution_service = MagicMock()
-    execution_service.validate = AsyncMock(return_value=validation)
-    execution_service.validate_state = AsyncMock(return_value=validation)
-
-    readiness_service = MagicMock()
-    readiness_service.compute_snapshot = AsyncMock(return_value=readiness)
-
-    settings = MagicMock()
-    settings.shareable_link_lifetime_seconds = 30 * 24 * 3600
+) -> tuple[ShareableReviewService, _FakeSessionService, _FakeExecutionService, _FakeReadinessService]:
+    session_service = _FakeSessionService(current_state=state_record, session=session_record)
+    execution_service = _FakeExecutionService(validation=validation)
+    readiness_service = _FakeReadinessService(snapshot=readiness)
+    settings = _FakeSettings()
 
     # Phase 8 Sub-task 7c — the constructor now requires a telemetry
     # container. Build a fresh fake-counter container per service
@@ -596,7 +635,7 @@ async def test_get_shareable_link_rejects_state_drift_even_when_digest_matches(
     await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
 
     drifted_state = replace(state_record, id=uuid4())
-    session_service.get_current_state = AsyncMock(return_value=drifted_state)
+    session_service.current_state = drifted_state
 
     with pytest.raises(CompositionNotRunnableError) as exc_info:
         await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
@@ -699,8 +738,8 @@ async def test_get_shareable_link_requires_mark_ready_event(
     with pytest.raises(CompositionNotRunnableError, match="mark this composition ready"):
         await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
 
-    execution_service.validate_state.assert_not_awaited()
-    readiness_service.compute_snapshot.assert_not_awaited()
+    assert execution_service.validate_state_await_count == 0
+    assert readiness_service.compute_snapshot_await_count == 0
 
 
 @pytest.mark.asyncio
@@ -745,15 +784,16 @@ async def test_resolve_token_returns_frozen_snapshot(
         readiness=mark_time_snapshot,
     )
     response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
-    # Mutate the readiness mock so a re-fetch would return a different snapshot.
+    # Mutate the readiness fake so a re-fetch would return a different snapshot.
     later_snapshot = _readiness_snapshot(session_record.id, version=99)
-    readiness_service.compute_snapshot = AsyncMock(return_value=later_snapshot)
+    readiness_service.snapshot = later_snapshot
+    readiness_service.reset_counts()
 
     resolved = await service.resolve_token(token=response.token, requesting_user_id="bob")
     # Frozen-at-mark-time: composition_version reflects the mark-time view, not the later one.
     assert resolved.audit_readiness.composition_version == 3
     # The readiness service was NOT called during resolve.
-    assert readiness_service.compute_snapshot.call_count == 0
+    assert readiness_service.compute_snapshot_await_count == 0
 
 
 @pytest.mark.asyncio
@@ -851,6 +891,6 @@ async def test_resolve_token_does_not_call_readiness_service(
         readiness=snapshot,
     )
     response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
-    readiness_service.compute_snapshot.reset_mock()
+    readiness_service.reset_counts()
     await service.resolve_token(token=response.token, requesting_user_id="bob")
-    assert readiness_service.compute_snapshot.call_count == 0
+    assert readiness_service.compute_snapshot_await_count == 0

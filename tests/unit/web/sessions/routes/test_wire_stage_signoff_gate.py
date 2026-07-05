@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,13 +22,44 @@ from tests.unit.web.sessions.routes._wire_fixtures import (  # P3 helper; see no
 ADVISOR_ON_PROFILE = dataclasses.replace(TUTORIAL_PROFILE, advisor_checkpoints=True)
 
 
-def _service(verdict: AdvisorCheckpointVerdict | None) -> MagicMock:
-    svc = MagicMock()
-    if verdict is None:
-        svc.run_signoff_checkpoint = AsyncMock(side_effect=AssertionError("advisor must NOT be called"))
-    else:
-        svc.run_signoff_checkpoint = AsyncMock(return_value=verdict)
-    return svc
+class _AdvisorCheckpointFake:
+    def __init__(self, verdict: AdvisorCheckpointVerdict | None) -> None:
+        self._verdict = verdict
+        self.await_count = 0
+
+    async def __call__(self, *args, **kwargs) -> AdvisorCheckpointVerdict:
+        self.await_count += 1
+        if self._verdict is None:
+            raise AssertionError("advisor must NOT be called")
+        return self._verdict
+
+    def assert_awaited_once(self) -> None:
+        assert self.await_count == 1
+
+    def assert_not_awaited(self) -> None:
+        assert self.await_count == 0
+
+
+class _AdvisorServiceFake:
+    def __init__(self, verdict: AdvisorCheckpointVerdict | None) -> None:
+        self.run_signoff_checkpoint = _AdvisorCheckpointFake(verdict)
+
+
+class _CatalogPlaceholder:
+    pass
+
+
+class _BlobServicePlaceholder:
+    pass
+
+
+class _PayloadStoreFake:
+    def store(self, _payload: bytes) -> str:
+        return "payload-id"
+
+
+def _service(verdict: AdvisorCheckpointVerdict | None) -> _AdvisorServiceFake:
+    return _AdvisorServiceFake(verdict)
 
 
 async def _dispatch(
@@ -50,23 +80,20 @@ async def _dispatch(
         "edit_step_index": None,
         "control_signal": None,
     }
-    catalog = MagicMock()
-    payload_store = MagicMock()
-    payload_store.store.return_value = "payload-id"
     return await _dispatch_guided_respond(
         state=state,
         guided=session,
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=turn_response,
-        catalog=catalog,
+        catalog=_CatalogPlaceholder(),
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,
         session_engine=None,
         session_id="s1",
-        blob_service=MagicMock(),
-        payload_store=payload_store,
+        blob_service=_BlobServicePlaceholder(),
+        payload_store=_PayloadStoreFake(),
         model="m",
         temperature=None,
         seed=None,

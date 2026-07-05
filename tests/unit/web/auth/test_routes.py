@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from dataclasses import dataclass, field
 
 import jwt as pyjwt
 import pytest
@@ -16,7 +16,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import auth_events_table
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
-from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
 from elspeth.web.auth.routes import RegisterRequest, create_auth_router
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.request_id import RequestIdMiddleware
@@ -41,6 +41,39 @@ class _NoopAuthAuditRecorder:
 
     def record_auth_failure(self, *args, **kwargs) -> None:
         return None
+
+
+@dataclass
+class _FakeAuthProvider:
+    authenticate_result: UserIdentity = field(default_factory=lambda: UserIdentity(user_id="alice", username="alice"))
+    authenticate_error: AuthenticationError | None = None
+    profile_result: UserProfile = field(default_factory=lambda: UserProfile(user_id="alice", username="alice"))
+    profile_error: AuthenticationError | None = None
+    authenticate_calls: int = 0
+    get_user_info_calls: int = 0
+    login_calls: int = 0
+    refresh_calls: int = 0
+
+    async def authenticate(self, _token: str) -> UserIdentity:
+        self.authenticate_calls += 1
+        if self.authenticate_error is not None:
+            raise self.authenticate_error
+        return self.authenticate_result
+
+    async def get_user_info(self, _token: str) -> UserProfile:
+        self.get_user_info_calls += 1
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.profile_result
+
+    async def login(self, _username: str, _password: str) -> str:
+        self.login_calls += 1
+        raise AssertionError("login should not be called")
+
+    async def refresh(self, _user_id: str, _username: str, *, original_iat: int) -> str:
+        _ = original_iat
+        self.refresh_calls += 1
+        raise AssertionError("refresh should not be called")
 
 
 def _create_test_app(provider, auth_provider_type: str = "local", **settings_overrides) -> FastAPI:
@@ -275,7 +308,7 @@ class TestLoginEndpoint:
         assert _read_auth_event_rows(audit_url) == []
 
     async def test_login_not_available_for_oidc(self, tmp_path) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
 
         async with _client_for(app) as client:
@@ -286,7 +319,7 @@ class TestLoginEndpoint:
         assert response.status_code == 404
 
     async def test_login_not_available_for_entra(self) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="entra", **_ENTRA_FIELDS)
         async with _client_for(app) as client:
             response = await client.post(
@@ -402,7 +435,7 @@ class TestRegisterEndpoint:
         assert "Email verification" in response.json()["detail"]
 
     async def test_register_non_local_provider_returns_404(self) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(
             provider,
             auth_provider_type="oidc",
@@ -727,7 +760,7 @@ class TestAuthConfigEndpoint:
         assert response.json()["registration_mode"] == "closed"
 
     async def test_oidc_provider_returns_issuer_and_client_id(self) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(
             provider,
             auth_provider_type="oidc",
@@ -746,7 +779,7 @@ class TestAuthConfigEndpoint:
 
     async def test_config_endpoint_is_unauthenticated(self) -> None:
         """GET /api/auth/config must not require a Bearer token."""
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="local")
 
         # No Authorization header -- should still return 200
@@ -760,8 +793,7 @@ class TestTokenRefreshNonLocal:
     """Token refresh must be unavailable for non-local providers."""
 
     async def test_token_refresh_not_available_for_oidc(self) -> None:
-        provider = AsyncMock()
-        provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
         async with _client_for(app) as client:
             response = await client.post(
@@ -782,14 +814,14 @@ class TestTokenRefreshNonLocal:
         provider_type: str,
         settings_fields: dict[str, str],
     ) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type=provider_type, **settings_fields)
 
         async with _client_for(app) as client:
             response = await client.post("/api/auth/token")
 
         assert response.status_code == 404
-        provider.authenticate.assert_not_awaited()
+        assert provider.authenticate_calls == 0
 
     @pytest.mark.parametrize(
         ("provider_type", "settings_fields"),
@@ -803,8 +835,7 @@ class TestTokenRefreshNonLocal:
         provider_type: str,
         settings_fields: dict[str, str],
     ) -> None:
-        provider = AsyncMock()
-        provider.authenticate.side_effect = AuthenticationError("bad token")
+        provider = _FakeAuthProvider(authenticate_error=AuthenticationError("bad token"))
         app = _create_test_app(provider, auth_provider_type=provider_type, **settings_fields)
 
         async with _client_for(app) as client:
@@ -814,7 +845,7 @@ class TestTokenRefreshNonLocal:
             )
 
         assert response.status_code == 404
-        provider.authenticate.assert_not_awaited()
+        assert provider.authenticate_calls == 0
 
 
 @pytest.mark.asyncio
@@ -823,9 +854,8 @@ class TestMeErrorPath:
 
     async def test_me_authenticate_invalid_tenant_records_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthenticationError("Invalid tenant: received tid='SECRET_TENANT'")
-        app = _create_test_app(mock_provider, auth_provider_type="entra", landscape_url=audit_url, **_ENTRA_FIELDS)
+        provider = _FakeAuthProvider(authenticate_error=AuthenticationError("Invalid tenant: received tid='SECRET_TENANT'"))
+        app = _create_test_app(provider, auth_provider_type="entra", landscape_url=audit_url, **_ENTRA_FIELDS)
         _enable_auth_audit(app)
 
         async with _client_for(app) as client:
@@ -850,9 +880,8 @@ class TestMeErrorPath:
 
     async def test_me_authenticate_provider_unavailable_records_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthProviderUnavailable("JWKS unavailable: SECRET_URL")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(authenticate_error=AuthProviderUnavailable("JWKS unavailable: SECRET_URL"))
+        app = _create_test_app(provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
         _enable_auth_audit(app)
 
         async with _client_for(app) as client:
@@ -875,10 +904,8 @@ class TestMeErrorPath:
 
     async def test_me_get_user_info_failure_returns_401(self) -> None:
         """If get_user_info raises, /me returns 401 with the detail."""
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
-        mock_provider.get_user_info.side_effect = AuthenticationError("Profile lookup failed")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Profile lookup failed"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
         async with _client_for(app) as client:
             response = await client.get(
                 "/api/auth/me",
@@ -889,10 +916,8 @@ class TestMeErrorPath:
 
     async def test_me_get_user_info_failure_records_profile_lookup_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
-        mock_provider.get_user_info.side_effect = AuthenticationError("Missing required 'sub' claim SECRET_SUB")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Missing required 'sub' claim SECRET_SUB"))
+        app = _create_test_app(provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
         _enable_auth_audit(app)
 
         async with _client_for(app) as client:
@@ -917,10 +942,8 @@ class TestMeErrorPath:
 
     async def test_me_get_user_info_unavailable_returns_503(self) -> None:
         """Provider availability failures during profile lookup return 503."""
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
-        mock_provider.get_user_info.side_effect = AuthProviderUnavailable("JWKS unavailable: ConnectError")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(profile_error=AuthProviderUnavailable("JWKS unavailable: ConnectError"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
         async with _client_for(app) as client:
             response = await client.get(
                 "/api/auth/me",

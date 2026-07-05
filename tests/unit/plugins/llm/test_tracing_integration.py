@@ -15,14 +15,16 @@ from __future__ import annotations
 import sys
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.transforms.llm.langfuse import ActiveLangfuseTracer, NoOpLangfuseTracer
-from elspeth.plugins.transforms.llm.provider import LLMProvider
+from elspeth.plugins.transforms.llm.provider import LLMQueryResult
 from elspeth.plugins.transforms.llm.transform import LLMTransform
+from elspeth.testing import make_pipeline_row
 
 # A valid OpenRouter catalog model id (the retired anthropic/claude-3-opus was
 # dropped from the litellm-derived catalog; OpenRouterConfig now rejects models
@@ -79,50 +81,92 @@ def _make_multi_query_config(**overrides: Any) -> dict[str, Any]:
     return config
 
 
-def _make_mock_ctx(run_id: str = "test-run") -> MagicMock:
-    """Create a mock PluginContext."""
-    ctx = MagicMock()
-    ctx.landscape = MagicMock()
-    ctx.run_id = run_id
-    ctx.telemetry_emit = lambda x: None
-    ctx.rate_limit_registry = None
-    return ctx
+class _LandscapeSentinel:
+    pass
+
+
+class _TracingContext:
+    """Minimal transform context for LLMTransform._process_row tests."""
+
+    def __init__(self, run_id: str = "test-run") -> None:
+        self.landscape = _LandscapeSentinel()
+        self.run_id = run_id
+        self.telemetry_emit = lambda x: None
+        self.rate_limit_registry = None
+        self.state_id = "state-123"
+        self.token: TokenInfo | None = None
+
+
+class _RecordingObservation:
+    def __init__(self, record: dict[str, Any]) -> None:
+        self._record = record
+
+    def update(self, **update_kwargs: Any) -> None:
+        self._record["updates"].append(update_kwargs)
+
+
+class _RecordingLangfuseClient:
+    def __init__(self) -> None:
+        self.captured_observations: list[dict[str, Any]] = []
+        self.flush_count = 0
+
+    @contextmanager
+    def start_as_current_observation(self, **kwargs: Any):
+        record: dict[str, Any] = {"kwargs": kwargs, "updates": []}
+        self.captured_observations.append(record)
+        yield _RecordingObservation(record)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _ErroringProvider:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def execute_query(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int | None,
+        state_id: str,
+        token_id: str,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMQueryResult:
+        del messages, model, temperature, max_tokens, state_id, token_id, response_format
+        raise self.error
+
+    def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+        del operation_id, model
+
+    def close(self) -> None:
+        return None
+
+
+def _make_ctx(run_id: str = "test-run") -> _TracingContext:
+    """Create a minimal PluginContext-like object."""
+    return _TracingContext(run_id)
+
+
+def _make_token(token_id: str = "test-token-id") -> TokenInfo:
+    return TokenInfo(row_id="row-1", token_id=token_id, row_data=make_pipeline_row({}))
 
 
 class TestLangfuseIntegration:
     """Integration tests for Langfuse tracing (v3 API)."""
 
     @pytest.fixture
-    def mock_langfuse_client(self) -> MagicMock:
-        """Create a mock Langfuse client that captures v3 observations.
+    def mock_langfuse_client(self) -> _RecordingLangfuseClient:
+        """Create a Langfuse client double that captures v3 observations.
 
         v3 API uses start_as_current_observation() context manager for both
         spans and generations, with update() to record outputs.
         """
-        captured_observations: list[dict[str, Any]] = []
+        return _RecordingLangfuseClient()
 
-        mock_client = MagicMock()
-
-        @contextmanager
-        def mock_start_observation(**kwargs: Any):
-            """Mock start_as_current_observation context manager."""
-            obs = MagicMock()
-            obs_record: dict[str, Any] = {"kwargs": kwargs, "updates": []}
-            captured_observations.append(obs_record)
-
-            def capture_update(**update_kwargs: Any) -> None:
-                obs_record["updates"].append(update_kwargs)
-
-            obs.update = capture_update
-            yield obs
-
-        mock_client.start_as_current_observation = mock_start_observation
-        mock_client.captured_observations = captured_observations
-        mock_client.flush = MagicMock()
-
-        return mock_client
-
-    def test_langfuse_captures_llm_call_end_to_end(self, mock_langfuse_client: MagicMock) -> None:
+    def test_langfuse_captures_llm_call_end_to_end(self, mock_langfuse_client: _RecordingLangfuseClient) -> None:
         """Langfuse captures complete LLM call with prompt, response, and usage."""
         # Setup transform with Langfuse tracing
         config = _make_azure_config(
@@ -208,7 +252,7 @@ class TestLangfuseIntegration:
         transform = LLMTransform(config)
 
         # Setup mock tracer
-        mock_langfuse = MagicMock()
+        mock_langfuse = _RecordingLangfuseClient()
         transform._tracer = ActiveLangfuseTracer(
             transform_name=transform.name,
             client=mock_langfuse,
@@ -218,7 +262,7 @@ class TestLangfuseIntegration:
         transform.close()
 
         # Verify flush was called
-        mock_langfuse.flush.assert_called_once()
+        assert mock_langfuse.flush_count == 1
 
 
 class TestGracefulDegradation:
@@ -348,48 +392,31 @@ class TestProcessRowErrorTracing:
     retryable errors (re-raised after recording the trace).
     """
 
-    def _create_transform_with_langfuse(self) -> tuple[LLMTransform, MagicMock, list[dict[str, Any]]]:
-        """Create transform with mocked Langfuse client via LangfuseTracer."""
+    def _create_transform_with_langfuse(self) -> tuple[LLMTransform, _RecordingLangfuseClient, list[dict[str, Any]]]:
+        """Create transform with a recording Langfuse client via LangfuseTracer."""
         config = _make_azure_config()
         transform = LLMTransform(config)
 
-        captured_observations: list[dict[str, Any]] = []
-
-        @contextmanager
-        def mock_start_observation(**kwargs: Any):
-            obs = MagicMock()
-            obs_record: dict[str, Any] = {"kwargs": kwargs, "updates": []}
-            captured_observations.append(obs_record)
-            obs.update = lambda **uk: obs_record["updates"].append(uk)
-            yield obs
-
-        mock_langfuse = MagicMock()
-        mock_langfuse.start_as_current_observation = mock_start_observation
-        mock_langfuse.flush = MagicMock()
+        mock_langfuse = _RecordingLangfuseClient()
 
         transform._tracer = ActiveLangfuseTracer(
             transform_name=transform.name,
             client=mock_langfuse,
         )
 
-        return transform, mock_langfuse, captured_observations
+        return transform, mock_langfuse, mock_langfuse.captured_observations
 
     def test_process_row_records_error_trace_on_llm_failure(self) -> None:
         """_process_row records Langfuse trace when LLM call fails."""
         from elspeth.plugins.infrastructure.clients.llm import LLMClientError
-        from elspeth.testing import make_pipeline_row
 
         transform, _mock_langfuse, captured_observations = self._create_transform_with_langfuse()
 
-        # Set up provider mock (LLMTransform delegates to _provider.execute_query)
-        mock_provider = MagicMock(spec=LLMProvider)
-        mock_provider.execute_query.side_effect = LLMClientError("Content policy violation", retryable=False)
-        transform._provider = mock_provider
+        transform._provider = _ErroringProvider(LLMClientError("Content policy violation", retryable=False))
 
-        ctx = _make_mock_ctx()
+        ctx = _make_ctx()
         ctx.state_id = "test-state"
-        ctx.token = MagicMock()
-        ctx.token.token_id = "test-token-id"
+        ctx.token = _make_token()
 
         result = transform._process_row(make_pipeline_row({"name": "test"}), ctx)
 
@@ -408,19 +435,14 @@ class TestProcessRowErrorTracing:
     def test_process_row_records_error_trace_on_retryable_failure(self) -> None:
         """_process_row records Langfuse trace even for retryable errors before re-raising."""
         from elspeth.plugins.infrastructure.clients.llm import LLMClientError
-        from elspeth.testing import make_pipeline_row
 
         transform, _mock_langfuse, captured_observations = self._create_transform_with_langfuse()
 
-        # Set up provider mock (LLMTransform delegates to _provider.execute_query)
-        mock_provider = MagicMock(spec=LLMProvider)
-        mock_provider.execute_query.side_effect = LLMClientError("Rate limit exceeded", retryable=True)
-        transform._provider = mock_provider
+        transform._provider = _ErroringProvider(LLMClientError("Rate limit exceeded", retryable=True))
 
-        ctx = _make_mock_ctx()
+        ctx = _make_ctx()
         ctx.state_id = "test-state"
-        ctx.token = MagicMock()
-        ctx.token.token_id = "test-token-id"
+        ctx.token = _make_token()
 
         try:
             transform._process_row(make_pipeline_row({"name": "test"}), ctx)
@@ -517,8 +539,8 @@ class TestMultiQueryLangfuseTracingViaStrategy:
 
     def _create_multi_query_transform_with_langfuse(
         self,
-    ) -> tuple[LLMTransform, MagicMock, list[dict[str, Any]]]:
-        """Create multi-query LLMTransform with mocked Langfuse client."""
+    ) -> tuple[LLMTransform, _RecordingLangfuseClient, list[dict[str, Any]]]:
+        """Create multi-query LLMTransform with a recording Langfuse client."""
         config = _make_multi_query_config(
             tracing={
                 "provider": "langfuse",
@@ -529,26 +551,14 @@ class TestMultiQueryLangfuseTracingViaStrategy:
         )
         transform = LLMTransform(config)
 
-        captured_observations: list[dict[str, Any]] = []
-
-        @contextmanager
-        def mock_start_observation(**kwargs: Any):
-            obs = MagicMock()
-            obs_record: dict[str, Any] = {"kwargs": kwargs, "updates": []}
-            captured_observations.append(obs_record)
-            obs.update = lambda **uk: obs_record["updates"].append(uk)
-            yield obs
-
-        mock_langfuse = MagicMock()
-        mock_langfuse.start_as_current_observation = mock_start_observation
-        mock_langfuse.flush = MagicMock()
+        mock_langfuse = _RecordingLangfuseClient()
 
         transform._tracer = ActiveLangfuseTracer(
             transform_name=transform.name,
             client=mock_langfuse,
         )
 
-        return transform, mock_langfuse, captured_observations
+        return transform, mock_langfuse, mock_langfuse.captured_observations
 
     def test_multi_query_tracer_is_active_with_langfuse_config(self) -> None:
         """Multi-query LLMTransform has ActiveLangfuseTracer when Langfuse configured."""

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Literal, cast
-from unittest.mock import MagicMock
 
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.mcp.analyzers.contracts import explain_field
@@ -21,6 +20,37 @@ SchemaMode = Literal["FIXED", "FLEXIBLE", "OBSERVED"]
 def _make_contract(*fields: FieldContract, mode: SchemaMode = "OBSERVED") -> SchemaContract:
     """Create a SchemaContract from field specs."""
     return SchemaContract(mode=mode, fields=tuple(fields), locked=True)
+
+
+class _RunLifecycleDouble:
+    def __init__(self, contract: SchemaContract) -> None:
+        self._contract = contract
+
+    def get_run(self, _run_id: str) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    def get_run_source_resume_records(self, _run_id: str) -> dict[str, SimpleNamespace]:
+        return {
+            "source-only": SimpleNamespace(
+                source_node_id="source-only",
+                source_name="primary",
+                source_schema_json="{}",
+                schema_contract=self._contract,
+            ),
+        }
+
+
+class _RepositoryFactoryDouble:
+    def __init__(self, contract: SchemaContract) -> None:
+        self.run_lifecycle = _RunLifecycleDouble(contract)
+
+
+class _DatabaseDouble:
+    pass
+
+
+def _make_factory(contract: SchemaContract) -> _RepositoryFactoryDouble:
+    return _RepositoryFactoryDouble(contract)
 
 
 class TestExplainFieldPrecedence:
@@ -59,17 +89,8 @@ class TestExplainFieldPrecedence:
         # ADR-025 §3 Decision 5 (G6): MCP layer resolves contracts through
         # ``get_run_source_resume_records`` keyed by source_node_id; the
         # deleted singleton ``get_run_contract`` is gone.
-        db = MagicMock()
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock()
-        factory.run_lifecycle.get_run_source_resume_records.return_value = {
-            "source-only": SimpleNamespace(
-                source_node_id="source-only",
-                source_name="primary",
-                source_schema_json="{}",
-                schema_contract=contract,
-            ),
-        }
+        db = _DatabaseDouble()
+        factory = _make_factory(contract)
 
         result = explain_field(db, factory, "run-123", "x")
         assert "error" not in result
@@ -94,17 +115,8 @@ class TestExplainFieldPrecedence:
         # ADR-025 §3 Decision 5 (G6): MCP layer resolves contracts through
         # ``get_run_source_resume_records`` keyed by source_node_id; the
         # deleted singleton ``get_run_contract`` is gone.
-        db = MagicMock()
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock()
-        factory.run_lifecycle.get_run_source_resume_records.return_value = {
-            "source-only": SimpleNamespace(
-                source_node_id="source-only",
-                source_name="primary",
-                source_schema_json="{}",
-                schema_contract=contract,
-            ),
-        }
+        db = _DatabaseDouble()
+        factory = _make_factory(contract)
 
         result = explain_field(db, factory, "run-123", "Original A")
         assert "error" not in result
@@ -127,17 +139,8 @@ class TestExplainFieldPrecedence:
         # ADR-025 §3 Decision 5 (G6): MCP layer resolves contracts through
         # ``get_run_source_resume_records`` keyed by source_node_id; the
         # deleted singleton ``get_run_contract`` is gone.
-        db = MagicMock()
-        factory = MagicMock()
-        factory.run_lifecycle.get_run.return_value = MagicMock()
-        factory.run_lifecycle.get_run_source_resume_records.return_value = {
-            "source-only": SimpleNamespace(
-                source_node_id="source-only",
-                source_name="primary",
-                source_schema_json="{}",
-                schema_contract=contract,
-            ),
-        }
+        db = _DatabaseDouble()
+        factory = _make_factory(contract)
 
         raw_result = explain_field(db, factory, "run-123", "nonexistent")
         result = cast(FieldNotFoundError, raw_result)

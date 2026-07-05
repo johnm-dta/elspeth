@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,7 +16,13 @@ from elspeth.contracts import (
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError, CoalesceFailureReason
-from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
+from elspeth.contracts.payload_store import (
+    IntegrityError as PayloadIntegrityError,
+)
+from elspeth.contracts.payload_store import (
+    PayloadNotFoundError,
+    PayloadStore,
+)
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB, QueryRepository
@@ -39,6 +44,39 @@ _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 # Minimal contract for tests that only care about token lifecycle, not contract content.
 _MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+
+
+class _PayloadStoreStub:
+    """Configurable PayloadStore fake for row payload retrieval tests."""
+
+    def __init__(
+        self,
+        *,
+        store_ref: str = "ref-hash",
+        retrieve_result: bytes | Exception = b'{"x": 1}',
+    ) -> None:
+        self._store_ref = store_ref
+        self._retrieve_result = retrieve_result
+        self.stored_payloads: list[bytes] = []
+        self.retrieved_hashes: list[str] = []
+        self.deleted_hashes: list[str] = []
+
+    def store(self, content: bytes) -> str:
+        self.stored_payloads.append(content)
+        return self._store_ref
+
+    def retrieve(self, content_hash: str) -> bytes:
+        self.retrieved_hashes.append(content_hash)
+        if isinstance(self._retrieve_result, Exception):
+            raise self._retrieve_result
+        return self._retrieve_result
+
+    def exists(self, content_hash: str) -> bool:
+        return content_hash == self._store_ref
+
+    def delete(self, content_hash: str) -> bool:
+        self.deleted_hashes.append(content_hash)
+        return content_hash == self._store_ref
 
 
 def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory]:
@@ -346,9 +384,8 @@ class TestGetRowData:
         """Row has source_data_ref but QueryRepository has no payload_store → STORE_NOT_CONFIGURED."""
         db = make_landscape_db()
         # Create a factory WITH a payload store so the row gets a ref
-        mock_store = MagicMock()
-        mock_store.store.return_value = "abc123"
-        factory = RecorderFactory(db, payload_store=mock_store)
+        payload_store = _PayloadStoreStub(store_ref="abc123")
+        factory = RecorderFactory(db, payload_store=payload_store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         factory.data_flow.register_node(
             run_id="run-1",
@@ -1514,7 +1551,7 @@ class TestChunkedQueryMethods:
 def _make_repo(
     *,
     run_id: str = "run-1",
-    payload_store: MagicMock | None = None,
+    payload_store: PayloadStore | None = None,
 ) -> tuple[LandscapeDB, QueryRepository, RecorderFactory]:
     """Create a QueryRepository with supporting infrastructure.
 
@@ -1550,11 +1587,10 @@ class TestDirectQueryRepositoryConstruction:
 
     def test_get_row_data_store_not_configured(self):
         """payload_store=None → STORE_NOT_CONFIGURED for rows with refs."""
-        mock_store = MagicMock()
-        mock_store.store.return_value = "ref-hash"
+        payload_store = _PayloadStoreStub()
         # Create factory WITH payload store so create_row sets source_data_ref
         db = make_landscape_db()
-        factory = RecorderFactory(db, payload_store=mock_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         factory.data_flow.register_node(
             run_id="run-1",
@@ -1585,12 +1621,10 @@ class TestDirectQueryRepositoryConstruction:
 
     def test_get_row_data_with_valid_payload(self):
         """Payload store returns valid JSON → AVAILABLE with data."""
-        mock_store = MagicMock()
-        mock_store.store.return_value = "ref-hash"
         payload = json.dumps({"key": "value"}).encode("utf-8")
-        mock_store.retrieve.return_value = payload
+        payload_store = _PayloadStoreStub(retrieve_result=payload)
         db = make_landscape_db()
-        factory = RecorderFactory(db, payload_store=mock_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         factory.data_flow.register_node(
             run_id="run-1",
@@ -1613,7 +1647,7 @@ class TestDirectQueryRepositoryConstruction:
             routing_event_loader=RoutingEventLoader(),
             call_loader=CallLoader(),
             token_outcome_loader=TokenOutcomeLoader(),
-            payload_store=mock_store,
+            payload_store=payload_store,
         )
         result = repo.get_row_data("row-1")
 
@@ -1628,16 +1662,15 @@ class TestGetRowDataErrorHandling:
     OSError — all should raise AuditIntegrityError with row context.
     """
 
-    def _make_repo_with_row(self, mock_store: MagicMock) -> QueryRepository:
+    def _make_repo_with_row(self, payload_store: PayloadStore) -> QueryRepository:
         """Create a repo+row where the row has a source_data_ref.
 
-        The mock_store is used for BOTH the factory (so create_row stores a ref)
-        and the QueryRepository (so retrieval goes through the mock).
+        The payload_store is used for BOTH the factory (so create_row stores a ref)
+        and the QueryRepository (so retrieval goes through the fake).
         """
-        mock_store.store.return_value = "ref-hash"
         db = make_landscape_db()
         # Factory WITH payload store — so create_row sets source_data_ref
-        factory = RecorderFactory(db, payload_store=mock_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         factory.data_flow.register_node(
             run_id="run-1",
@@ -1660,53 +1693,47 @@ class TestGetRowDataErrorHandling:
             routing_event_loader=RoutingEventLoader(),
             call_loader=CallLoader(),
             token_outcome_loader=TokenOutcomeLoader(),
-            payload_store=mock_store,
+            payload_store=payload_store,
         )
 
     def test_json_decode_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.return_value = b"not-json{{"
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=b"not-json{{")
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Corrupt payload for row row-1"):
             repo.get_row_data("row-1")
 
     def test_unicode_decode_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.return_value = b"\xff\xfe"
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=b"\xff\xfe")
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Corrupt payload for row row-1"):
             repo.get_row_data("row-1")
 
     def test_payload_integrity_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.side_effect = PayloadIntegrityError("hash mismatch")
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=PayloadIntegrityError("hash mismatch"))
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Payload integrity check failed for row row-1"):
             repo.get_row_data("row-1")
 
     def test_os_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.side_effect = OSError("Permission denied")
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=OSError("Permission denied"))
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Payload retrieval failed for row row-1"):
             repo.get_row_data("row-1")
 
     def test_non_dict_json_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.return_value = json.dumps([1, 2, 3]).encode("utf-8")
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=json.dumps([1, 2, 3]).encode("utf-8"))
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="expected JSON object, got list"):
             repo.get_row_data("row-1")
 
     def test_valid_json_returns_available(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.return_value = json.dumps({"key": "val"}).encode("utf-8")
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=json.dumps({"key": "val"}).encode("utf-8"))
+        repo = self._make_repo_with_row(payload_store)
 
         result = repo.get_row_data("row-1")
 
@@ -1722,11 +1749,10 @@ class TestExplainRowErrorHandling:
     silent degradation to crash per Tier 1 trust model.
     """
 
-    def _make_repo_with_row(self, mock_store: MagicMock) -> QueryRepository:
+    def _make_repo_with_row(self, payload_store: PayloadStore) -> QueryRepository:
         """Create a repo+row where the row has a source_data_ref."""
-        mock_store.store.return_value = "ref-hash"
         db = make_landscape_db()
-        factory = RecorderFactory(db, payload_store=mock_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         factory.data_flow.register_node(
             run_id="run-1",
@@ -1748,49 +1774,42 @@ class TestExplainRowErrorHandling:
             routing_event_loader=RoutingEventLoader(),
             call_loader=CallLoader(),
             token_outcome_loader=TokenOutcomeLoader(),
-            payload_store=mock_store,
+            payload_store=payload_store,
         )
 
     def test_unicode_decode_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.return_value = b"\xff\xfe"
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=b"\xff\xfe")
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Corrupt payload for row row-1"):
             repo.explain_row("run-1", "row-1")
 
     def test_os_error_raises_audit_integrity(self):
         """H2: OSError during payload retrieval is infrastructure failure — crash, don't degrade."""
-        mock_store = MagicMock()
-        mock_store.retrieve.side_effect = OSError("NFS timeout")
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=OSError("NFS timeout"))
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Payload retrieval failed for row row-1"):
             repo.explain_row("run-1", "row-1")
 
     def test_payload_integrity_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.side_effect = PayloadIntegrityError("hash mismatch")
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=PayloadIntegrityError("hash mismatch"))
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Payload integrity check failed for row row-1"):
             repo.explain_row("run-1", "row-1")
 
     def test_json_decode_error_raises_audit_integrity(self):
-        mock_store = MagicMock()
-        mock_store.retrieve.return_value = b"not-json{{"
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=b"not-json{{")
+        repo = self._make_repo_with_row(payload_store)
 
         with pytest.raises(AuditIntegrityError, match="Corrupt payload for row row-1"):
             repo.explain_row("run-1", "row-1")
 
     def test_purged_payload_returns_lineage_without_data(self):
         """PayloadNotFoundError (purged) is the only graceful degradation — not a crash."""
-        from elspeth.contracts.payload_store import PayloadNotFoundError
-
-        mock_store = MagicMock()
-        mock_store.retrieve.side_effect = PayloadNotFoundError("deadbeef" * 8)
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=PayloadNotFoundError("deadbeef" * 8))
+        repo = self._make_repo_with_row(payload_store)
 
         lineage = repo.explain_row("run-1", "row-1")
 
@@ -1800,11 +1819,8 @@ class TestExplainRowErrorHandling:
 
     def test_get_row_data_purged_returns_purged_state(self):
         """get_row_data returns PURGED when payload was removed by retention policy."""
-        from elspeth.contracts.payload_store import PayloadNotFoundError
-
-        mock_store = MagicMock()
-        mock_store.retrieve.side_effect = PayloadNotFoundError("deadbeef" * 8)
-        repo = self._make_repo_with_row(mock_store)
+        payload_store = _PayloadStoreStub(retrieve_result=PayloadNotFoundError("deadbeef" * 8))
+        repo = self._make_repo_with_row(payload_store)
 
         result = repo.get_row_data("row-1")
 
@@ -1813,8 +1829,8 @@ class TestExplainRowErrorHandling:
 
     def test_run_id_mismatch_raises_value_error(self):
         """H3: Cross-run mismatch is a caller bug, not a normal 'not found'."""
-        mock_store = MagicMock()
-        _db, repo, factory = _make_repo(payload_store=mock_store)
+        payload_store = _PayloadStoreStub()
+        _db, repo, factory = _make_repo(payload_store=payload_store)
         factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         with pytest.raises(AuditIntegrityError, match="Row row-1 belongs to run run-1, not wrong-run"):

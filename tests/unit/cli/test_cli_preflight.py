@@ -8,8 +8,10 @@ depends_on, commencement_gates, and collection_probes are reachable from
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
@@ -17,6 +19,24 @@ from elspeth.cli import app
 from elspeth.core.dependency_config import DependencyRunResult, PreflightResult
 
 runner = CliRunner()
+
+
+@dataclass(slots=True)
+class _FakeGraph:
+    node_count: int = 0
+    edge_count: int = 0
+
+    def validate(self) -> None:
+        """Match the ExecutionGraph API used by the CLI run command."""
+
+
+@dataclass(frozen=True, slots=True)
+class _FakePluginBundle:
+    sources: dict[str, object] = field(default_factory=lambda: {"primary": object()})
+    source_settings_map: dict[str, object] = field(default_factory=lambda: {"primary": object()})
+    transforms: tuple[object, ...] = ()
+    sinks: dict[str, object] = field(default_factory=lambda: {"output": object()})
+    aggregations: dict[str, object] = field(default_factory=dict)
 
 
 def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) -> Path:
@@ -34,6 +54,17 @@ def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) 
     settings_path = tmp_path / "pipeline.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path
+
+
+def _fake_config(*, with_depends_on: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        depends_on=[SimpleNamespace(name="indexer")] if with_depends_on else [],
+        collection_probes=[SimpleNamespace(name="probe")] if with_depends_on else [],
+        gates=[],
+        coalesce=[],
+        queues={},
+        landscape=SimpleNamespace(export=SimpleNamespace(enabled=False, sink=None)),
+    )
 
 
 class TestCLIRunCallsResolvePreflight:
@@ -57,16 +88,11 @@ class TestCLIRunCallsResolvePreflight:
             patch("elspeth.cli._execute_pipeline_with_instances") as mock_execute,
             patch("elspeth.plugins.infrastructure.probe_factory.build_collection_probes", return_value=[]),
         ):
-            mock_config = MagicMock()
-            mock_config.depends_on = [MagicMock()]
-            mock_config.collection_probes = [MagicMock()]
-            mock_config.gates = []
-            mock_config.coalesce = []
-            mock_config.landscape.export.enabled = False
+            mock_config = _fake_config(with_depends_on=True)
             mock_load.return_value = (mock_config, [])
 
-            mock_plugins.return_value = MagicMock()
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_plugins.return_value = _FakePluginBundle()
+            mock_graph_cls.from_plugin_instances.return_value = _FakeGraph()
 
             # resolve_preflight returns a PreflightResult with dependency runs
             dep_result = DependencyRunResult(
@@ -116,16 +142,11 @@ class TestCLIRunCallsResolvePreflight:
             patch("elspeth.cli._execute_pipeline_with_instances") as mock_execute,
             patch("elspeth.plugins.infrastructure.probe_factory.build_collection_probes", return_value=[]),
         ):
-            mock_config = MagicMock()
-            mock_config.depends_on = []
-            mock_config.collection_probes = []
-            mock_config.gates = []
-            mock_config.coalesce = []
-            mock_config.landscape.export.enabled = False
+            mock_config = _fake_config(with_depends_on=False)
             mock_load.return_value = (mock_config, [])
 
-            mock_plugins.return_value = MagicMock()
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_plugins.return_value = _FakePluginBundle()
+            mock_graph_cls.from_plugin_instances.return_value = _FakeGraph()
             mock_execute.return_value = {
                 "run_id": "test-run-id",
                 "status": "completed",
@@ -157,16 +178,11 @@ class TestCLIRunCallsResolvePreflight:
             patch("elspeth.cli._execute_pipeline_with_instances") as mock_execute,
             patch("elspeth.plugins.infrastructure.probe_factory.build_collection_probes", return_value=[]),
         ):
-            mock_config = MagicMock()
-            mock_config.depends_on = [MagicMock()]
-            mock_config.collection_probes = [MagicMock()]
-            mock_config.gates = []
-            mock_config.coalesce = []
-            mock_config.landscape.export.enabled = False
+            mock_config = _fake_config(with_depends_on=True)
             mock_load.return_value = (mock_config, [])
 
-            mock_plugins.return_value = MagicMock()
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_plugins.return_value = _FakePluginBundle()
+            mock_graph_cls.from_plugin_instances.return_value = _FakeGraph()
 
             result = runner.invoke(app, ["run", "-s", str(settings_path), "--execute"])
 

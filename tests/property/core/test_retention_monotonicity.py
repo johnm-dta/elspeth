@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from unittest.mock import MagicMock
 
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
@@ -62,6 +61,14 @@ _REFERENCE_TIME = datetime(2025, 1, 1, tzinfo=UTC)
 _RUN_COUNTER = count()
 _ROW_COUNTER = count()
 _REF_COUNTER = count()
+
+
+class _PayloadStoreDouble:
+    def __init__(self, *, delete_result: bool = False) -> None:
+        self.delete_result = delete_result
+
+    def delete(self, _ref: str) -> bool:
+        return self.delete_result
 
 
 def _create_completed_run(
@@ -177,8 +184,8 @@ class TestRetentionAgeMonotonicityProperties:
             run_id = _create_completed_run(db, completed_at)
             _insert_rows_with_refs(db, run_id, num_rows)
 
-            mock_store = MagicMock()
-            manager = PurgeManager(db, mock_store)
+            store = _PayloadStoreDouble()
+            manager = PurgeManager(db, store)
 
             refs_short = manager.find_expired_payload_refs(days_short)
             refs_long = manager.find_expired_payload_refs(days_long)
@@ -201,8 +208,8 @@ class TestRetentionAgeMonotonicityProperties:
             run_id = _create_completed_run(db, completed_at)
             _insert_rows_with_refs(db, run_id, num_rows)
 
-            mock_store = MagicMock()
-            manager = PurgeManager(db, mock_store)
+            store = _PayloadStoreDouble()
+            manager = PurgeManager(db, store)
 
             refs = manager.find_expired_payload_refs(retention_days=9999)
 
@@ -222,8 +229,8 @@ class TestRetentionAgeMonotonicityProperties:
             run_id = _create_completed_run(db, completed_at)
             refs = _insert_rows_with_refs(db, run_id, num_rows)
 
-            mock_store = MagicMock()
-            manager = PurgeManager(db, mock_store)
+            store = _PayloadStoreDouble()
+            manager = PurgeManager(db, store)
 
             expired = manager.find_expired_payload_refs(retention_days=0)
 
@@ -265,8 +272,8 @@ class TestCutoffMonotonicityProperties:
             run_id = _create_completed_run(db, completed_at)
             _insert_rows_with_refs(db, run_id, num_rows)
 
-            mock_store = MagicMock()
-            manager = PurgeManager(db, mock_store)
+            store = _PayloadStoreDouble()
+            manager = PurgeManager(db, store)
 
             now = _REFERENCE_TIME
             as_of_early = now + timedelta(days=days_offset_early)
@@ -328,15 +335,14 @@ class TestPurgeResultInvariantProperties:
         No refs should be silently dropped during purging.
         """
         # PayloadStore.delete(False) means the ref was not found (skipped).
-        mock_store = MagicMock()
-        mock_store.delete.return_value = False
+        store = _PayloadStoreDouble(delete_result=False)
 
         with make_landscape_db() as db:
             completed_at = _REFERENCE_TIME - timedelta(days=30)
             run_id = _create_completed_run(db, completed_at)
             refs = _insert_rows_with_refs(db, run_id, num_rows)
 
-            manager = PurgeManager(db, mock_store)
+            manager = PurgeManager(db, store)
             result = manager.purge_payloads(refs)
 
             total_accounted = result.deleted_count + result.skipped_count + len(result.failed_refs)
@@ -350,15 +356,14 @@ class TestPurgeResultInvariantProperties:
     @settings(max_examples=20)
     def test_purge_nonexistent_all_skipped(self, num_rows: int) -> None:
         """Property: Purging refs that don't exist in store counts as skipped."""
-        mock_store = MagicMock()
-        mock_store.delete.return_value = False
+        store = _PayloadStoreDouble(delete_result=False)
 
         with make_landscape_db() as db:
             completed_at = _REFERENCE_TIME - timedelta(days=30)
             run_id = _create_completed_run(db, completed_at)
             refs = _insert_rows_with_refs(db, run_id, num_rows)
 
-            manager = PurgeManager(db, mock_store)
+            manager = PurgeManager(db, store)
             result = manager.purge_payloads(refs)
 
             assert result.skipped_count == len(refs), (
@@ -371,15 +376,14 @@ class TestPurgeResultInvariantProperties:
     @settings(max_examples=20)
     def test_purge_existing_all_deleted(self, num_rows: int) -> None:
         """Property: Purging refs that exist and succeed counts as deleted."""
-        mock_store = MagicMock()
-        mock_store.delete.return_value = True
+        store = _PayloadStoreDouble(delete_result=True)
 
         with make_landscape_db() as db:
             completed_at = _REFERENCE_TIME - timedelta(days=30)
             run_id = _create_completed_run(db, completed_at)
             refs = _insert_rows_with_refs(db, run_id, num_rows)
 
-            manager = PurgeManager(db, mock_store)
+            manager = PurgeManager(db, store)
             result = manager.purge_payloads(refs)
 
             assert result.deleted_count == len(refs), f"Expected all {len(refs)} refs to be deleted, got {result.deleted_count} deleted"

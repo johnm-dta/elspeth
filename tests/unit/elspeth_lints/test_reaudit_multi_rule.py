@@ -38,7 +38,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -406,29 +407,44 @@ def _write_pre_judge_allow_hit(path: Path, *, key: str) -> None:
     )
 
 
-def _mock_openrouter_completion(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> MagicMock:
-    message = MagicMock()
-    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
-    choice = MagicMock()
-    choice.message = message
-    choice.finish_reason = "stop"
-    completion = MagicMock()
-    completion.choices = [choice]
-    completion.model = served_model
-    completion.usage = MagicMock(
-        prompt_tokens=4000,
-        prompt_tokens_details=MagicMock(cached_tokens=0),
+class _RecordingCompletionCreate:
+    def __init__(self, completion: SimpleNamespace) -> None:
+        self._completion = completion
+        self.call_count = 0
+
+    def __call__(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        self.call_count += 1
+        return self._completion
+
+
+class _OpenAIFactory:
+    def __init__(self, return_value: SimpleNamespace) -> None:
+        self.return_value = return_value
+
+    def __call__(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return self.return_value
+
+
+def _mock_openrouter_completion(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> SimpleNamespace:
+    message = SimpleNamespace(
+        content=json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
     )
-    return completion
+    choice = SimpleNamespace(message=message, finish_reason="stop")
+    usage = SimpleNamespace(
+        prompt_tokens=4000,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+    )
+    return SimpleNamespace(choices=[choice], model=served_model, usage=usage)
 
 
 @contextmanager
-def _mock_judge_call(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> Iterator[MagicMock]:
+def _mock_judge_call(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> Iterator[_OpenAIFactory]:
     fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale, served_model=served_model)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_create = _RecordingCompletionCreate(fake_completion)
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    fake_openai = _OpenAIFactory(fake_client)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
-        patch("openai.OpenAI", return_value=fake_client) as client_class,
+        patch("openai.OpenAI", new=fake_openai),
     ):
-        yield client_class
+        yield fake_openai

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
-from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import PluginSummary
+from elspeth.web.catalog.protocol import PluginKind
+from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.guided.chat_solver import Step2SinkChatOutcome, maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
@@ -18,6 +20,33 @@ from elspeth.web.sessions._guided_step_chat import (
     Step2SinkChatResult,
     resolve_step_2_sink_chat_with_auto_drop,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeCatalogService:
+    sinks: tuple[PluginSummary, ...] = ()
+
+    def list_sources(self) -> list[PluginSummary]:
+        return []
+
+    def list_transforms(self) -> list[PluginSummary]:
+        return []
+
+    def list_sinks(self) -> list[PluginSummary]:
+        return list(self.sinks)
+
+    def get_schema(self, plugin_type: PluginKind, name: str) -> PluginSchemaInfo:
+        raise AssertionError(f"unexpected schema lookup for {plugin_type}:{name}")
+
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        return ()
 
 
 def _fake_resolve_sink_response(args: dict) -> SimpleNamespace:
@@ -56,9 +85,12 @@ _JSON_SINK_ARGS = {
 
 @pytest.mark.asyncio
 async def test_sink_driver_resolves_json_output() -> None:
+    async def _return_json_sink_response(**_kwargs: object) -> SimpleNamespace:
+        return _fake_resolve_sink_response(_JSON_SINK_ARGS)
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=_fake_resolve_sink_response(_JSON_SINK_ARGS)),
+        new=_return_json_sink_response,
     ):
         outcome = await maybe_resolve_step_2_sink_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -84,9 +116,13 @@ async def test_sink_driver_captures_prose_reply_on_decline() -> None:
     route) uses this to answer without a second, tool-less call (C-1 fix).
     """
     prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A sink writes rows out.", tool_calls=None))])
+
+    async def _return_prose_reply(**_kwargs: object) -> SimpleNamespace:
+        return prose
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=prose),
+        new=_return_prose_reply,
     ):
         outcome = await maybe_resolve_step_2_sink_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -114,9 +150,13 @@ async def test_sink_driver_returns_both_none_on_hallucinated_tool_call() -> None
             )
         ]
     )
+
+    async def _return_hallucinated_tool_call(**_kwargs: object) -> SimpleNamespace:
+        return hallucinated
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=hallucinated),
+        new=_return_hallucinated_tool_call,
     ):
         outcome = await maybe_resolve_step_2_sink_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -150,10 +190,14 @@ async def test_sink_driver_rejects_scaffold_leak_in_declined_prose() -> None:
             )
         ]
     )
+
+    async def _return_scaffold_reply(**_kwargs: object) -> SimpleNamespace:
+        return scaffold_reply
+
     with (
         patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(return_value=scaffold_reply),
+            new=_return_scaffold_reply,
         ),
         pytest.raises(AssistantScaffoldLeakError, match="user-facing prose"),
     ):
@@ -186,7 +230,7 @@ async def test_sink_driver_revise_threads_current_sink() -> None:
 
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(side_effect=_capture),
+        new=_capture,
     ):
         await maybe_resolve_step_2_sink_chat(
             model="anthropic/claude-sonnet-4.6",
@@ -215,9 +259,13 @@ async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
     green. Regression for the fp-review step-2-salvage-untested finding.
     """
     declined = Step2SinkChatOutcome(sink=None, assistant_message="A sink writes your rows out to a file or table.")
+
+    async def _decline_sink_chat(**_kwargs: object) -> Step2SinkChatOutcome:
+        return declined
+
     with patch(
         "elspeth.web.sessions._guided_step_chat.maybe_resolve_step_2_sink_chat",
-        new=AsyncMock(return_value=declined),
+        new=_decline_sink_chat,
     ):
         result = await resolve_step_2_sink_chat_with_auto_drop(
             site="test",
@@ -239,9 +287,12 @@ async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
 
 @pytest.mark.asyncio
 async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> None:
+    async def _raise_provider_timeout(**_kwargs: object) -> Step2SinkChatOutcome:
+        raise TimeoutError("provider timeout")
+
     with patch(
         "elspeth.web.sessions._guided_step_chat.maybe_resolve_step_2_sink_chat",
-        new=AsyncMock(side_effect=TimeoutError("provider timeout")),
+        new=_raise_provider_timeout,
     ):
         result = await resolve_step_2_sink_chat_with_auto_drop(
             site="test",
@@ -271,10 +322,7 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
     its transient set but the sink twin did not, so a model that emitted an
     *allowed* discovery tool with garbage arguments crashed the request.
     """
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sinks.return_value = [
-        PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),
-    ]
+    catalog = _FakeCatalogService(sinks=(PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),))
     state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
     # ``list_sinks`` is an allowed discovery tool, but its arguments decode to a
     # non-object, so the production ``_execute_discovery_call`` raises
@@ -294,9 +342,13 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
             )
         ]
     )
+
+    async def _return_malformed_discovery_call(**_kwargs: object) -> SimpleNamespace:
+        return malformed
+
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(return_value=malformed),
+        new=_return_malformed_discovery_call,
     ):
         result = await resolve_step_2_sink_chat_with_auto_drop(
             site="test",

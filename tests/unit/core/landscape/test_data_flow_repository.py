@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -66,6 +66,21 @@ _ERROR_HASH = "a" * 64
 
 # Minimal contract for tests that only care about token lifecycle, not contract content.
 _MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _RowcountResult:
+    rowcount: int
+
+
+class _RecordingPayloadStore:
+    def __init__(self, payload_ref: str) -> None:
+        self._payload_ref = payload_ref
+        self.stored_payloads: list[bytes] = []
+
+    def store(self, payload: bytes) -> str:
+        self.stored_payloads.append(payload)
+        return self._payload_ref
 
 
 def _make_repo(
@@ -1351,9 +1366,7 @@ class TestForkTokenRowcountValidation:
                         insert_count += 1
                         # First insert is child token — return zero rowcount
                         if insert_count == 1:
-                            mock_result = MagicMock()
-                            mock_result.rowcount = 0
-                            return mock_result
+                            return _RowcountResult(rowcount=0)
                     return result
 
                 conn.execute = patched_execute
@@ -1398,9 +1411,7 @@ class TestCoalesceTokensRowcountValidation:
                     if stmt.is_insert:
                         insert_count += 1
                         if insert_count == 1:
-                            mock_result = MagicMock()
-                            mock_result.rowcount = 0
-                            return mock_result
+                            return _RowcountResult(rowcount=0)
                     return result
 
                 conn.execute = patched_execute
@@ -1438,9 +1449,7 @@ class TestExpandTokenRowcountValidation:
                     if stmt.is_insert:
                         insert_count += 1
                         if insert_count == 1:
-                            mock_result = MagicMock()
-                            mock_result.rowcount = 0
-                            return mock_result
+                            return _RowcountResult(rowcount=0)
                     return result
 
                 conn.execute = patched_execute
@@ -1494,31 +1503,29 @@ class TestCreateRowQuarantined:
 
     def test_quarantined_nan_payload_uses_repr_fallback(self) -> None:
         """create_row(quarantined=True) with payload_store falls back to repr payload for NaN data."""
-        mock_store = MagicMock()
-        mock_store.store.return_value = "payload-ref-123"
-        _db, repo, _fac = _make_repo(payload_store=mock_store)
+        payload_store = _RecordingPayloadStore("payload-ref-123")
+        _db, repo, _fac = _make_repo(payload_store=payload_store)
 
         data = {"v": float("nan")}
         row = _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
 
         # Verify payload_store.store() was called with repr fallback bytes
-        mock_store.store.assert_called_once()
-        stored_bytes = mock_store.store.call_args[0][0]
+        assert len(payload_store.stored_payloads) == 1
+        stored_bytes = payload_store.stored_payloads[0]
         parsed = json.loads(stored_bytes.decode("utf-8"))
         assert "_repr" in parsed
         assert row.source_data_ref == "payload-ref-123"
 
     def test_quarantined_normal_data_payload_uses_canonical(self) -> None:
         """create_row(quarantined=True) with payload_store uses canonical JSON for normal data."""
-        mock_store = MagicMock()
-        mock_store.store.return_value = "payload-ref-456"
-        _db, repo, _fac = _make_repo(payload_store=mock_store)
+        payload_store = _RecordingPayloadStore("payload-ref-456")
+        _db, repo, _fac = _make_repo(payload_store=payload_store)
 
         data = {"v": 42}
         _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
 
-        mock_store.store.assert_called_once()
-        stored_bytes = mock_store.store.call_args[0][0]
+        assert len(payload_store.stored_payloads) == 1
+        stored_bytes = payload_store.stored_payloads[0]
         parsed = json.loads(stored_bytes.decode("utf-8"))
         assert parsed == {"v": 42}
         assert "_repr" not in parsed

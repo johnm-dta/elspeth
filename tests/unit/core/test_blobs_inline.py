@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -30,6 +29,31 @@ from elspeth.core.blobs_inline import (
 VALID_HASH = "a" * 64
 BLOB1 = "5b7a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3a4b"
 BLOB2 = "7c3a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3aaa"
+
+
+class _AsyncCallRecorder:
+    def __init__(self) -> None:
+        self.return_value: object = None
+        self.side_effect: BaseException | None = None
+        self.call_args_list: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def __call__(self, *args: object, **kwargs: object) -> object:
+        self.call_args_list.append((args, kwargs))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    def assert_awaited_once_with(self, *args: object, **kwargs: object) -> None:
+        assert self.call_args_list == [(args, kwargs)]
+
+    def assert_not_called(self) -> None:
+        assert self.call_args_list == []
+
+
+class _BlobServiceDouble:
+    def __init__(self) -> None:
+        self.read_blob_content = _AsyncCallRecorder()
+        self.get_blob = _AsyncCallRecorder()
 
 
 def _marker(blob_id: str = BLOB1, sha256: str = VALID_HASH) -> dict[str, str]:
@@ -229,7 +253,7 @@ class TestDiscoverBlobContentRefs:
 class TestFetchBlobContents:
     @pytest.mark.asyncio
     async def test_returns_bytes_by_ref(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.read_blob_content.return_value = b"content"
         ref = _ref()
 
@@ -240,7 +264,7 @@ class TestFetchBlobContents:
 
     @pytest.mark.asyncio
     async def test_dedupes_reads_by_blob_id(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.read_blob_content.return_value = b"content"
         refs = [
             _ref(BLOB1, "source.options.a"),
@@ -254,7 +278,7 @@ class TestFetchBlobContents:
 
     @pytest.mark.asyncio
     async def test_propagates_integrity_errors(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.read_blob_content.side_effect = BlobIntegrityError(BLOB1, expected="a" * 64, actual="b" * 64)
 
         with pytest.raises(BlobIntegrityError):
@@ -262,7 +286,7 @@ class TestFetchBlobContents:
 
     @pytest.mark.asyncio
     async def test_propagates_content_missing_errors(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.read_blob_content.side_effect = BlobContentMissingError(BLOB1, storage_path="/tmp/blob.csv")
 
         with pytest.raises(BlobContentMissingError):
@@ -270,7 +294,7 @@ class TestFetchBlobContents:
 
     @pytest.mark.asyncio
     async def test_collects_not_found_by_field_path(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.read_blob_content.side_effect = BlobNotFoundError(BLOB1)
 
         with pytest.raises(BlobContentResolutionError) as exc_info:
@@ -280,7 +304,7 @@ class TestFetchBlobContents:
 
     @pytest.mark.asyncio
     async def test_collects_not_ready_by_field_path(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.read_blob_content.side_effect = BlobStateError(BLOB1, message="Blob is pending")
 
         with pytest.raises(BlobContentResolutionError) as exc_info:
@@ -452,7 +476,7 @@ class TestSubstituteBlobContentRefs:
 class TestValidateBlobContentRefs:
     @pytest.mark.asyncio
     async def test_async_returns_missing_violation_without_raising(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.get_blob.side_effect = BlobNotFoundError(BLOB1)
         config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
 
@@ -468,7 +492,7 @@ class TestValidateBlobContentRefs:
 
     @pytest.mark.asyncio
     async def test_async_returns_malformed_violation_without_lookup(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         config = {"source": {"options": {"x": {"blob_ref": BLOB1}}}}
 
         violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
@@ -484,7 +508,7 @@ class TestValidateBlobContentRefs:
 
     @pytest.mark.asyncio
     async def test_async_returns_malformed_violation_for_non_string_marker_fields(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         config = {"source": {"options": {"x": {"blob_ref": BLOB1, "mode": []}}}}
 
         violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
@@ -500,7 +524,7 @@ class TestValidateBlobContentRefs:
 
     @pytest.mark.asyncio
     async def test_async_returns_hash_and_size_violations(self) -> None:
-        blob_service = AsyncMock()
+        blob_service = _BlobServiceDouble()
         blob_service.get_blob.return_value = _blob_record(content_hash="b" * 64, size_bytes=128)
         config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
 

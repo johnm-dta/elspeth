@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -86,13 +85,31 @@ def test_blocked_validation_is_non_runnable() -> None:
 # --- End-to-end: the recorded invocation's tool_name equals the distinct name -
 
 
-def _service(verdict: AdvisorCheckpointVerdict | None) -> MagicMock:
-    svc = MagicMock()
-    if verdict is None:
-        svc.run_signoff_checkpoint = AsyncMock(side_effect=AssertionError("advisor must NOT be called"))
-    else:
-        svc.run_signoff_checkpoint = AsyncMock(return_value=verdict)
-    return svc
+class _AdvisorServiceFake:
+    def __init__(self, verdict: AdvisorCheckpointVerdict | None) -> None:
+        self._verdict = verdict
+
+    async def run_signoff_checkpoint(self, *args, **kwargs) -> AdvisorCheckpointVerdict:
+        if self._verdict is None:
+            raise AssertionError("advisor must NOT be called")
+        return self._verdict
+
+
+class _CatalogPlaceholder:
+    pass
+
+
+class _BlobServicePlaceholder:
+    pass
+
+
+class _PayloadStoreFake:
+    def store(self, _payload: bytes) -> str:
+        return "payload-id"
+
+
+def _service(verdict: AdvisorCheckpointVerdict | None) -> _AdvisorServiceFake:
+    return _AdvisorServiceFake(verdict)
 
 
 async def _dispatch(
@@ -112,23 +129,20 @@ async def _dispatch(
         "edit_step_index": None,
         "control_signal": None,
     }
-    catalog = MagicMock()
-    payload_store = MagicMock()
-    payload_store.store.return_value = "payload-id"
     return await _dispatch_guided_respond(
         state=state,
         guided=session,
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=turn_response,
-        catalog=catalog,
+        catalog=_CatalogPlaceholder(),
         recorder=recorder,
         user_id="u1",
         data_dir=None,
         session_engine=None,
         session_id="s1",
-        blob_service=MagicMock(),
-        payload_store=payload_store,
+        blob_service=_BlobServicePlaceholder(),
+        payload_store=_PayloadStoreFake(),
         model="m",
         temperature=None,
         seed=None,

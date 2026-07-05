@@ -17,7 +17,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -52,16 +52,42 @@ def _make_journal(
     )
 
 
-def _make_conn(buffer: list[Any] | None = None) -> MagicMock:
-    """Create a mock SQLAlchemy Connection with info dict.
+class _ConnectionDouble:
+    """Small SQLAlchemy connection double for journal event handlers."""
+
+    def __init__(self, buffer: list[Any] | None = None) -> None:
+        self.info: dict[str, Any] = {}
+        if buffer is not None:
+            self.info["landscape_journal_buffer_stack"] = [buffer]
+
+
+class _PayloadStoreDouble:
+    """Configurable payload store double for journal enrichment tests."""
+
+    def __init__(self, *, content: bytes | None = None, error: BaseException | None = None) -> None:
+        self.content = content
+        self.error = error
+        self.refs: list[str] = []
+
+    def retrieve(self, ref: str) -> bytes:
+        self.refs.append(ref)
+        if self.error is not None:
+            raise self.error
+        if self.content is None:
+            raise AssertionError("PayloadStoreDouble content was not configured")
+        return self.content
+
+
+class _EngineSentinel:
+    pass
+
+
+def _make_conn(buffer: list[Any] | None = None) -> _ConnectionDouble:
+    """Create a SQLAlchemy Connection double with an info dict.
 
     When buffer is provided, it becomes the root buffer in the stack.
     """
-    conn = MagicMock()
-    conn.info = {}
-    if buffer is not None:
-        conn.info["landscape_journal_buffer_stack"] = [buffer]
-    return conn
+    return _ConnectionDouble(buffer)
 
 
 # ===========================================================================
@@ -518,7 +544,7 @@ class TestAttach:
 
     def test_registers_six_listeners(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
-        engine = Mock()
+        engine = _EngineSentinel()
 
         with patch("elspeth.core.landscape.journal.event") as mock_event:
             journal.attach(engine)
@@ -563,8 +589,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b'{"key": "value"}'
+        journal._payload_store = _PayloadStoreDouble(content=b'{"key": "value"}')
 
         content, error = journal._load_payload("some-ref")
         assert content == '{"key": "value"}'
@@ -578,8 +603,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = PayloadNotFoundError("deadbeef" * 8)
+        journal._payload_store = _PayloadStoreDouble(error=PayloadNotFoundError("deadbeef" * 8))
 
         content, error = journal._load_payload("some-ref")
         assert content is None
@@ -592,8 +616,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = OSError("disk failure")
+        journal._payload_store = _PayloadStoreDouble(error=OSError("disk failure"))
 
         content, error = journal._load_payload("some-ref")
         assert content is None
@@ -609,8 +632,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = PayloadNotFoundError("deadbeef" * 8)
+        journal._payload_store = _PayloadStoreDouble(error=PayloadNotFoundError("deadbeef" * 8))
 
         with pytest.raises(PayloadNotFoundError):
             journal._load_payload("some-ref")
@@ -622,8 +644,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = OSError("disk failure")
+        journal._payload_store = _PayloadStoreDouble(error=OSError("disk failure"))
 
         with pytest.raises(OSError):
             journal._load_payload("some-ref")
@@ -635,8 +656,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = TypeError("bad type in store")
+        journal._payload_store = _PayloadStoreDouble(error=TypeError("bad type in store"))
 
         with pytest.raises(TypeError, match="bad type in store"):
             journal._load_payload("some-ref")
@@ -657,8 +677,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = IntegrityError("expected abc123, got def456")
+        journal._payload_store = _PayloadStoreDouble(error=IntegrityError("expected abc123, got def456"))
 
         with pytest.raises(AuditIntegrityError, match="corruption or tampering"):
             journal._load_payload("some-ref")
@@ -678,8 +697,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = IntegrityError("expected abc123, got def456")
+        journal._payload_store = _PayloadStoreDouble(error=IntegrityError("expected abc123, got def456"))
 
         with pytest.raises(AuditIntegrityError, match="corruption or tampering"):
             journal._load_payload("some-ref")
@@ -690,8 +708,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"\x80\x81\x82"  # Invalid UTF-8
+        journal._payload_store = _PayloadStoreDouble(content=b"\x80\x81\x82")  # Invalid UTF-8
 
         content, error = journal._load_payload("some-ref")
         assert content is None
@@ -726,8 +743,7 @@ class TestEnrichWithPayloads:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"payload content"
+        journal._payload_store = _PayloadStoreDouble(content=b"payload content")
 
         record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
         journal._enrich_with_payloads(
@@ -745,8 +761,7 @@ class TestEnrichWithPayloads:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"payload content"
+        journal._payload_store = _PayloadStoreDouble(content=b"payload content")
 
         record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
         journal._enrich_with_payloads(
@@ -766,8 +781,7 @@ class TestEnrichWithPayloads:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"payload"
+        journal._payload_store = _PayloadStoreDouble(content=b"payload")
 
         record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": True})
         journal._enrich_with_payloads(

@@ -1161,6 +1161,7 @@ async def _runtime_preflight_for_state(
     settings: Any,
     secret_service: Any | None,
     user_id: str | None,
+    session_id: str | UUID,
 ) -> ValidationResult:
     return await asyncio.wait_for(
         run_sync_in_worker(
@@ -1170,6 +1171,7 @@ async def _runtime_preflight_for_state(
             yaml_generator,
             secret_service=secret_service,
             user_id=user_id,
+            session_id=str(session_id),
         ),
         timeout=settings.composer_runtime_preflight_timeout_seconds,
     )
@@ -1577,6 +1579,7 @@ async def _state_data_from_composer_state(
     settings: Any,
     secret_service: Any | None,
     user_id: str | None,
+    session_id: str | UUID,
     runtime_preflight: _RuntimePreflightOutcome,
     preflight_exception_policy: _PreflightExceptionPolicy,
     initial_version: int | None,
@@ -1609,6 +1612,7 @@ async def _state_data_from_composer_state(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
             )
         except Exception as exc:
             # Telemetry MUST fire on both policy branches. Emitting before
@@ -1799,6 +1803,7 @@ async def _handle_convergence_error(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -1942,6 +1947,7 @@ async def _handle_plugin_crash(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -2176,6 +2182,7 @@ async def _handle_runtime_preflight_failure(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,

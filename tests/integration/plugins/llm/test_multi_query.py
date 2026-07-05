@@ -11,8 +11,9 @@ from __future__ import annotations
 import json
 from collections.abc import Generator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +30,37 @@ from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
 
 DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, side_effect: Any = None) -> None:
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return None
+
+
+class _AzureOpenAIClientDouble:
+    def __init__(self, create_response: Any) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CallRecorder(create_response)))
+        self.close = _CallRecorder()
 
 
 def make_full_config() -> dict[str, Any]:
@@ -197,47 +229,38 @@ Assess this case against the criterion.
 @contextmanager
 def mock_azure_openai_multi_query(
     responses: list[dict[str, Any]],
-) -> Generator[Mock, None, None]:
+) -> Generator[_AzureOpenAIClientDouble, None, None]:
     """Context manager to mock Azure OpenAI for multi-query processing.
 
     Args:
         responses: List of response dicts to return in order (cycles if exhausted)
 
     Yields:
-        Mock client instance for assertions
+        Client double for assertions
     """
     call_count = [0]
 
-    def make_response(**kwargs: Any) -> Mock:
+    def make_response(**_kwargs: Any) -> SimpleNamespace:
         content = json.dumps(responses[call_count[0] % len(responses)])
         call_count[0] += 1
-
-        mock_usage = Mock()
-        mock_usage.prompt_tokens = 50
-        mock_usage.completion_tokens = 20
-
-        mock_message = Mock()
-        mock_message.content = content
-
-        mock_choice = Mock()
-        mock_choice.message = mock_message
-
-        mock_response = Mock()
-        mock_response.choices = [mock_choice]
-        mock_response.model = "gpt-4o"
-        mock_response.usage = mock_usage
-        mock_response.model_dump = Mock(
-            return_value={
-                "model": "gpt-4o",
-                "choices": [{"finish_reason": "stop", "message": {"content": content}}],
-            }
+        raw_response = {
+            "model": "gpt-4o",
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+        }
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=content),
+                )
+            ],
+            model="gpt-4o",
+            usage=SimpleNamespace(prompt_tokens=50, completion_tokens=20),
+            model_dump=lambda *_args, **_kwargs: raw_response,
         )
 
-        return mock_response
-
     with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = make_response
+        mock_client = _AzureOpenAIClientDouble(make_response)
         mock_azure_class.return_value = mock_client
         yield mock_client
 

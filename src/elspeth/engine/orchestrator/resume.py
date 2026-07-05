@@ -844,13 +844,16 @@ class ResumeCoordinator:
         # like can_resume() — a caller may hand-build a ResumePoint — so
         # re-verify at the enforcing boundary that (a) the supplied checkpoint
         # is the run's LATEST resume baseline (resuming a superseded one would
-        # replay work the run has already progressed past) and (b) its recorded
-        # topology matches the graph this resume runs under (one run_id = one
-        # configuration). Both are READ-ONLY refusals fired before the first
-        # mutation (prepare_for_run / rebase_sequence / the seat CAS in
-        # reconstruct_resume_state), mirroring the status guard above. A
-        # format-incompatible checkpoint row (IncompatibleCheckpointError from
-        # get_latest_checkpoint) propagates as-is — structured, fail-closed.
+        # replay work the run has already progressed past) and (b) the stored
+        # latest checkpoint's recorded topology matches the graph this resume
+        # runs under (one run_id = one configuration). The topology check must
+        # use the database-loaded latest checkpoint, not caller-supplied
+        # checkpoint fields from a hand-built ResumePoint. Both are READ-ONLY
+        # refusals fired before the first mutation (prepare_for_run /
+        # rebase_sequence / the seat CAS in reconstruct_resume_state),
+        # mirroring the status guard above. A format-incompatible checkpoint
+        # row (IncompatibleCheckpointError from get_latest_checkpoint)
+        # propagates as-is — structured, fail-closed.
         if self._checkpoint_manager is None:
             raise OrchestrationInvariantError(
                 "CheckpointManager is required for resume - Orchestrator must be initialized with checkpoint_manager"
@@ -871,7 +874,7 @@ class ResumeCoordinator:
                 f"is not the run's latest resume point '{latest_checkpoint.checkpoint_id}' "
                 f"(sequence {latest_checkpoint.sequence_number})",
             )
-        topology_check = CheckpointCompatibilityValidator().validate(resume_point.checkpoint, graph)
+        topology_check = CheckpointCompatibilityValidator().validate(latest_checkpoint, graph)
         if not topology_check.can_resume:
             raise NonResumableRunError(
                 guarded_run_id,

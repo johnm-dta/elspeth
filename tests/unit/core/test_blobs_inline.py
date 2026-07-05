@@ -20,6 +20,8 @@ from elspeth.contracts.blobs_inline import BlobContentResolutionError, BlobInlin
 from elspeth.contracts.enums import CreationModality
 from elspeth.core.blobs_inline import (
     _discover_blob_content_refs,
+    _enforce_blob_content_ref_metadata,
+    _evaluate_blob_content_ref_metadata,
     _fetch_blob_contents,
     _substitute_blob_content_refs,
     _validate_blob_content_refs,
@@ -29,6 +31,7 @@ from elspeth.core.blobs_inline import (
 VALID_HASH = "a" * 64
 BLOB1 = "5b7a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3a4b"
 BLOB2 = "7c3a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3aaa"
+BLOB3 = "9d4a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3bbb"
 SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
 OTHER_SESSION_ID = UUID("22222222-2222-4222-8222-222222222222")
 
@@ -485,6 +488,63 @@ class TestSubstituteBlobContentRefs:
 
 
 class TestValidateBlobContentRefs:
+    def test_metadata_evaluator_collects_shared_policy_facts(self) -> None:
+        oversized = _blob_record(blob_id=BLOB1, content_hash=VALID_HASH, size_bytes=128)
+        pending = _blob_record(blob_id=BLOB2, status="pending")
+        mismatch = _blob_record(blob_id=BLOB3, content_hash="b" * 64)
+        refs = [
+            _ref(BLOB1, "source.options.oversized"),
+            _ref(BLOB2, "source.options.pending"),
+            _ref(BLOB3, "source.options.mismatch"),
+            _ref("aaaaaaaa-9e4a-4f0b-8d3e-2c0e1f0d3ccc", "source.options.missing"),
+        ]
+
+        result = _evaluate_blob_content_ref_metadata(
+            refs,
+            {
+                UUID(BLOB1): oversized,
+                UUID(BLOB2): pending,
+                UUID(BLOB3): mismatch,
+            },
+            per_ref_byte_cap=64,
+            aggregate_byte_cap=64,
+        )
+
+        assert result.missing == (("source.options.missing", UUID("aaaaaaaa-9e4a-4f0b-8d3e-2c0e1f0d3ccc")),)
+        assert result.not_ready == (("source.options.pending", f"blob {UUID(BLOB2)} status is 'pending'"),)
+        assert result.hash_mismatches == ((refs[2], "b" * 64),)
+        assert result.oversized == (
+            ("source.options.oversized", 128, 64),
+            ("(aggregate)", 128, 64),
+        )
+
+    def test_runtime_metadata_enforcement_batches_shared_non_integrity_errors(self) -> None:
+        oversized = _blob_record(blob_id=BLOB1, content_hash=VALID_HASH, size_bytes=128)
+        pending = _blob_record(blob_id=BLOB2, status="pending")
+        refs = [
+            _ref(BLOB1, "source.options.oversized"),
+            _ref(BLOB2, "source.options.pending"),
+            _ref(BLOB3, "source.options.missing"),
+        ]
+
+        with pytest.raises(BlobContentResolutionError) as exc_info:
+            _enforce_blob_content_ref_metadata(
+                refs,
+                {
+                    UUID(BLOB1): oversized,
+                    UUID(BLOB2): pending,
+                },
+                per_ref_byte_cap=64,
+                aggregate_byte_cap=64,
+            )
+
+        assert exc_info.value.missing == ("source.options.missing",)
+        assert exc_info.value.not_ready == (("source.options.pending", f"blob {UUID(BLOB2)} status is 'pending'"),)
+        assert exc_info.value.oversized == (
+            ("source.options.oversized", 128, 64),
+            ("(aggregate)", 128, 64),
+        )
+
     @pytest.mark.asyncio
     async def test_async_returns_missing_violation_without_raising(self) -> None:
         blob_service = _BlobServiceDouble()

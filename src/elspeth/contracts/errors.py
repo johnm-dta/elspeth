@@ -1079,6 +1079,8 @@ class DeclaredOutputFieldRowViolationPayload(TypedDict):
 
     emitted_index: Required[int]
     runtime_observed: Required[list[str]]
+    runtime_observed_count: NotRequired[int]
+    runtime_observed_truncated: NotRequired[bool]
     missing: Required[list[str]]
 
 
@@ -1086,6 +1088,8 @@ class DeclaredOutputFieldsPayload(TypedDict):
     """Audit payload for ADR-011 declared-output-fields mismatches."""
 
     declared: Required[list[str]]
+    violation_count: Required[int]
+    violations_truncated: Required[bool]
     violations: Required[list[DeclaredOutputFieldRowViolationPayload]]
 
 

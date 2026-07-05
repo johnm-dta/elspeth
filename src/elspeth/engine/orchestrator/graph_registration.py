@@ -17,7 +17,6 @@ import json
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from elspeth.contracts.events import (
@@ -43,10 +42,7 @@ from elspeth.engine.orchestrator.landscape_registration import (
 )
 from elspeth.engine.orchestrator.types import GraphArtifacts
 from elspeth.engine.orchestrator.validation import (
-    validate_route_destinations,
-    validate_sink_failsink_destinations,
-    validate_source_quarantine_destination,
-    validate_transform_error_sinks,
+    validate_pipeline_route_targets,
 )
 
 if TYPE_CHECKING:
@@ -170,9 +166,6 @@ class GraphRegistrationService:
                 # Key by edge label - gates return route labels, transforms use "continue"
                 edge_map[(NodeID(edge_info.from_node), edge_info.label)] = edge.edge_id
 
-            # Get route resolution map - maps (gate_node, label) -> "continue" | sink_name
-            route_resolution_map = graph.get_route_resolution_map()
-
             # NOTE — value-source compliance is enforced at the entry-point
             # boundary, NOT here. The walker
             # (``engine/orchestrator/preflight.validate_value_source_compliance``)
@@ -189,42 +182,11 @@ class GraphRegistrationService:
             # value-source declarations per run, and a bypassing entry point
             # would silently skip the check otherwise.
             #
-            # Validate all route destinations BEFORE processing any rows
-            # This catches config errors early instead of after partial processing
-            # Note: config gates also add to route_resolution_map, validated the same way
-            # Call module function directly (no wrapper method)
-            validate_route_destinations(
-                route_resolution_map=route_resolution_map,
-                available_sinks=set(config.sinks.keys()),
+            validate_pipeline_route_targets(
+                config=config,
+                route_resolution_map=graph.get_route_resolution_map(),
                 transform_id_map=transform_id_map,
-                transforms=config.transforms,
                 config_gate_id_map=config_gate_id_map,
-                config_gates=config.gates,
-            )
-
-            # Validate transform error sink destinations
-            # Call module function directly (no wrapper method)
-            validate_transform_error_sinks(
-                transforms=config.transforms,
-                available_sinks=set(config.sinks.keys()),
-            )
-
-            # Validate source quarantine destination
-            # Call module function directly (no wrapper method)
-            for source in config.sources.values():
-                validate_source_quarantine_destination(
-                    source=source,
-                    available_sinks=set(config.sinks.keys()),
-                )
-
-            # Validate sink failsink destinations
-
-            sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in config.sinks.items()}
-            sink_plugins = {name: sink.name for name, sink in config.sinks.items()}
-            validate_sink_failsink_destinations(
-                sink_configs=sink_validation_stubs,
-                available_sinks=set(config.sinks.keys()),
-                sink_plugins=sink_plugins,
             )
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.GRAPH, duration_seconds=time.perf_counter() - phase_start))

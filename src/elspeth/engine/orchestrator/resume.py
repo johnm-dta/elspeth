@@ -30,7 +30,6 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import PipelineRow, ResumedRow, RunStatus
@@ -88,10 +87,7 @@ from elspeth.engine.orchestrator.types import (
     ResumeState,
 )
 from elspeth.engine.orchestrator.validation import (
-    validate_route_destinations,
-    validate_sink_failsink_destinations,
-    validate_source_quarantine_destination,
-    validate_transform_error_sinks,
+    validate_pipeline_route_targets,
 )
 from elspeth.engine.retry import RetryManager
 
@@ -150,43 +146,11 @@ def setup_resume_context(
     # registered in the original run — FK integrity for routing events).
     edge_map = load_edge_map(factory.data_flow, run_id)
 
-    # Get route resolution map for validation
-    route_resolution_map = graph.get_route_resolution_map()
-
-    # Validate route destinations (config may have changed since original run)
-    # This catches config errors early instead of after partial processing
-    # Call module function directly (no wrapper method)
-    validate_route_destinations(
-        route_resolution_map=route_resolution_map,
-        available_sinks=set(config.sinks.keys()),
+    validate_pipeline_route_targets(
+        config=config,
+        route_resolution_map=graph.get_route_resolution_map(),
         transform_id_map=transform_id_map,
-        transforms=config.transforms,
         config_gate_id_map=config_gate_id_map,
-        config_gates=config.gates,
-    )
-
-    # Validate transform error sink destinations
-    # Call module function directly (no wrapper method)
-    validate_transform_error_sinks(
-        transforms=config.transforms,
-        available_sinks=set(config.sinks.keys()),
-    )
-
-    # Validate source quarantine destinations
-    # Call module function directly (no wrapper method)
-    for source in config.sources.values():
-        validate_source_quarantine_destination(
-            source=source,
-            available_sinks=set(config.sinks.keys()),
-        )
-
-    # Validate sink failsink destinations
-    sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in config.sinks.items()}
-    sink_plugins = {name: sink.name for name, sink in config.sinks.items()}
-    validate_sink_failsink_destinations(
-        sink_configs=sink_validation_stubs,
-        available_sinks=set(config.sinks.keys()),
-        sink_plugins=sink_plugins,
     )
 
     return GraphArtifacts(

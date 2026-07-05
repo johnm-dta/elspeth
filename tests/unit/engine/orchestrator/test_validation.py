@@ -10,6 +10,7 @@ are rejected with clear error messages.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from elspeth.contracts import RouteDestination
 from elspeth.contracts.types import GateName, NodeID, SinkName
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.engine.orchestrator.validation import (
+    validate_pipeline_route_targets,
     validate_route_destinations,
     validate_source_quarantine_destination,
     validate_transform_error_sinks,
@@ -41,6 +43,12 @@ class FakeSource:
 
 
 @dataclass
+class FakeSink:
+    name: str = "json"
+    _on_write_failure: str = "discard"
+
+
+@dataclass
 class FakeConfigGate:
     name: str
 
@@ -51,6 +59,25 @@ def _make_transform(*, node_id: str, name: str, on_error: str | None = None) -> 
 
 def _make_source(*, name: str = "csv-source", on_validation_failure: str = "discard") -> FakeSource:
     return FakeSource(name=name, _on_validation_failure=on_validation_failure)
+
+
+def _make_sink(*, name: str = "json", on_write_failure: str = "discard") -> FakeSink:
+    return FakeSink(name=name, _on_write_failure=on_write_failure)
+
+
+def _make_pipeline_config(
+    *,
+    source: FakeSource | None = None,
+    transform: FakeTransform | None = None,
+    sinks: dict[str, FakeSink] | None = None,
+    gates: list[FakeConfigGate] | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        sources={"source": source or _make_source()},
+        transforms=[transform or _make_transform(node_id="t-1", name="mapper", on_error="discard")],
+        sinks=sinks or {"output": _make_sink()},
+        gates=gates or [FakeConfigGate(name="quality_gate")],
+    )
 
 
 # =============================================================================
@@ -191,3 +218,74 @@ class TestValidateSourceQuarantineDestination:
         source = _make_source(on_validation_failure="bad")
         with pytest.raises(RouteValidationError, match="discard"):
             validate_source_quarantine_destination(source, {"output"})
+
+
+# =============================================================================
+# validate_pipeline_route_targets
+# =============================================================================
+
+
+class TestValidatePipelineRouteTargets:
+    """Tests for the shared route-target preflight bundle."""
+
+    def test_valid_bundle_passes(self) -> None:
+        config = _make_pipeline_config(
+            source=_make_source(on_validation_failure="quarantine"),
+            transform=_make_transform(node_id="t-1", name="mapper", on_error="errors"),
+            sinks={
+                "output": _make_sink(name="json"),
+                "errors": _make_sink(name="json"),
+                "quarantine": _make_sink(name="json"),
+            },
+        )
+
+        validate_pipeline_route_targets(
+            config=config,
+            route_resolution_map={(NodeID("cfg-gate-1"), "true"): RouteDestination.sink(SinkName("output"))},
+            transform_id_map={},
+            config_gate_id_map={GateName("quality_gate"): NodeID("cfg-gate-1")},
+        )
+
+    def test_bundle_rejects_missing_route_sink(self) -> None:
+        config = _make_pipeline_config()
+
+        with pytest.raises(RouteValidationError, match=r"quality_gate.*missing"):
+            validate_pipeline_route_targets(
+                config=config,
+                route_resolution_map={(NodeID("cfg-gate-1"), "true"): RouteDestination.sink(SinkName("missing"))},
+                transform_id_map={},
+                config_gate_id_map={GateName("quality_gate"): NodeID("cfg-gate-1")},
+            )
+
+    def test_bundle_rejects_missing_transform_error_sink(self) -> None:
+        config = _make_pipeline_config(transform=_make_transform(node_id="t-1", name="mapper", on_error="missing"))
+
+        with pytest.raises(RouteValidationError, match=r"mapper.*missing"):
+            validate_pipeline_route_targets(
+                config=config,
+                route_resolution_map={},
+                transform_id_map={},
+                config_gate_id_map={GateName("quality_gate"): NodeID("cfg-gate-1")},
+            )
+
+    def test_bundle_rejects_missing_source_quarantine_sink(self) -> None:
+        config = _make_pipeline_config(source=_make_source(on_validation_failure="missing"))
+
+        with pytest.raises(RouteValidationError, match=r"csv-source.*missing"):
+            validate_pipeline_route_targets(
+                config=config,
+                route_resolution_map={},
+                transform_id_map={},
+                config_gate_id_map={GateName("quality_gate"): NodeID("cfg-gate-1")},
+            )
+
+    def test_bundle_rejects_invalid_sink_failsink(self) -> None:
+        config = _make_pipeline_config(sinks={"output": _make_sink(name="json", on_write_failure="missing")})
+
+        with pytest.raises(RouteValidationError, match=r"unknown sink 'missing'"):
+            validate_pipeline_route_targets(
+                config=config,
+                route_resolution_map={},
+                transform_id_map={},
+                config_gate_id_map={GateName("quality_gate"): NodeID("cfg-gate-1")},
+            )

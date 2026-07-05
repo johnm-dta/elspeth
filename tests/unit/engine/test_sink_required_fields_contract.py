@@ -244,6 +244,26 @@ def test_boundary_check_rejects_dispatcher_plugin_node_drift() -> None:
         contract.boundary_check(inputs, BoundaryOutputs())
 
 
+def test_boundary_check_uses_static_contract_snapshot_not_mutable_plugin_state() -> None:
+    contract = SinkRequiredFieldsContract()
+    inputs = BoundaryInputs(
+        plugin=_plugin(node_id="n-1", declared_required_fields=frozenset({"plugin_mutated_field"})),
+        node_id="n-1",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        static_contract=frozenset({"snapshot_required_field"}),
+        row_data={"plugin_mutated_field": "v"},
+        row_contract=None,
+    )
+
+    with pytest.raises(SinkRequiredFieldsViolation) as exc_info:
+        contract.boundary_check(inputs, BoundaryOutputs())
+
+    assert tuple(exc_info.value.payload["declared"]) == ("snapshot_required_field",)
+    assert tuple(exc_info.value.payload["missing"]) == ("snapshot_required_field",)
+
+
 def test_boundary_check_bounds_runtime_observed_diagnostics() -> None:
     contract = SinkRequiredFieldsContract()
     long_suffix = "x" * 120

@@ -356,6 +356,21 @@ class TestResolveDependencies:
                 runner=mock_runner,
             )
 
+    def test_graceful_shutdown_propagates_unwrapped(self, tmp_path: Path) -> None:
+        from elspeth.contracts.errors import GracefulShutdownError
+
+        dep = DependencyConfig(name="index", settings="./index.yaml")
+        parent_path = tmp_path / "query.yaml"
+        shutdown = GracefulShutdownError(rows_processed=0, run_id="run-1")
+        mock_runner = _RunnerDouble(error=shutdown)
+
+        with pytest.raises(GracefulShutdownError):
+            resolve_dependencies(
+                depends_on=[dep],
+                parent_settings_path=parent_path,
+                runner=mock_runner,
+            )
+
     def test_runner_exception_wrapped_in_dependency_failed_error(self, tmp_path: Path) -> None:
         """Runner exceptions (other than KeyboardInterrupt) are wrapped in DependencyFailedError."""
         dep = DependencyConfig(name="index", settings="./index.yaml")

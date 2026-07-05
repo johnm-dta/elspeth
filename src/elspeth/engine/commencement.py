@@ -9,6 +9,7 @@ from elspeth.contracts.errors import CommencementGateFailedError
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.core.dependency_config import CommencementGateConfig, CommencementGateResult
 from elspeth.core.expression_parser import ExpressionParser
+from elspeth.engine.error_boundary import reraise_if_engine_crash_through
 
 _GATE_ALLOWED_NAMES = ["collections", "dependency_runs", "env"]
 
@@ -109,11 +110,10 @@ def evaluate_commencement_gates(
             passed = result
         except CommencementGateFailedError:
             raise
-        except (TypeError, AttributeError, AssertionError, NameError, KeyError, RecursionError):
-            # Programming errors crash through — these indicate bugs
-            # in the expression parser, not operator expression issues.
-            raise
-        except Exception as exc:
+        except BaseException as exc:
+            reraise_if_engine_crash_through(exc)
+            if not isinstance(exc, Exception):
+                raise
             raise CommencementGateFailedError(
                 gate_name=gate.name,
                 condition=gate.condition,

@@ -10,12 +10,12 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-import elspeth.contracts.errors as contract_errors
 from elspeth.contracts.enums import RunStatus
-from elspeth.contracts.errors import DependencyFailedError, GracefulShutdownError
+from elspeth.contracts.errors import DependencyFailedError
 from elspeth.contracts.pipeline_runner import PipelineRunner
 from elspeth.core.canonical import canonical_json
 from elspeth.core.dependency_config import DependencyConfig, DependencyRunResult
+from elspeth.engine.error_boundary import reraise_if_engine_crash_through
 
 
 def _load_depends_on(settings_path: Path) -> list[dict[str, str]]:
@@ -183,20 +183,10 @@ def resolve_dependencies(
         start_ms = time.monotonic_ns() // 1_000_000
         try:
             run_result = runner(dep_path)
-        except KeyboardInterrupt:
-            raise
-        except contract_errors.TIER_1_ERRORS:
-            # Tier 1 errors propagate unwrapped — the CLI's fatal-error
-            # handler must see these at their original severity, not
-            # downgraded to an ordinary DependencyFailedError.
-            raise
-        except GracefulShutdownError:
-            raise
-        except (TypeError, AttributeError, NotImplementedError, AssertionError, NameError, KeyError, RecursionError):
-            # Programming errors crash through — these indicate bugs
-            # in the runner or its callees, not operational failures.
-            raise
-        except Exception as exc:
+        except BaseException as exc:
+            reraise_if_engine_crash_through(exc)
+            if not isinstance(exc, Exception):
+                raise
             raise DependencyFailedError(
                 dependency_name=dep.name,
                 run_id="pre-run",

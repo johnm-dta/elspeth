@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts.errors import CommencementGateFailedError
+from elspeth.contracts.errors import CommencementGateFailedError, GracefulShutdownError
 from elspeth.core.dependency_config import CommencementGateConfig
 from elspeth.engine.commencement import (
     build_preflight_context,
@@ -258,6 +258,20 @@ class TestCommencementGateCrashThrough:
             pytest.raises(NameError),
         ):
             mock_cls.return_value.evaluate.side_effect = NameError("undefined")
+            evaluate_commencement_gates([gate], context)
+
+    def test_graceful_shutdown_crashes_through(self) -> None:
+        from unittest.mock import patch
+
+        gate = CommencementGateConfig(name="g", condition="True")
+        context = self._make_context()
+        shutdown = GracefulShutdownError(rows_processed=0, run_id="run-1")
+
+        with (
+            patch("elspeth.engine.commencement.ExpressionParser") as mock_cls,
+            pytest.raises(GracefulShutdownError),
+        ):
+            mock_cls.return_value.evaluate.side_effect = shutdown
             evaluate_commencement_gates([gate], context)
 
 

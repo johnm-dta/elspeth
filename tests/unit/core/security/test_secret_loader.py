@@ -361,3 +361,76 @@ class TestClearCacheThreadSafety:
         loader.clear_cache()
         clear_done.set()
         t.join()
+
+
+def _resolve_challenge_verify_flag(client: object) -> bool:
+    """Read the effective verify-challenge-resource flag off a live SecretClient.
+
+    The flag is not a public attribute; it lives on the Key Vault
+    ``ChallengeAuthPolicy`` inside the client's transport pipeline. We reach
+    through SDK internals deliberately: the pin below must observe the *real*
+    runtime posture, so if a future ``azure-keyvault-secrets`` release reorganises
+    these internals the walk fails loudly. That failure is the intended
+    "someone must re-verify this security assumption" signal — not a silent pass.
+    """
+    try:
+        policies = client._client._client._pipeline._impl_policies  # type: ignore[attr-defined]
+    except AttributeError as e:  # pragma: no cover - only trips on an SDK reshuffle
+        raise AssertionError(
+            "Could not reach the SecretClient transport pipeline via the known "
+            "azure-keyvault-secrets internals — the SDK layout changed. Re-verify "
+            "that Key Vault challenge-resource verification is still on by default, "
+            "then update this walk (see test_keyvault_client_verifies_challenge_"
+            "resource_by_default)."
+        ) from e
+
+    for policy in policies:
+        if "Challenge" in type(policy).__name__ and hasattr(policy, "_verify_challenge_resource"):
+            return bool(policy._verify_challenge_resource)  # type: ignore[attr-defined]
+
+    raise AssertionError(
+        "No challenge-auth policy exposing _verify_challenge_resource was found on "
+        "the SecretClient pipeline — azure-keyvault-secrets no longer challenge-"
+        "verifies by construction. Re-verify the SSRF/credential-boundary "
+        "assumption (elspeth-7572facbc6) before adjusting this pin."
+    )
+
+
+def test_keyvault_client_verifies_challenge_resource_by_default() -> None:
+    """Pin the SDK default our SSRF hardening quietly leans on (elspeth-7572facbc6).
+
+    WHY THIS MATTERS. The ``vault_url`` SSRF hardening has two visible layers: a
+    validator that restricts ``vault_url`` to approved Azure Key Vault host
+    suffixes, and an optional deployment allowlist. Together they stop a settings
+    file from aiming a ``DefaultAzureCredential``-backed client at an *arbitrary*
+    host. What neither layer covers is token leakage during the auth *challenge*:
+    absent challenge-resource verification, a host that answers with a crafted
+    ``WWW-Authenticate`` challenge could induce the client to request — and send —
+    a bearer token scoped to a resource the responder names. ``azure-keyvault-
+    secrets`` >= 4.11 defaults ``verify_challenge_resource=True`` (it rejects a
+    challenge whose resource is not the vault's own domain), and our loader relies
+    entirely on that default: ``_get_keyvault_client`` never passes the flag.
+
+    That reliance is an invisible assumption, so we pin it. This test fails if
+    either side erodes:
+
+    * a future SDK release flips the default to ``False`` (guarded further by the
+      ``azure-keyvault-secrets>=4.11,<5`` pin in pyproject), or
+    * someone edits ``_get_keyvault_client`` to pass
+      ``verify_challenge_resource=False``.
+
+    A failure here is a prompt to re-verify the credential-egress posture, not a
+    test to silence.
+    """
+    pytest.importorskip("azure.keyvault.secrets")
+    pytest.importorskip("azure.identity")
+
+    # Build via the real production path. Both SecretClient and
+    # DefaultAzureCredential defer all network I/O until the first token/secret
+    # fetch, so constructing the client here is side-effect free.
+    client = _get_keyvault_client("https://elspeth-pin-test.vault.azure.net")
+
+    assert _resolve_challenge_verify_flag(client) is True, (
+        "Key Vault client is not verifying the challenge resource — the SSRF "
+        "hardening's token-leak defense (elspeth-7572facbc6) has regressed."
+    )

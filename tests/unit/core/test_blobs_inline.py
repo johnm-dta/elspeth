@@ -252,6 +252,14 @@ class TestDiscoverBlobContentRefs:
 
         assert exc_info.value.malformed == (("source.options.prompts", "inline blob refs inside lists are not supported"),)
 
+    def test_nested_markers_inside_lists_are_malformed_because_paths_would_be_positional(self) -> None:
+        config = {"source": {"plugin": "csv", "options": {"prompts": [{"prompt": _marker()}]}}}
+
+        with pytest.raises(BlobContentResolutionError) as exc_info:
+            _discover_blob_content_refs(config)
+
+        assert exc_info.value.malformed == (("source.options.prompts", "inline blob refs inside lists are not supported"),)
+
 
 class TestFetchBlobContents:
     @pytest.mark.asyncio

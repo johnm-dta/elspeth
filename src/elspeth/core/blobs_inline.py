@@ -592,9 +592,20 @@ def _walk_options(
 
     if type(value) is list:
         for child in cast(list[object], value):
-            if type(child) is dict and "blob_ref" in cast(dict[object, object], child):
+            if _contains_blob_ref_marker(child):
                 malformed.append((field_path, "inline blob refs inside lists are not supported"))
                 return
+
+
+def _contains_blob_ref_marker(value: object) -> bool:
+    if type(value) is dict:
+        mapping = cast(dict[object, object], value)
+        if "blob_ref" in mapping:
+            return True
+        return any(_contains_blob_ref_marker(child) for child in mapping.values())
+    if type(value) is list:
+        return any(_contains_blob_ref_marker(child) for child in cast(list[object], value))
+    return False
 
 
 def _is_source_options_path(field_path: str) -> bool:

@@ -142,9 +142,20 @@ def _full_resume_point(
     )
 
 
-def _latest_checkpoint(run_id: str, *, checkpoint_id: str = "cp-1", sequence_number: int = 7) -> Any:
+def _latest_checkpoint(
+    run_id: str,
+    *,
+    checkpoint_id: str = "cp-1",
+    sequence_number: int = 7,
+    topology_hash: str = "hash-1",
+) -> Any:
     """Canned latest-checkpoint stub for _StubCheckpointManager."""
-    return SimpleNamespace(run_id=run_id, checkpoint_id=checkpoint_id, sequence_number=sequence_number)
+    return SimpleNamespace(
+        run_id=run_id,
+        checkpoint_id=checkpoint_id,
+        sequence_number=sequence_number,
+        upstream_topology_hash=topology_hash,
+    )
 
 
 def _currency_coordinator(db: LandscapeDB, latest: Any) -> tuple[ResumeCoordinator, _RecordingCheckpoints]:
@@ -542,6 +553,39 @@ class TestResumeCheckpointCurrencyGuard:
         assert exc_info.value.run_id == "run-topo-drift"
         assert checkpoints.rebase_calls == []
 
+    def test_stored_latest_topology_refused_even_when_hand_built_resume_point_claims_current_hash(self, db: LandscapeDB) -> None:
+        """The enforcing guard validates the stored latest checkpoint, not caller-supplied checkpoint fields."""
+        from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
+        from elspeth.engine.orchestrator import PipelineConfig
+        from tests.fixtures.base_classes import as_sink, as_source
+        from tests.fixtures.pipeline import build_production_graph
+        from tests.fixtures.plugins import CollectSink, ListSource
+
+        config = PipelineConfig(
+            sources={"primary": as_source(ListSource([{"value": 1}]))},
+            transforms=[],
+            sinks={"default": as_sink(CollectSink("default"))},
+        )
+        graph = build_production_graph(config)
+        current_hash = CheckpointCompatibilityValidator().compute_full_topology_hash(graph)
+
+        _insert_run(db, "run-stored-topo-drift", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(
+            db,
+            latest=_latest_checkpoint("run-stored-topo-drift", topology_hash="stale-stored-topology-hash"),
+        )
+
+        with pytest.raises(NonResumableRunError, match=r"configuration changed") as exc_info:
+            coordinator.resume(
+                _full_resume_point("run-stored-topo-drift", topology_hash=current_hash),
+                cast(Any, config),
+                cast(Any, graph),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert exc_info.value.run_id == "run-stored-topo-drift"
+        assert checkpoints.rebase_calls == []
+
     def test_current_checkpoint_and_matching_topology_admitted(self, db: LandscapeDB) -> None:
         """Positive control: a current, topology-matching point passes the guard.
 
@@ -569,7 +613,7 @@ class TestResumeCheckpointCurrencyGuard:
         _insert_run(db, "run-current-cp", status=RunStatus.FAILED)
         coordinator, checkpoints = _currency_coordinator(
             db,
-            latest=_latest_checkpoint("run-current-cp"),
+            latest=_latest_checkpoint("run-current-cp", topology_hash=current_hash),
         )
 
         with pytest.raises(AuditIntegrityError, match=r"no runtime VAL manifest stored"):

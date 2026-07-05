@@ -70,6 +70,19 @@ class TestExecutionError:
         }
         assert "exception_type" not in payload
 
+    def test_execution_error_scrubs_exception_text_for_audit(self) -> None:
+        """Freeform exception text must not persist secret-bearing messages."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        error = ExecutionError(
+            exception=f"provider failed with Authorization: Bearer {secret}",
+            exception_type="RuntimeError",
+        )
+
+        assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
 
 class TestRuntimePreflightFailedError:
     """Tests for runtime-preflight audit payloads."""

@@ -62,7 +62,7 @@ class ExecutionError:
     queries can filter on ``json_extract(error_data, '$.context.<field>')``.
     """
 
-    exception: str  # String representation of the exception
+    exception: str  # Secret-scrubbed string representation of the exception
     exception_type: str  # Exception class name (e.g., "ValueError")
     traceback: str | None = None  # Optional full traceback
     phase: str | None = None  # Optional phase indicator (e.g., "flush" for sink flush errors)
@@ -74,6 +74,9 @@ class ExecutionError:
         These fields are recorded in the audit trail. Empty strings would
         produce valid-looking but uninformative error records.
         """
+        object.__setattr__(self, "exception", scrub_text_for_audit(self.exception))
+        if self.traceback is not None:
+            object.__setattr__(self, "traceback", scrub_text_for_audit(self.traceback))
         if not self.exception:
             raise ValueError("ExecutionError.exception must not be empty")
         if not self.exception_type:

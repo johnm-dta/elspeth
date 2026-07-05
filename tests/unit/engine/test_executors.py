@@ -2745,6 +2745,27 @@ class TestAggregationExecutor:
         failed_calls = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
         assert len(failed_calls) == 1
 
+    def test_execute_flush_scrubs_plugin_exception_message_in_failed_state(self) -> None:
+        """Secret-bearing plugin exception text must not be persisted in audit errors."""
+        executor, factory, nid = self._make_agg_executor(count=1)
+        contract = _make_contract()
+        secret = "sk-" + ("a" * 32)
+
+        executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
+
+        transform = _make_aggregation_transform("agg_transform")
+        transform.process.side_effect = RuntimeError(f"Authorization: Bearer {secret}")
+        ctx = make_context()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        assert secret in str(exc_info.value)
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        error = failed_kwargs["error"]
+        assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
     def test_execute_flush_exception_clears_batch_token_ids(self) -> None:
         """Exception path clears ctx.batch_token_ids to prevent stale leakage.
 

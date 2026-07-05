@@ -415,8 +415,8 @@ def test_resume_calls_prepare_for_run() -> None:
     prepare_for_run() call the registries are never frozen — leaving a window
     where register_declaration_contract() could succeed after bootstrap.
     """
-    import elspeth.engine.orchestrator.core as orchestrator_core
     from elspeth.contracts import Checkpoint, ResumePoint
+    from elspeth.engine.orchestrator import resume as resume_module
     from elspeth.engine.orchestrator.core import Orchestrator
     from elspeth.engine.orchestrator.resume import ResumeCoordinator
     from tests.fixtures.landscape import make_landscape_db
@@ -438,7 +438,7 @@ def test_resume_calls_prepare_for_run() -> None:
         raise ReconstructReached
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(orchestrator_core, "prepare_for_run", fake_prepare_for_run)
+    monkeypatch.setattr(resume_module, "prepare_for_run", fake_prepare_for_run)
     monkeypatch.setattr(ResumeCoordinator, "reconstruct_resume_state", fake_reconstruct_resume_state)
     try:
         checkpoint = Checkpoint(
@@ -481,7 +481,6 @@ def test_resume_calls_prepare_for_run() -> None:
         # behavior is pinned in test_resume_entry_guard.py) so the bootstrap
         # ordering under test stays reachable.
         from elspeth.contracts.checkpoint import ResumeCheck
-        from elspeth.engine.orchestrator import resume as resume_module
 
         class _LatestServingManager:
             def get_latest_checkpoint(self, run_id: str) -> Checkpoint:

@@ -43,9 +43,9 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
-from elspeth.engine.orchestrator.core import Orchestrator, _RunFailedWithPartialResultError
+from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.resume import run_resume_processing_loop, setup_resume_context
-from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, LoopResult, ResumeState
+from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, LoopResult, ResumeState, _RunFailedWithPartialResultError
 from elspeth.engine.processor import RowProcessor
 from elspeth.testing import make_row_result, make_source_row
 from tests.fixtures.landscape import make_landscape_db

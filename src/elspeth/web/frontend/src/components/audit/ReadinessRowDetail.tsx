@@ -28,7 +28,7 @@ import { resolveNodePlugin, stepLabelForPlugin } from "../chat/interpretationSte
 import {
   humaniseValidationMessage,
   makePhraseFor,
-} from "../chat/guided/PipelineValidationSummary";
+} from "@/lib/validationHumaniser";
 import { UNKNOWN_COMPONENT_PHRASE } from "../chat/guided/pipelineGloss";
 
 export interface ReadinessRowDetailProps {

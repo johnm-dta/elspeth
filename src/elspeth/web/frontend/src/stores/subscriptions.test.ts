@@ -127,9 +127,48 @@ describe("subscriptions — validation result side effects", () => {
 
     const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
     expect(message).toContain("Validation failed");
-    expect(message).toContain("csv_source");
+    // Humanised (elspeth-d9e5d157cb): the engineer-grade "[type] id:" prefix and
+    // the raw internal component id no longer leak into the novice chat register.
+    expect(message).not.toContain("[source]");
+    expect(message).not.toContain("csv_source");
     expect(message).not.toContain("sent to the agent");
     expect(stableId).toBe("system-validation-current");
+  });
+
+  it("humanises a contract-violation error into a plain-language chat headline (no raw dump, no [type] id: prefix)", () => {
+    const injectSystemMessage = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendMessage,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: "edge",
+            component_id: "rater",
+            message:
+              "Schema contract violation: edge 'rater' → 'cleaner'\n  Consumer expects field 'score'",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    const [message] = injectSystemMessage.mock.calls[0] as [string, string];
+    expect(message).toContain("Validation failed");
+    // The raw engine dump is replaced by a plain-language headline; the dump
+    // and the internal-id prefix never reach the novice chat register.
+    expect(message).toContain("aren't connected correctly");
+    expect(message).not.toContain("Schema contract violation");
+    expect(message).not.toContain("[edge]");
+    expect(message).not.toContain("rater");
   });
 
   it("does NOT inject system message or send a composer message for the structured empty_pipeline outcome", () => {
@@ -386,7 +425,10 @@ describe("subscriptions — validation result side effects", () => {
 
     const [message] = injectSystemMessage.mock.calls[0] as [string, string];
     expect(message).toContain("Validation passed with warnings");
-    expect(message).toContain("select_cols");
+    expect(message).toContain("Identity passthrough detected");
+    // Humanised: no "[type] id:" prefix / raw internal id (elspeth-d9e5d157cb).
+    expect(message).not.toContain("[transform]");
+    expect(message).not.toContain("select_cols");
   });
 
   it("fires side effects exactly once when the same result reference is set twice (reference-equality guard)", () => {

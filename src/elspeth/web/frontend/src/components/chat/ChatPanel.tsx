@@ -40,11 +40,8 @@ import { GuidedTurn } from "./guided/GuidedTurn";
 import { isGuidedBuildActive } from "./guided/guidedBuildActive";
 import { latestAssistantRationale } from "./guided/guidedRationale";
 import { PipelineGloss } from "./guided/PipelineGloss";
-import {
-  humaniseValidationMessage,
-  makePhraseFor,
-  PipelineValidationSummary,
-} from "./guided/PipelineValidationSummary";
+import { PipelineValidationSummary } from "./guided/PipelineValidationSummary";
+import { humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
 import { GraphMiniView } from "@/components/sidebar/GraphMiniView";
 import {
   AcknowledgementLiveRegion,

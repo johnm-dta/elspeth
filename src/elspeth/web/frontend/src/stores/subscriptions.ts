@@ -10,6 +10,7 @@ import { useAuditReadinessStore } from "./auditReadinessStore";
 import { useAuthStore } from "./authStore";
 import type { ValidationResult } from "@/types/index";
 import { hasCompositionContent } from "@/utils/compositionState";
+import { humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
 
 let previousVersion: number | null = null;
 let previousSessionIds: Set<string> = new Set();
@@ -108,6 +109,29 @@ function validationFingerprint(result: ValidationResult | null): string | null {
       suggestion: warn.suggestion ?? null,
     })),
   });
+}
+
+/**
+ * Format one validation finding as a novice-register chat bullet
+ * (elspeth-d9e5d157cb). Routes the raw backend message through the SHARED
+ * humaniser and drops the engineer-grade "[type] id:" internal-id prefix the
+ * old injection leaked verbatim. Prefixes the plain step name only when the
+ * finding is attributed to a resolvable component AND was passed through
+ * un-humanised (a humanised contract headline already names its steps) —
+ * mirrors formatFindingBody (elspeth-901a404926). Interpretation-review-pending
+ * findings never reach here (handled by isPendingInterpretationReviewResult
+ * above), so no stepLabelFor is needed.
+ */
+function humanisedValidationBullet(
+  message: string,
+  componentId: string | null,
+  phraseFor: (componentId: string | null) => string,
+): string {
+  const finding = humaniseValidationMessage(message, phraseFor);
+  const attributed = finding.raw === null && componentId !== null;
+  return attributed
+    ? `- **${phraseFor(componentId)}:** ${finding.headline}`
+    : `- ${finding.headline}`;
 }
 
 /**
@@ -281,20 +305,18 @@ export function initStoreSubscriptions(): void {
 
     if (!result.is_valid && result.errors.length > 0) {
       previousWasPendingReview = false;
+      const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation failed** — fix the following errors before running:"];
       for (const err of result.errors) {
-        lines.push(
-          `- **[${err.component_type ?? "unknown"}] ${err.component_id ?? "unknown"}:** ${err.message}`,
-        );
+        lines.push(humanisedValidationBullet(err.message, err.component_id ?? null, phraseFor));
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
       previousWasPendingReview = false;
+      const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation passed with warnings:**"];
       for (const warn of result.warnings) {
-        lines.push(
-          `- **[${warn.component_type ?? "unknown"}] ${warn.component_id ?? "unknown"}:** ${warn.message}`,
-        );
+        lines.push(humanisedValidationBullet(warn.message, warn.component_id ?? null, phraseFor));
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && previousWasPendingReview) {

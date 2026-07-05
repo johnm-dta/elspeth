@@ -62,6 +62,7 @@ async def finalize_no_tool_response(
     state: CompositionState,
     initial_version: int,
     user_id: str | None,
+    session_id: str | None,
     last_runtime_preflight: ValidationResult | None,
     runtime_preflight_cache: _RuntimePreflightCache,
     session_scope: str,
@@ -199,6 +200,7 @@ async def finalize_no_tool_response(
         runtime_result = await service._cached_runtime_preflight(
             state,
             user_id=user_id,
+            session_id=session_id,
             cache=runtime_preflight_cache,
             initial_version=initial_version,
             session_scope=session_scope,

@@ -771,8 +771,13 @@ def validate_pipeline(
     user_id: str | None = None,
     blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
     allow_pending_interpretation_placeholders: bool = False,
+    session_id: str | None = None,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
+
+    ``session_id`` scopes the sink-path allowlist to the caller's own
+    ``blobs/<session>/`` subtree (elspeth-bdc17cfdb1). ``None`` fails
+    closed: blob-targeted sink paths are rejected outright.
 
     Steps:
     1. Source path allowlist check (C3/S2 defense-in-depth)
@@ -865,7 +870,7 @@ def validate_pipeline(
     )
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
-    allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
+    allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir), session_id=session_id)
     path_checked = False
     for source_name, source in state.sources.items():
         source_options = dict(source.options)
@@ -932,7 +937,7 @@ def validate_pipeline(
                                 component_id=output.name,
                                 component_type="sink",
                                 message=f"Path traversal blocked: sink '{output.name}' {key}='{value}' resolves outside allowed directories",
-                                suggestion="Use a path within the outputs or blobs directory.",
+                                suggestion="Use a path within the outputs directory or this session's own blobs subtree.",
                                 error_code=None,
                             ),
                         ],
@@ -977,7 +982,7 @@ def validate_pipeline(
                                 component_id=node.id,
                                 component_type="transform",
                                 message=f"Path traversal blocked: transform '{node.id}' {key}='{value}' resolves outside allowed directories",
-                                suggestion="Use a path within the outputs or blobs directory.",
+                                suggestion="Use a path within the outputs directory or this session's own blobs subtree.",
                                 error_code=None,
                             ),
                         ],

@@ -1006,6 +1006,7 @@ async def run_tool_batch(
                 preview_preflight = await ctx.service._cached_runtime_preflight(
                     state,
                     user_id=user_id,
+                    session_id=session_id,
                     cache=runtime_preflight_cache,
                     initial_version=initial_version,
                     session_scope=session_scope,

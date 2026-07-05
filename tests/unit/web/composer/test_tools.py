@@ -6519,9 +6519,31 @@ class TestPatchOutputPathSecurity:
     def test_persist_directory_key_also_validated(self) -> None:
         from elspeth.web.composer.tools._common import _validate_sink_path
 
-        error = _validate_sink_path({"persist_directory": "/tmp/elspeth-outside"}, data_dir="/data")
+        error = _validate_sink_path({"persist_directory": "/tmp/elspeth-outside"}, data_dir="/data", session_id=None)
         assert error is not None
         assert "persist_directory" in error
+
+    def test_sink_path_in_own_session_blobs_allowed(self) -> None:
+        """elspeth-bdc17cfdb1: a sink may write into its own session's blob subtree."""
+        from elspeth.web.composer.tools._common import _validate_sink_path
+
+        error = _validate_sink_path({"path": "/data/blobs/sess-a/out.json"}, data_dir="/data", session_id="sess-a")
+        assert error is None
+
+    def test_sink_path_in_other_session_blobs_rejected(self) -> None:
+        """elspeth-bdc17cfdb1: cross-session blob writes are the defect this guard closes."""
+        from elspeth.web.composer.tools._common import _validate_sink_path
+
+        error = _validate_sink_path({"path": "/data/blobs/sess-b/out.json"}, data_dir="/data", session_id="sess-a")
+        assert error is not None
+        assert "path" in error
+
+    def test_sink_path_in_blobs_without_session_rejected(self) -> None:
+        """No session identity fails closed: no blob access at all."""
+        from elspeth.web.composer.tools._common import _validate_sink_path
+
+        error = _validate_sink_path({"path": "/data/blobs/sess-a/out.json"}, data_dir="/data", session_id=None)
+        assert error is not None
 
     def test_file_key_traversal_rejected(self) -> None:
         state = self._state_with_output({"path": "/data/outputs/ok.csv"})
@@ -6639,6 +6661,7 @@ class TestTransformProviderConfigPathSecurity:
         error = _validate_transform_provider_config_path(
             {"provider": "chroma", "provider_config": {"persist_directory": "/tmp/elspeth-outside"}},
             data_dir="/data",
+            session_id=None,
         )
         assert error is not None
         assert "persist_directory" in error
@@ -6649,13 +6672,38 @@ class TestTransformProviderConfigPathSecurity:
         error = _validate_transform_provider_config_path(
             {"provider": "chroma", "provider_config": {"persist_directory": "/data/outputs/chroma"}},
             data_dir="/data",
+            session_id=None,
         )
         assert error is None
+
+    def test_helper_allows_persist_directory_in_own_session_blobs(self) -> None:
+        """elspeth-bdc17cfdb1: persist_directory may live in the caller's own blob subtree."""
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path(
+            {"provider": "chroma", "provider_config": {"persist_directory": "/data/blobs/sess-a/chroma"}},
+            data_dir="/data",
+            session_id="sess-a",
+        )
+        assert error is None
+
+    def test_helper_rejects_persist_directory_in_other_session_blobs(self) -> None:
+        """elspeth-bdc17cfdb1: persist_directory is a read/write target — pointing it
+        at another session's blob subtree would disclose that session's data."""
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path(
+            {"provider": "chroma", "provider_config": {"persist_directory": "/data/blobs/sess-b/chroma"}},
+            data_dir="/data",
+            session_id="sess-a",
+        )
+        assert error is not None
+        assert "persist_directory" in error
 
     def test_helper_skips_non_rag_transform(self) -> None:
         from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
 
-        error = _validate_transform_provider_config_path({"some_field": "value"}, data_dir="/data")
+        error = _validate_transform_provider_config_path({"some_field": "value"}, data_dir="/data", session_id=None)
         assert error is None
 
     def test_helper_skips_null_persist_directory(self) -> None:
@@ -6667,6 +6715,7 @@ class TestTransformProviderConfigPathSecurity:
         error = _validate_transform_provider_config_path(
             {"provider": "chroma", "provider_config": {"persist_directory": None, "collection": "docs"}},
             data_dir="/data",
+            session_id=None,
         )
         assert error is None
 

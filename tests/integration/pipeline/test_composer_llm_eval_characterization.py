@@ -1258,6 +1258,7 @@ async def test_final_completion_claim_is_augmented_with_runtime_preflight_failur
         state=changed_state,
         initial_version=state.version,
         user_id=EVAL_USER_ID,
+        session_id=None,
         last_runtime_preflight=None,
         runtime_preflight_cache=composer._new_runtime_preflight_cache(),
         session_scope="session:eval",

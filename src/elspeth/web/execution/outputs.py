@@ -34,20 +34,24 @@ from elspeth.web.paths import allowed_sink_directories
 _FILE_URI_PREFIX = "file://"
 
 
-def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path) -> bool:
+def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path, *, session_id: str | None) -> bool:
     """Mirror of the read-side guard in the ``/content`` endpoint.
 
     Returns True iff ``fs_path`` resolves to a location inside one of
-    the canonical sink directories (``data_dir/{outputs,blobs}``).
+    the canonical sink directories — ``data_dir/outputs`` or the owning
+    session's ``data_dir/blobs/<session_id>`` subtree (elspeth-bdc17cfdb1).
     Used to decide whether the UI may surface a Download button — a
     sink that wrote outside the allowlist produces a real artefact
     record but the download endpoint will refuse to serve it.
+    ``session_id`` is the run's owning session; ``None`` fails closed so a
+    blob-directory artefact never reports downloadable without session
+    identity.
     """
     try:
         resolved = fs_path.resolve()
     except OSError:
         return False
-    allowed = allowed_sink_directories(str(data_dir))
+    allowed = allowed_sink_directories(str(data_dir), session_id=session_id)
     return any(resolved.is_relative_to(base) for base in allowed)
 
 
@@ -124,6 +128,7 @@ def load_run_outputs_from_db(
     run_id: str,
     landscape_run_id: str,
     data_dir: str | Path | None = None,
+    session_id: str | None = None,
 ) -> RunOutputsResponse:
     """Read every sink-write artefact for a run and return the full manifest.
 
@@ -157,7 +162,7 @@ def load_run_outputs_from_db(
                 and exists_now
                 and data_dir is not None
                 and fs_paths is not None
-                and any(fs_path.exists() and _is_path_in_sink_allowlist(fs_path, data_dir) for fs_path in fs_paths)
+                and any(fs_path.exists() and _is_path_in_sink_allowlist(fs_path, data_dir, session_id=session_id) for fs_path in fs_paths)
             )
             artifacts.append(
                 RunOutputArtifact(
@@ -184,6 +189,7 @@ def load_run_outputs_for_settings(
     *,
     run_id: str,
     landscape_run_id: str,
+    session_id: str | None = None,
 ) -> RunOutputsResponse:
     """Settings-driven variant — opens the configured Landscape DB and
     delegates to :func:`load_run_outputs_from_db`.
@@ -205,4 +211,5 @@ def load_run_outputs_for_settings(
             run_id=run_id,
             landscape_run_id=landscape_run_id,
             data_dir=settings.data_dir,
+            session_id=session_id,
         )

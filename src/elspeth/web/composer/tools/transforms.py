@@ -468,7 +468,7 @@ def _execute_upsert_node(
             return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
         # S2: confine nested provider_config persist_directory (RAG retrieval).
-        provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir)
+        provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir, session_id=context.session_id)
         if provider_path_error is not None:
             return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 
@@ -809,7 +809,7 @@ def _execute_patch_node_options(
 
         # S2: confine nested provider_config persist_directory (RAG retrieval).
         # A merge-patch can introduce an escaping path just as upsert_node can.
-        provider_path_error = _validate_transform_provider_config_path(new_options, context.data_dir)
+        provider_path_error = _validate_transform_provider_config_path(new_options, context.data_dir, session_id=context.session_id)
         if provider_path_error is not None:
             return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 

@@ -1288,16 +1288,20 @@ def _validate_source_path(
 def _validate_sink_path(
     options: dict[str, Any],
     data_dir: str | None,
+    *,
+    session_id: str | None,
 ) -> str | None:
     """Validate that sink path options are under allowed output directories.
 
     Returns an error message if validation fails, None if OK.
     Mirrors _validate_source_path but uses _allowed_sink_directories.
+    Blob-directory writes are confined to the caller's own session subtree
+    (elspeth-bdc17cfdb1); ``session_id=None`` fails closed to outputs only.
     """
     if data_dir is None:
         return None
 
-    allowed = allowed_sink_directories(data_dir)
+    allowed = allowed_sink_directories(data_dir, session_id=session_id)
 
     for key in SINK_LOCAL_PATH_OPTION_KEYS:
         if key in options:
@@ -1306,7 +1310,8 @@ def _validate_sink_path(
                 return (
                     f"Path violation (S2): '{key}' value '{options[key]}' is outside the "
                     f"allowed directories. Sink output paths "
-                    f"must be under {data_dir}/outputs/ or {data_dir}/blobs/."
+                    f"must be under {data_dir}/outputs/ or this session's own "
+                    f"{data_dir}/blobs/<session>/ subtree."
                 )
     return None
 
@@ -1314,13 +1319,18 @@ def _validate_sink_path(
 def _validate_transform_provider_config_path(
     options: Mapping[str, Any],
     data_dir: str | None,
+    *,
+    session_id: str | None,
 ) -> str | None:
     """Validate nested provider_config path options are under allowed dirs.
 
     RAG retrieval transforms carry a local Chroma persist_directory under
     ``options["provider_config"]``. It is a read/write target like a sink, so
-    it is confined to the allowed sink directories. Non-RAG transforms have no
-    provider_config dict and are skipped cleanly.
+    it is confined to the allowed sink directories — including the per-session
+    blob confinement (elspeth-bdc17cfdb1): a persist_directory pointed at
+    another session's blob subtree would disclose that session's data on read
+    as well as corrupt it on write. Non-RAG transforms have no provider_config
+    dict and are skipped cleanly.
 
     Returns an error message if validation fails, None if OK.
     """
@@ -1331,7 +1341,7 @@ def _validate_transform_provider_config_path(
     if not isinstance(provider_config, Mapping):
         return None
 
-    allowed = allowed_sink_directories(data_dir)
+    allowed = allowed_sink_directories(data_dir, session_id=session_id)
 
     for key in NESTED_LOCAL_PATH_OPTION_KEYS:
         if key not in provider_config:
@@ -1348,7 +1358,7 @@ def _validate_transform_provider_config_path(
                 f"Path violation (S2): provider_config '{key}' value "
                 f"'{value}' is outside the allowed directories. "
                 f"Transform provider paths must be under {data_dir}/outputs/ "
-                f"or {data_dir}/blobs/."
+                f"or this session's own {data_dir}/blobs/<session>/ subtree."
             )
     return None
 

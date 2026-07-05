@@ -46,11 +46,29 @@ def allowed_source_directories(data_dir: str) -> tuple[Path, ...]:
     return (base / "blobs",)
 
 
-def allowed_sink_directories(data_dir: str) -> tuple[Path, ...]:
+def allowed_sink_directories(data_dir: str, *, session_id: str | None) -> tuple[Path, ...]:
     """Return the set of directories to which sink paths may write.
 
-    Includes data_dir/outputs (primary sink target) and data_dir/blobs
-    (output blobs are stored alongside input blobs).
+    Includes data_dir/outputs (primary sink target, shared flat pool) and
+    the caller's own session subtree of data_dir/blobs — blob storage is
+    laid out as ``blobs/<session_id>/<blob_id>_<filename>`` and a sink (or
+    a transform's ``provider_config.persist_directory``) must never be
+    able to address another session's subtree (elspeth-bdc17cfdb1).
+
+    ``session_id=None`` means the caller has no session identity: the
+    result fails closed to outputs only — it never widens to the blobs
+    root. ``session_id`` is required as a keyword so no call site can
+    silently keep the old unscoped behaviour.
+
+    Raises:
+        ValueError: if ``session_id`` is present but could alter the path
+            shape (empty, a path separator, or a dot segment). Session ids
+            are UUID strings everywhere in the system; anything else
+            reaching this boundary is a contract violation upstream.
     """
     base = Path(data_dir).resolve()
-    return (base / "outputs", base / "blobs")
+    if session_id is None:
+        return (base / "outputs",)
+    if not session_id or session_id in (".", "..") or "/" in session_id or "\\" in session_id:
+        raise ValueError(f"allowed_sink_directories: malformed session_id {session_id!r} — expected a UUID-shaped path segment")
+    return (base / "outputs", base / "blobs" / session_id)

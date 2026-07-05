@@ -1113,19 +1113,48 @@ class TestValidatePipelineSinkPathAllowlist:
         assert path_check.passed is True
         assert "All paths within allowed directories" in path_check.detail
 
-    def test_sink_path_under_blobs_passes(self) -> None:
+    def test_sink_path_under_own_session_blobs_passes(self) -> None:
+        """elspeth-bdc17cfdb1: a sink may target the caller's own blob subtree."""
         state = _make_state(
             source_options={},
-            outputs=(_make_output(name="blob_out", options={"path": "/tmp/test_data/blobs/out.json"}),),
+            outputs=(_make_output(name="blob_out", options={"path": "/tmp/test_data/blobs/sess-1/out.json"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            result = validate_pipeline(state, settings, mock_yaml_gen, session_id="sess-1")
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
+
+    def test_sink_path_under_other_session_blobs_blocked(self) -> None:
+        """elspeth-bdc17cfdb1: a sink targeting another session's blob subtree
+        must fail the path allowlist — this is the cross-session write defect."""
+        state = _make_state(
+            source_options={},
+            outputs=(_make_output(name="blob_out", options={"path": "/tmp/test_data/blobs/sess-2/out.json"}),),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        result = validate_pipeline(state, settings, mock_yaml_gen, session_id="sess-1")
+        assert result.is_valid is False
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is False
+
+    def test_sink_path_under_blobs_blocked_without_session(self) -> None:
+        """No session identity fails closed: blob-targeted sinks are rejected,
+        never allowed against the blobs root."""
+        state = _make_state(
+            source_options={},
+            outputs=(_make_output(name="blob_out", options={"path": "/tmp/test_data/blobs/sess-1/out.json"}),),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+        assert result.is_valid is False
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is False
 
     def test_second_named_source_path_outside_allowed_dirs_is_blocked(self) -> None:
         """Every named source path must pass the validation allowlist."""
@@ -1751,20 +1780,36 @@ class TestValidatePipelineRelativePaths:
         assert result.is_valid is False
         assert any("Path traversal" in e.message for e in result.errors)
 
-    def test_relative_sink_path_under_blobs(self) -> None:
-        """blobs/out.json should resolve under {data_dir}/blobs/."""
+    def test_relative_sink_path_under_own_session_blobs(self) -> None:
+        """blobs/<session>/out.json resolves under the caller's own subtree
+        (elspeth-bdc17cfdb1); the session segment is load-bearing."""
         state = _make_state(
             source_options={},
-            outputs=(_make_output(name="blob_out", options={"path": "blobs/out.json"}),),
+            outputs=(_make_output(name="blob_out", options={"path": "blobs/sess-1/out.json"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            result = validate_pipeline(state, settings, mock_yaml_gen, session_id="sess-1")
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
+
+    def test_relative_sink_path_at_blobs_root_blocked(self) -> None:
+        """blobs/out.json (no session segment) resolves to the shared blobs
+        root, which no session may write — the pre-fix contract this class
+        used to pin."""
+        state = _make_state(
+            source_options={},
+            outputs=(_make_output(name="blob_out", options={"path": "blobs/out.json"}),),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        result = validate_pipeline(state, settings, mock_yaml_gen, session_id="sess-1")
+        assert result.is_valid is False
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is False
 
 
 class TestValidatePipelineSuccess:

@@ -552,7 +552,7 @@ class ExecutionServiceImpl:
         if composition_state.outputs:
             from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
 
-            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir), session_id=str(session_id))
             for output in composition_state.outputs:
                 for key in SINK_LOCAL_PATH_OPTION_KEYS:
                     value = output.options.get(key)
@@ -574,7 +574,7 @@ class ExecutionServiceImpl:
                 resolve_data_path,
             )
 
-            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir), session_id=str(session_id))
             for node in composition_state.nodes:
                 if node.node_type != "transform":
                     continue
@@ -670,6 +670,7 @@ class ExecutionServiceImpl:
             self._yaml_generator,
             secret_service=self._secret_service,
             user_id=user_id,
+            session_id=str(session_id),
         )
         if not preflight_result.is_valid:
             raise PipelineValidationError(
@@ -959,6 +960,7 @@ class ExecutionServiceImpl:
                     secret_service=self._secret_service,
                     user_id=user_id,
                     blob_get_metadata=_blob_get_metadata,
+                    session_id=str(session_id) if session_id is not None else None,
                 ),
             ),
         )

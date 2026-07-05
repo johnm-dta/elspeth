@@ -4568,6 +4568,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
         with patch.object(service, "_runtime_preflight", return_value=preflight) as mock_preflight:
             first = await service._cached_runtime_preflight(
                 state,
+                session_id=None,
                 user_id="user-1",
                 cache=cache,
                 initial_version=state.version,
@@ -4575,6 +4576,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
             )
             second = await service._cached_runtime_preflight(
                 state,
+                session_id=None,
                 user_id="user-1",
                 cache=cache,
                 initial_version=state.version,
@@ -4583,7 +4585,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
 
         assert first is preflight
         assert second is preflight
-        mock_preflight.assert_called_once_with(state, "user-1")
+        mock_preflight.assert_called_once_with(state, "user-1", None)
 
     @pytest.mark.asyncio
     async def test_runtime_preflight_timeout_is_cached_for_compose_call(self) -> None:
@@ -4594,7 +4596,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
         started = threading.Event()
         release = threading.Event()
 
-        def slow_preflight(candidate: CompositionState, user_id: str | None) -> ValidationResult:
+        def slow_preflight(candidate: CompositionState, user_id: str | None, session_id: str | None) -> ValidationResult:
             started.set()
             release.wait(timeout=30)
             return ValidationResult(is_valid=True, checks=[], errors=[])
@@ -4604,6 +4606,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
                 with pytest.raises(ComposerRuntimePreflightError) as first:
                     await service._cached_runtime_preflight(
                         state,
+                        session_id=None,
                         user_id="user-1",
                         cache=cache,
                         initial_version=state.version - 1,
@@ -4615,6 +4618,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
                 with pytest.raises(ComposerRuntimePreflightError) as second:
                     await service._cached_runtime_preflight(
                         state,
+                        session_id=None,
                         user_id="user-1",
                         cache=cache,
                         initial_version=state.version - 1,
@@ -4720,6 +4724,7 @@ class TestComposerRuntimePreflightFinalGate:
                     state=changed_state,
                     initial_version=state.version,
                     user_id="user-1",
+                    session_id=None,
                     last_runtime_preflight=None,
                     runtime_preflight_cache=service._new_runtime_preflight_cache(),
                     session_scope="session:test",
@@ -4728,7 +4733,7 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.message != "The pipeline is complete and valid."
         assert result.raw_assistant_content == "The pipeline is complete and valid."
         assert result.runtime_preflight is failed_preflight
-        mock_preflight.assert_called_once_with(changed_state, "user-1")
+        mock_preflight.assert_called_once_with(changed_state, "user-1", None)
 
     @pytest.mark.asyncio
     async def test_pending_interpretation_handoff_is_not_augmented_as_invalid_config(self) -> None:
@@ -4774,6 +4779,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=changed_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4783,7 +4789,7 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.message == model_prose
         assert result.raw_assistant_content is None
         assert result.runtime_preflight is pending_preflight
-        mock_preflight.assert_called_once_with(changed_state, "user-1")
+        mock_preflight.assert_called_once_with(changed_state, "user-1", None)
 
     @pytest.mark.asyncio
     async def test_unchanged_text_without_preview_does_not_run_preflight(self) -> None:
@@ -4798,6 +4804,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4842,6 +4849,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=preview_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4873,6 +4881,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=passing_preview_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4898,6 +4907,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=changed_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4924,6 +4934,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=changed_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5248,6 +5259,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5306,6 +5318,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=invalid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5355,6 +5368,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5423,6 +5437,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5500,6 +5515,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5534,6 +5550,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5591,6 +5608,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5649,6 +5667,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,  # unchanged → no mutation
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5701,6 +5720,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5758,6 +5778,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,  # unchanged → no mutation
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,  # no preview was called
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5816,6 +5837,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5859,6 +5881,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5897,6 +5920,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",

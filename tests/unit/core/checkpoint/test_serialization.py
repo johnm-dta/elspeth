@@ -331,6 +331,26 @@ def test_checkpoint_roundtrip_bytes() -> None:
     assert restored == b"\x00\xff"
 
 
+@pytest.mark.parametrize("bad", ["Zm9v!!", "AA==$", "é"])
+def test_checkpoint_loads_rejects_bytes_envelope_with_non_base64_characters(bad: str) -> None:
+    """A bytes envelope with discarded non-base64 characters must crash."""
+    import json
+
+    corrupted = json.dumps({"b": {"__elspeth_type__": "bytes", "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match="bytes envelope"):
+        checkpoint_loads(corrupted)
+
+
+@pytest.mark.parametrize("bad", ["AB==", "//=="])
+def test_checkpoint_loads_rejects_non_canonical_bytes_envelope(bad: str) -> None:
+    """A bytes envelope must use the canonical Base64 spelling for its bytes."""
+    import json
+
+    corrupted = json.dumps({"b": {"__elspeth_type__": "bytes", "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match="non-canonical"):
+        checkpoint_loads(corrupted)
+
+
 def test_checkpoint_roundtrip_uuid() -> None:
     """UUID must round-trip as a UUID instance."""
     u = UUID("12345678-1234-5678-1234-567812345678")

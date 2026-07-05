@@ -38,6 +38,7 @@ Per CLAUDE.md:
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import math
 from datetime import UTC, date, datetime, time
@@ -342,7 +343,7 @@ def _restore_types(obj: Any) -> Any:
                 return time.fromisoformat(envelope_value)
 
             if envelope_type == "bytes" and isinstance(envelope_value, str):
-                return base64.b64decode(envelope_value)
+                return _restore_bytes_envelope(envelope_value)
 
             if envelope_type == "uuid" and isinstance(envelope_value, str):
                 return UUID(envelope_value)
@@ -378,6 +379,24 @@ def _restore_types(obj: Any) -> Any:
     elif isinstance(obj, list):
         return [_restore_types(v) for v in obj]
     return obj
+
+
+def _restore_bytes_envelope(envelope_value: str) -> bytes:
+    try:
+        restored = base64.b64decode(envelope_value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AuditIntegrityError(
+            f"Corrupted checkpoint: bytes envelope contains invalid Base64 "
+            f"{envelope_value!r} - data may be corrupted or tampered"
+        ) from exc
+
+    canonical = base64.b64encode(restored).decode("ascii")
+    if canonical != envelope_value:
+        raise AuditIntegrityError(
+            f"Corrupted checkpoint: bytes envelope contains non-canonical Base64 "
+            f"{envelope_value!r} - expected {canonical!r}"
+        )
+    return restored
 
 
 def _reject_json_constant(constant: str) -> Any:

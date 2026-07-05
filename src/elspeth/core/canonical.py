@@ -3,7 +3,7 @@ Canonical JSON serialization for deterministic hashing.
 
 Two-phase approach:
 1. Normalize: Convert pandas/numpy types to JSON-safe primitives (our code)
-2. Serialize: Produce deterministic JSON per RFC 8785/JCS (rfc8785 package)
+2. Serialize: Delegate primitive canonical JSON/hash policy to contracts.hashing
 
 IMPORTANT: NaN and Infinity are strictly REJECTED, not silently converted.
 This is defense-in-depth for audit integrity.
@@ -18,7 +18,6 @@ problematic.
 from __future__ import annotations
 
 import base64
-import hashlib
 import math
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time
@@ -29,9 +28,10 @@ from uuid import UUID
 import networkx as nx
 import numpy as np
 import pandas as pd
-import rfc8785
 
 from elspeth.contracts.hashing import CANONICAL_VERSION as CANONICAL_VERSION
+from elspeth.contracts.hashing import canonical_json as _primitive_canonical_json
+from elspeth.contracts.hashing import stable_hash as _primitive_stable_hash
 from elspeth.contracts.schema_contract import PipelineRow
 
 if TYPE_CHECKING:
@@ -182,7 +182,7 @@ def canonical_json(obj: Any) -> str:
 
     Two-phase approach:
     1. Normalize pandas/numpy types to JSON-safe primitives (our code)
-    2. Serialize per RFC 8785/JCS standard (rfc8785 package)
+    2. Serialize via the shared contracts.hashing primitive policy
 
     Args:
         obj: Data structure to serialize
@@ -195,8 +195,7 @@ def canonical_json(obj: Any) -> str:
         TypeError: If data contains types that cannot be serialized
     """
     normalized = _normalize_for_canonical(obj)
-    result: bytes = rfc8785.dumps(normalized)
-    return result.decode("utf-8")
+    return _primitive_canonical_json(normalized)
 
 
 def stable_hash(obj: Any) -> str:
@@ -208,8 +207,8 @@ def stable_hash(obj: Any) -> str:
     Returns:
         SHA-256 hex digest of canonical JSON
     """
-    canonical = canonical_json(obj)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    normalized = _normalize_for_canonical(obj)
+    return _primitive_stable_hash(normalized)
 
 
 def compute_full_topology_hash(graph: ExecutionGraph) -> str:

@@ -67,7 +67,6 @@ from elspeth.engine._best_effort import best_effort
 from elspeth.engine.barrier_coordination import BarrierJournalRestoreContext
 from elspeth.engine.orchestrator.aggregation import check_aggregation_timeouts
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
-from elspeth.engine.orchestrator.export import reconstruct_schema_from_json
 from elspeth.engine.orchestrator.graph_wiring import build_source_id_map, load_edge_map
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.leader_drain import run_end_of_input_barrier_flush
@@ -80,6 +79,7 @@ from elspeth.engine.orchestrator.run_status import (
     derive_resume_terminal_status_from_audit,
 )
 from elspeth.engine.orchestrator.runtime_preflight import run_transform_runtime_preflights
+from elspeth.engine.orchestrator.schema_reconstruction import reconstruct_schema_from_json
 from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
 from elspeth.engine.orchestrator.types import (
     ExecutionCounters,

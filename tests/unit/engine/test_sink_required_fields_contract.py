@@ -209,7 +209,7 @@ def test_contract_claims_boundary_dispatch_site() -> None:
 def test_boundary_check_raises_on_missing_required_field() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(
-        plugin=_plugin(),
+        plugin=_plugin(node_id="n-1"),
         node_id="n-1",
         run_id="run-1",
         row_id="row-1",
@@ -227,10 +227,27 @@ def test_boundary_check_raises_on_missing_required_field() -> None:
     assert "coalesce merge" in str(exc_info.value)
 
 
+def test_boundary_check_rejects_dispatcher_plugin_node_drift() -> None:
+    contract = SinkRequiredFieldsContract()
+    inputs = BoundaryInputs(
+        plugin=_plugin(node_id="sink-node"),
+        node_id="dispatcher-node",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        static_contract=frozenset({"customer_id", "amount"}),
+        row_data={"customer_id": "v"},
+        row_contract=None,
+    )
+
+    with pytest.raises(OrchestrationInvariantError, match="node_id drift"):
+        contract.boundary_check(inputs, BoundaryOutputs())
+
+
 def test_boundary_check_returns_none_when_required_fields_present() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(
-        plugin=_plugin(),
+        plugin=_plugin(node_id="n-1"),
         node_id="n-1",
         run_id="run-1",
         row_id="row-1",
@@ -246,7 +263,7 @@ def test_boundary_check_returns_none_when_required_fields_present() -> None:
 def test_boundary_check_skips_contract_annotation_when_row_contract_absent() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(
-        plugin=_plugin(),
+        plugin=_plugin(node_id="n-1"),
         node_id="n-1",
         run_id="run-1",
         row_id="row-1",

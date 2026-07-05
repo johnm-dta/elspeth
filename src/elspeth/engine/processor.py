@@ -125,6 +125,7 @@ from elspeth.contracts.scheduler import (
     TokenWorkItem,
     TokenWorkStatus,
 )
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape._helpers import generate_id
@@ -1761,7 +1762,7 @@ class RowProcessor:
                 f"Transform '{transform.name}' has on_error=None — this should be impossible since TransformSettings requires on_error"
             )
 
-        error_details: TransformErrorReason = {"reason": reason, "error": str(exc)}
+        error_details: TransformErrorReason = {"reason": reason, "error": scrub_text_for_audit(str(exc))}
         # Shared error-audit routine (elspeth-aeb0a8f756): identical
         # transform_error + DIVERT routing_event recording as the executor's
         # error-result branch. Here the guard already auto-failed the state on

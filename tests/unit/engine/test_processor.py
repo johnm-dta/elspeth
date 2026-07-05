@@ -17,6 +17,7 @@ This avoids the anti-pattern of testing mocks instead of behavior.
 from __future__ import annotations
 
 import hashlib
+import json
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from elspeth.contracts.declaration_contracts import _attach_contract_name_from_d
 from elspeth.contracts.enums import (
     BatchStatus,
     NodeStateStatus,
+    RoutingMode,
     TerminalOutcome,
     TerminalPath,
     TriggerType,
@@ -6259,6 +6261,100 @@ class TestExecuteTransformNoRetry:
 
         assert result.status == "error"
         assert error_sink == "error-sink"
+
+    def test_retryable_exception_text_is_scrubbed_before_audit_routing_and_export(self, tmp_path: Any) -> None:
+        """Retryable exception conversion must not persist raw provider secrets."""
+        from elspeth.core.landscape.exporter import LandscapeExporter
+        from elspeth.core.payload_store import FilesystemPayloadStore
+        from tests.fixtures.landscape import register_test_node
+
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        setup = make_recorder_with_run(
+            run_id="run-secret-scrub",
+            source_node_id="source-0",
+            source_plugin_name="csv",
+            payload_store=payload_store,
+            leader_worker_id=_TEST_LEADER_WORKER_ID,
+        )
+        factory = setup.factory
+        processor = _make_processor(factory, run_id=setup.run_id, retry_manager=None)
+        processor._error_edge_ids = {NodeID("t1"): "error-edge-1"}
+        register_test_node(factory.data_flow, setup.run_id, "t1", node_type=NodeType.TRANSFORM, plugin_name="llm")
+        register_test_node(factory.data_flow, setup.run_id, "error-sink", node_type=NodeType.SINK, plugin_name="csv")
+        factory.data_flow.register_edge(
+            run_id=setup.run_id,
+            from_node_id="t1",
+            to_node_id="error-sink",
+            label="__error_0__",
+            mode=RoutingMode.DIVERT,
+            edge_id="error-edge-1",
+        )
+        transform = _make_mock_transform(node_id="t1", on_error="error-sink")
+        token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(
+            factory,
+            token,
+            run_id=setup.run_id,
+            source_node_id=setup.source_node_id,
+        )
+        factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="t1",
+            run_id=setup.run_id,
+            step_index=0,
+            input_data=token.row_data.to_dict(),
+            state_id="state-retryable-secret",
+        )
+        ctx = make_context(
+            run_id=setup.run_id,
+            state_id="state-retryable-secret",
+            token=token,
+            landscape=factory.plugin_audit_writer(),
+        )
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+
+        with patch.object(
+            processor._transform_executor,
+            "execute_transform",
+            side_effect=ConnectionError(f"provider retry failed: {raw_secret}"),
+        ):
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["error"] == "<redacted-secret>"
+        assert error_sink == "error-sink"
+
+        transform_errors = factory.data_flow.get_transform_errors_for_run(setup.run_id)
+        assert len(transform_errors) == 1
+        transform_error_payload = json.loads(transform_errors[0].error_details_json)
+        assert transform_error_payload["error"] == "<redacted-secret>"
+
+        routing_events = factory.query.get_all_routing_events_for_run(setup.run_id)
+        assert len(routing_events) == 1
+        assert routing_events[0].reason_ref is not None
+        routing_reason_payload = json.loads(payload_store.retrieve(routing_events[0].reason_ref).decode("utf-8"))
+        assert routing_reason_payload["error"] == "<redacted-secret>"
+
+        export_records = list(LandscapeExporter(setup.db).export_run(setup.run_id))
+        transform_error_export = next(record for record in export_records if record["record_type"] == "transform_error")
+        exported_error_payload = json.loads(transform_error_export["error_details_json"])
+        assert exported_error_payload["error"] == "<redacted-secret>"
+
+        durable_text = json.dumps(
+            {
+                "result": result.reason,
+                "transform_error": transform_error_payload,
+                "routing_reason": routing_reason_payload,
+                "transform_error_export": transform_error_export,
+            },
+            sort_keys=True,
+        )
+        assert raw_secret not in durable_text
 
     def test_retryable_llm_error_with_missing_error_edge_raises(self) -> None:
         """Retryable error with named sink but no DIVERT edge → OrchestrationInvariantError."""

@@ -449,8 +449,11 @@ class TestStep2IntraStep:
         # Composition state must have at least one output — sink was committed.
         cs = body["composition_state"]
         assert cs is not None, "composition_state missing from response"
-        outputs = cs.get("outputs", {})
+        outputs = cs.get("outputs", [])
         assert outputs, "composition_state.outputs is empty after MULTI_SELECT advance — handle_step_2_sink was not called"
+        committed_schema = outputs[0]["options"]["schema"]
+        assert committed_schema["mode"] == "observed"
+        assert committed_schema["required_fields"] == ["text", "label"]
 
         # Both authoritative surfaces agree on success (elspeth-948eb9c0b8 C-3(b)):
         # the decisions-ledger side (guided_session.step_2_result) and the
@@ -510,7 +513,51 @@ class TestStep2IntraStep:
 
         cs = body["composition_state"]
         assert cs is not None, "composition_state missing from response"
-        assert cs.get("outputs"), "composition_state.outputs is empty — passthrough commit did not reach handle_step_2_sink"
+        outputs = cs.get("outputs", [])
+        assert outputs, "composition_state.outputs is empty — passthrough commit did not reach handle_step_2_sink"
+        committed_schema = outputs[0]["options"]["schema"]
+        assert committed_schema["mode"] == "observed"
+        assert committed_schema["required_fields"] == []
+
+    def test_multi_select_schema_config_alias_is_canonicalised_on_commit(self, composer_test_client: TestClient) -> None:
+        """Step-2 commits preserve schema_config alias compatibility without persisting duplicate aliases."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out_schema_config_alias.jsonl")
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema_config": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            body = _respond(
+                composer_test_client,
+                session_id,
+                chosen=["text"],
+                custom_inputs=["summary"],
+            )
+
+        outputs = body["composition_state"]["outputs"]
+        committed_options = outputs[0]["options"]
+        assert "schema_config" not in committed_options
+        assert committed_options["schema"]["mode"] == "observed"
+        assert committed_options["schema"]["required_fields"] == ["text", "summary"]
 
     def test_multi_select_bare_empty_chosen_returns_structured_400(self, composer_test_client: TestClient) -> None:
         """Fail-closed contract (C-3(a)): an empty chosen + custom_inputs pair

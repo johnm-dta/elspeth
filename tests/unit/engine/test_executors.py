@@ -3101,7 +3101,7 @@ class TestAggregationExecutor:
         assert node.accepted_count_total == 5
         assert node.batch_id is None
         assert node.tokens == []
-        assert node.buffers == []
+        assert executor.get_buffered_rows(nid) == []
         assert node.member_count == 0
         assert node.trigger.get_age_seconds() == 0.0
 

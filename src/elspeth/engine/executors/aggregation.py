@@ -50,26 +50,41 @@ slog = structlog.get_logger(__name__)
 class _AggregationNodeState:
     """Per-node aggregation state.
 
-    Groups settings, trigger evaluator, batch tracking, and row buffers
+    Groups settings, trigger evaluator, batch tracking, and buffered tokens
     that were previously scattered across six parallel dicts keyed by NodeID,
     plus a member_count that was in a separate dict keyed by batch_id.
 
-    Mutable because buffers grow during processing and batch_id/member_count
-    change across batch lifecycles.  Not frozen (unlike _BranchEntry in
-    coalesce_executor.py) because the fields are updated in-place.
+    Mutable because the token buffer grows during processing and
+    batch_id/member_count change across batch lifecycles.  Not frozen (unlike
+    _BranchEntry in coalesce_executor.py) because the fields are updated
+    in-place.
+
+    ``tokens`` is the single in-memory source of truth for buffered rows: each
+    ``TokenInfo.row_data`` is an immutable, deep-frozen ``PipelineRow``, so the
+    row-dict view is derived on demand via :meth:`snapshot_rows` rather than
+    stored a second time.
     """
 
     settings: AggregationSettings
     trigger: TriggerEvaluator
     batch_id: str | None = None
     member_count: int = 0
-    buffers: list[dict[str, Any]] = field(default_factory=list)
     tokens: list[TokenInfo] = field(default_factory=list)
     # Durable counters used to derive AggregationBatchContext pagination metadata.
     # NOT persisted in the checkpoint row (F1 design D3): they derive from audit
     # tables at restore time and arrive via restore_from_journal.
     accepted_count_total: int = 0
     completed_flush_count: int = 0
+
+    def snapshot_rows(self) -> list[dict[str, Any]]:
+        """Derive the row-dict view of the buffered tokens.
+
+        ``PipelineRow`` is deep-frozen and ``to_dict()`` returns a fresh mutable
+        deep copy, so this projection is pure and stable — it always mirrors
+        ``tokens`` and can never desync from it. Callers that mutate the result
+        get an independent copy; the buffered tokens stay authoritative.
+        """
+        return [token.row_data.to_dict() for token in self.tokens]
 
 
 class AggregationExecutor:
@@ -203,9 +218,8 @@ class AggregationExecutor:
             raise OrchestrationInvariantError(
                 f"accept_adopted_row called for node {node_id} with no open batch; open_batch_membership must run before the adoption verb."
             )
-        # Buffer the row - store dict (JSON-serializable for checkpoints)
-        # TokenInfo.row_data is PipelineRow, extract dict for buffer
-        node.buffers.append(token.row_data.to_dict())
+        # Buffer the row. tokens is the single source of truth; the row-dict
+        # view is derived on demand (_AggregationNodeState.snapshot_rows).
         node.tokens.append(token)
         node.member_count += 1
         # Durable cumulative counter that drives AggregationBatchContext.rows_seen_total.
@@ -256,7 +270,7 @@ class AggregationExecutor:
         Raises:
             OrchestrationInvariantError: If node_id is not a configured aggregation.
         """
-        return list(self._get_node(node_id, "get_buffered_rows").buffers)
+        return self._get_node(node_id, "get_buffered_rows").snapshot_rows()
 
     def get_buffered_tokens(self, node_id: NodeID) -> list[TokenInfo]:
         """Get currently buffered tokens (does not clear buffer).
@@ -289,7 +303,7 @@ class AggregationExecutor:
             OrchestrationInvariantError: If node_id is not a configured aggregation.
         """
         node = self._get_node(node_id, "_get_buffered_data")
-        return list(node.buffers), list(node.tokens)
+        return node.snapshot_rows(), list(node.tokens)
 
     def execute_flush(
         self,
@@ -327,24 +341,15 @@ class AggregationExecutor:
         if batch_id is None:
             raise OrchestrationInvariantError(f"No batch exists for node {node_id} - cannot flush")
 
-        # Snapshot buffered data (consolidated state eliminates KeyError risk —
-        # buffers and tokens are structurally tied to the same node entry)
-        buffered_rows = list(node.buffers)
+        # Snapshot the buffered tokens (the single source of truth) and derive
+        # the row-dict view from that same list. Because the rows are projected
+        # from the tokens rather than stored alongside them, the two collections
+        # cannot desync — the old length-check invariant guarded a corruption
+        # that only the duplicate storage could produce, so it is gone with it.
         buffered_tokens = list(node.tokens)
-
-        if not buffered_rows:
+        if not buffered_tokens:
             raise OrchestrationInvariantError(f"Cannot flush empty buffer for node {node_id}")
-
-        # Defensive validation: buffer and tokens must be same length
-        # This should never happen (checkpoint restore ensures they stay in sync)
-        # but crashes explicitly if internal state is corrupted
-        if len(buffered_rows) != len(buffered_tokens):
-            raise OrchestrationInvariantError(
-                f"Internal state corruption in AggregationExecutor node '{node_id}': "
-                f"buffer has {len(buffered_rows)} rows but tokens has {len(buffered_tokens)} entries. "
-                f"These must always match. This indicates a bug in checkpoint "
-                f"restore or buffer management."
-            )
+        buffered_rows = [token.row_data.to_dict() for token in buffered_tokens]
 
         # Use first token for node_state (represents the batch operation)
         representative_token = buffered_tokens[0]
@@ -592,9 +597,8 @@ class AggregationExecutor:
                             f"batch would remain in non-terminal state (audit trail corruption). "
                             f"Cleanup error: {cleanup_err}"
                         ) from cleanup_err
-                # Full cleanup: reset batch state, clear buffers, reset trigger
+                # Full cleanup: reset batch state, clear the token buffer, reset trigger
                 self._reset_batch_state(node_id)
-                node.buffers.clear()
                 node.tokens.clear()
                 node.trigger.reset()
                 ctx.batch_token_ids = None
@@ -604,9 +608,8 @@ class AggregationExecutor:
         # Success cleanup: save batch_id before reset (needed by caller for CONSUMED_IN_BATCH)
         flushed_batch_id = batch_id
 
-        # Reset for next batch and clear buffers
+        # Reset for next batch and clear the token buffer
         self._reset_batch_state(node_id)
-        node.buffers.clear()
         node.tokens.clear()
 
         # Reset trigger evaluator for next batch
@@ -646,7 +649,7 @@ class AggregationExecutor:
         Raises:
             OrchestrationInvariantError: If node_id is not a configured aggregation.
         """
-        return len(self._get_node(node_id, "get_buffer_count").buffers)
+        return len(self._get_node(node_id, "get_buffer_count").tokens)
 
     def get_barrier_scalars(self) -> dict[NodeID, AggregationNodeScalars]:
         """Return the underivable trigger-latch scalars for the checkpoint row.
@@ -754,7 +757,6 @@ class AggregationExecutor:
         # journal/audit disagreement (validate-before-mutate: a failed restore
         # leaves this node's in-memory state intact).
         node.tokens = list(restored.tokens)
-        node.buffers = [t.row_data.to_dict() for t in restored.tokens]
         node.batch_id = restored.batch_id
         node.member_count = len(restored.tokens)
         node.accepted_count_total = restored.accepted_count_total

@@ -687,7 +687,7 @@ class TestConstructorErrorEdgeMap:
         node = processor._aggregation_executor._nodes[agg_node]
         assert [t.token_id for t in node.tokens] == ["t1", "t2"]
         assert node.batch_id == batch.batch_id
-        assert node.buffers == [{"value": 0}, {"value": 1}]
+        assert [t.row_data.to_dict() for t in node.tokens] == [{"value": 0}, {"value": 1}]
         assert node.accepted_count_total == 2
         assert node.completed_flush_count == 0
         assert all(t.resume_attempt_offset == 1 for t in node.tokens)  # max_attempt(0)+1

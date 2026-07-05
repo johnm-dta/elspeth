@@ -29,6 +29,12 @@ from elspeth.contracts.schema import (
     get_raw_sink_required_fields,
     raw_options_have_schema,
 )
+from elspeth.contracts.sink import (
+    FAILSINK_ELIGIBLE_PLUGIN_TEXT,
+    FAILSINK_ELIGIBLE_SINK_PLUGINS,
+    FILE_SINK_PLUGINS,
+    LOCAL_RECOVERY_SINK_PLUGINS,
+)
 from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.config import (
     _MAX_NODE_NAME_LENGTH,
@@ -39,9 +45,6 @@ from elspeth.core.config import (
     _validate_node_name_chars,
 )
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
-from elspeth.engine.orchestrator.validation import (
-    _ALLOWED_FAILSINK_PLUGINS,
-)
 from elspeth.web.composer.guided.state_machine import GuidedSession
 
 NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
@@ -53,13 +56,6 @@ COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gat
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
 _DISCARD_ROUTE_TARGET = "discard"
-
-# Sink plugin names whose configuration requires a `path` option (W6 warning).
-# MUST be a subset of the runtime sink registry — drift here means composer
-# pre-validation either misses required-path warnings (false negative) or
-# advertises plugins that don't exist (false positive). Enforced by
-# tests/unit/web/composer/test_skill_drift.py::test_file_sinks_subset_of_registered_sinks.
-_FILE_SINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
 
 
 def validate_composer_source_name(source_name: str) -> None:
@@ -2544,7 +2540,7 @@ class CompositionState:
 
         # W6: File sink missing required path
         for output in self.outputs:
-            if output.plugin in _FILE_SINK_PLUGINS:
+            if output.plugin in FILE_SINK_PLUGINS:
                 if not output.options or "path" not in output.options:
                     warnings.append(
                         _warn(
@@ -2565,7 +2561,7 @@ class CompositionState:
         # W7: on_write_failure reference validation
         # Mirrors rules from engine/orchestrator/validation.py so LLMs get
         # early feedback instead of failing at pipeline build time.
-        _failsink_eligible = _ALLOWED_FAILSINK_PLUGINS
+        _failsink_eligible = FAILSINK_ELIGIBLE_SINK_PLUGINS
         output_name_set = {o.name for o in self.outputs}
         output_by_name = {o.name: o for o in self.outputs}
         for output in self.outputs:
@@ -2598,7 +2594,7 @@ class CompositionState:
                 warnings.append(
                     _warn(
                         f"output:{output.name}",
-                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use csv or json.",
+                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use {FAILSINK_ELIGIBLE_PLUGIN_TEXT}.",
                         "medium",
                     )
                 )
@@ -2650,18 +2646,13 @@ class CompositionState:
             )
 
         # S2: Single output to external sink — suggest a local fallback
-        # Local file sinks (csv, json) don't benefit from a backup:
+        # Local file sinks don't benefit from a backup:
         # if the filesystem is failing, a second file will fail too.
         # External sinks (database, azure_blob, dataverse, http) benefit from a
         # local recovery file when the external system is unavailable.
-        # MUST be a subset of the runtime sink registry — phantoms are
-        # behaviour-neutral here (the check fires for non-members, so a phantom
-        # plugin name can never appear in a valid pipeline anyway), but kept
-        # consistent with _FILE_SINK_PLUGINS / _ALLOWED_FAILSINK_PLUGINS.
-        _local_file_sinks = {"csv", "json"}
         if len(self.outputs) == 1:
             output = self.outputs[0]
-            if output.plugin not in _local_file_sinks:
+            if output.plugin not in LOCAL_RECOVERY_SINK_PLUGINS:
                 suggestions.append(
                     _sug(
                         "pipeline",

@@ -8,6 +8,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.contracts.sink import FILE_SINK_PLUGIN_SLASH_TEXT
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     PatchOutputOptionsArgumentsModel,
@@ -82,7 +83,7 @@ _SET_OUTPUT_DECLARATION = ToolDeclaration(
             "options": {
                 "type": "object",
                 "description": (
-                    "Plugin-specific config. For csv/json file sinks in runnable web pipelines, "
+                    f"Plugin-specific config. For {FILE_SINK_PLUGIN_SLASH_TEXT} file sinks in runnable web pipelines, "
                     "include path, schema, and explicit collision_policy."
                 ),
             },

@@ -18,6 +18,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationKind,
     InterpretationSource,
 )
+from elspeth.contracts.sink import FILE_SINK_PLUGIN_SLASH_TEXT
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
@@ -1045,7 +1046,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "options": {
                             "type": "object",
                             "description": (
-                                "Plugin-specific sink config. For csv/json file sinks in runnable web "
+                                f"Plugin-specific sink config. For {FILE_SINK_PLUGIN_SLASH_TEXT} file sinks in runnable web "
                                 "pipelines, include path, schema, and explicit collision_policy."
                             ),
                         },
@@ -1068,7 +1069,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 },
                 "description": (
                     "Array of output specs: [{sink_name, plugin, options, on_write_failure?}]. "
-                    "For csv/json file sinks in runnable web pipelines, options must include "
+                    f"For {FILE_SINK_PLUGIN_SLASH_TEXT} file sinks in runnable web pipelines, options must include "
                     "path, schema, explicit mode ('write' or 'append'), and explicit collision_policy."
                 ),
             },

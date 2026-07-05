@@ -36,6 +36,7 @@ from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.contracts.sink import FILE_SINK_PLUGINS, FILE_SINK_REPAIR_EXTENSIONS
 from elspeth.core.config import TriggerConfig
 from elspeth.core.secrets import (
     collect_credential_field_violations,
@@ -1638,10 +1639,6 @@ def _source_options_for_prevalidation(options: Mapping[str, Any]) -> dict[str, A
     return filtered
 
 
-_FILE_SINKS_REQUIRING_COLLISION_POLICY = frozenset({"csv", "json"})
-
-_FILE_SINK_REPAIR_EXTENSIONS: Final[dict[str, str]] = {"csv": "csv", "json": "json"}
-
 _WRITE_COLLISION_POLICIES = frozenset({"fail_if_exists", "auto_increment"})
 
 _APPEND_COLLISION_POLICIES = frozenset({"append_or_create"})
@@ -1655,9 +1652,9 @@ def _missing_output_options_repair_error(
     validation_error: str | None,
 ) -> str:
     """Return an exact output-object repair hint for omitted sink options."""
-    if plugin_name in _FILE_SINK_REPAIR_EXTENSIONS:
+    if plugin_name in FILE_SINK_REPAIR_EXTENSIONS:
         path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
-        extension = _FILE_SINK_REPAIR_EXTENSIONS[plugin_name]
+        extension = FILE_SINK_REPAIR_EXTENSIONS[plugin_name]
         repair_output = {
             "sink_name": sink_name,
             "plugin": plugin_name,
@@ -1696,7 +1693,7 @@ def validate_composer_file_sink_collision_policy(
     require_explicit: bool,
 ) -> str | None:
     """Require generated runnable file sinks to choose collision behavior."""
-    if not require_explicit or plugin_name not in _FILE_SINKS_REQUIRING_COLLISION_POLICY:
+    if not require_explicit or plugin_name not in FILE_SINK_PLUGINS:
         return None
 
     if "collision_policy" not in options:

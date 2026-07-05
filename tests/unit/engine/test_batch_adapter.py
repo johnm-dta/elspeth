@@ -174,6 +174,14 @@ class TestSharedBatchAdapter:
 
         assert adapter._entries[key] is original_entry
 
+    def test_row_waiter_does_not_hold_adapter_registry_or_lock(self) -> None:
+        """RowWaiter should delegate lifecycle operations instead of owning adapter internals."""
+        adapter = SharedBatchAdapter()
+        waiter = adapter.register("token-boundary", "state-boundary")
+
+        assert not hasattr(waiter, "_entries")
+        assert not hasattr(waiter, "_lock")
+
     def test_timeout(self) -> None:
         """Test that wait() times out if result never arrives."""
         adapter = SharedBatchAdapter()

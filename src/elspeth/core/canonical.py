@@ -38,6 +38,11 @@ if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
 
 
+_CANONICAL_TYPE_KEY = "__elspeth_canonical_type__"
+_CANONICAL_BYTES_TAG = "bytes"
+_CANONICAL_MAPPING_TAG = "mapping"
+
+
 def _normalize_value(obj: Any) -> Any:
     """Convert a single value to JSON-safe primitive.
 
@@ -141,7 +146,10 @@ def _normalize_value(obj: Any) -> Any:
         return str(obj)
 
     if isinstance(obj, bytes):
-        return {"__bytes__": base64.b64encode(obj).decode("ascii")}
+        return {
+            _CANONICAL_TYPE_KEY: _CANONICAL_BYTES_TAG,
+            "base64": base64.b64encode(obj).decode("ascii"),
+        }
 
     if isinstance(obj, Decimal):
         if not obj.is_finite():  # Rejects NaN, sNaN, Infinity, -Infinity
@@ -171,6 +179,18 @@ def _normalize_for_canonical(data: Any) -> Any:
         data = data.to_dict()
 
     if isinstance(data, Mapping):
+        if _CANONICAL_TYPE_KEY in data:
+            entries = [
+                {
+                    "key": _normalize_for_canonical(key),
+                    "value": _normalize_for_canonical(value),
+                }
+                for key, value in data.items()
+            ]
+            return {
+                _CANONICAL_TYPE_KEY: _CANONICAL_MAPPING_TAG,
+                "entries": sorted(entries, key=lambda entry: _primitive_canonical_json(entry["key"])),
+            }
         return {k: _normalize_for_canonical(v) for k, v in data.items()}
     if isinstance(data, list | tuple):
         return [_normalize_for_canonical(v) for v in data]

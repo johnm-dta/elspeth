@@ -208,7 +208,38 @@ class TestSpecialTypeConversion:
 
         data = b"hello world"
         result = _normalize_value(data)
-        assert result == {"__bytes__": base64.b64encode(data).decode("ascii")}
+        assert result == {
+            "__elspeth_canonical_type__": "bytes",
+            "base64": base64.b64encode(data).decode("ascii"),
+        }
+
+    def test_bytes_wrapper_does_not_collide_with_caller_mapping(self) -> None:
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        data = b"hello world"
+        user_mapping = {"__bytes__": base64.b64encode(data).decode("ascii")}
+
+        assert canonical_json(data) != canonical_json(user_mapping)
+        assert stable_hash(data) != stable_hash(user_mapping)
+
+    def test_reserved_bytes_envelope_mapping_is_escaped(self) -> None:
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        data = b"hello world"
+        encoded = base64.b64encode(data).decode("ascii")
+        user_mapping = {
+            "__elspeth_canonical_type__": "bytes",
+            "base64": encoded,
+        }
+
+        assert canonical_json(data) != canonical_json(user_mapping)
+        assert stable_hash(data) != stable_hash(user_mapping)
+        assert canonical_json(user_mapping) == (
+            '{"__elspeth_canonical_type__":"mapping","entries":['
+            '{"key":"__elspeth_canonical_type__","value":"bytes"},'
+            f'{{"key":"base64","value":"{encoded}"}}'
+            "]}"
+        )
 
     def test_decimal_to_string(self) -> None:
         from elspeth.core.canonical import _normalize_value

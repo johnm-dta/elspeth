@@ -469,6 +469,48 @@ class TestExportCSVMultifile:
             headers = next(reader)
         assert sorted(headers) == ["common", "only_a", "only_b"]
 
+    def test_csv_cells_neutralize_spreadsheet_formula_prefixes(self, tmp_path: Path) -> None:
+        """CSV audit export neutralizes untrusted strings that spreadsheets execute."""
+        export_dir = tmp_path / "export"
+        dangerous_values = {
+            "row_data_json": '=HYPERLINK("https://example.test","click")',
+            "error_details_json": "+SUM(1,2)",
+            "negative": "-10+2",
+            "mention": "@cmd",
+            "tabbed": "\t=SUM(1,1)",
+            "carriage_return": "\r=SUM(1,1)",
+            "line_feed": "\n=SUM(1,1)",
+        }
+
+        exporter = _ExporterDouble(
+            {
+                "validation_errors": [
+                    {
+                        **dangerous_values,
+                        "nested": {"message": '=cmd|"/C calc"!A0'},
+                        "safe": "ordinary audit text",
+                        "count": 3,
+                    }
+                ],
+            }
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
+
+        with open(export_dir / "validation_errors.csv", newline="") as f:
+            reader = csv.DictReader(f)
+            row = next(reader)
+
+        for field, value in dangerous_values.items():
+            assert row[field] == f"'{value}"
+        assert row["nested.message"] == '\'=cmd|"/C calc"!A0'
+        assert row["safe"] == "ordinary audit text"
+        assert row["count"] == "3"
+
 
 # =============================================================================
 # reconstruct_schema_from_json — Primitive types

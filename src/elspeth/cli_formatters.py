@@ -44,7 +44,7 @@ def create_console_formatters(prefix: str = "Run") -> dict[type, Callable[..., N
 
     def _format_phase_error(event: PhaseError) -> None:
         target_info = f" ({event.target})" if event.target else ""
-        typer.echo(f"[{event.phase.value.upper()}] ✗ Error{target_info}: {event.error_message}", err=True)
+        typer.echo(f"[{event.phase.value.upper()}] ✗ Error{target_info}: {event.error_type}: {event.error_message}", err=True)
 
     def _format_run_summary(event: RunSummary) -> None:
         status_symbols = {
@@ -124,6 +124,7 @@ def create_json_formatters() -> dict[type, Callable[..., None]]:
                 {
                     "event": "phase_error",
                     "phase": event.phase.value,
+                    "error_type": event.error_type,
                     "error": event.error_message,
                     "target": event.target,
                 }

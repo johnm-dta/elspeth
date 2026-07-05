@@ -12,6 +12,7 @@ from elspeth.contracts import Checkpoint
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.canonical import compute_full_topology_hash
+from elspeth.core.checkpoint.compatibility import IncompatibleCheckpointError as IncompatibleCheckpointError
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
@@ -27,12 +28,6 @@ if TYPE_CHECKING:
     from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.core.dag import ExecutionGraph
-
-
-class IncompatibleCheckpointError(Exception):
-    """Raised when attempting to load a checkpoint from an incompatible version."""
-
-    pass
 
 
 class CheckpointCorruptionError(Exception):
@@ -210,8 +205,8 @@ class CheckpointManager:
         Returns:
             Latest Checkpoint or None if no checkpoints exist
 
-        Raises:
-            IncompatibleCheckpointError: If checkpoint predates deterministic node IDs
+        This is a raw persistence read. Resume compatibility policy is enforced
+        by CheckpointCompatibilityValidator, not by the repository boundary.
         """
         with self._db.engine.connect() as conn:
             result = conn.execute(
@@ -238,9 +233,6 @@ class CheckpointManager:
             raise CheckpointCorruptionError(
                 f"Checkpoint corruption detected for run '{run_id}', checkpoint '{result.checkpoint_id}': {e}"
             ) from e
-
-        # Validate checkpoint compatibility before returning
-        self._validate_checkpoint_compatibility(checkpoint)
 
         return checkpoint
 
@@ -299,32 +291,3 @@ class CheckpointManager:
             result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
             # begin() auto-commits on clean exit, auto-rollbacks on exception
             return result.rowcount
-
-    def _validate_checkpoint_compatibility(self, checkpoint: Checkpoint) -> None:
-        """Verify checkpoint was created with compatible format version.
-
-        CRITICAL: Node IDs changed from random UUID to deterministic hash-based
-        in format version 2. Old checkpoints cannot be resumed because node IDs
-        will not match between checkpoint and current graph.
-
-        Args:
-            checkpoint: Checkpoint to validate
-
-        Raises:
-            IncompatibleCheckpointError: If checkpoint format version is incompatible
-        """
-        if checkpoint.format_version is None:
-            raise IncompatibleCheckpointError(
-                f"Checkpoint '{checkpoint.checkpoint_id}' is missing format_version. "
-                "Resume not supported for unversioned checkpoints. "
-                "Please restart pipeline from beginning."
-            )
-
-        # CRITICAL: Reject BOTH older AND newer versions - cross-version resume is unsupported
-        if checkpoint.format_version != Checkpoint.CURRENT_FORMAT_VERSION:
-            raise IncompatibleCheckpointError(
-                f"Checkpoint '{checkpoint.checkpoint_id}' has incompatible format version "
-                f"(checkpoint: v{checkpoint.format_version}, current: v{Checkpoint.CURRENT_FORMAT_VERSION}). "
-                "Resume requires exact format version match. "
-                "Please restart pipeline from beginning."
-            )

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, select, update
 from sqlalchemy.engine import Row
 
 from elspeth.contracts import Checkpoint, Determinism, NodeType, RunStatus
@@ -17,11 +17,7 @@ from elspeth.contracts.barrier_scalars import (
     CoalescePendingScalars,
 )
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.core.checkpoint.manager import (
-    CheckpointManager,
-    IncompatibleCheckpointError,
-    _validate_barrier_scalars_json_size,
-)
+from elspeth.core.checkpoint.manager import CheckpointManager, _validate_barrier_scalars_json_size
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import checkpoints_table, nodes_table, rows_table, runs_table, tokens_table
 from tests.fixtures.factories import make_graph_linear
@@ -213,36 +209,35 @@ def test_create_checkpoint_round_trips_coalesce_scalars(db: LandscapeDB, checkpo
     assert restored.coalesce[("merge_paths", "row-001")].lost_branches == {"branch_b": "timeout"}
 
 
-def test_validate_checkpoint_compatibility_rejects_missing_format_version(checkpoint_manager: CheckpointManager) -> None:
-    checkpoint = Checkpoint(
-        checkpoint_id="cp-test",
-        run_id="run-001",
-        sequence_number=1,
-        created_at=datetime.now(UTC),
-        upstream_topology_hash="a" * 64,
-        format_version=None,
-    )
-
-    with pytest.raises(IncompatibleCheckpointError, match="missing format_version"):
-        checkpoint_manager._validate_checkpoint_compatibility(checkpoint)
-
-
 @pytest.mark.parametrize(
-    "version",
-    [Checkpoint.CURRENT_FORMAT_VERSION - 1, Checkpoint.CURRENT_FORMAT_VERSION + 1],
+    "format_version",
+    [None, Checkpoint.CURRENT_FORMAT_VERSION - 1, Checkpoint.CURRENT_FORMAT_VERSION + 1],
 )
-def test_validate_checkpoint_compatibility_rejects_mismatched_version(checkpoint_manager: CheckpointManager, version: int) -> None:
-    checkpoint = Checkpoint(
-        checkpoint_id="cp-test",
-        run_id="run-001",
+def test_get_latest_checkpoint_loads_raw_format_versions(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    format_version: int | None,
+) -> None:
+    """Repository reads expose stored checkpoint rows; resume policy lives elsewhere."""
+    run_id = f"run-format-{format_version}"
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn, run_id=run_id)
+
+    graph = make_graph_linear("node-001")
+    created = checkpoint_manager.create_checkpoint(
+        run_id=run_id,
         sequence_number=1,
-        created_at=datetime.now(UTC),
-        upstream_topology_hash="a" * 64,
-        format_version=version,
+        barrier_scalars=None,
+        graph=graph,
     )
 
-    with pytest.raises(IncompatibleCheckpointError, match="incompatible format version"):
-        checkpoint_manager._validate_checkpoint_compatibility(checkpoint)
+    with db.engine.begin() as conn:
+        conn.execute(update(checkpoints_table).where(checkpoints_table.c.run_id == run_id).values(format_version=format_version))
+
+    loaded = checkpoint_manager.get_latest_checkpoint(run_id)
+    assert loaded is not None
+    assert loaded.checkpoint_id == created.checkpoint_id
+    assert loaded.format_version == format_version
 
 
 def test_delete_checkpoints_removes_all_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:

@@ -34,8 +34,8 @@ from elspeth.contracts import (
 from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
 from elspeth.contracts.types import NodeID
-from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
-from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
+from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator, IncompatibleCheckpointError
+from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager
 from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
@@ -334,6 +334,19 @@ class RecoveryManager:
             barrier_scalars=barrier_scalars,
         )
 
+    def _get_latest_checkpoint_for_resume_workset(self, run_id: str) -> Checkpoint | None:
+        """Load latest checkpoint and enforce format compatibility for workset reads."""
+        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        if checkpoint is None:
+            return None
+
+        format_check = CheckpointCompatibilityValidator().validate_format_version(checkpoint)
+        if not format_check.can_resume:
+            assert format_check.reason is not None
+            raise IncompatibleCheckpointError(format_check.reason)
+
+        return checkpoint
+
     def get_unprocessed_row_data(
         self,
         run_id: str,
@@ -608,7 +621,7 @@ class RecoveryManager:
             List of row_id strings for rows that need processing.
             Empty list if run cannot be resumed or all rows were processed.
         """
-        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        checkpoint = self._get_latest_checkpoint_for_resume_workset(run_id)
         if checkpoint is None:
             return []
 

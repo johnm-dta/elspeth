@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from pydantic import ConfigDict
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, select, update
 
 from elspeth.contracts import (
     Checkpoint,
@@ -407,6 +407,20 @@ def test_can_resume_returns_reason_when_checkpoint_format_is_incompatible(
     check = recovery_manager.can_resume("run-incompatible", _create_graph())
     assert check.can_resume is False
     assert check.reason == "bad checkpoint format"
+
+
+def test_get_unprocessed_rows_rejects_incompatible_checkpoint_format(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    run_id = "run-workset-incompatible-format"
+    _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
+    with db.engine.begin() as conn:
+        conn.execute(update(checkpoints_table).where(checkpoints_table.c.run_id == run_id).values(format_version=None))
+
+    with pytest.raises(IncompatibleCheckpointError, match="missing format_version"):
+        recovery_manager.get_unprocessed_rows(run_id)
 
 
 def test_can_resume_rejects_topology_mismatch(

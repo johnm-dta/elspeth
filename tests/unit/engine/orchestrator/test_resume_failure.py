@@ -34,7 +34,7 @@ from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import SinkName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.checkpoint.manager import CheckpointManager
-from elspeth.core.checkpoint.recovery import RecoveryManager
+from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager
 from elspeth.core.config import AggregationSettings, ElspethSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
@@ -218,6 +218,28 @@ class TestResumeFinalizesAsFailed:
     Fix: Added `except Exception` handler in resume() that calls
     recorder.finalize_run(run_id, status=RunStatus.FAILED).
     """
+
+    def test_reconstruct_resume_state_refuses_incompatible_checkpoint_before_snapshot_work(self) -> None:
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-direct-reconstruct-incompatible-format"
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-direct-reconstruct-incompatible-format",
+            run_id=run_id,
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=None,
+        )
+        resume_point = ResumePoint(checkpoint=checkpoint, sequence_number=checkpoint.sequence_number)
+
+        with (
+            patch("elspeth.engine.orchestrator.resume.RecorderFactory") as recorder_factory,
+            pytest.raises(NonResumableRunError, match="missing format_version"),
+        ):
+            orch._resume_coordinator.reconstruct_resume_state(resume_point, MagicMock(spec=PayloadStore))
+
+        recorder_factory.assert_not_called()
 
     def test_resume_failure_finalizes_run_as_failed(self) -> None:
         """When _process_resumed_rows raises, run status becomes FAILED."""

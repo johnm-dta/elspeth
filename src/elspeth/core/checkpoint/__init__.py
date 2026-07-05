@@ -12,8 +12,8 @@ Provides:
 """
 
 from elspeth.contracts import ResumeCheck, ResumePoint
-from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
-from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
+from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator, IncompatibleCheckpointError
+from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, NonResumableRunError, RecoveryManager, check_run_status_resumable
 from elspeth.core.checkpoint.serialization import checkpoint_dumps, checkpoint_loads
 

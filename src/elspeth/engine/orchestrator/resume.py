@@ -556,10 +556,16 @@ class ResumeCoordinator:
         Raises:
             ValueError: If checkpoint_manager is not initialized.
             OrchestrationInvariantError: If schema contract is missing from audit trail.
+            NonResumableRunError: If the resume checkpoint format is incompatible.
             NonResumableRunError: If the seat CAS loses to a live leader.
             AuditIntegrityError: If the run is terminally successful
                 (immutable-success durable backstop inside the CAS).
         """
+        format_check = CheckpointCompatibilityValidator().validate_format_version(resume_point.checkpoint)
+        if not format_check.can_resume:
+            assert format_check.reason is not None
+            raise NonResumableRunError(resume_point.checkpoint.run_id, format_check.reason)
+
         # Stage 1 — READ-ONLY reconstruction (no durable mutation).
         snapshot = self._load_resume_audit_snapshot(resume_point, payload_store, worker_id=worker_id)
 

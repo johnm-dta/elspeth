@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from elspeth.contracts import Checkpoint, NodeType
 from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
@@ -34,6 +36,35 @@ def _checkpoint_for_graph(graph: ExecutionGraph) -> Checkpoint:
         upstream_topology_hash=compute_full_topology_hash(graph),
         format_version=Checkpoint.CURRENT_FORMAT_VERSION,
     )
+
+
+@pytest.mark.parametrize(
+    ("format_version", "reason_fragment"),
+    [
+        (None, "missing format_version"),
+        (Checkpoint.CURRENT_FORMAT_VERSION - 1, "incompatible format version"),
+        (Checkpoint.CURRENT_FORMAT_VERSION + 1, "incompatible format version"),
+    ],
+)
+def test_validate_rejects_incompatible_format_versions_before_topology(
+    format_version: int | None,
+    reason_fragment: str,
+) -> None:
+    graph = _graph(checkpoint_config={"version": 1})
+    checkpoint = Checkpoint(
+        checkpoint_id="cp-compat-format",
+        run_id="run-compat-format",
+        sequence_number=7,
+        created_at=datetime.now(UTC),
+        upstream_topology_hash=compute_full_topology_hash(graph),
+        format_version=format_version,
+    )
+
+    result = CheckpointCompatibilityValidator().validate(checkpoint, graph)
+
+    assert result.can_resume is False
+    assert result.reason is not None
+    assert reason_fragment in result.reason
 
 
 def test_validate_rejects_node_removal_via_topology_hash() -> None:
@@ -100,7 +131,11 @@ def test_checkpoint_exposes_full_topology_hash_accessor() -> None:
 
 def test_validator_reads_full_topology_hash_accessor_not_legacy_column_name() -> None:
     graph = _graph(checkpoint_config={"version": 1})
-    checkpoint = SimpleNamespace(full_topology_hash=compute_full_topology_hash(graph))
+    checkpoint = SimpleNamespace(
+        checkpoint_id="cp-compat-namespace",
+        full_topology_hash=compute_full_topology_hash(graph),
+        format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+    )
 
     validator = CheckpointCompatibilityValidator()
     result = validator.validate(checkpoint, graph)  # type: ignore[arg-type]

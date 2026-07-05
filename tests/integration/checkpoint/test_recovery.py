@@ -631,7 +631,7 @@ class TestResumeCheckpointCleanup:
 
 
 class TestCanResumeErrorHandling:
-    """Tests for can_resume() error handling (Bug: incompatible-checkpoint-error-propagates).
+    """Tests for can_resume() incompatible-checkpoint error handling.
 
     Verifies that can_resume() returns ResumeCheck for all error cases,
     never propagating exceptions that violate its API contract.
@@ -650,8 +650,9 @@ class TestCanResumeErrorHandling:
     def test_can_resume_returns_check_for_incompatible_checkpoint(self, test_env: dict[str, Any]) -> None:
         """can_resume() returns ResumeCheck for incompatible checkpoints, not exception.
 
-        Bug fix: IncompatibleCheckpointError was propagating from get_latest_checkpoint()
-        instead of being caught and converted to a ResumeCheck with can_resume=False.
+        Format-version compatibility is part of the resume compatibility
+        boundary, so a raw checkpoint row with an incompatible version must
+        become a ResumeCheck with can_resume=False.
 
         This test verifies the API contract: can_resume() always returns ResumeCheck.
         """
@@ -715,12 +716,10 @@ class TestCanResumeErrorHandling:
             graph=graph,
         )
 
-        # Corrupt the checkpoint's format_version to trigger IncompatibleCheckpointError
+        # Corrupt the checkpoint's format_version to trigger compatibility refusal.
         with db.engine.begin() as conn:
             conn.execute(update(checkpoints_table).where(checkpoints_table.c.run_id == run.run_id).values(format_version=None))
 
-        # Before the fix, this would raise IncompatibleCheckpointError
-        # After the fix, it should return a ResumeCheck with can_resume=False
         result = recovery_mgr.can_resume(run.run_id, graph)
 
         # Verify API contract: returns ResumeCheck, not exception

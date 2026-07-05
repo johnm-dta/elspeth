@@ -198,8 +198,6 @@ class TestFormatVersionProperties:
         Cross-version resume is explicitly forbidden - both older AND newer
         versions must be rejected to prevent silent corruption.
         """
-        from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
-
         # Skip current version (it's valid)
         assume(version != Checkpoint.CURRENT_FORMAT_VERSION)
 
@@ -229,9 +227,16 @@ class TestFormatVersionProperties:
                     update(checkpoints_table).where(checkpoints_table.c.run_id == "test-run-version").values(format_version=version)
                 )
 
-            # Now try to load - should raise
-            with pytest.raises(IncompatibleCheckpointError):
-                manager.get_latest_checkpoint("test-run-version")
+            # Raw repository load succeeds; compatibility validation owns
+            # the resume refusal.
+            loaded = manager.get_latest_checkpoint("test-run-version")
+            assert loaded is not None
+            assert loaded.format_version == version
+
+            result = CheckpointCompatibilityValidator().validate(loaded, graph)
+            assert result.can_resume is False
+            assert result.reason is not None
+            assert "incompatible format version" in result.reason
 
         finally:
             db.close()

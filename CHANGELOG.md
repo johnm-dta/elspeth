@@ -17,7 +17,7 @@ whose completion is gated by an advisor sign-off. The design is recorded in
 `docs/superpowers/specs/2026-06-25-llm-primary-guided-creation-design.md`.
 
 The web session database resets on upgrade and the Landscape audit database
-does not: `SESSION_SCHEMA_EPOCH` advances to 24 (it was 22 at the 0.6.0
+does not: `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at the 0.6.0
 release) while `SQLITE_SCHEMA_EPOCH` stays 21, so per the delete-the-DB
 migration policy this is a single-DB, session-only cutover. The untagged
 0.6.1 maintenance line is folded into this release rather than tagged
@@ -44,7 +44,7 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   field), mirrored onto the TypeScript `GuidedSession`, seeded by a new
   idempotent `POST /guided/start` entry endpoint, and stripped on fork so a
   tutorial profile cannot leak into a forked session.
-  `GUIDED_SESSION_SCHEMA_VERSION` advances 5→6.
+  `GUIDED_SESSION_SCHEMA_VERSION` advances 5→7 across the release.
 - **`STEP_4_WIRE` wiring stage with a confirm-wiring contract** — a terminal
   wiring stage is added to the guided order; it rebuilds the pipeline edges
   from the model's connection labels, renders them with a contract overlay,
@@ -64,6 +64,18 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   …) at the persist seam and block advancement until they are resolved,
   extending the interpretation-surfacing model into the guided flow with a
   backend run-tier backstop.
+- **Guided mode reframed as a conversational builder with live-graph
+  verification** — the guided surface is reworked into a docked chat
+  conversation paired with an always-visible verification panel: a
+  plain-language gloss and a validation summary sit above the live pipeline
+  graph so the operator can read what the model built as it is built, with a
+  `ComposingIndicator` during the build. Each interpretation decision renders
+  as a read-only summary card that leads with the model's own rationale,
+  carries an `Explain` button backed by grounded advisory context, and gates
+  advancement behind a two-stage View→Approve acknowledgement over a card
+  stack. Design:
+  `docs/superpowers/specs/2026-06-30-guided-mode-reframe-design.md` and
+  `docs/superpowers/specs/2026-06-29-guided-decision-readonly-summary-design.md`.
 
 #### Always-on prompt-shield review
 
@@ -98,8 +110,28 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   (`guided_staged_skill_hash`, `recipe_catalog_content_hash`) alongside its
   existing inputs, so a change to either the staged skill or the recipe
   catalog invalidates a stale tutorial build.
+- **Tutorial workspace promoted to the guided layout and relaid out** — the
+  first-run tutorial adopts the guided layout as its canonical shell: a
+  freeform-parity conversation column, an action-zone decision surface, and a
+  320px artifact rail, with the guided composer docked at the bottom to match
+  the live composer. The tutorial can be reset from preferences at any time,
+  and its stage is now persisted so a mid-tutorial reload resumes at the saved
+  stage — including post-run — rather than restarting at the welcome bookend
+  (backed by the new `user_preferences` tutorial-resume columns; see
+  Operational).
 - Design: `docs/superpowers/specs/2026-06-22-tutorial-staged-recut-design.md`
   and `docs/superpowers/specs/2026-06-25-tutorial-synthetic-scrape-page-design.md`.
+
+#### Azure Document Intelligence enrichment transform
+
+- **`azure_document_intelligence` enrichment transform** — a new transform
+  plugin enriches rows by sending a document to Azure AI Document
+  Intelligence and folding the extracted layout/content back onto the row. It
+  is registered under the `azure_document_intelligence` plugin name and
+  declared as an external-call boundary in the audit-readiness expectations,
+  with fail-closed page-count handling and host:port pinning on its endpoint.
+  Design:
+  `docs/superpowers/specs/2026-06-30-azure-document-intelligence-transform-design.md`.
 
 #### ELSPETH design system and marketing website
 
@@ -127,6 +159,14 @@ separately (the same precedent as 0.5.4 into 0.6.0).
 - **Composer routes decomposed into an area package** — the monolithic
   `routes/composer.py` is decomposed into a `routes/composer/` area package,
   splitting the route module without changing its HTTP surface.
+- **Explicit `ProcessorMode` and a public follower-drain surface** — the
+  engine's leader/follower processor mode is made an explicit value and the
+  follower drain is promoted to a public surface, replacing the previous
+  implicit mode selection so the run coordinator's behaviour is legible at the
+  seam rather than inferred.
+- **Dead `aggregation_boundaries` checkpoint knob removed** — the unused
+  aggregation-boundaries checkpoint configuration option is deleted from the
+  config surface (pre-release tech-debt removal; there is no data to migrate).
 
 ### Fixed
 
@@ -154,6 +194,45 @@ headline work.
   their user-facing alias; env schema option overrides are normalized; and a
   dangling allowlist `allow_hits` entry degrades to skip-and-warn instead of
   crashing the run.
+- **Engine fail-closed hardening** — a wave of integrity fixes make the run
+  engine refuse to proceed on ambiguous state rather than silently guess:
+  `resume()` re-verifies checkpoint currency and topology at entry; checkpoint
+  writes, the heartbeat, and best-effort transforms fail closed on Tier-1
+  integrity errors; coalesce journal restore fails closed on unknown or
+  overlapping branches; unmapped traversal nodes fail closed via an explicit
+  structural allowlist; scheduler disposition writes are membership-fenced;
+  transform-error audit is recorded before terminal completion; diverted sink
+  anchors are closed when the primary audit fails; `PENDING_SINK` replay
+  preserves the persisted error hash; and condition-trigger fire times are
+  sampled at observation rather than backdated.
+- **Guided and tutorial front-end robustness** — the guided chat seam gains a
+  discriminator, self-heal, and reload-resume; a dead resume session is
+  recovered and the tutorial runs once rather than re-firing on remount;
+  advisory replies reject tool-scaffold leaks and clamp the decision headline;
+  assistant markdown renders in the flat transcript; and the wire-stage
+  advisor dead-end is closed.
+- **Chat and node-config layout tamed on wide displays** — chat bubbles are
+  held to a centred reading column and the node-config inspector stacks its
+  option rows, so neither sprawls edge-to-edge on a wide viewport.
+- **YAML export/import round-trip fidelity** — a pipeline exported to YAML and
+  re-imported preserves its `source_blob_ids` sidecar and reattaches the
+  guided `blob_ref` without leaking a filesystem path; export is unblocked for
+  secret-bearing pipelines; and the import path is hardened against pasted
+  input.
+- **Validation-error legibility** — a pydantic missing-source / missing-sink
+  error is reframed into novice-facing copy at settings-load, and chat
+  validation-failure injections are humanised through a store-safe frontend
+  module (`validationHumaniser.ts`).
+- **Secret-field heuristic false positives** — structural field names that
+  merely end in `_key` (`data_key`, `alternate_key`) are exempted from the
+  secret-field heuristic by exact name, so a JSON source's `data_key` or a
+  Dataverse sink's `alternate_key` is no longer misclassified as a credential.
+- **Sink, provider, and HTTP correctness** — CSV sink stringification
+  `ValueError`s propagate instead of being swallowed; non-string Chroma
+  required fields are diverted; generic Dataverse 4xx responses fail closed;
+  lost-branch union schema fields are tolerated; absolute-path SQLite DSNs keep
+  their slash count through sanitization; and `AuditedHTTPClient` no longer
+  double-decompresses gzip bodies.
 
 ### Security
 
@@ -188,19 +267,46 @@ data or being forged, and tighten transport and endpoint authentication.
   unverified fork-allowlist signatures are rejected.
 - **Bounded budgets** — sequential LLM retry budgets and MCP Landscape query
   limits are bounded so a runaway model or query cannot exhaust the host.
+- **Key Vault `vault_url` restricted to approved Azure endpoints** — the Azure
+  Key Vault `vault_url` is constrained to the approved `*.vault.azure.net`
+  endpoint class by a host check (which a bare suffix test cannot enforce),
+  with an optional exact-URL pin via `ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS`,
+  closing an SSRF vector where a foreign vault URL could redirect the
+  managed-identity challenge; edge whitespace is normalised before validation.
+- **Blob sink path allowlist scoped to the owning session** — composer blob
+  writes and reads are confined to the session that owns them, and the session
+  id is threaded through shareable-review validation, so one session cannot
+  address another session's blob paths.
+- **Database credentials scrubbed before audit persistence** — `odbc_connect`
+  connection-string passwords and database-node DSN passwords are scrubbed
+  before they can reach an audit record or a fingerprint.
+- **Output-echoed fields reject environment-variable placeholders** — the
+  `report_assemble` transform rejects env-var placeholders in the fields it
+  echoes to output, so an unresolved `${VAR}` cannot be surfaced as literal
+  content.
+- **Further audit-export and gate hardening** — raw failing rows are redacted
+  from audit exports by default; harness credentials are kept out of the eval
+  `curl` argv and backfill sink paths are restricted to data roots; and the
+  `elspeth_lints` gates gain reaudit-limit, allowlist-expiry,
+  stale-judged-signature, and override-hash-IO fail-closed handling.
 
 ### Operational
 
 - **The web session database resets on upgrade; the audit database does
-  not.** `SESSION_SCHEMA_EPOCH` advances to 24 (it was 22 at the 0.6.0
-  release), in lockstep with `GUIDED_SESSION_SCHEMA_VERSION` 5→6; the new
-  guided fields live in the `composition_states.composer_meta` JSON blob, so
-  there is no new SQL column. The Landscape audit DB schema is unchanged —
-  `SQLITE_SCHEMA_EPOCH` stays 21 — so this is a single-DB, session-only
-  cutover. 0.7.0 boot fails closed on a pre-0.7.0 session DB with
-  `SessionSchemaError: Session DB schema version 22 does not match
-  SESSION_SCHEMA_EPOCH=24. Pre-release ELSPETH does not migrate session
-  databases. Delete the session DB file and restart.` Before first start on
+  not.** `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at the 0.6.0
+  release). `GUIDED_SESSION_SCHEMA_VERSION` reached 7 over the release (5→7),
+  and those guided fields live in the `composition_states.composer_meta` JSON
+  blob, so they add no SQL column. The guided-version bumps moved in lockstep
+  with the epoch through 25; the final 25→26 bump is session-only and is NOT
+  paired with a guided-version bump — it adds first-run-tutorial resume
+  columns (`tutorial_stage`, `tutorial_session_id`, `tutorial_run_id`,
+  `tutorial_source_data_hash`) to `user_preferences` so a mid-tutorial reload
+  resumes at the persisted stage instead of restarting at the welcome bookend.
+  The Landscape audit DB schema is unchanged — `SQLITE_SCHEMA_EPOCH` stays 21
+  — so this is a single-DB, session-only cutover. 0.7.0 boot fails closed on a
+  pre-0.7.0 session DB with `SessionSchemaError: Session DB schema version 22
+  does not match SESSION_SCHEMA_EPOCH=26. Pre-release ELSPETH does not migrate
+  session databases. Delete the session DB file and restart.` Before first start on
   0.7.0, stop `elspeth-web.service`, archive and remove `data/sessions.db`
   (and its `-wal`/`-shm` sidecars), and restart; the bootstrap recreates the
   schema on first start. `data/auth.db` is a SEPARATE file — local user

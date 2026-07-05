@@ -21,7 +21,7 @@ wiring for an integration concern.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 
 import pytest
@@ -29,10 +29,13 @@ import pytest
 from elspeth.contracts.audit import TokenOutcome
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.run_result import RunResult
+from elspeth.engine.orchestrator import run_status
 from elspeth.engine.orchestrator.run_status import (
     derive_resume_terminal_status_from_audit,
     is_counted_coalesced_output,
 )
+from elspeth.engine.orchestrator.types import ExecutionCounters
 
 _RECORDED_AT = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
 
@@ -179,3 +182,17 @@ def test_nested_coalesce_counts_only_final_merged_output() -> None:
     _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
     assert counters.rows_coalesced == 1
     assert counters.rows_succeeded == 1
+
+
+def test_terminal_counter_parity_fields_follow_execution_counters() -> None:
+    """Every ExecutionCounters field is compared or explicitly excluded."""
+    execution_counter_fields = tuple(field.name for field in fields(ExecutionCounters))
+    run_result_fields = {field.name for field in fields(RunResult)}
+    strict_fields = run_status._PARITY_STRICT_FIELDS
+    excluded_fields = run_status._PARITY_EXCLUDED_FIELDS
+
+    assert excluded_fields == frozenset({"rows_coalesce_failed", "routed_destinations"})
+    assert set(strict_fields).isdisjoint(excluded_fields)
+    assert set(execution_counter_fields) == set(strict_fields) | excluded_fields
+    assert strict_fields == tuple(field for field in execution_counter_fields if field not in excluded_fields)
+    assert not [field for field in strict_fields if field not in run_result_fields]

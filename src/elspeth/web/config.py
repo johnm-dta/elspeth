@@ -86,6 +86,7 @@ class WebSettings(BaseModel):
     composer_runtime_preflight_timeout_seconds: float = Field(default=5.0, gt=0)
     composer_rate_limit_per_minute: int = Field(..., ge=1)
     composer_expose_provider_errors: bool = False
+    e2e_state_seed_enabled: bool = False
     composer_advisor_model: str = "anthropic/claude-sonnet-4-6"
     composer_advisor_max_calls_per_compose: int = Field(
         default=4,

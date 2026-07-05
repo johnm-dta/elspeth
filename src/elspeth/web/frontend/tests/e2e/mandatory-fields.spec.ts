@@ -10,15 +10,16 @@
 //   2. Patch via API to add plugin; banner clears.
 //
 // Why skipped:
-//   See topology.spec.ts — same blocker (no direct state-mutation REST
-//   endpoint; would otherwise need an LLM stub). Tracked as elspeth-3a7df642c5.
+//   State seeding now exists via seedCompositionState(), but this spec body
+//   still needs to be implemented from the outline below. Tracked as
+//   elspeth-7cf763da7c.
 
 import { test } from "@playwright/test";
 
 test.describe("mandatory-fields — transform nodes must declare plugin", () => {
   test.skip(
     true,
-    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+    "pending seeded spec implementation — tracked as elspeth-7cf763da7c",
   );
 
   test("transform without plugin is reported invalid", async () => {

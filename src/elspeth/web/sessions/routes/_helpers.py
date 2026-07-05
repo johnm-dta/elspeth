@@ -673,6 +673,7 @@ _ComposerPreflightTelemetrySource = Literal[
     "plugin_crash",
     "runtime_preflight",
     "yaml_export",
+    "state_seed",
     # Path-1 cached re-raise — composer.compose() re-raised a previously-
     # cached runtime-preflight failure via web/composer/service.py:
     # _raise_cached_runtime_preflight_failure. Distinct from "compose" to

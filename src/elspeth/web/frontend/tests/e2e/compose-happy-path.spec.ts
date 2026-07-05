@@ -17,14 +17,14 @@
 //   Driving the compose loop requires either a real LLM (cost +
 //   nondeterminism — out of scope for E2E) or an LLM stub. The pytest
 //   suite uses ChaosLLM for this purpose; porting that to a JS-side stub
-//   the webServer can dial is its own work item. Tracked as elspeth-3a7df642c5.
+//   the webServer can dial is its own work item. Tracked as elspeth-617e1ca703.
 
 import { test } from "@playwright/test";
 
 test.describe("compose-happy-path — through-UI compose loop with stubbed LLM", () => {
   test.skip(
     true,
-    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+    "blocked: needs Playwright LLM stub server — tracked as elspeth-617e1ca703",
   );
 
   test("user prompt → composer tools → valid pipeline state", async () => {

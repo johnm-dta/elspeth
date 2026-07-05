@@ -12,13 +12,13 @@
 //
 // What this spec deliberately does NOT do:
 //   - Drive the LLM compose loop (would cost money / be nondeterministic).
-//   - Mutate composition state (composer tools are LLM-facing, not REST).
+//   - Mutate composition state (seeded composer-correctness specs own that).
 //   - Assert on visual layout or styling.
 //
 // The richer composer-correctness specs that target epic elspeth-e1ab67e55a
 // live alongside this file as tracked test.skip() stubs (see ./topology.spec.ts
-// etc., tracked as elspeth-3a7df642c5) and will be unblocked by either an LLM
-// stub server or a direct state-mutation REST endpoint.
+// etc., tracked as elspeth-7cf763da7c). The through-UI compose happy path is
+// tracked separately as elspeth-617e1ca703 because it still needs an LLM stub.
 
 import { expect, test } from "@playwright/test";
 

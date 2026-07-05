@@ -4,12 +4,11 @@
 // points (SideRail click, Escape key, keyboard shortcut) plus hash-routed
 // deep links for graph and yaml.
 //
-// Existing modal stubs (yaml-export-roundtrip.spec.ts, topology.spec.ts) are
-// both tracked test.skip (elspeth-3a7df642c5) — they are blocked on a direct
-// state-seed endpoint or LLM stub server and test a different surface (YAML
-// round-trip correctness and topology validation parity). Neither exercises
-// the modal open/close or keyboard affordances this spec covers; there is no
-// overlap.
+// Existing modal-adjacent stubs (yaml-export-roundtrip.spec.ts,
+// topology.spec.ts) are both tracked test.skip (elspeth-7cf763da7c) — they
+// still need seeded spec implementations and test a different surface (YAML
+// round-trip correctness and topology validation parity). Neither exercises the
+// modal open/close or keyboard affordances this spec covers; there is no overlap.
 //
 // Pattern: REST session creation via helpers/api.ts (same as smoke.spec.ts),
 // then UI interaction. No LLM calls.

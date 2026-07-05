@@ -13,7 +13,7 @@ import { test } from "@playwright/test";
 test.describe("yaml-export-roundtrip — generate_yaml output re-validates", () => {
   test.skip(
     true,
-    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+    "pending seeded spec implementation — tracked as elspeth-7cf763da7c",
   );
 
   test("valid state → exported YAML → re-imported state is also valid", async () => {

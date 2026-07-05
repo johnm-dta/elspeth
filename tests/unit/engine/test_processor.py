@@ -496,6 +496,29 @@ class TestConstructorErrorEdgeMap:
 
         assert processor._scheduler_lease_owner == "worker-a"
 
+    def test_navigator_is_constructed_from_traversal_context_factory(self) -> None:
+        """RowProcessor should not re-derive DAGNavigator internals at the call site."""
+        _, factory = _make_factory()
+        nav = SimpleNamespace(create_work_item=Mock(name="create_work_item"))
+        coalesce_on_success = {CoalesceName("merge"): "out"}
+        sink_names = frozenset({"out", "error"})
+
+        with patch("elspeth.engine.processor.DAGNavigator.from_traversal_context", return_value=nav) as from_traversal:
+            processor = _make_processor(
+                factory,
+                scheduler=factory.scheduler,
+                coalesce_on_success_map=coalesce_on_success,
+                sink_names=sink_names,
+            )
+
+        assert processor._nav is nav
+        from_traversal.assert_called_once()
+        assert from_traversal.call_args.args == (processor._traversal,)
+        assert from_traversal.call_args.kwargs == {
+            "coalesce_on_success_map": coalesce_on_success,
+            "sink_names": sink_names,
+        }
+
     def test_fresh_row_drains_throttle_empty_scheduler_maintenance(self) -> None:
         """Fresh source-row drains should not run empty recovery sweeps per row."""
         _, factory = _make_factory()

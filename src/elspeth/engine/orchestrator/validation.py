@@ -19,6 +19,7 @@ Other imports use TYPE_CHECKING to avoid cycles.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 # Import GateName at runtime - used in function body, not just type hints
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from elspeth.contracts import SourceProtocol
     from elspeth.contracts.types import NodeID
     from elspeth.core.config import GateSettings
-    from elspeth.engine.orchestrator.types import RowPlugin
+    from elspeth.engine.orchestrator.types import PipelineConfig, RowPlugin
 
 
 def validate_route_destinations(
@@ -94,6 +95,42 @@ def validate_route_destinations(
                 f"(via route label '{route_label}') but no sink named "
                 f"'{destination.sink_name}' exists. Available sinks: {sorted(available_sinks)}"
             )
+
+
+def validate_pipeline_route_targets(
+    *,
+    config: PipelineConfig,
+    route_resolution_map: Mapping[tuple[NodeID, str], RouteDestination],
+    transform_id_map: Mapping[int, NodeID],
+    config_gate_id_map: Mapping[GateName, NodeID],
+) -> None:
+    """Run the full route-target preflight bundle for a pipeline config."""
+
+    available_sinks = set(config.sinks.keys())
+    validate_route_destinations(
+        route_resolution_map=route_resolution_map,
+        available_sinks=available_sinks,
+        transform_id_map=transform_id_map,
+        transforms=config.transforms,
+        config_gate_id_map=config_gate_id_map,
+        config_gates=config.gates,
+    )
+    validate_transform_error_sinks(
+        transforms=config.transforms,
+        available_sinks=available_sinks,
+    )
+    for source in config.sources.values():
+        validate_source_quarantine_destination(
+            source=source,
+            available_sinks=available_sinks,
+        )
+    sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in config.sinks.items()}
+    sink_plugins = {name: sink.name for name, sink in config.sinks.items()}
+    validate_sink_failsink_destinations(
+        sink_configs=sink_validation_stubs,
+        available_sinks=available_sinks,
+        sink_plugins=sink_plugins,
+    )
 
 
 def validate_transform_error_sinks(

@@ -260,6 +260,10 @@ def _create_nondeterministic_operation_call(
     factory: RecorderFactory,
     *,
     determinism: Determinism = Determinism.IO_READ,
+    input_data_ref: str | None = None,
+    input_data_hash: str | None = None,
+    output_data_ref: str | None = None,
+    output_data_hash: str | None = None,
     response_ref: str | None = None,
     response_hash: str | None = "resp_hash",
     node_id: str = "operation-node",
@@ -286,6 +290,10 @@ def _create_nondeterministic_operation_call(
                 operation_type="source_load",
                 started_at=datetime.now(UTC),
                 status="completed",
+                input_data_ref=input_data_ref,
+                input_data_hash=input_data_hash,
+                output_data_ref=output_data_ref,
+                output_data_hash=output_data_hash,
             )
         )
         conn.execute(
@@ -299,6 +307,40 @@ def _create_nondeterministic_operation_call(
                 request_hash="req_hash",
                 response_hash=response_hash,
                 response_ref=response_ref,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+
+def _create_source_row(
+    db: LandscapeDB,
+    factory: RecorderFactory,
+    *,
+    determinism: Determinism,
+    source_data_ref: str | None,
+    node_id: str = "source-node",
+) -> None:
+    factory.data_flow.register_node(
+        run_id="run-1",
+        plugin_name="source",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        node_id=node_id,
+        schema_config=_DYNAMIC_SCHEMA,
+        determinism=determinism,
+    )
+    with db.connection() as conn:
+        conn.execute(
+            rows_table.insert().values(
+                row_id=f"row-{node_id}",
+                run_id="run-1",
+                source_node_id=node_id,
+                row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
+                source_data_hash="src_hash",
+                source_data_ref=source_data_ref,
                 created_at=datetime.now(UTC),
             )
         )
@@ -325,6 +367,33 @@ class TestUpdateGradeAfterPurge:
         _create_nondeterministic_operation_call(db, factory, response_ref="ref://operation-response", response_hash="resp_hash")
         _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
         update_grade_after_purge(db, "run-1", deleted_refs=["ref://operation-response"])
+        run = factory.run_lifecycle.get_run("run-1")
+        assert run is not None
+        assert run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY
+
+    def test_replay_degrades_when_io_read_source_data_ref_deleted(self) -> None:
+        """Downgrade when an IO_READ source row payload was purged."""
+        db, factory = _setup()
+        _create_source_row(db, factory, determinism=Determinism.IO_READ, source_data_ref="ref://source-row")
+        _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
+        update_grade_after_purge(db, "run-1", deleted_refs=["ref://source-row"])
+        run = factory.run_lifecycle.get_run("run-1")
+        assert run is not None
+        assert run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY
+
+    def test_replay_degrades_when_io_write_operation_output_ref_deleted(self) -> None:
+        """Downgrade when an IO_WRITE operation payload needed for replay was purged."""
+        db, factory = _setup()
+        _create_nondeterministic_operation_call(
+            db,
+            factory,
+            determinism=Determinism.IO_WRITE,
+            output_data_ref="ref://operation-output",
+            output_data_hash="output_hash",
+            response_hash=None,
+        )
+        _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
+        update_grade_after_purge(db, "run-1", deleted_refs=["ref://operation-output"])
         run = factory.run_lifecycle.get_run("run-1")
         assert run is not None
         assert run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY

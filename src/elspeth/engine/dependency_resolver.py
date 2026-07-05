@@ -63,6 +63,32 @@ def _load_depends_on(settings_path: Path) -> list[dict[str, str]]:
     return deps
 
 
+def _resolve_dependency_settings_path(
+    *,
+    parent_settings_path: Path,
+    dependency_name: str,
+    dependency_settings: str,
+    allowed_root: Path,
+) -> Path:
+    """Resolve a dependency settings path under the configured allowed root."""
+    raw_path = Path(dependency_settings)
+    if raw_path.is_absolute():
+        raise ValueError(
+            f"Dependency settings path for {dependency_name!r} must be relative to {parent_settings_path.parent}: {dependency_settings!r}"
+        )
+
+    resolved_path = (parent_settings_path.parent / raw_path).resolve()
+    resolved_root = allowed_root.resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Dependency settings path for {dependency_name!r} escapes allowed root "
+            f"{resolved_root}: {dependency_settings!r} -> {resolved_path}"
+        ) from exc
+    return resolved_path
+
+
 def detect_cycles(
     settings_path: Path,
     *,
@@ -70,6 +96,7 @@ def detect_cycles(
     _visited: set[str] | None = None,
     _stack: list[str] | None = None,
     _depth: int = 0,
+    _allowed_root: Path | None = None,
 ) -> None:
     """Detect circular dependencies and enforce depth limit.
 
@@ -77,6 +104,7 @@ def detect_cycles(
     Raises ValueError on cycle or depth limit violation.
     """
     canonical = str(settings_path.resolve())
+    allowed_root = _allowed_root if _allowed_root is not None else settings_path.parent.resolve()
     visited = _visited if _visited is not None else set()
     stack = _stack if _stack is not None else []
 
@@ -95,13 +123,19 @@ def detect_cycles(
     deps = _load_depends_on(settings_path)
 
     for dep in deps:
-        dep_path = (settings_path.parent / dep["settings"]).resolve()
+        dep_path = _resolve_dependency_settings_path(
+            parent_settings_path=settings_path,
+            dependency_name=dep["name"],
+            dependency_settings=dep["settings"],
+            allowed_root=allowed_root,
+        )
         detect_cycles(
             Path(dep_path),
             max_depth=max_depth,
             _visited=visited,
             _stack=stack,
             _depth=_depth + 1,
+            _allowed_root=allowed_root,
         )
 
     stack.pop()
@@ -127,8 +161,14 @@ def resolve_dependencies(
     KeyboardInterrupt is propagated as-is (not wrapped in DependencyFailedError).
     """
     results: list[DependencyRunResult] = []
+    allowed_root = parent_settings_path.parent.resolve()
     for dep in depends_on:
-        dep_path = (parent_settings_path.parent / dep.settings).resolve()
+        dep_path = _resolve_dependency_settings_path(
+            parent_settings_path=parent_settings_path,
+            dependency_name=dep.name,
+            dependency_settings=dep.settings,
+            allowed_root=allowed_root,
+        )
         try:
             settings_hash = _hash_settings_file(dep_path)
             settings_hash_error: Exception | None = None

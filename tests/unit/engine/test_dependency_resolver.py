@@ -111,13 +111,41 @@ class TestLoadDependsOnValidation:
 
 
 class TestCycleDetection:
+    def test_absolute_dependency_path_rejected(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside.yaml"
+        outside.write_text("source:\n  plugin: null_source\n", encoding="utf-8")
+        main = project / "main.yaml"
+        main.write_text(
+            f"depends_on:\n  - name: outside\n    settings: {outside}\nsource:\n  plugin: null_source\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"Dependency settings path.*must be relative"):
+            detect_cycles(main)
+
+    def test_traversal_dependency_path_rejected(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside.yaml"
+        outside.write_text("source:\n  plugin: null_source\n", encoding="utf-8")
+        main = project / "main.yaml"
+        main.write_text(
+            "depends_on:\n  - name: outside\n    settings: ../outside.yaml\nsource:\n  plugin: null_source\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="escapes allowed root"):
+            detect_cycles(main)
+
     def test_no_cycle_returns_none(self, tmp_path: Path) -> None:
         # A -> B, no cycle
         b = tmp_path / "b.yaml"
         b.write_text("source:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\nlandscape:\n  url: sqlite:///test.db\n")
         a = tmp_path / "a.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\nsource:\n  plugin: null_source\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\nsource:\n  plugin: null_source\n"
             "sinks:\n  out:\n    plugin: json_sink\nlandscape:\n  url: sqlite:///test.db\n"
         )
 
@@ -127,7 +155,7 @@ class TestCycleDetection:
     def test_self_loop_detected(self, tmp_path: Path) -> None:
         a = tmp_path / "a.yaml"
         a.write_text(
-            f"depends_on:\n  - name: self\n    settings: {a}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: self\n    settings: {a.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Cc]ircular|[Cc]ycle"):
@@ -137,10 +165,10 @@ class TestCycleDetection:
         a = tmp_path / "a.yaml"
         b = tmp_path / "b.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         b.write_text(
-            f"depends_on:\n  - name: a\n    settings: {a}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: a\n    settings: {a.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Cc]ircular|[Cc]ycle"):
@@ -151,13 +179,13 @@ class TestCycleDetection:
         b = tmp_path / "b.yaml"
         c = tmp_path / "c.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         b.write_text(
-            f"depends_on:\n  - name: c\n    settings: {c}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: c\n    settings: {c.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         c.write_text(
-            f"depends_on:\n  - name: a\n    settings: {a}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: a\n    settings: {a.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Cc]ircular|[Cc]ycle"):
@@ -171,13 +199,13 @@ class TestCycleDetection:
 
         files["d"].write_text("source:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n")
         files["c"].write_text(
-            f"depends_on:\n  - name: d\n    settings: {files['d']}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: d\n    settings: {files['d'].name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         files["b"].write_text(
-            f"depends_on:\n  - name: c\n    settings: {files['c']}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: c\n    settings: {files['c'].name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         files["a"].write_text(
-            f"depends_on:\n  - name: b\n    settings: {files['b']}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: b\n    settings: {files['b'].name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Dd]epth"):
@@ -192,7 +220,7 @@ class TestCycleDetection:
 
         main = tmp_path / "main.yaml"
         main.write_text(
-            f"depends_on:\n  - name: dep\n    settings: {link}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: dep\n    settings: {link.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         # Should not raise — link resolves to real, no cycle
@@ -205,17 +233,17 @@ class TestCycleDetection:
 
         b = tmp_path / "b.yaml"
         b.write_text(
-            f"depends_on:\n  - name: d\n    settings: {d}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: d\n    settings: {d.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         c = tmp_path / "c.yaml"
         c.write_text(
-            f"depends_on:\n  - name: d\n    settings: {d}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: d\n    settings: {d.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         a = tmp_path / "a.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\n  - name: c\n    settings: {c}\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\n  - name: c\n    settings: {c.name}\n"
             "source:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
@@ -224,6 +252,37 @@ class TestCycleDetection:
 
 
 class TestResolveDependencies:
+    def test_absolute_dependency_path_rejected_before_runner(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside.yaml"
+        dep = DependencyConfig(name="outside", settings=str(outside))
+        parent_path = tmp_path / "project" / "query.yaml"
+        parent_path.parent.mkdir()
+        mock_runner = _RunnerDouble(result=_run_result("unused", RunStatus.COMPLETED))
+
+        with (
+            patch("elspeth.engine.dependency_resolver._hash_settings_file") as mock_hash,
+            pytest.raises(ValueError, match=r"Dependency settings path.*must be relative"),
+        ):
+            resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
+
+        mock_hash.assert_not_called()
+        assert mock_runner.paths == []
+
+    def test_traversal_dependency_path_rejected_before_runner(self, tmp_path: Path) -> None:
+        dep = DependencyConfig(name="outside", settings="../outside.yaml")
+        parent_path = tmp_path / "project" / "query.yaml"
+        parent_path.parent.mkdir()
+        mock_runner = _RunnerDouble(result=_run_result("unused", RunStatus.COMPLETED))
+
+        with (
+            patch("elspeth.engine.dependency_resolver._hash_settings_file") as mock_hash,
+            pytest.raises(ValueError, match="escapes allowed root"),
+        ):
+            resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
+
+        mock_hash.assert_not_called()
+        assert mock_runner.paths == []
+
     def test_single_dependency_success(self, tmp_path: Path) -> None:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"

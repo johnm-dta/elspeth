@@ -1382,11 +1382,11 @@ class TestTransformExecutor:
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
 
-        captured_ctx = None
+        captured_contract = None
 
         def capture_ctx(row_data: Any, ctx: Any) -> TransformResult:
-            nonlocal captured_ctx
-            captured_ctx = ctx
+            nonlocal captured_contract
+            captured_contract = ctx.contract
             return TransformResult.success(
                 make_row({"value": "processed"}, contract=contract),
                 success_reason={"action": "test"},
@@ -1400,8 +1400,101 @@ class TestTransformExecutor:
 
         executor.execute_transform(transform, token, ctx)
 
-        assert captured_ctx is not None
-        assert captured_ctx.contract is contract
+        assert captured_contract is contract
+
+    def test_restores_ctx_execution_metadata_after_success(self) -> None:
+        """Per-token execution metadata must not leak after a successful transform."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        previous_contract = _make_output_contract()
+        previous_token = _make_token(data={"value": "previous"}, token_id="tok_previous", contract=previous_contract)
+        input_contract = _make_contract()
+        token = _make_token(contract=input_contract)
+        seen: dict[str, Any] = {}
+
+        def capture_ctx(row_data: Any, call_ctx: Any) -> TransformResult:
+            seen["state_id"] = call_ctx.state_id
+            seen["node_id"] = call_ctx.node_id
+            seen["contract"] = call_ctx.contract
+            seen["token"] = call_ctx.token
+            return TransformResult.success(
+                make_row({"value": "processed"}, contract=input_contract),
+                success_reason={"action": "test"},
+            )
+
+        transform = _make_transform()
+        transform.process = capture_ctx
+        ctx = make_context()
+        ctx.state_id = "previous_state"
+        ctx.node_id = "previous_node"
+        ctx.contract = previous_contract
+        ctx.token = previous_token
+
+        executor.execute_transform(transform, token, ctx)
+
+        assert seen["state_id"] == "state_001"
+        assert seen["node_id"] == "node_1"
+        assert seen["contract"] is input_contract
+        assert seen["token"] is token
+        assert ctx.state_id == "previous_state"
+        assert ctx.node_id == "previous_node"
+        assert ctx.contract is previous_contract
+        assert ctx.token is previous_token
+
+    def test_restores_ctx_execution_metadata_after_error_result(self) -> None:
+        """Per-token execution metadata must not leak after TransformResult.error."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        previous_contract = _make_output_contract()
+        previous_token = _make_token(data={"value": "previous"}, token_id="tok_previous", contract=previous_contract)
+        input_contract = _make_contract()
+        token = _make_token(contract=input_contract)
+        transform = _make_transform(on_error="discard")
+        transform.process.return_value = TransformResult.error(reason={"reason": "content_filtered"})
+        ctx = make_context(landscape=factory.execution)
+        ctx.state_id = "previous_state"
+        ctx.node_id = "previous_node"
+        ctx.contract = previous_contract
+        ctx.token = previous_token
+
+        executor.execute_transform(transform, token, ctx)
+
+        assert ctx.state_id == "previous_state"
+        assert ctx.node_id == "previous_node"
+        assert ctx.contract is previous_contract
+        assert ctx.token is previous_token
+
+    def test_restores_ctx_execution_metadata_after_exception(self) -> None:
+        """Per-token execution metadata must not leak when transform.process crashes."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        previous_contract = _make_output_contract()
+        previous_token = _make_token(data={"value": "previous"}, token_id="tok_previous", contract=previous_contract)
+        input_contract = _make_contract()
+        token = _make_token(contract=input_contract)
+
+        def crash(row_data: Any, call_ctx: Any) -> TransformResult:
+            assert call_ctx.state_id == "state_001"
+            assert call_ctx.node_id == "node_1"
+            assert call_ctx.contract is input_contract
+            assert call_ctx.token is token
+            raise RuntimeError("plugin crash")
+
+        transform = _make_transform()
+        transform.process = crash
+        ctx = make_context()
+        ctx.state_id = "previous_state"
+        ctx.node_id = "previous_node"
+        ctx.contract = previous_contract
+        ctx.token = previous_token
+
+        with pytest.raises(RuntimeError, match="plugin crash"):
+            executor.execute_transform(transform, token, ctx)
+
+        assert ctx.state_id == "previous_state"
+        assert ctx.node_id == "previous_node"
+        assert ctx.contract is previous_contract
+        assert ctx.token is previous_token
 
     def test_creates_pipeline_row_from_result(self) -> None:
         """Updated token should have PipelineRow with output contract."""

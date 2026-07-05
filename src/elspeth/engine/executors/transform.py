@@ -35,7 +35,7 @@ from elspeth.contracts.errors import (
     PluginContractViolation,
     ZeroEmissionSuccessContractViolation,
 )
-from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.plugin_context import PluginContext, plugin_context_scope
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
@@ -672,186 +672,181 @@ class TransformExecutor:
                 node_id=node_id,
             )
 
-            # Set state_id and node_id on context for external call recording.
-            ctx.state_id = guard.state_id
-            ctx.node_id = node_id
-            # Note: call_index allocation is handled by ExecutionRepository.allocate_call_index()
-            # which automatically starts at 0 for each new state_id
-
-            # Set ctx.contract for plugins that use fallback access (dual-name resolution)
-            # This allows transforms to access original header names via ctx.contract.resolve_name()
-            ctx.contract = token.row_data.contract
-
-            # Set token on context for ALL transforms (not just batch-mixin).
-            # Regular transforms also need ctx.token for telemetry correlation
-            # when using audited clients (e.g., WebScrapeTransform uses ctx.token.token_id).
-            # Bug fix: ctx.token was previously only set for batch-mixin transforms.
-            ctx.token = token
-
-            # Execute with timing and span
-            # Pass token_id for accurate child token attribution in traces
-            # Pass node_id for disambiguation when multiple plugin instances exist
-            with self._spans.transform_span(
-                transform.name,
+            # Set per-token execution metadata only for this operation. The
+            # shared context is reused across plugin calls, so these fields
+            # must restore even when transform execution or post-processing
+            # raises.
+            with plugin_context_scope(
+                ctx,
+                state_id=guard.state_id,
                 node_id=node_id,
-                input_hash=input_hash,
-                token_id=token.token_id,
+                contract=token.row_data.contract,
+                token=token,
             ):
-                start = time.perf_counter()
-                try:
-                    # Invocation-mode selection (sync process() vs batch-runtime
-                    # accept()+wait) lives in _invoke_transform; timing, FAILED
-                    # completion, and timeout eviction stay here with the guard.
-                    result = self._invoke_transform(
+                # Execute with timing and span
+                # Pass token_id for accurate child token attribution in traces
+                # Pass node_id for disambiguation when multiple plugin instances exist
+                with self._spans.transform_span(
+                    transform.name,
+                    node_id=node_id,
+                    input_hash=input_hash,
+                    token_id=token.token_id,
+                ):
+                    start = time.perf_counter()
+                    try:
+                        # Invocation-mode selection (sync process() vs batch-runtime
+                        # accept()+wait) lives in _invoke_transform; timing, FAILED
+                        # completion, and timeout eviction stay here with the guard.
+                        result = self._invoke_transform(
+                            transform=transform,
+                            batch_runtime=batch_runtime,
+                            token=token,
+                            ctx=ctx,
+                            state_id=guard.state_id,
+                        )
+                        duration_ms = (time.perf_counter() - start) * 1000
+                    except contract_errors.TIER_1_ERRORS:
+                        raise  # Tier 1 errors must crash — never record as row FAILED
+                    except Exception as e:
+                        duration_ms = (time.perf_counter() - start) * 1000
+                        # Record failure
+                        error = ExecutionError(
+                            exception=str(e),
+                            exception_type=type(e).__name__,
+                        )
+                        guard.complete(
+                            NodeStateStatus.FAILED,
+                            duration_ms=duration_ms,
+                            error=error,
+                        )
+
+                        # For TimeoutError on batch transforms, evict the buffer entry
+                        # to prevent FIFO blocking on retry attempts.
+                        #
+                        # The eviction flow:
+                        # 1. First attempt times out at waiter.wait()
+                        # 2. We call evict_submission() to remove buffer entry
+                        # 3. Retry attempt gets new sequence number and can proceed
+                        # 4. Original worker may still complete, but result is discarded
+                        if isinstance(e, TimeoutError) and batch_runtime is not None:
+                            try:
+                                batch_runtime.evict_submission(token.token_id, guard.state_id)
+                            except Exception as evict_err:
+                                raise RuntimeError(f"Failed to evict timed-out submission for token {token.token_id}") from evict_err
+
+                        raise
+
+                # -- Post-processing (GUARDED by NodeStateGuard) --
+                # If any of the following steps raise before guard.complete() is
+                # called, the guard auto-completes the state as FAILED in __exit__.
+
+                # Post-emission declaration-contract dispatch + output-schema
+                # validation. Runs BEFORE output hashing below so declaration
+                # violations keep attribution over canonicalization failures.
+                if result.status == "success":
+                    self._verify_success_emissions(
+                        result=result,
                         transform=transform,
-                        batch_runtime=batch_runtime,
                         token=token,
+                        run_id=ctx.run_id,
+                        node_id=node_id,
+                        static_contract=static_contract,
+                        effective_input_fields=effective_input_fields,
+                    )
+
+                # Populate audit fields (success and error results alike); a
+                # canonicalization failure raises PluginContractViolation.
+                self._populate_result_audit_fields(
+                    result=result,
+                    transform=transform,
+                    input_hash=input_hash,
+                    duration_ms=duration_ms,
+                )
+
+                # Initialize error_sink - will be set if transform errors with on_error configured
+                error_sink: str | None = None
+
+                # Complete node state
+                if result.status == "success":
+                    # Output-data extraction + contract-evolution recording
+                    # (record-before-complete — B1 terminality doctrine: a
+                    # recording failure must auto-fail the state via the guard).
+                    output_data = self._prepare_success_completion(
+                        result=result,
+                        transform=transform,
+                        token=token,
+                        run_id=ctx.run_id,
+                        node_id=node_id,
+                    )
+
+                    # NOW complete as COMPLETED — all validation has succeeded
+                    guard.complete(
+                        NodeStateStatus.COMPLETED,
+                        output_data=output_data,
+                        duration_ms=duration_ms,
+                        success_reason=result.success_reason,
+                        context_after=result.context_after,
+                    )
+
+                    # Update token with new PipelineRow, preserving all lineage metadata
+                    # For multi-row results, keep original row_data (engine will expand tokens later)
+                    if result.row is not None:
+                        # Single-row result: transforms return PipelineRow with correct contract
+                        updated_token = token.with_updated_data(result.row)
+                    else:
+                        # Multi-row result: keep original row_data (engine will expand tokens later)
+                        updated_token = token.with_updated_data(token.row_data)
+                else:
+                    # Transform returned error status (not exception)
+                    # This is a LEGITIMATE processing failure, not a bug
+
+                    # Handle error routing - on_error is part of TransformProtocol
+                    on_error = transform.on_error
+                    # on_error is always set (required by TransformSettings) — Tier 1 invariant
+                    if on_error is None:
+                        raise OrchestrationInvariantError(
+                            f"Transform '{transform.name}' has on_error=None — this should be impossible since TransformSettings requires on_error"
+                        )
+
+                    # Set error_sink so caller knows where the error was routed
+                    error_sink = on_error
+
+                    # result.reason MUST be set for error results - TransformResult.error() requires it.
+                    # If None, that's a bug in the transform (constructed error result without reason).
+                    if result.reason is None:
+                        raise OrchestrationInvariantError(
+                            f"Transform '{transform.name}' returned error but reason is None. "
+                            'Use TransformResult.error({{"reason": "...", ...}}) to create error results.'
+                        )
+
+                    # Record transform_error + DIVERT routing_event BEFORE terminal
+                    # completion (record-before-complete, elspeth-2d65e04912 —
+                    # same B1 doctrine as the success path above): once
+                    # guard.complete() runs the guard stands down, and a failing
+                    # audit write would escape its terminality protection. If a
+                    # write raises here, the guard auto-fails the state
+                    # (phase='executor_post_process', carrying the audit-write
+                    # error rather than result.reason) and the error propagates —
+                    # fail-closed, never completed-then-crashed.
+                    record_transform_error_with_routing(
                         ctx=ctx,
+                        execution=self._execution,
+                        error_edge_ids=self._error_edge_ids,
                         state_id=guard.state_id,
+                        token=token,
+                        transform=transform,
+                        row=input_dict,  # Use extracted dict for Landscape recording
+                        error_details=result.reason,
+                        on_error=on_error,
                     )
-                    duration_ms = (time.perf_counter() - start) * 1000
-                except contract_errors.TIER_1_ERRORS:
-                    raise  # Tier 1 errors must crash — never record as row FAILED
-                except Exception as e:
-                    duration_ms = (time.perf_counter() - start) * 1000
-                    # Record failure
-                    error = ExecutionError(
-                        exception=str(e),
-                        exception_type=type(e).__name__,
-                    )
+
                     guard.complete(
                         NodeStateStatus.FAILED,
                         duration_ms=duration_ms,
-                        error=error,
+                        error=result.reason,
+                        context_after=result.context_after,
                     )
 
-                    # For TimeoutError on batch transforms, evict the buffer entry
-                    # to prevent FIFO blocking on retry attempts.
-                    #
-                    # The eviction flow:
-                    # 1. First attempt times out at waiter.wait()
-                    # 2. We call evict_submission() to remove buffer entry
-                    # 3. Retry attempt gets new sequence number and can proceed
-                    # 4. Original worker may still complete, but result is discarded
-                    if isinstance(e, TimeoutError) and batch_runtime is not None:
-                        try:
-                            batch_runtime.evict_submission(token.token_id, guard.state_id)
-                        except Exception as evict_err:
-                            raise RuntimeError(f"Failed to evict timed-out submission for token {token.token_id}") from evict_err
-
-                    raise
-
-            # -- Post-processing (GUARDED by NodeStateGuard) --
-            # If any of the following steps raise before guard.complete() is
-            # called, the guard auto-completes the state as FAILED in __exit__.
-
-            # Post-emission declaration-contract dispatch + output-schema
-            # validation. Runs BEFORE output hashing below so declaration
-            # violations keep attribution over canonicalization failures.
-            if result.status == "success":
-                self._verify_success_emissions(
-                    result=result,
-                    transform=transform,
-                    token=token,
-                    run_id=ctx.run_id,
-                    node_id=node_id,
-                    static_contract=static_contract,
-                    effective_input_fields=effective_input_fields,
-                )
-
-            # Populate audit fields (success and error results alike); a
-            # canonicalization failure raises PluginContractViolation.
-            self._populate_result_audit_fields(
-                result=result,
-                transform=transform,
-                input_hash=input_hash,
-                duration_ms=duration_ms,
-            )
-
-            # Initialize error_sink - will be set if transform errors with on_error configured
-            error_sink: str | None = None
-
-            # Complete node state
-            if result.status == "success":
-                # Output-data extraction + contract-evolution recording
-                # (record-before-complete — B1 terminality doctrine: a
-                # recording failure must auto-fail the state via the guard).
-                output_data = self._prepare_success_completion(
-                    result=result,
-                    transform=transform,
-                    token=token,
-                    run_id=ctx.run_id,
-                    node_id=node_id,
-                )
-
-                # NOW complete as COMPLETED — all validation has succeeded
-                guard.complete(
-                    NodeStateStatus.COMPLETED,
-                    output_data=output_data,
-                    duration_ms=duration_ms,
-                    success_reason=result.success_reason,
-                    context_after=result.context_after,
-                )
-
-                # Update token with new PipelineRow, preserving all lineage metadata
-                # For multi-row results, keep original row_data (engine will expand tokens later)
-                if result.row is not None:
-                    # Single-row result: transforms return PipelineRow with correct contract
-                    updated_token = token.with_updated_data(result.row)
-                else:
-                    # Multi-row result: keep original row_data (engine will expand tokens later)
-                    updated_token = token.with_updated_data(token.row_data)
-            else:
-                # Transform returned error status (not exception)
-                # This is a LEGITIMATE processing failure, not a bug
-
-                # Handle error routing - on_error is part of TransformProtocol
-                on_error = transform.on_error
-                # on_error is always set (required by TransformSettings) — Tier 1 invariant
-                if on_error is None:
-                    raise OrchestrationInvariantError(
-                        f"Transform '{transform.name}' has on_error=None — this should be impossible since TransformSettings requires on_error"
-                    )
-
-                # Set error_sink so caller knows where the error was routed
-                error_sink = on_error
-
-                # result.reason MUST be set for error results - TransformResult.error() requires it.
-                # If None, that's a bug in the transform (constructed error result without reason).
-                if result.reason is None:
-                    raise OrchestrationInvariantError(
-                        f"Transform '{transform.name}' returned error but reason is None. "
-                        'Use TransformResult.error({{"reason": "...", ...}}) to create error results.'
-                    )
-
-                # Record transform_error + DIVERT routing_event BEFORE terminal
-                # completion (record-before-complete, elspeth-2d65e04912 —
-                # same B1 doctrine as the success path above): once
-                # guard.complete() runs the guard stands down, and a failing
-                # audit write would escape its terminality protection. If a
-                # write raises here, the guard auto-fails the state
-                # (phase='executor_post_process', carrying the audit-write
-                # error rather than result.reason) and the error propagates —
-                # fail-closed, never completed-then-crashed.
-                record_transform_error_with_routing(
-                    ctx=ctx,
-                    execution=self._execution,
-                    error_edge_ids=self._error_edge_ids,
-                    state_id=guard.state_id,
-                    token=token,
-                    transform=transform,
-                    row=input_dict,  # Use extracted dict for Landscape recording
-                    error_details=result.reason,
-                    on_error=on_error,
-                )
-
-                guard.complete(
-                    NodeStateStatus.FAILED,
-                    duration_ms=duration_ms,
-                    error=result.reason,
-                    context_after=result.context_after,
-                )
-
-                updated_token = token
+                    updated_token = token
 
         return result, updated_token, error_sink

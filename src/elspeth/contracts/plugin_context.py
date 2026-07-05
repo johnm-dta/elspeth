@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -565,3 +566,53 @@ class PluginContext:
             error_id=error_id,
             destination=destination,
         )
+
+
+class _ContextScopeUnset:
+    __slots__ = ()
+
+
+_CONTEXT_SCOPE_UNSET = _ContextScopeUnset()
+
+
+@contextmanager
+def plugin_context_scope(
+    ctx: PluginContext,
+    *,
+    node_id: str | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+    token: TokenInfo | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+    batch_token_ids: tuple[str, ...] | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+    aggregation_batch: AggregationBatchContext | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+    contract: SchemaContract | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+    state_id: str | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+    operation_id: str | None | _ContextScopeUnset = _CONTEXT_SCOPE_UNSET,
+) -> Iterator[PluginContext]:
+    """Temporarily assign executor-owned metadata on a shared plugin context.
+
+    Executors reuse ``PluginContext`` across operations for infrastructure
+    handles and pending audit linkage state. Per-operation metadata must be
+    scoped so state/token/contract attribution cannot leak into the next plugin
+    call on the same context.
+    """
+    updates = {
+        "node_id": node_id,
+        "token": token,
+        "batch_token_ids": batch_token_ids,
+        "aggregation_batch": aggregation_batch,
+        "contract": contract,
+        "state_id": state_id,
+        "operation_id": operation_id,
+    }
+    previous: dict[str, object] = {}
+
+    for name, value in updates.items():
+        if value is _CONTEXT_SCOPE_UNSET:
+            continue
+        previous[name] = getattr(ctx, name)
+        setattr(ctx, name, value)
+
+    try:
+        yield ctx
+    finally:
+        for name, value in previous.items():
+            setattr(ctx, name, value)

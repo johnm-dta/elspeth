@@ -131,7 +131,7 @@ class TestStep2Handler:
             catalog=catalog,
             resolved=SourceResolved(
                 plugin="csv",
-                options={"path": "x.csv", "schema": {"mode": "observed"}},
+                options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["a"]}},
                 observed_columns=("a",),
                 sample_rows=({"a": "1"},),
             ),
@@ -229,7 +229,7 @@ class TestStep3Handler:
             catalog=catalog,
             resolved=SourceResolved(
                 plugin="csv",
-                options={"path": "x.csv", "schema": {"mode": "observed"}},
+                options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 observed_columns=("price",),
                 sample_rows=({"price": "1.99"},),
             ),
@@ -257,7 +257,7 @@ class TestStep3Handler:
             steps=(
                 {
                     "plugin": "passthrough",
-                    "options": {"schema": {"mode": "observed"}},
+                    "options": {"schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                     "rationale": "echo rows; minimal transform for wiring proof",
                 },
             ),
@@ -407,7 +407,7 @@ class TestTerminalStampInvariant:
             catalog=catalog,
             resolved=SourceResolved(
                 plugin="csv",
-                options={"path": "x.csv", "schema": {"mode": "observed"}},
+                options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 observed_columns=("price",),
                 sample_rows=({"price": "1.99"},),
             ),
@@ -431,7 +431,7 @@ class TestTerminalStampInvariant:
             steps=(
                 {
                     "plugin": "passthrough",
-                    "options": {"schema": {"mode": "observed"}},
+                    "options": {"schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                     "rationale": "echo rows",
                 },
             ),

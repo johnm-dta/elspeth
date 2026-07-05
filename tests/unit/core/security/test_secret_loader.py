@@ -385,8 +385,12 @@ def _resolve_challenge_verify_flag(client: object) -> bool:
         ) from e
 
     for policy in policies:
-        if "Challenge" in type(policy).__name__ and hasattr(policy, "_verify_challenge_resource"):
+        if "Challenge" not in type(policy).__name__:
+            continue
+        try:
             return bool(policy._verify_challenge_resource)  # type: ignore[attr-defined]
+        except AttributeError:
+            continue
 
     raise AssertionError(
         "No challenge-auth policy exposing _verify_challenge_resource was found on "

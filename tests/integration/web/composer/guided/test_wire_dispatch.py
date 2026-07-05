@@ -60,7 +60,7 @@ def _proposal() -> ChainProposal:
         steps=(
             {
                 "plugin": "passthrough",
-                "options": {"schema": {"mode": "observed"}},
+                "options": {"schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 "rationale": "identity transform",
             },
         ),
@@ -79,7 +79,7 @@ def _step3_ready_session() -> tuple[CompositionState, GuidedSession, Any, MockPa
         catalog=catalog,
         resolved=SourceResolved(
             plugin="csv",
-            options={"path": "x.csv", "schema": {"mode": "observed"}},
+            options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
             observed_columns=("price",),
             sample_rows=({"price": "1.99"},),
         ),

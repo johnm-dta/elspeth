@@ -86,10 +86,10 @@ def _outputs_path(client: TestClient, filename: str) -> str:
 def _fake_llm_response_for_passthrough() -> SimpleNamespace:
     """A LiteLLM-shaped response that proposes a single passthrough transform.
 
-    Passthrough is the safest stub target: minimal options
-    (only ``schema: {mode: observed}`` required) so the
-    ``_execute_set_pipeline`` step inside ``handle_step_3_chain_accept`` is
-    exercising the wiring, not plugin-specific validation.
+    Passthrough is the safest stub target: minimal options plus the explicit
+    field contract needed by the sink, so the ``_execute_set_pipeline`` step
+    inside ``handle_step_3_chain_accept`` is exercising the wiring, not
+    plugin-specific validation.
     """
     return SimpleNamespace(
         choices=[
@@ -106,7 +106,12 @@ def _fake_llm_response_for_passthrough() -> SimpleNamespace:
                                             "steps": [
                                                 {
                                                     "plugin": "passthrough",
-                                                    "options": {"schema": {"mode": "observed"}},
+                                                    "options": {
+                                                        "schema": {
+                                                            "mode": "observed",
+                                                            "guaranteed_fields": ["text"],
+                                                        }
+                                                    },
                                                     "rationale": "no transformation needed; pass rows through unchanged",
                                                 }
                                             ],
@@ -145,7 +150,10 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
         session_id,
         edited_values={
             "plugin": "csv",
-            "options": {"path": storage_path, "schema": {"mode": "observed"}},
+            "options": {
+                "path": storage_path,
+                "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+            },
             "observed_columns": ["text", "note"],
             "sample_rows": [{"text": "Hello world", "note": "greeting"}],
         },

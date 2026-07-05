@@ -149,7 +149,12 @@ def _fake_llm_response_for_passthrough() -> SimpleNamespace:
                                             "steps": [
                                                 {
                                                     "plugin": "passthrough",
-                                                    "options": {"schema": {"mode": "observed"}},
+                                                    "options": {
+                                                        "schema": {
+                                                            "mode": "observed",
+                                                            "guaranteed_fields": ["text"],
+                                                        }
+                                                    },
                                                     "rationale": "pass rows through unchanged",
                                                 }
                                             ],
@@ -208,7 +213,10 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
         session_id,
         edited_values={
             "plugin": "csv",
-            "options": {"path": storage_path, "schema": {"mode": "observed"}},
+            "options": {
+                "path": storage_path,
+                "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+            },
             "observed_columns": ["text", "note"],
             "sample_rows": [{"text": "Hello world", "note": "greeting"}],
         },
@@ -498,7 +506,10 @@ def _drive_to_step_2_sink_initial_solve_pre_call(client: TestClient, session_id:
         session_id,
         edited_values={
             "plugin": "csv",
-            "options": {"path": storage_path, "schema": {"mode": "observed"}},
+            "options": {
+                "path": storage_path,
+                "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+            },
             "observed_columns": ["text", "note"],
             "sample_rows": [{"text": "Hello world", "note": "greeting"}],
         },

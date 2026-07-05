@@ -17,9 +17,9 @@ def test_readme_advertises_current_release_surface() -> None:
     text = _readme_text()
 
     # Current release line is shown, not a stale RC badge.
-    assert "Status: 0.6.0" in text
-    assert "status-0.6.0" in text
-    assert "## What Changed In 0.6.0" in text
+    assert "Status: 0.7.0" in text
+    assert "status-0.7.0" in text
+    assert "## What Changed In 0.7.0" in text
 
     # Key evaluator-facing release references remain.
     assert "[Audit and Lineage Guarantees](docs/release/guarantees.md)" in text

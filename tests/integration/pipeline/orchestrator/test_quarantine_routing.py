@@ -796,7 +796,7 @@ class TestQuarantineErrorLengthBound:
     """
 
     def test_overlong_quarantine_error_is_truncated_on_audit_surfaces(self, payload_store) -> None:
-        from elspeth.engine.orchestrator.source_iteration import QUARANTINE_ERROR_MAX_CHARS
+        from elspeth.engine.orchestrator.quarantine_router import QUARANTINE_ERROR_MAX_CHARS
 
         long_error = ("x" * (QUARANTINE_ERROR_MAX_CHARS + 5000)) + "TAIL-SENTINEL"
         db = make_landscape_db()

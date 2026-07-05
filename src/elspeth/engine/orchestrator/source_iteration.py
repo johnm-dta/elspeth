@@ -1,8 +1,18 @@
-"""SourceIterationDriver: source iteration and row-loop cluster.
+"""SourceIterationDriver: source iteration and row-loop coordinator.
 
-Extracted from Orchestrator (core.py) — these methods own the source
-loading, per-row dispatching, quarantine handling, field resolution
-recording, and post-loop finalization phases of a pipeline run.
+Extracted from Orchestrator (core.py); this driver coordinates the source
+loading, per-row dispatch, and post-loop finalization phases of a pipeline
+run. Two focused concerns live in collaborators the driver delegates to:
+
+- ``QuarantineRouter`` (``quarantine_router.py``) — routes a validation-failed
+  source row directly to its configured sink.
+- ``SourceLifecycleRecorder`` (``source_lifecycle_recorder.py``) — records the
+  source field-resolution mapping and run_source lifecycle evidence.
+
+Idle-timeout aggregation/coalesce flushing runs on an ``IdleTimeoutPump``
+(``idle_timeout_pump.py``); the driver binds the run-scoped flush closure into
+it. The driver keeps the main row loop, progress emission, source-scoped
+context restoration, and end-of-input finalization.
 
 Dependencies held by this driver:
 - ``_events``: EventBusProtocol for emitting progress and phase lifecycle events
@@ -16,34 +26,25 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from elspeth.contracts import PendingOutcome, SourceRow
+from elspeth.contracts import SourceRow
 from elspeth.contracts.cli import ProgressEvent
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import (
-    ExecutionError,
-    OrchestrationInvariantError,
-    SourceQuarantineReason,
-)
+from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.events import (
-    FieldResolutionApplied,
     PhaseAction,
     PhaseChanged,
     PhaseCompleted,
     PhaseStarted,
     PipelinePhase,
-    RowCreated,
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.core.canonical import sanitize_for_canonical, stable_hash
+from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.core.operations import track_operation
-from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     run_end_of_input_barrier_flush,
@@ -55,13 +56,14 @@ from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
     handle_coalesce_timeouts,
 )
+from elspeth.engine.orchestrator.quarantine_router import QuarantineRouter
+from elspeth.engine.orchestrator.source_lifecycle_recorder import SourceLifecycleRecorder
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     ExecutionCounters,
     LoopContext,
     LoopResult,
     PipelineConfig,
-    RouteValidationError,
 )
 from elspeth.engine.spans import SpanFactory
 
@@ -69,29 +71,14 @@ if TYPE_CHECKING:
     from elspeth.contracts import SourceProtocol
     from elspeth.core.events import EventBusProtocol
 
-# Backstop cap for plugin-authored quarantine error text (elspeth-a300402c58).
-# Source plugins own producing input-free error strings
-# (plugins/sources/_safe_validation_errors.py); this bound stops an
-# unbounded or input-echoing plugin string from flooding every audit
-# surface the text lands on (node_states.error_json, the DIVERT routing
-# reason, exports). Genuine validation messages are far shorter.
-QUARANTINE_ERROR_MAX_CHARS = 2000
-
-
-def _bound_quarantine_error(error_text: str) -> str:
-    """Truncate over-long quarantine error text with an explicit marker."""
-    if len(error_text) <= QUARANTINE_ERROR_MAX_CHARS:
-        return error_text
-    elided = len(error_text) - QUARANTINE_ERROR_MAX_CHARS
-    return f"{error_text[:QUARANTINE_ERROR_MAX_CHARS]} [truncated {elided} chars]"
-
 
 class SourceIterationDriver:
-    """Owns the source-iteration / row-loop cluster of an Orchestrator run.
+    """Coordinate the source-iteration / row-loop cluster of an Orchestrator run.
 
-    Extracted from Orchestrator — holds the 7 methods that span source loading,
-    per-row dispatching, quarantine handling, field resolution recording, and
-    post-loop finalization.
+    Owns source loading, the per-row dispatch loop, progress emission, and
+    post-loop finalization. Quarantine routing and source lifecycle/field
+    recording are delegated to the ``QuarantineRouter`` and
+    ``SourceLifecycleRecorder`` collaborators built in ``__init__``.
     """
 
     _PROGRESS_ROW_INTERVAL = 100
@@ -108,236 +95,8 @@ class SourceIterationDriver:
         self._events = events
         self._span_factory = span_factory
         self._ceremony = ceremony
-
-    def handle_quarantine_row(
-        self,
-        factory: RecorderFactory,
-        run_id: str,
-        source_id: NodeID,
-        source_item: SourceRow,
-        row_index: int,
-        source_row_index: int,
-        ingest_sequence: int,
-        edge_map: Mapping[tuple[NodeID, str], str],
-        loop_ctx: LoopContext,
-        *,
-        active_source: SourceProtocol,
-    ) -> None:
-        """Handle a quarantined source row: route directly to configured sink.
-
-        Accesses loop_ctx.processor for token creation and loop_ctx.counters
-        for incrementing quarantine count. Appends to loop_ctx.pending_tokens.
-
-        This method performs the complete quarantine workflow:
-        1. Validate quarantine destination exists
-        2. Sanitize data for canonical JSON
-        3. Create quarantine token
-        4. Record source node_state (FAILED)
-        5. Record DIVERT routing_event
-        6. Emit telemetry
-        7. Compute error_hash
-        8. Append to pending_tokens with PendingOutcome
-        """
-
-        config = loop_ctx.config
-        counters = loop_ctx.counters
-        processor = loop_ctx.processor
-        pending_tokens = loop_ctx.pending_tokens
-
-        # Route quarantined row to configured sink
-        # Per CLAUDE.md: plugin bugs must crash, no silent drops
-        quarantine_sink = source_item.quarantine_destination
-
-        # Validate destination exists - crash on plugin bug
-        if not quarantine_sink:
-            raise RouteValidationError(
-                f"Source '{active_source.name}' yielded quarantined row "
-                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
-                f"with missing quarantine_destination. "
-                f"This is a plugin bug: quarantined rows MUST specify a destination. "
-                f"Use SourceRow.quarantined(row, error, destination, source_row_index=...) factory method."
-            )
-        if quarantine_sink not in config.sinks:
-            raise RouteValidationError(
-                f"Source '{active_source.name}' yielded quarantined row "
-                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
-                f"with invalid quarantine_destination='{quarantine_sink}'. "
-                f"No sink named '{quarantine_sink}' exists. "
-                f"Available sinks: {sorted(config.sinks.keys())}. "
-                f"This is a plugin bug: quarantine_destination must match "
-                f"source._on_validation_failure='{active_source._on_validation_failure}'."
-            )
-
-        # Destination validated. Source quarantine is a FAILURE lifecycle with
-        # a quarantine reporting subset, so bump both counters.
-        counters.rows_quarantined += 1
-        counters.rows_failed += 1
-        validation_error_id = loop_ctx.ctx.pop_pending_quarantine_validation_error_id(source_item.row)
-        # Sanitize quarantine data at Tier-3 boundary: replace non-finite
-        # floats (NaN, Infinity) with None so downstream canonical JSON
-        # and stable_hash operations succeed. The quarantine_error records
-        # what was originally wrong with the data.
-        # SourceRow is frozen — create a new instance with sanitized row data.
-        source_item = replace(source_item, row=sanitize_for_canonical(source_item.row))
-
-        # Create a token for the quarantined row using specialized method
-        # (quarantine rows don't have contracts - they failed validation)
-        quarantine_token = processor.token_manager.create_quarantine_token(
-            run_id=run_id,
-            source_node_id=source_id,
-            row_index=row_index,
-            source_row_index=source_row_index,
-            ingest_sequence=ingest_sequence,
-            source_row=source_item,
-            validation_error_id=validation_error_id,
-            # ADR-030 §C.4 row 9: the quarantine arm is an ingest-adjacent
-            # durable rows write — it rides the leader epoch fence (rows +
-            # token in ONE fenced transaction).
-            coordination_token=processor.coordination_token,
-        )
-
-        # Record source node_state (step_index=0) for quarantine audit lineage.
-        # Status is FAILED because the source validation rejected this row.
-        quarantine_data = source_item.row if isinstance(source_item.row, dict) else {"_raw": source_item.row}
-        quarantine_error_msg = source_item.quarantine_error
-        if quarantine_error_msg is None or not quarantine_error_msg.strip():
-            raise RouteValidationError(
-                f"Source '{active_source.name}' yielded quarantined row "
-                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
-                f"with missing quarantine_error. "
-                f"This is a plugin bug: quarantined rows MUST specify a non-empty validation error. "
-                f"Use SourceRow.quarantined(row, error, destination, source_row_index=...) factory method."
-            )
-        # Backstop length-bound (elspeth-a300402c58): applied BEFORE every use
-        # below — node_state error, routing reason, and error_hash all see the
-        # same bounded text, so the hash stays stable for the persisted evidence.
-        quarantine_error_msg = _bound_quarantine_error(quarantine_error_msg)
-        source_state = factory.execution.begin_node_state(
-            token_id=quarantine_token.token_id,
-            node_id=source_id,
-            run_id=run_id,
-            step_index=0,
-            input_data=quarantine_data,
-            quarantined=True,
-        )
-        factory.execution.complete_node_state(
-            state_id=source_state.state_id,
-            status=NodeStateStatus.FAILED,
-            duration_ms=0,
-            error=ExecutionError(
-                exception=quarantine_error_msg,
-                exception_type="ValidationError",
-            ),
-        )
-
-        # Record DIVERT routing_event for the quarantine edge.
-        # The __quarantine__ edge MUST exist — DAG creates it in
-        # the source quarantine edge block of from_plugin_instances().
-        quarantine_edge_key = (source_id, "__quarantine__")
-        try:
-            quarantine_edge_id = edge_map[quarantine_edge_key]
-        except KeyError as exc:
-            raise OrchestrationInvariantError(
-                f"Quarantine row reached orchestrator but no __quarantine__ "
-                f"DIVERT edge exists in DAG for source '{source_id}'. "
-                f"This is a DAG construction bug — "
-                f"on_validation_failure should have created a DIVERT edge "
-                f"in from_plugin_instances()."
-            ) from exc
-        factory.execution.record_routing_event(
-            state_id=source_state.state_id,
-            edge_id=quarantine_edge_id,
-            mode=RoutingMode.DIVERT,
-            reason=SourceQuarantineReason(
-                quarantine_error=quarantine_error_msg,
-            ),
-        )
-
-        # Emit RowCreated telemetry AFTER Landscape recording succeeds.
-        # source_item.row was already sanitized for Tier-3 non-canonical values
-        # (NaN/Infinity -> None) above, so stable_hash gives a single deterministic
-        # semantics for content_hash. No repr_hash fallback: after sanitization the
-        # only residual stable_hash failure is a structurally non-serializable type,
-        # which is a plugin-contract violation that must surface, not be masked by a
-        # second, divergent hash function recorded under the same field name.
-        quarantine_content_hash = stable_hash(source_item.row)
-        self._ceremony.emit_telemetry(
-            RowCreated(
-                timestamp=datetime.now(UTC),
-                run_id=run_id,
-                row_id=quarantine_token.row_id,
-                token_id=quarantine_token.token_id,
-                content_hash=quarantine_content_hash,
-            )
-        )
-
-        # Compute error_hash for QUARANTINED outcome audit trail
-        # Per CLAUDE.md: every row must reach exactly one terminal state
-        # Do NOT record outcome here — record after sink durability in SinkExecutor.write()
-        quarantine_error_hash = compute_error_hash(quarantine_error_msg)
-
-        # Pass PendingOutcome with error_hash - outcome recorded after sink durability
-        pending_tokens[quarantine_sink].append(
-            (
-                quarantine_token,
-                PendingOutcome(
-                    outcome=TerminalOutcome.FAILURE,
-                    path=TerminalPath.QUARANTINED_AT_SOURCE,
-                    error_hash=quarantine_error_hash,
-                ),
-            )
-        )
-
-    def record_field_resolution(
-        self,
-        factory: RecorderFactory,
-        run_id: str,
-        *,
-        active_source: SourceProtocol,
-        previously_recorded: tuple[Mapping[str, str], str | None] | None = None,
-    ) -> tuple[Mapping[str, str], str | None] | None:
-        """Record the source field-resolution mapping if available.
-
-        Called on first iteration (provisional — after the generator body
-        executes) and again from ``finalize_source_iteration`` (authoritative —
-        sparse sources can extend the mapping on later rows, and the run-level
-        column is an overwrite UPDATE; elspeth-fb108a77c9). Empty sources
-        (header-only files where the loop never runs) record once at finalize.
-
-        ``previously_recorded`` is the snapshot returned by the earlier call;
-        when the source's current resolution is identical, the write and its
-        ``FieldResolutionApplied`` telemetry are skipped, so an unchanged
-        mapping (fixed-header sources — the common case) emits exactly one
-        event and a grown union emits a provisional then an authoritative one.
-
-        Returns:
-            The recorded (mapping, normalization_version) snapshot, or None if
-            the source has no field resolution.
-        """
-        field_resolution = active_source.get_field_resolution()
-        if field_resolution is None:
-            return None
-        if previously_recorded is not None and field_resolution == previously_recorded:
-            return previously_recorded
-
-        resolution_mapping, normalization_version = field_resolution
-        factory.run_lifecycle.record_source_field_resolution(
-            run_id=run_id,
-            resolution_mapping=resolution_mapping,
-            normalization_version=normalization_version,
-        )
-        # Emit telemetry AFTER Landscape succeeds
-        self._ceremony.emit_telemetry(
-            FieldResolutionApplied(
-                timestamp=datetime.now(UTC),
-                run_id=run_id,
-                source_plugin=active_source.name,
-                field_count=len(resolution_mapping),
-                normalization_version=normalization_version,
-                resolution_mapping=resolution_mapping,
-            )
-        )
-        return field_resolution
+        self._quarantine_router = QuarantineRouter(ceremony=ceremony)
+        self._lifecycle_recorder = SourceLifecycleRecorder(ceremony=ceremony)
 
     def restore_source_iteration_context(
         self,
@@ -356,36 +115,6 @@ class SourceIterationDriver:
         """
         ctx.node_id = source_id
         ctx.operation_id = source_operation_id
-
-    def record_run_source_lifecycle(
-        self,
-        factory: RecorderFactory,
-        run_id: str,
-        source_id: NodeID,
-        source_name: str,
-        active_source: SourceProtocol,
-        lifecycle_state: RunSourceLifecycleState,
-    ) -> None:
-        """Record source lifecycle with the latest source schema evidence."""
-
-        field_resolution = active_source.get_field_resolution()
-        resolution_mapping: Mapping[str, str] | None = None
-        normalization_version: str | None = None
-        if field_resolution is not None:
-            resolution_mapping, normalization_version = field_resolution
-
-        factory.run_lifecycle.record_run_source(
-            run_id=run_id,
-            source_node_id=source_id,
-            source_name=source_name,
-            plugin_name=active_source.name,
-            config_hash=stable_hash(active_source.config),
-            source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
-            schema_contract=active_source.get_schema_contract(),
-            field_resolution_mapping=resolution_mapping,
-            normalization_version=normalization_version,
-            lifecycle_state=lifecycle_state,
-        )
 
     def _requires_idle_aggregation_polling(self, config: PipelineConfig) -> bool:
         """Return True when the pipeline has time-sensitive buffered work."""
@@ -639,7 +368,7 @@ class SourceIterationDriver:
         # on shutdown interruption (the audit reflects fields observed up to
         # that point). Skipped internally when the mapping is unchanged, so
         # fixed-header sources see no second write or telemetry event.
-        self.record_field_resolution(
+        self._lifecycle_recorder.record_field_resolution(
             factory,
             run_id,
             active_source=active_source,
@@ -650,7 +379,7 @@ class SourceIterationDriver:
             record_schema_contract(factory, run_id, source_id, ctx, active_source=active_source)
 
         if source_exhausted and not interrupted_by_shutdown:
-            self.record_run_source_lifecycle(
+            self._lifecycle_recorder.record_run_source_lifecycle(
                 factory,
                 run_id,
                 source_id,
@@ -903,11 +632,13 @@ class SourceIterationDriver:
                         # Provisional: the finalizer re-records the union at EOF (elspeth-fb108a77c9).
                         if not field_resolution_recorded:
                             field_resolution_recorded = True
-                            recorded_field_resolution = self.record_field_resolution(factory, run_id, active_source=active_source)
+                            recorded_field_resolution = self._lifecycle_recorder.record_field_resolution(
+                                factory, run_id, active_source=active_source
+                            )
 
                         # Quarantine path — route directly to sink, skip normal processing
                         if source_item.is_quarantined:
-                            self.handle_quarantine_row(
+                            self._quarantine_router.route(
                                 factory,
                                 run_id,
                                 source_id,
@@ -1028,7 +759,7 @@ class SourceIterationDriver:
                         active_source=active_source,
                     )
                     if interrupted_by_shutdown:
-                        self.record_run_source_lifecycle(
+                        self._lifecycle_recorder.record_run_source_lifecycle(
                             factory,
                             run_id,
                             source_id,
@@ -1037,7 +768,7 @@ class SourceIterationDriver:
                             RunSourceLifecycleState.INTERRUPTED,
                         )
                     elif not source_exhausted:
-                        self.record_run_source_lifecycle(
+                        self._lifecycle_recorder.record_run_source_lifecycle(
                             factory,
                             run_id,
                             source_id,

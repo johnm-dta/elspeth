@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 # Import GateName at runtime - used in function body, not just type hints
 from elspeth.contracts import RouteDestination, RouteDestinationKind
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.sink import FAILSINK_ELIGIBLE_SINK_PLUGINS, format_sink_plugin_names
 from elspeth.contracts.types import GateName
 from elspeth.engine.orchestrator.types import RouteValidationError
 
@@ -207,19 +208,11 @@ def validate_source_quarantine_destination(
         )
 
 
-# Sink plugin names eligible as failsinks (Rule 4 of validate_sink_failsink_destinations).
-# MUST be a subset of the runtime sink registry — drift here means engine
-# pre-validation accepts a plugin that does not exist, deferring a guaranteed
-# runtime crash (PluginNotFoundError in get_sink_by_name) past validation.
-# Enforced by tests/unit/web/composer/test_skill_drift.py::TestEngineValidatorPluginDrift::test_allowed_failsink_plugins_subset_of_registered_sinks.
-_ALLOWED_FAILSINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
-
-
 def validate_sink_failsink_destinations(
     sink_configs: Mapping[str, Any],
     available_sinks: set[str],
     sink_plugins: Mapping[str, str],
-    allowed_failsink_plugins: frozenset[str] = _ALLOWED_FAILSINK_PLUGINS,
+    allowed_failsink_plugins: frozenset[str] = FAILSINK_ELIGIBLE_SINK_PLUGINS,
 ) -> None:
     """Validate all sink on_write_failure destinations.
 
@@ -230,7 +223,7 @@ def validate_sink_failsink_destinations(
     1. 'discard' is always valid
     2. Sink name must exist in available_sinks
     3. Sink cannot reference itself
-    4. Target sink must use csv or json plugin type
+    4. Target sink must use a failsink-capable plugin type
     5. Target sink must have on_write_failure='discard' (no chains)
 
     Args:
@@ -261,15 +254,16 @@ def validate_sink_failsink_destinations(
         if dest == sink_name:
             raise RouteValidationError(f"Sink '{sink_name}' on_write_failure references itself. A sink cannot be its own failsink.")
 
-        # Rule 4: must be a file sink.
+        # Rule 4: must use a failsink-capable plugin.
         # Direct access — Rule 2 guarantees dest exists in available_sinks,
         # so it must also exist in sink_plugins. If the maps are inconsistent,
         # the KeyError crashes through as a framework bug.
         plugin_type = sink_plugins[dest]
         if plugin_type not in allowed_failsink_plugins:
+            allowed_text = format_sink_plugin_names(allowed_failsink_plugins)
             raise RouteValidationError(
                 f"Sink '{sink_name}' on_write_failure references '{dest}' "
-                f"(plugin='{plugin_type}'), but failsinks must use csv or json plugins."
+                f"(plugin='{plugin_type}'), but failsinks must use {allowed_text} plugins."
             )
 
         # Rule 5: no chains — target must use 'discard'

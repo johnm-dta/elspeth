@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts.enums import OutputMode, RunMode
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
+from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT
 from elspeth.core.dependency_config import CollectionProbeConfig, CommencementGateConfig, DependencyConfig
 from elspeth.core.secrets import is_secret_field
 
@@ -1114,7 +1115,7 @@ class SinkSettings(BaseModel):
         description=(
             "Per-row write failure handling. Required — pipeline author must decide: "
             "'discard' to drop with audit record, or a sink name to divert to failsink "
-            "(must be csv or json plugin)."
+            f"(must be {FAILSINK_ELIGIBLE_PLUGIN_TEXT} plugin)."
         ),
     )
 

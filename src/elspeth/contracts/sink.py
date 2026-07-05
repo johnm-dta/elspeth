@@ -1,11 +1,92 @@
 """Sink-specific contracts for cross-boundary data types.
 
-This module defines contracts for sink validation and output target compatibility.
+This module defines contracts for sink validation, output target compatibility,
+and public sink capability policy shared by runtime and composer layers.
 """
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Final
 
 from elspeth.contracts.freeze import freeze_fields
+
+
+@dataclass(frozen=True, slots=True)
+class SinkCapabilities:
+    """Public policy metadata for a sink plugin family.
+
+    Plugin discovery remains owned by the plugin manager. This registry captures
+    cross-layer policy that must stay consistent before plugin instances exist.
+    """
+
+    requires_path_option: bool = False
+    eligible_as_failsink: bool = False
+    local_recovery_file: bool = False
+    default_file_extension: str | None = None
+
+
+SINK_CAPABILITIES_BY_PLUGIN: Final[Mapping[str, SinkCapabilities]] = MappingProxyType(
+    {
+        "csv": SinkCapabilities(
+            requires_path_option=True,
+            eligible_as_failsink=True,
+            local_recovery_file=True,
+            default_file_extension="csv",
+        ),
+        "json": SinkCapabilities(
+            requires_path_option=True,
+            eligible_as_failsink=True,
+            local_recovery_file=True,
+            default_file_extension="json",
+        ),
+    }
+)
+
+
+def _plugins_requiring_path() -> frozenset[str]:
+    return frozenset(plugin_name for plugin_name, capabilities in SINK_CAPABILITIES_BY_PLUGIN.items() if capabilities.requires_path_option)
+
+
+def _failsink_eligible_plugins() -> frozenset[str]:
+    return frozenset(plugin_name for plugin_name, capabilities in SINK_CAPABILITIES_BY_PLUGIN.items() if capabilities.eligible_as_failsink)
+
+
+def _local_recovery_plugins() -> frozenset[str]:
+    return frozenset(plugin_name for plugin_name, capabilities in SINK_CAPABILITIES_BY_PLUGIN.items() if capabilities.local_recovery_file)
+
+
+def _file_sink_repair_extensions() -> dict[str, str]:
+    extensions: dict[str, str] = {}
+    for plugin_name, capabilities in SINK_CAPABILITIES_BY_PLUGIN.items():
+        extension = capabilities.default_file_extension
+        if extension is not None:
+            extensions[plugin_name] = extension
+    return extensions
+
+
+FILE_SINK_PLUGINS: Final[frozenset[str]] = _plugins_requiring_path()
+FAILSINK_ELIGIBLE_SINK_PLUGINS: Final[frozenset[str]] = _failsink_eligible_plugins()
+LOCAL_RECOVERY_SINK_PLUGINS: Final[frozenset[str]] = _local_recovery_plugins()
+FILE_SINK_REPAIR_EXTENSIONS: Final[Mapping[str, str]] = MappingProxyType(_file_sink_repair_extensions())
+
+
+def format_sink_plugin_names(plugin_names: Collection[str]) -> str:
+    """Format a plugin-name set for validation and composer messages."""
+
+    ordered = tuple(sorted(plugin_names))
+    if not ordered:
+        return "no plugins"
+    if len(ordered) == 1:
+        return ordered[0]
+    if len(ordered) == 2:
+        return f"{ordered[0]} or {ordered[1]}"
+    return f"{', '.join(ordered[:-1])}, or {ordered[-1]}"
+
+
+FAILSINK_ELIGIBLE_PLUGIN_TEXT: Final[str] = format_sink_plugin_names(FAILSINK_ELIGIBLE_SINK_PLUGINS)
+FILE_SINK_PLUGIN_TEXT: Final[str] = format_sink_plugin_names(FILE_SINK_PLUGINS)
+FILE_SINK_PLUGIN_SLASH_TEXT: Final[str] = "/".join(sorted(FILE_SINK_PLUGINS))
 
 
 @dataclass(frozen=True, slots=True)

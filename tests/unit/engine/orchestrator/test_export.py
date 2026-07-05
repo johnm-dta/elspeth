@@ -11,6 +11,7 @@ The schema reconstruction functions are pure logic — no mocks needed.
 
 from __future__ import annotations
 
+import ast
 import csv
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
@@ -328,6 +329,44 @@ class TestExportLandscapeCSV:
         mock_csv.assert_called_once()
         call_kwargs = mock_csv.call_args
         assert call_kwargs.kwargs["run_id"] == "run-1"
+
+    def test_csv_export_uses_sink_lifecycle_around_multifile_writer(self, tmp_path: Path) -> None:
+        """CSV export keeps sink lifecycle even when the writer owns multi-file output."""
+        db = object()
+        settings = self._make_settings()
+        sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+            patch("elspeth.engine.orchestrator.export._export_csv_multifile"),
+        ):
+            export_landscape(db, "run-1", settings, factory)
+
+        sink.on_start.assert_called_once()
+        sink.flush.assert_called_once()
+        sink.on_complete.assert_called_once()
+        sink.close.assert_called_once()
+
+    def test_export_landscape_does_not_read_csv_sink_path_directly(self) -> None:
+        """Path extraction belongs behind the CSV audit-export writer boundary."""
+        repo_root = Path(__file__).parents[4]
+        path = repo_root / "src/elspeth/engine/orchestrator/export.py"
+        tree = ast.parse(path.read_text(), filename=str(path))
+        export_func = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "export_landscape")
+
+        offenders: list[str] = []
+        for node in ast.walk(export_func):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "sink"
+                and node.value.attr == "config"
+            ):
+                offenders.append(f"{path.relative_to(repo_root)}:{node.lineno}:sink.config[...]")
+
+        assert offenders == []
 
 
 # =============================================================================

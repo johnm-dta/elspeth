@@ -53,6 +53,28 @@ def _neutralize_csv_formula_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return {key: _neutralize_csv_formula_cell(value) for key, value in record.items()}
 
 
+class _FileSystemCsvAuditExportWriter:
+    """Filesystem-backed writer for the multi-file CSV audit export capability."""
+
+    def __init__(self, artifact_path: str) -> None:
+        self._artifact_path = artifact_path
+
+    @classmethod
+    def from_sink(cls, *, sink_name: str, sink: SinkProtocol) -> _FileSystemCsvAuditExportWriter:
+        artifact_path = sink.config.get("path")
+        if not isinstance(artifact_path, str) or not artifact_path:
+            raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
+        return cls(artifact_path)
+
+    def write(self, *, exporter: Any, run_id: str, sign: bool) -> None:
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id=run_id,
+            artifact_path=self._artifact_path,
+            sign=sign,
+        )
+
+
 def export_landscape(
     db: LandscapeDB,
     run_id: str,
@@ -132,16 +154,22 @@ def export_landscape(
     )
 
     if export_config.format == "csv":
-        if "path" not in sink.config:
-            raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
-        artifact_path: str = sink.config["path"]
-        sink.close()
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id=run_id,
-            artifact_path=artifact_path,
-            sign=export_config.sign,
-        )
+        csv_writer = _FileSystemCsvAuditExportWriter.from_sink(sink_name=sink_name, sink=sink)
+        sink.on_start(ctx)
+        try:
+            with track_operation(
+                factory.execution,
+                run_id,
+                sink.node_id,
+                "sink_write",
+                ctx,
+                input_data={"export_format": "csv"},
+            ):
+                csv_writer.write(exporter=exporter, run_id=run_id, sign=export_config.sign)
+                sink.flush()
+        finally:
+            sink.on_complete(ctx)
+            sink.close()
     else:
         records = list(exporter.export_run(run_id, sign=export_config.sign))
         sink.on_start(ctx)

@@ -45,6 +45,7 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Protocol
 
 from sqlalchemy.exc import OperationalError
 
@@ -69,6 +70,27 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DEGRADED_THRESHOLD: int = 3
 
 
+class _HeartbeatSnapshot(Protocol):
+    """Snapshot fields consumed by the heartbeat thread."""
+
+    @property
+    def leader_worker_id(self) -> str | None: ...
+
+    @property
+    def worker_active(self) -> bool: ...
+
+    @property
+    def worker_role(self) -> str: ...
+
+
+class _HeartbeatRepository(Protocol):
+    """Repository operations required by ``RunHeartbeatThread``."""
+
+    def worker_heartbeat(self, *, worker_id: str, now: datetime, window_seconds: float) -> _HeartbeatSnapshot: ...
+
+    def record_heartbeat_degraded(self, *, run_id: str, worker_id: str, failures: int, now: datetime) -> None: ...
+
+
 class RunHeartbeatThread:
     """Daemon thread that beats the run-worker (and, for leaders, the seat) row.
 
@@ -86,8 +108,8 @@ class RunHeartbeatThread:
     ----------
     repo:
         :class:`~elspeth.core.landscape.run_coordination_repository.RunCoordinationRepository`
-        instance backed by the run's engine.  Passed as ``Any`` to avoid a
-        circular import — the caller has the real type.
+        instance backed by the run's engine, typed structurally here to avoid
+        importing the concrete repository into the orchestrator layer.
     token:
         The leader's coordination token (worker_id + run_id); used to detect
         seat deposition (snapshot ``leader_worker_id`` ≠ our ``worker_id``).
@@ -114,7 +136,7 @@ class RunHeartbeatThread:
 
     def __init__(
         self,
-        repo: object,
+        repo: _HeartbeatRepository,
         *,
         token: CoordinationToken,
         heartbeat_seconds: float = DEFAULT_RUN_HEARTBEAT_SECONDS,
@@ -250,7 +272,7 @@ class RunHeartbeatThread:
         without the field.
         """
         try:
-            snapshot = self._repo.worker_heartbeat(  # type: ignore[attr-defined]
+            snapshot = self._repo.worker_heartbeat(
                 worker_id=self._token.worker_id,
                 now=self._now_fn(),
                 window_seconds=self._window_seconds,
@@ -339,7 +361,7 @@ class RunHeartbeatThread:
     def _emit_degraded(self) -> None:
         """Emit ``heartbeat_degraded`` event; best-effort, never raises."""
         with contextlib.suppress(Exception):
-            self._repo.record_heartbeat_degraded(  # type: ignore[attr-defined]
+            self._repo.record_heartbeat_degraded(
                 run_id=self._token.run_id,
                 worker_id=self._token.worker_id,
                 failures=self._consecutive_busy,

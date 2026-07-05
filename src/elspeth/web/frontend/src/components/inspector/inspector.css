@@ -359,8 +359,14 @@
 .graph-config-rows > div,
 .graph-config-nested > div {
   display: grid;
-  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
-  gap: var(--space-sm);
+  /* Stacked key-above-value, not a two-column grid. This panel is a fixed
+     ~360px; with two columns a long key (e.g. dead_letter_connection_string)
+     stretched the auto-sized key track and crushed the value — a connection
+     string or endpoint collapsed into an unreadable one-word-per-line ribbon.
+     Stacking gives every value the full panel measure and cannot overflow. It
+     matches the narrow-viewport fallback that was already defined below. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2xs);
   min-width: 0;
   padding: var(--space-xs) 0;
   border-top: 1px solid var(--color-border);
@@ -368,9 +374,12 @@
 
 .graph-config-rows dt,
 .graph-config-nested dt {
+  min-width: 0;
   color: var(--color-text-muted);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
+  /* A long snake_case key breaks rather than forcing horizontal overflow. */
+  overflow-wrap: anywhere;
 }
 
 .graph-config-rows dd,
@@ -380,6 +389,14 @@
   color: var(--color-text);
   font-size: var(--font-size-xs);
   word-break: break-word;
+}
+
+/* Nested objects: indent + left rule so a nested group still reads as belonging
+   to its parent key now that rows stack (the two-column value offset that used
+   to signal nesting is gone). */
+.graph-config-nested {
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--color-border);
 }
 
 .graph-config-list {
@@ -405,10 +422,6 @@
     width: auto;
     max-height: min(45%, 360px);
   }
-
-  .graph-config-rows > div,
-  .graph-config-nested > div {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-2xs);
-  }
+  /* The rows already stack at every width now, so the old narrow-viewport
+     grid-template override here became redundant and was removed. */
 }

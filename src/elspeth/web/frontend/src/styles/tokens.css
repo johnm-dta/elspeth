@@ -56,10 +56,15 @@
   --color-input-border:      #608a8a;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
-  --color-bubble-user:           rgba(40, 130, 100, 0.14);
-  --color-bubble-user-border:    rgba(40, 130, 100, 0.35);
-  --color-bubble-assistant:      rgba(255, 255, 255, 0.05);
-  --color-bubble-assistant-border: rgba(255, 255, 255, 0.18);
+  /* The user (green) and assistant/reply (cool-teal) fills are pushed apart so
+     the two speakers read as two distinct shades even where they overlap in the
+     centred column. The reply was previously a 5%-white wash that all but
+     vanished into the teal workspace surface; a 10% cool-teal tint gives it a
+     visible "card" presence without competing with the user's green. */
+  --color-bubble-user:           rgba(40, 150, 112, 0.20);
+  --color-bubble-user-border:    rgba(40, 150, 112, 0.42);
+  --color-bubble-assistant:      rgba(174, 214, 214, 0.10);
+  --color-bubble-assistant-border: rgba(174, 214, 214, 0.24);
   --color-bubble-system:         rgba(255, 255, 255, 0.03);
 
   /* ── Component type badges — functional colour coding ────────────────────── */
@@ -304,10 +309,14 @@
   --color-input-border:      #6c919d;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
-  --color-bubble-user:           rgba(40, 130, 100, 0.10);
-  --color-bubble-user-border:    rgba(40, 130, 100, 0.30);
-  --color-bubble-assistant:      rgba(15, 45, 53, 0.05);
-  --color-bubble-assistant-border: rgba(15, 45, 53, 0.15);
+  /* Light-theme mirror of the dark widened split: a stronger green for the user
+     and a more present navy tint for the reply so the two speakers stay clearly
+     distinct on the light paper surface (the old 5% navy reply was nearly
+     invisible), while keeping dark text well above AA on both fills. */
+  --color-bubble-user:           rgba(40, 130, 100, 0.15);
+  --color-bubble-user-border:    rgba(40, 130, 100, 0.40);
+  --color-bubble-assistant:      rgba(15, 45, 53, 0.09);
+  --color-bubble-assistant-border: rgba(15, 45, 53, 0.22);
   --color-bubble-system:         rgba(15, 45, 53, 0.03);
 
   /* ── Semantic backgrounds — adjusted for light theme ────────────────────── */

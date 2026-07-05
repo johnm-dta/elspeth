@@ -22,7 +22,7 @@
      lives on .message-bubble-content below — placed there because that
      selector has equal specificity to .bubble but appears later in
      source order and would otherwise silently win. */
-  max-width: min(85%, 68ch);
+  max-width: min(92%, 74ch);
   padding: var(--space-md) var(--space-lg);
   border-radius: var(--radius-lg);
   word-break: break-word;
@@ -757,6 +757,18 @@
 .message-row {
   display: flex;
   padding: var(--space-xs) var(--space-lg);
+  /* Cap the conversation to a centred column so a right-aligned (user) and a
+     left-aligned (assistant) bubble stay near each other instead of pinning to
+     opposite edges of a wide chat column. On WQHD+ the chat column is ~2240px,
+     which left a ~1100px dead gulf down the middle and forced the eye to jump
+     left↔right to follow the thread. 56rem keeps a comfortable reading measure
+     while giving consecutive bubbles a generous horizontal overlap.
+     Applies to freeform AND guided/tutorial — both emit .message-row. The
+     guided workspace widgets (.guided-workspace-*) and full-width run-result
+     panels (.inline-run-results) are NOT .message-row, so they keep full width. */
+  max-width: min(100%, 56rem);
+  margin-inline: auto;
+  width: 100%;
 }
 
 .message-row--user {
@@ -772,14 +784,18 @@
 }
 
 .message-bubble-content {
-  /* Cap measure at ~68ch (Bringhurst's upper range) so wide windows do
-     not stretch the bubble to a 120-char measure that hurts eye-return
-     on long assistant summaries. Small windows keep the 80% behaviour
+  /* Cap measure at ~74ch so wide windows do not stretch the bubble to a
+     120-char measure that hurts eye-return on long assistant summaries.
+     74ch sits just above Bringhurst's ideal band (66) and a touch over the
+     prior 68ch: now that .message-row caps the conversation to a 56rem
+     centred column, the slightly wider bubble gives consecutive left/right
+     bubbles more horizontal overlap (less eye travel) without pushing the
+     line length into fatiguing territory. Small windows keep the % behaviour
      via min(). This is the LIVE cap — .bubble has the same cap as a
      defense-in-depth fallback, but .message-bubble-content has equal
      specificity to .bubble and appears later in source order, so this
      rule wins for every user and assistant bubble. */
-  max-width: min(80%, 68ch);
+  max-width: min(92%, 74ch);
   font-size: var(--font-size-base);
   /* Was --line-height-normal (1.5). .message-bubble-content has the same
      specificity as .bubble but appears later in source, so it overrides

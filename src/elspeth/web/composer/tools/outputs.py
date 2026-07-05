@@ -148,7 +148,7 @@ def _execute_set_output(
     )
     if credential_error is not None:
         return credential_error
-    path_error = _validate_sink_path(sink_options, context.data_dir)
+    path_error = _validate_sink_path(sink_options, context.data_dir, session_id=context.session_id)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -233,7 +233,7 @@ def _execute_patch_output_options(
         return credential_error
 
     # S2: Validate patched sink paths against allowlist
-    path_error = _validate_sink_path(new_options, context.data_dir)
+    path_error = _validate_sink_path(new_options, context.data_dir, session_id=context.session_id)
     if path_error is not None:
         return _failure_result(state, path_error)
 

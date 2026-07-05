@@ -979,13 +979,14 @@ class ComposerServiceImpl:
         """Return the boot-time composer availability snapshot."""
         return self._availability
 
-    def _runtime_preflight(self, state: CompositionState, user_id: str | None) -> ValidationResult:
+    def _runtime_preflight(self, state: CompositionState, user_id: str | None, session_id: str | None) -> ValidationResult:
         return validate_pipeline(
             state,
             self._settings,
             yaml_generator,
             secret_service=self._secret_service,
             user_id=user_id,
+            session_id=session_id,
         )
 
     async def _missing_pending_interpretation_review_sites(
@@ -1341,6 +1342,7 @@ class ComposerServiceImpl:
         state: CompositionState,
         *,
         user_id: str | None,
+        session_id: str | None,
         cache: _RuntimePreflightCache,
         initial_version: int,
         session_scope: str,
@@ -1367,7 +1369,7 @@ class ComposerServiceImpl:
 
         async def worker() -> ValidationResult:
             return await asyncio.wait_for(
-                run_sync_in_worker(self._runtime_preflight, state, user_id),
+                run_sync_in_worker(self._runtime_preflight, state, user_id, session_id),
                 timeout=self._runtime_preflight_timeout_seconds,
             )
 
@@ -1514,6 +1516,7 @@ class ComposerServiceImpl:
         state: CompositionState,
         llm_messages: list[dict[str, Any]],
         user_id: str | None,
+        session_id: str | None,
         last_runtime_preflight: ValidationResult | None,
         runtime_preflight_cache: _RuntimePreflightCache,
         initial_version: int,
@@ -1563,6 +1566,7 @@ class ComposerServiceImpl:
             runtime_result = await self._cached_runtime_preflight(
                 state,
                 user_id=user_id,
+                session_id=session_id,
                 cache=runtime_preflight_cache,
                 initial_version=initial_version,
                 session_scope=session_scope,
@@ -1587,6 +1591,7 @@ class ComposerServiceImpl:
         state: CompositionState,
         initial_version: int,
         user_id: str | None,
+        session_id: str | None,
         last_runtime_preflight: ValidationResult | None,
         runtime_preflight_cache: _RuntimePreflightCache,
         session_scope: str,
@@ -1607,6 +1612,7 @@ class ComposerServiceImpl:
             state=state,
             initial_version=initial_version,
             user_id=user_id,
+            session_id=session_id,
             last_runtime_preflight=last_runtime_preflight,
             runtime_preflight_cache=runtime_preflight_cache,
             session_scope=session_scope,
@@ -2596,6 +2602,7 @@ class ComposerServiceImpl:
             state=state,
             llm_messages=llm_messages,
             user_id=user_id,
+            session_id=session_id,
             last_runtime_preflight=last_runtime_preflight,
             runtime_preflight_cache=runtime_preflight_cache,
             initial_version=initial_version,
@@ -2846,6 +2853,7 @@ class ComposerServiceImpl:
             state=state,
             initial_version=initial_version,
             user_id=user_id,
+            session_id=session_id,
             last_runtime_preflight=last_runtime_preflight,
             runtime_preflight_cache=runtime_preflight_cache,
             session_scope=session_scope,

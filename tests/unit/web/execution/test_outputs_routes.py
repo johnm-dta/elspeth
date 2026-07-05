@@ -634,6 +634,109 @@ class TestRunOutputContentEndpoint:
         assert response.json()["detail"]["error_type"] == "output_path_outside_allowlist"
 
     @pytest.mark.asyncio
+    async def test_serves_artifact_in_runs_own_session_blob_subtree(self, monkeypatch, tmp_path) -> None:
+        """elspeth-bdc17cfdb1 regression guard: an output artefact stored in
+        the run's OWN ``blobs/<session>/`` subtree must still stream. Output
+        blobs are stored exactly there (blob.session_id == run.session_id,
+        enforced by link_blob_to_run), so the per-session read allowlist must
+        not break legitimate blob downloads."""
+        run_id = uuid4()
+        session_id = uuid4()
+        blob_dir = tmp_path / "blobs" / str(session_id)
+        blob_dir.mkdir(parents=True)
+        blob_file = blob_dir / "out.jsonl"
+        blob_bytes = b'{"row":1}\n'
+        blob_file.write_bytes(blob_bytes)
+
+        svc = _execution_service_for_status(run_id)
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            return RunOutputsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                artifacts=[
+                    RunOutputArtifact(
+                        artifact_id="art-blob",
+                        sink_node_id="blob_out",
+                        artifact_type="file",
+                        path_or_uri=f"file://{blob_file}",
+                        content_hash=hashlib.sha256(blob_bytes).hexdigest(),
+                        size_bytes=blob_file.stat().st_size,
+                        created_at=datetime.now(UTC),
+                        exists_now=True,
+                        downloadable=True,
+                    )
+                ],
+            )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+
+        settings = _FakeSettings(data_dir=str(tmp_path))
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        # Pin the run's owning session so the artefact's blob subtree matches.
+        app.state.session_service.run.session_id = session_id
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-blob/content")
+
+        assert response.status_code == 200
+        assert response.content == blob_bytes
+
+    @pytest.mark.asyncio
+    async def test_403_when_artifact_in_other_session_blob_subtree(self, monkeypatch, tmp_path) -> None:
+        """elspeth-bdc17cfdb1: an artefact whose path lands in ANOTHER
+        session's ``blobs/<session>/`` subtree must be refused — the read-side
+        of the cross-session confinement."""
+        run_id = uuid4()
+        own_session = uuid4()
+        other_session = uuid4()
+        other_dir = tmp_path / "blobs" / str(other_session)
+        other_dir.mkdir(parents=True)
+        foreign_file = other_dir / "secret.jsonl"
+        foreign_file.write_bytes(b'{"leak":1}\n')
+
+        svc = _execution_service_for_status(run_id)
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            return RunOutputsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                artifacts=[
+                    RunOutputArtifact(
+                        artifact_id="art-foreign",
+                        sink_node_id="blob_out",
+                        artifact_type="file",
+                        path_or_uri=f"file://{foreign_file}",
+                        content_hash="c" * 64,
+                        size_bytes=foreign_file.stat().st_size,
+                        created_at=datetime.now(UTC),
+                        exists_now=True,
+                        downloadable=True,
+                    )
+                ],
+            )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+
+        settings = _FakeSettings(data_dir=str(tmp_path))
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        app.state.session_service.run.session_id = own_session
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-foreign/content")
+
+        assert response.status_code == 403
+        assert response.json()["detail"]["error_type"] == "output_path_outside_allowlist"
+
+    @pytest.mark.asyncio
     async def test_404_when_artifact_id_not_in_run(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
         svc = _execution_service_for_status(run_id)

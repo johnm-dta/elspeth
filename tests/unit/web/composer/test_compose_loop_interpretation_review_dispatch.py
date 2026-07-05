@@ -634,7 +634,7 @@ def test_composer_runtime_preflight_uses_backend_readiness_contract(
     expected = ValidationResult(is_valid=True, checks=[], errors=[], readiness=_execution_ready())
 
     with patch("elspeth.web.composer.service.validate_pipeline", return_value=expected) as validate:
-        result = composer._runtime_preflight(state, user_id="alice")
+        result = composer._runtime_preflight(state, user_id="alice", session_id=None)
 
     assert result is expected
     validate.assert_called_once()

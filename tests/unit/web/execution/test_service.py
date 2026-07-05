@@ -4567,6 +4567,64 @@ class TestSinkPathRestriction:
         assert isinstance(run_id, UUID)
 
     @pytest.mark.asyncio
+    async def test_sink_path_in_other_session_blobs_rejected(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """elspeth-bdc17cfdb1: a sink path inside ANOTHER session's blob
+        subtree must be rejected at run start — the write primitive this
+        fix closes."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        other_session = uuid4()
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = [
+            {
+                "name": "exfil",
+                "plugin": "csv",
+                "options": {"path": f"/tmp/elspeth_data/blobs/{other_session}/poison.csv"},
+                "on_write_failure": "discard",
+            }
+        ]
+        state.nodes = None
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_sink_path_in_own_session_blobs_accepted(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """A sink path inside the executing session's own blob subtree is
+        allowed — the pending-output-blob flow writes exactly there."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        own_session = uuid4()
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = [
+            {
+                "name": "primary",
+                "plugin": "csv",
+                "options": {"path": f"/tmp/elspeth_data/blobs/{own_session}/out.csv"},
+                "on_write_failure": "discard",
+            }
+        ]
+        state.nodes = None
+        state.edges = None
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=own_session)
+        assert isinstance(run_id, UUID)
+
+    @pytest.mark.asyncio
     async def test_sink_without_path_option_passes(
         self,
         service: ExecutionServiceImpl,

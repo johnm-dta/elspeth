@@ -388,7 +388,7 @@ def test_rows_from_artifacts_skips_auxiliary_and_returns_row_artifact_rows(tmp_p
         _fake_artifact("rows-1", str(rows_file)),
     ]
 
-    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-aux")
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-aux", session_id="sess-t")
     assert rows == [{"url": "ato.gov.au", "rating": "5"}]
 
 
@@ -412,7 +412,7 @@ def test_rows_from_artifacts_skips_auxiliary_before_reading_bytes(monkeypatch: p
 
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
-    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-aux-skip")
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-aux-skip", session_id="sess-t")
 
     assert rows == [{"url": "ato.gov.au", "rating": "5"}]
 
@@ -442,7 +442,7 @@ def test_rows_from_artifacts_skips_legacy_percent_encoded_suffix_auxiliary_befor
 
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
-    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-percent-aux-skip")
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-percent-aux-skip", session_id="sess-t")
 
     assert rows == [{"url": "ato.gov.au", "rating": "5"}]
 
@@ -464,7 +464,7 @@ def test_rows_from_artifacts_uses_legacy_raw_percent_candidate_when_it_matches_a
         )
     ]
 
-    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-legacy")
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-legacy", session_id="sess-t")
 
     assert rows == [{"url": "raw.example", "rating": "5"}]
 
@@ -494,7 +494,7 @@ def test_rows_from_artifacts_parses_verified_bytes_when_file_changes_after_verif
 
     monkeypatch.setattr(tutorial_service_module, "_parse_rows_content", tampering_parse_rows_content)
 
-    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-snapshot")
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-snapshot", session_id="sess-t")
 
     assert rows == [{"url": "ato.gov.au", "rating": "5"}]
     assert rows_file.read_text(encoding="utf-8") == "url,rating\ntampered.example,1\n"
@@ -514,7 +514,7 @@ def test_rows_from_artifacts_distinguishes_no_row_format_from_all_empty(tmp_path
     artifacts = [_fake_artifact("aux-1", str(only_aux))]
 
     with pytest.raises(TutorialRunIntegrityError, match="no row-bearing artifact"):
-        _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-only-aux")
+        _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-only-aux", session_id="sess-t")
 
 
 def test_rows_from_artifacts_raises_when_all_row_artifacts_yield_zero_rows(tmp_path: Path) -> None:
@@ -525,4 +525,4 @@ def test_rows_from_artifacts_raises_when_all_row_artifacts_yield_zero_rows(tmp_p
     artifacts = [_fake_artifact("rows-1", str(empty))]
 
     with pytest.raises(TutorialRunIntegrityError, match="yielded zero rows"):
-        _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-empty")
+        _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-empty", session_id="sess-t")

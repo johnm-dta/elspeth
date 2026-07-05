@@ -169,6 +169,7 @@ async def _run_live_tutorial(
         settings,
         run_id=str(run_id),
         landscape_run_id=run_record.landscape_run_id,
+        session_id=str(session_id),
     )
     response = TutorialRunResponse(
         run_id=str(run_id),
@@ -191,7 +192,7 @@ async def _wait_for_terminal_run(session_service: SessionServiceProtocol, run_id
         await asyncio.sleep(_TUTORIAL_RUN_POLL_SECONDS)
 
 
-def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landscape_run_id: str) -> _LiveTutorialProjection:
+def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landscape_run_id: str, session_id: str) -> _LiveTutorialProjection:
     # Despite the read-shaped name this is a WRITER surface: it stamps
     # ``llm_call_count`` / ``seeded_from_cache`` / ``cache_key`` onto the run
     # row (Tier-1 contract assertion below) in the same transaction as its
@@ -242,6 +243,7 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
         artifact_rows,
         data_dir=settings.data_dir,
         run_id=run_id,
+        session_id=session_id,
     )
     return _LiveTutorialProjection(
         output=TutorialRunOutput(
@@ -345,7 +347,7 @@ def _read_audited_artifact_bytes(
     )
 
 
-def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id: str) -> list[dict[str, Any]]:
+def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id: str, session_id: str) -> list[dict[str, Any]]:
     """Project the rows produced by a tutorial run from its file artifacts.
 
     Three distinct Tier-1 failure modes are surfaced separately rather than
@@ -361,7 +363,7 @@ def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id
     3. **All row-bearing artifacts yielded zero rows** — distinct error makes
        it clear the parse succeeded but the pipeline produced no output rows.
     """
-    allowed = allowed_sink_directories(str(data_dir))
+    allowed = allowed_sink_directories(str(data_dir), session_id=session_id)
     saw_row_format = False
     for artifact in artifact_rows:
         if artifact.artifact_type != "file":

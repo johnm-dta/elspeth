@@ -187,6 +187,7 @@ def _resolved_allowed_artifact_paths(
     artifact: RunOutputArtifact,
     *,
     data_dir: str | Path,
+    session_id: str | None,
     object_store_error_type: str,
 ) -> tuple[Path, ...]:
     fs_paths = filesystem_path_candidates(artifact.path_or_uri)
@@ -199,7 +200,7 @@ def _resolved_allowed_artifact_paths(
             },
         )
 
-    allowed = allowed_sink_directories(str(data_dir))
+    allowed = allowed_sink_directories(str(data_dir), session_id=session_id)
     resolved_paths: list[Path] = []
     seen_paths: set[Path] = set()
     for fs_path in fs_paths:
@@ -422,11 +423,13 @@ async def _verified_artifact_file_snapshot_from_candidates(
     artifact: RunOutputArtifact,
     *,
     data_dir: str | Path,
+    session_id: str | None,
     snapshot_dir: Path,
 ) -> tuple[Path, _ArtifactFileSnapshot]:
     candidates = _resolved_allowed_artifact_paths(
         artifact,
         data_dir=data_dir,
+        session_id=session_id,
         object_store_error_type="object_store_artifact_not_streamable",
     )
     purged_error: HTTPException | None = None
@@ -460,10 +463,12 @@ async def _verified_artifact_preview_head_from_candidates(
     artifact: RunOutputArtifact,
     *,
     data_dir: str | Path,
+    session_id: str | None,
 ) -> tuple[Path, _ArtifactPreviewHeadSnapshot]:
     candidates = _resolved_allowed_artifact_paths(
         artifact,
         data_dir=data_dir,
+        session_id=session_id,
         object_store_error_type="object_store_artifact_not_previewable",
     )
     purged_error: HTTPException | None = None
@@ -497,11 +502,14 @@ async def _verified_artifact_preview_head_from_candidates(
 # Run-ownership verification remains here — only execution/ runs care.
 
 
-async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Request) -> None:
+async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Request) -> RunRecord:
     """Verify the run exists and belongs to the current user's session.
 
     Looks up the run's parent session and checks ownership.
     Returns 404 (not 403) to avoid leaking run existence (IDOR).
+    Returns the verified run record so callers can scope further checks
+    (e.g. the per-session sink allowlist, elspeth-bdc17cfdb1) to the
+    run's owning session without a second lookup.
     """
     session_service: SessionServiceProtocol = request.app.state.session_service
     settings: WebSettings = request.app.state.settings
@@ -517,6 +525,7 @@ async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Reque
 
     if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
         raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 def _run_not_found_http() -> HTTPException:
@@ -1430,7 +1439,7 @@ def create_execution_router() -> APIRouter:
         endpoint is the audit-evidence retrieval surface — every artefact
         the run wrote, with ``content_hash`` and ``exists_now``.
         """
-        await _verify_run_ownership(run_id, user, request)
+        run = await _verify_run_ownership(run_id, user, request)
         try:
             status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
         except _RunStatusNotFoundError:
@@ -1445,6 +1454,7 @@ def create_execution_router() -> APIRouter:
                 request.app.state.settings,
                 run_id=status.run_id,
                 landscape_run_id=landscape_run_id,
+                session_id=str(run.session_id),
             )
         except RunOutputsAuditUnavailableError as exc:
             raise HTTPException(
@@ -1467,9 +1477,10 @@ def create_execution_router() -> APIRouter:
         """Stream the bytes of one artefact written by a run.
 
         Path-allowlist guard: refuses any artefact whose ``path_or_uri``
-        resolves outside ``allowed_sink_directories(data_dir)`` (the
-        canonical ``data_dir/{outputs,blobs}`` set). This is
-        defence-in-depth — the path was already allowlisted at write
+        resolves outside the canonical sink set for the run's owning
+        session — ``data_dir/outputs`` plus that session's own
+        ``data_dir/blobs/<session>/`` subtree (elspeth-bdc17cfdb1). This
+        is defence-in-depth — the path was already allowlisted at write
         time, but the audit row is read-mutable in principle and the
         read-side guard MUST NOT trust it.
 
@@ -1479,7 +1490,7 @@ def create_execution_router() -> APIRouter:
         * 404 when artefact is not in the run's manifest.
         * 410 when path was in-allowlist but file no longer exists.
         """
-        await _verify_run_ownership(run_id, user, request)
+        run = await _verify_run_ownership(run_id, user, request)
         try:
             status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
         except _RunStatusNotFoundError:
@@ -1494,6 +1505,7 @@ def create_execution_router() -> APIRouter:
                 request.app.state.settings,
                 run_id=status.run_id,
                 landscape_run_id=landscape_run_id,
+                session_id=str(run.session_id),
             )
         except RunOutputsAuditUnavailableError as exc:
             raise HTTPException(
@@ -1528,6 +1540,7 @@ def create_execution_router() -> APIRouter:
         resolved, snapshot = await _verified_artifact_file_snapshot_from_candidates(
             artifact,
             data_dir=data_dir,
+            session_id=str(run.session_id),
             snapshot_dir=Path(request.app.state.settings.data_dir) / ".run-output-snapshots",
         )
         try:
@@ -1581,7 +1594,7 @@ def create_execution_router() -> APIRouter:
           state, mirroring the manifest's ``exists_now=False``).
         * 415 when the artefact is non-file (object-store URI).
         """
-        await _verify_run_ownership(run_id, user, request)
+        run = await _verify_run_ownership(run_id, user, request)
         try:
             status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
         except _RunStatusNotFoundError:
@@ -1596,6 +1609,7 @@ def create_execution_router() -> APIRouter:
                 request.app.state.settings,
                 run_id=status.run_id,
                 landscape_run_id=landscape_run_id,
+                session_id=str(run.session_id),
             )
         except RunOutputsAuditUnavailableError as exc:
             raise HTTPException(
@@ -1621,6 +1635,7 @@ def create_execution_router() -> APIRouter:
         resolved, snapshot = await _verified_artifact_preview_head_from_candidates(
             artifact,
             data_dir=data_dir,
+            session_id=str(run.session_id),
         )
 
         return build_artifact_preview_from_head(

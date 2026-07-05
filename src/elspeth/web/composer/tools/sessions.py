@@ -500,7 +500,7 @@ def _execute_set_pipeline(
             # retrieval). Parity with the per-output sink-path check below so
             # a bulk set_pipeline cannot wave through an escaping transform
             # path while rejecting an escaping sink path.
-            provider_path_error = _validate_transform_provider_config_path(node_options, data_dir)
+            provider_path_error = _validate_transform_provider_config_path(node_options, data_dir, session_id=session_id)
             if provider_path_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 
@@ -570,7 +570,7 @@ def _execute_set_pipeline(
         )
         if credential_error is not None:
             return credential_error
-        out_path_error = _validate_sink_path(out_options, data_dir)
+        out_path_error = _validate_sink_path(out_options, data_dir, session_id=session_id)
         if out_path_error is not None:
             return _failure_result(state, f"Output '{out_name}': {out_path_error}")
         out_prevalidation = _prevalidate_sink(out_plugin, out_options)

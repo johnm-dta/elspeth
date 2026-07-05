@@ -577,7 +577,7 @@ async def drive_try_terminate(
     # preflight-repair gate runs BEFORE it and would intercept a preflight-invalid
     # state. These tests exercise the ADVISOR, so stub the runtime preflight valid
     # to establish that precondition (the preflight gate is covered separately).
-    service._runtime_preflight = lambda candidate, user_id=None: ValidationResult(
+    service._runtime_preflight = lambda candidate, user_id=None, session_id=None: ValidationResult(
         is_valid=True,
         checks=[],
         errors=[],

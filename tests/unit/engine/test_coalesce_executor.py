@@ -37,7 +37,14 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.engine.clock import MockClock
-from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome, _BranchEntry, _PendingCoalesce
+from elspeth.engine.coalesce_executor import (
+    CoalesceExecutor,
+    CoalesceMergePlan,
+    CoalesceOutcome,
+    _BranchEntry,
+    _PendingCoalesce,
+    build_coalesce_merge,
+)
 from elspeth.testing import make_field, make_row
 
 # ---------------------------------------------------------------------------
@@ -282,6 +289,25 @@ def _assert_collision_fingerprints(
 _JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 
 
+def _make_pending(
+    *entries: tuple[str, TokenInfo, float, str],
+    first_arrival: float = 100.0,
+    lost_branches: dict[str, str] | None = None,
+) -> _PendingCoalesce:
+    return _PendingCoalesce(
+        branches={
+            branch: _BranchEntry(
+                token=token,
+                arrival_time=arrival_time,
+                state_id=state_id,
+            )
+            for branch, token, arrival_time, state_id in entries
+        },
+        first_arrival=first_arrival,
+        lost_branches=lost_branches or {},
+    )
+
+
 def _journal_payload(data: dict[str, Any], contract: SchemaContract | None = None) -> str:
     """Build a REAL journal row payload via the serializer mark_blocked rows carry.
 
@@ -332,6 +358,100 @@ def _blocked_item(
         coalesce_name=coalesce_name,
         barrier_blocked_at=blocked_at,
     )
+
+
+# ===========================================================================
+# build_coalesce_merge
+# ===========================================================================
+
+
+class TestBuildCoalesceMerge:
+    def test_union_first_wins_plan_contains_data_metadata_and_consumed_tokens(self) -> None:
+        settings = _settings(
+            branches=["a", "b"],
+            merge="union",
+            union_collision_policy="first_wins",
+        )
+        output_schema = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        token_b = _make_token(
+            branch_name="b",
+            token_id="t_b",
+            data={"shared": "from_b", "b_only": 2},
+            contract=_make_contract(
+                fields=[
+                    make_field("shared", original_name="B Shared", python_type=str, required=False, source="inferred"),
+                    make_field("b_only", original_name="B Only", python_type=int, required=False, source="inferred"),
+                ],
+                mode="OBSERVED",
+            ),
+        )
+        token_a = _make_token(
+            branch_name="a",
+            token_id="t_a",
+            data={"shared": "from_a", "a_only": 1},
+            contract=_make_contract(
+                fields=[
+                    make_field("shared", original_name="A Shared", python_type=str, required=False, source="inferred"),
+                    make_field("a_only", original_name="A Only", python_type=int, required=False, source="inferred"),
+                ],
+                mode="OBSERVED",
+            ),
+        )
+        pending = _make_pending(
+            ("b", token_b, 100.0, "state_b"),
+            ("a", token_a, 101.0, "state_a"),
+            first_arrival=100.0,
+        )
+
+        plan = build_coalesce_merge(
+            settings=settings,
+            pending=pending,
+            coalesce_name="merge",
+            now=105.0,
+            output_schema=output_schema,
+            branch_expected_fields=None,
+        )
+
+        assert isinstance(plan, CoalesceMergePlan)
+        assert plan.merged_data.to_dict() == {"shared": "from_a", "a_only": 1, "b_only": 2}
+        assert plan.consumed_tokens == (token_b, token_a)
+        assert plan.metadata.wait_duration_ms == 5000.0
+        assert [entry.branch for entry in plan.metadata.arrival_order] == ["b", "a"]
+        assert plan.metadata.union_field_origins == {"shared": "a", "a_only": "a", "b_only": "b"}
+        assert plan.metadata.union_field_collision_values is not None
+        _assert_collision_fingerprints(
+            list(plan.metadata.union_field_collision_values["shared"]),
+            ["a", "b"],
+        )
+
+    def test_nested_plan_records_lost_branch_expected_fields(self) -> None:
+        settings = _settings(
+            branches=["a", "b"],
+            policy="best_effort",
+            merge="nested",
+            timeout_seconds=5.0,
+        )
+        token_a = _make_token(branch_name="a", token_id="t_a", data={"present": 42})
+        pending = _make_pending(
+            ("a", token_a, 100.0, "state_a"),
+            first_arrival=100.0,
+            lost_branches={"b": "error_routed"},
+        )
+
+        plan = build_coalesce_merge(
+            settings=settings,
+            pending=pending,
+            coalesce_name="merge",
+            now=102.5,
+            output_schema=None,
+            branch_expected_fields={"b": ("lost_optional",)},
+        )
+
+        assert isinstance(plan, CoalesceMergePlan)
+        assert plan.merged_data.to_dict() == {"a": {"present": 42}}
+        assert plan.consumed_tokens == (token_a,)
+        assert plan.metadata.lost_branch_expected_fields == {"b": ("lost_optional",)}
+        assert plan.metadata.branches_lost == {"b": "error_routed"}
 
 
 # ===========================================================================

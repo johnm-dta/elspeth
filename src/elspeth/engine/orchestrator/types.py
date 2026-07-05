@@ -29,18 +29,18 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
-    from elspeth.contracts.barrier_scalars import BarrierScalars
+    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.checkpoint import ResumedRow
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
     from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
+    from elspeth.engine.orchestrator.ports import RowProcessorHandle
 
 # Import protocols at runtime (not TYPE_CHECKING) because RowPlugin type alias
 # is used in runtime annotations and isinstance() checks
@@ -56,139 +56,6 @@ PendingTokenMap = dict[str, list[tuple["TokenInfo", "PendingOutcome | None"]]]
 # batch-aware transforms (is_batch_aware=True on TransformProtocol)
 RowPlugin = TransformProtocol
 """Row-processing plugin type for pipeline transforms list."""
-
-
-class RowProcessorHandle(Protocol):
-    """Orchestrator-facing processor contract stored in run/loop contexts."""
-
-    @property
-    def run_id(self) -> str:
-        """Expose the run identifier for scheduler recovery diagnostics."""
-        ...
-
-    @property
-    def token_manager(self) -> Any:
-        raise NotImplementedError
-
-    @property
-    def coordination_token(self) -> CoordinationToken | None:
-        """Leader fencing token bound at construction (ADR-030)."""
-        ...
-
-    def process_row(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    def process_existing_row(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    def process_token(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    def check_aggregation_timeout(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    def get_aggregation_buffer_count(self, *args: Any, **kwargs: Any) -> int:
-        raise NotImplementedError
-
-    def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
-        """Drain recoverable durable scheduler work during resume."""
-        ...
-
-    def has_scheduled_work(self) -> bool:
-        """Return whether the durable scheduler has active non-terminal work."""
-        ...
-
-    def active_scheduled_row_ids(self) -> frozenset[str]:
-        """Return row IDs represented by active durable scheduler work."""
-        ...
-
-    def summarize_scheduled_work(self) -> tuple[str, ...]:
-        """Return grouped active scheduler work for invariant diagnostics."""
-        ...
-
-    def has_unresolved_scheduler_work(self) -> bool:
-        """Return whether scheduler work remains short of a durable sink handoff."""
-        ...
-
-    def has_peer_active_leases(self) -> bool:
-        """Return whether any peer worker holds an unexpired LEASED item (ADR-030)."""
-        ...
-
-    def peer_lease_wait_budget_seconds(self) -> float:
-        """Return bounded wait budget for peer-held active item leases."""
-        ...
-
-    def peer_active_lease_owners(self) -> tuple[str, ...]:
-        """Return the distinct peer lease_owners holding unexpired LEASED rows (ADR-030)."""
-        ...
-
-    def reap_expired_peer_leases(self) -> int:
-        """Drive lease maintenance once so dead peers are reaped; return count recovered (ADR-030)."""
-        ...
-
-    def summarize_unresolved_scheduler_work(self) -> tuple[str, ...]:
-        """Return grouped unresolved scheduler work for invariant diagnostics."""
-        ...
-
-    def run_barrier_intake(self, ctx: PluginContext) -> list[RowResult]:
-        """Run one journal-first barrier intake pass (ADR-030 §E.2, §D step 3)."""
-        ...
-
-    def has_blocked_barrier_work(self) -> bool:
-        """Return whether durable BLOCKED barrier holds remain (§D step-3 loop)."""
-        ...
-
-    def count_unquiesced_scheduler_work(self) -> int:
-        """Count §D step-2 unquiesced journal work (READY + non-pending-sink LEASED)."""
-        ...
-
-    def summarize_unquiesced_scheduler_work(self) -> tuple[str, ...]:
-        """Return grouped §D step-2 unquiesced work for invariant diagnostics."""
-        ...
-
-    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
-        """Mark durable scheduler work consumed by a barrier as terminal."""
-        ...
-
-    def complete_coalesce_merge(
-        self,
-        *,
-        coalesce_name: CoalesceName,
-        consumed_tokens: tuple[TokenInfo, ...],
-        merged_token: TokenInfo,
-        coalesce_node_id: NodeID,
-        ctx: PluginContext,
-    ) -> list[RowResult]:
-        """Atomically complete an out-of-claim coalesce fire and drive the merged token (F1/D6)."""
-        raise NotImplementedError
-
-    def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
-        """Mark scheduler sink handoff complete after sink outcome durability."""
-        ...
-
-    def mark_sink_bound_scheduler_terminal_many(self, token_ids: tuple[str, ...]) -> None:
-        """Mark scheduler sink handoffs complete after durable batch sink outcomes."""
-        ...
-
-    def get_barrier_scalars(self) -> BarrierScalars:
-        """Compose the underivable barrier scalars from the live executors (F1)."""
-        raise NotImplementedError
-
-    def resume_incomplete_token(
-        self,
-        spec: IncompleteTokenSpec,
-        row_data: PipelineRow,
-        ctx: PluginContext,
-        *,
-        resume_checkpoint_id: str,
-    ) -> list[RowResult]:
-        raise NotImplementedError
-
-    def resolve_sink_step(self) -> int:
-        raise NotImplementedError
 
 
 class TelemetryManagerProtocol(Protocol):
@@ -731,57 +598,3 @@ class ResumeState:
                 f"{sorted(self.schema_contracts_by_source)}. Resume rejects rather "
                 "than picks an arbitrary contract (ADR-025 §3)."
             )
-
-
-class BarrierScalarsSource(Protocol):
-    """Narrow processor surface the checkpoint-progress callback needs.
-
-    A deliberately minimal slice of :class:`RowProcessorHandle`: the post-sink
-    checkpoint callback only reads the composed barrier scalars, so it depends
-    on this instead of the broad processor contract (elspeth-107a29d02e).
-    """
-
-    def get_barrier_scalars(self) -> BarrierScalars:
-        """Compose the underivable barrier scalars from the live executors (F1)."""
-        ...
-
-
-class SchedulerTerminalizer(Protocol):
-    """Narrow processor surface the scheduler-terminalization callback needs.
-
-    A deliberately minimal slice of :class:`RowProcessorHandle`: the post-sink
-    terminalization callback only marks durable batch sink-handoffs terminal, so
-    it depends on this instead of the broad processor contract
-    (elspeth-107a29d02e).
-    """
-
-    def mark_sink_bound_scheduler_terminal_many(self, token_ids: tuple[str, ...]) -> None:
-        """Mark scheduler sink handoffs complete after durable batch sink outcomes."""
-        ...
-
-
-class CheckpointAfterSinkCallback(Protocol):
-    """Post-sink callback with an explicit batch flush boundary."""
-
-    def __call__(self, token: TokenInfo) -> None:
-        """Record per-token checkpoint progress after durable sink handling."""
-        ...
-
-    def flush(self) -> None:
-        """Flush batched scheduler terminalization after callback use."""
-        ...
-
-
-class _CheckpointFactory(Protocol):
-    """Factory that creates per-sink checkpoint-PROGRESS callbacks.
-
-    The returned callback records checkpoint progress after each token is
-    durably written to a sink. Scheduler terminalization is a SEPARATE lifecycle
-    composed at the sink-write call site (see
-    :meth:`SinkFlushCoordinator.flush_and_write_sinks`), not this factory's concern
-    (elspeth-107a29d02e).
-    """
-
-    def __call__(self, sink_node_id: str) -> CheckpointAfterSinkCallback:
-        """Return a callback invoked after each token is written to a sink."""
-        ...

@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
+    from elspeth.engine.orchestrator.ports import EndOfInputBarrierProcessorPort
     from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
     from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
     from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
         GraphArtifacts,
         PendingTokenMap,
         PipelineConfig,
-        RowProcessorHandle,
         RunResult,
     )
 
@@ -406,7 +406,7 @@ MAX_END_OF_INPUT_FLUSH_ITERATIONS = 1_000
 def run_end_of_input_barrier_flush(
     *,
     config: PipelineConfig,
-    processor: RowProcessorHandle,
+    processor: EndOfInputBarrierProcessorPort,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,

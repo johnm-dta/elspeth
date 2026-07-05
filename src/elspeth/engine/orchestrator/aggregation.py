@@ -18,13 +18,13 @@ from elspeth.contracts.enums import TriggerType
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
+from elspeth.engine.orchestrator.ports import AggregationProcessorPort
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     AggregationFlushResult,
     ExecutionCounters,
     PendingTokenMap,
     PipelineConfig,
-    RowProcessorHandle,
 )
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ def find_aggregation_transform(
 def _process_flush_results(
     completed_results: Sequence[RowResult],
     work_items: Sequence[WorkItem],
-    processor: RowProcessorHandle,
+    processor: AggregationProcessorPort,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -105,7 +105,7 @@ def _process_flush_results(
 
 def check_aggregation_timeouts(
     config: PipelineConfig,
-    processor: RowProcessorHandle,
+    processor: AggregationProcessorPort,
     ctx: PluginContext,
     pending_tokens: PendingTokenMap,
     agg_transform_lookup: dict[str, AggNodeEntry] | None = None,
@@ -192,7 +192,7 @@ def check_aggregation_timeouts(
 
 def flush_remaining_aggregation_buffers(
     config: PipelineConfig,
-    processor: RowProcessorHandle,
+    processor: AggregationProcessorPort,
     ctx: PluginContext,
     pending_tokens: PendingTokenMap,
 ) -> AggregationFlushResult:

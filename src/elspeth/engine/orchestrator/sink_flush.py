@@ -39,14 +39,16 @@ if TYPE_CHECKING:
         TokenInfo,
     )
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
-    from elspeth.engine.orchestrator.types import (
+    from elspeth.engine.orchestrator.ports import (
         CheckpointAfterSinkCallback,
+        SchedulerTerminalizer,
+        _CheckpointFactory,
+    )
+    from elspeth.engine.orchestrator.types import (
         ExecutionCounters,
         LoopContext,
         PendingTokenMap,
         PipelineConfig,
-        SchedulerTerminalizer,
-        _CheckpointFactory,
     )
     from elspeth.engine.spans import SpanFactory
 

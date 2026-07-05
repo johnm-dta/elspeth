@@ -18,6 +18,7 @@ testable without constructing an Orchestrator instance.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from elspeth.contracts import RunStatus
@@ -204,6 +205,9 @@ derive_resume_terminal_status_from_audit = derive_terminal_status_from_audit
 
 
 # Live-vs-audit counter fields compared strictly by assert_terminal_counter_parity.
+# ExecutionCounters is the authoritative field list. Every field is strict by
+# default; add an entry here only when the exception is documented and handled
+# below.
 # rows_coalesce_failed is EXCLUDED — its two documented divergences (ADR-030 §D,
 # bug elspeth-ff6d48c180) are tolerated and logged instead:
 #   1. arrival-time barrier failures (branch-lost cascades, merge-exception
@@ -214,18 +218,17 @@ derive_resume_terminal_status_from_audit = derive_terminal_status_from_audit
 #      first_timeout_no_arrivals failure consumes no tokens and writes no
 #      node_states — live counts it, the derive cannot, so live MAY EXCEED
 #      audit (accepted, audit-is-truth doctrine).
-_PARITY_STRICT_FIELDS: tuple[str, ...] = (
-    "rows_processed",
-    "rows_succeeded",
-    "rows_failed",
-    "rows_routed_success",
-    "rows_routed_failure",
-    "rows_quarantined",
-    "rows_forked",
-    "rows_coalesced",
-    "rows_expanded",
-    "rows_buffered",
-    "rows_diverted",
+#
+# routed_destinations is compared separately as a plain dict below because
+# RunResult stores a frozen Mapping while ExecutionCounters stores a Counter.
+_PARITY_EXCLUDED_FIELDS: frozenset[str] = frozenset(
+    {
+        "rows_coalesce_failed",
+        "routed_destinations",
+    }
+)
+_PARITY_STRICT_FIELDS: tuple[str, ...] = tuple(
+    field.name for field in fields(ExecutionCounters) if field.name not in _PARITY_EXCLUDED_FIELDS
 )
 
 

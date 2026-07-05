@@ -9,7 +9,7 @@ This contract registers for ONE dispatch site:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar, cast
 
 from elspeth.contracts.declaration_contracts import (
@@ -115,6 +115,28 @@ def _runtime_observed_message(observed_payload: Mapping[str, object]) -> str:
     return f"{observed_count} runtime field(s), sampled {observed_sample!r}"
 
 
+def _format_optional_missing_fields_context(
+    *,
+    missing: Iterable[str],
+    row_contract: SchemaContract | None,
+) -> str:
+    if row_contract is None:
+        return ""
+
+    required_in_contract = row_contract.required_field_names
+    optional_in_contract: list[str] = []
+    for missing_name in missing:
+        normalized = row_contract.find_name(missing_name)
+        if normalized is not None and normalized not in required_in_contract:
+            optional_in_contract.append(missing_name)
+    if not optional_in_contract:
+        return ""
+    return (
+        f" Fields {optional_in_contract} are optional in the row's schema contract "
+        f"(likely from coalesce merge). Fix: ensure all branches produce these fields as required."
+    )
+
+
 def verify_sink_required_fields(
     *,
     declared_required_fields: frozenset[str],
@@ -132,19 +154,7 @@ def verify_sink_required_fields(
     if not missing:
         return
 
-    contract_context = ""
-    if row_contract is not None:
-        required_in_contract = row_contract.required_field_names
-        optional_in_contract: list[str] = []
-        for missing_name in missing:
-            normalized = row_contract.find_name(missing_name)
-            if normalized is not None and normalized not in required_in_contract:
-                optional_in_contract.append(missing_name)
-        if optional_in_contract:
-            contract_context = (
-                f" Fields {optional_in_contract} are optional in the row's schema contract "
-                f"(likely from coalesce merge). Fix: ensure all branches produce these fields as required."
-            )
+    contract_context = _format_optional_missing_fields_context(missing=sorted(missing), row_contract=row_contract)
 
     observed_payload = _bounded_runtime_observed_payload(runtime_observed)
     raise SinkRequiredFieldsViolation(

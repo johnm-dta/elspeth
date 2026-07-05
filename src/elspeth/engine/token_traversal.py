@@ -6,12 +6,14 @@ DAG traversal loop) and its transform / gate / terminal handler family.
 
 Processor-owned collaborators (navigation, executors, coalesce, telemetry, audit
 recording, the scheduler-lease heartbeat) are reached at CALL time through
-``self._processor.<seam>`` — never captured at construction — so the existing
-test net keeps working: tests that patch ``processor._process_single_token`` /
-``_handle_transform_node`` / ``_handle_transform_error_status`` and drive the
-scheduler drain still intercept the right method. Those three names remain thin
-delegates on ``RowProcessor`` (the SchedulerDrainHost seam plus direct test
-callers). The ``_Transform*`` / ``_Gate*`` discriminated-union outcome types live
+``self._processor.<seam>`` — never captured at construction. Test-seam contract:
+patching ``processor._process_single_token`` intercepts drain-driven work (the
+SchedulerDrainHost seam resolves it on the processor at call time), but the
+traversal loop dispatches its handler family on the ENGINE itself — patching
+``processor._handle_transform_node`` / ``_handle_transform_error_status``
+intercepts only DIRECT calls to those thin delegates, not loop-driven dispatch;
+to intercept the loop, patch ``processor._token_traversal.<handler>`` instead.
+The ``_Transform*`` / ``_Gate*`` discriminated-union outcome types live
 here and are re-exported from ``processor.py`` for callers that import them there.
 """
 

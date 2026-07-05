@@ -2278,7 +2278,7 @@ class TestForkRecoveryInvariant:
             journal verbs (enqueue_ready_claimed + mark_blocked with
             barrier_key='merge', the coalesce name) carrying its real row payload —
             F1: the journal BLOCKED row is the ONLY barrier-buffer truth. On resume,
-            processor._restore_barriers_from_journal repopulates _pending with this
+            BarrierRecoveryCoordinator.restore_from_journal repopulates _pending with this
             branch — it is "already arrived", awaiting the sibling. The HELD branch is
             chosen as the one with the smaller token_id so a buggy re-drive would be
             dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
@@ -2479,7 +2479,7 @@ class TestForkRecoveryInvariant:
         # claimed it, the branch arrived at the coalesce and accept() held it →
         # mark_blocked(barrier_key='merge') stamped barrier_blocked_at. The BLOCKED
         # row carries the branch's row payload — resume restores _pending from it
-        # (processor._restore_barriers_from_journal ← list_blocked_barrier_items).
+        # (BarrierRecoveryCoordinator.restore_from_journal ← list_blocked_barrier_items).
         held_first_node = str(graph.get_transform_id_map()[branch_index_by_name[held_branch_name]])
         seed_now = datetime.now(UTC)
         held_item = scheduler_repo.enqueue_ready_claimed(

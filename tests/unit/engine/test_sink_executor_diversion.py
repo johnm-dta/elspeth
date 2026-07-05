@@ -255,6 +255,71 @@ def _assert_single_primary_divert_cleanup(
         assert failed_kwargs["error"].exception_type == exception_type
 
 
+class TestSinkWriteResultValidation:
+    """Shared SinkWriteResult validation used by primary sink and failsink paths."""
+
+    def test_primary_result_returns_artifact_and_diversions(self) -> None:
+        diversions = (RowDiversion(row_index=0, reason="bad metadata", row_data={"field": "bad"}),)
+        artifact = _make_artifact("/tmp/primary")
+        result = SinkWriteResult(artifact=artifact, diversions=diversions)
+
+        returned_artifact, returned_diversions = SinkExecutor._require_sink_write_result(
+            label="primary",
+            result=result,
+            allow_diversions=True,
+        )
+
+        assert returned_artifact is artifact
+        assert returned_diversions == diversions
+
+    def test_primary_result_rejects_wrong_return_type(self) -> None:
+        with pytest.raises(PluginContractViolation, match="Sink 'primary' returned dict, expected SinkWriteResult"):
+            SinkExecutor._require_sink_write_result(
+                label="primary",
+                result={},
+                allow_diversions=True,
+            )
+
+    def test_primary_result_rejects_wrong_artifact_type(self) -> None:
+        result = object.__new__(SinkWriteResult)
+        object.__setattr__(result, "artifact", "not-an-artifact")
+        object.__setattr__(result, "diversions", ())
+
+        with pytest.raises(
+            PluginContractViolation,
+            match="Sink 'primary' returned SinkWriteResult with artifact of type str, expected ArtifactDescriptor",
+        ):
+            SinkExecutor._require_sink_write_result(
+                label="primary",
+                result=result,
+                allow_diversions=True,
+            )
+
+    def test_failsink_result_returns_artifact_when_diversions_absent(self) -> None:
+        artifact = _make_artifact("/tmp/failsink")
+        result = SinkWriteResult(artifact=artifact)
+
+        returned_artifact, returned_diversions = SinkExecutor._require_sink_write_result(
+            label="csv_failsink",
+            result=result,
+            allow_diversions=False,
+        )
+
+        assert returned_artifact is artifact
+        assert returned_diversions == ()
+
+    def test_failsink_result_rejects_diversions(self) -> None:
+        diversions = (RowDiversion(row_index=0, reason="bad metadata", row_data={"field": "bad"}),)
+        result = SinkWriteResult(artifact=_make_artifact("/tmp/failsink"), diversions=diversions)
+
+        with pytest.raises(FrameworkBugError, match="Failsink 'csv_failsink' produced 1 diversions"):
+            SinkExecutor._require_sink_write_result(
+                label="csv_failsink",
+                result=result,
+                allow_diversions=False,
+            )
+
+
 class TestNoDiversions:
     """Existing behavior preserved when no diversions occur."""
 

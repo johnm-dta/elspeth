@@ -41,9 +41,10 @@ import base64
 import binascii
 import json
 import math
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, cast
 from uuid import UUID
 
 import numpy as np
@@ -60,6 +61,18 @@ from elspeth.contracts.errors import AuditIntegrityError
 # are escaped via _escape_reserved_keys() before encoding.
 _ENVELOPE_TYPE_KEY = "__elspeth_type__"
 _ENVELOPE_VALUE_KEY = "__elspeth_value__"
+_KNOWN_ENVELOPE_TYPES = frozenset(
+    {
+        "datetime",
+        "decimal",
+        "date",
+        "time",
+        "bytes",
+        "uuid",
+        "escaped_dict",
+        "tuple",
+    }
+)
 
 
 class CheckpointEncoder(json.JSONEncoder):
@@ -219,7 +232,7 @@ def _reject_nan_infinity(obj: Any) -> Any:
 def _escape_reserved_keys(obj: Any) -> Any:
     """Recursively escape user dicts that coincidentally contain the reserved key.
 
-    If a user dict contains __elspeth_type__, wrap it in an escape envelope so
+    If a user dict contains a reserved envelope key, wrap it in an escape envelope so
     _restore_types() can distinguish it from a real type envelope.
 
     Args:
@@ -242,8 +255,8 @@ def _escape_reserved_keys(obj: Any) -> Any:
     if isinstance(obj, dict):
         # First recurse into values
         escaped = {k: _escape_reserved_keys(v) for k, v in obj.items()}
-        # If this dict contains our reserved key, wrap it in an escape envelope
-        if _ENVELOPE_TYPE_KEY in escaped:
+        # If this dict contains a reserved envelope key, wrap it in an escape envelope.
+        if _ENVELOPE_TYPE_KEY in escaped or _ENVELOPE_VALUE_KEY in escaped:
             return {
                 _ENVELOPE_TYPE_KEY: "escaped_dict",
                 _ENVELOPE_VALUE_KEY: escaped,
@@ -304,26 +317,34 @@ def _restore_types(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         # Check for collision-safe envelope
-        if _ENVELOPE_TYPE_KEY in obj and _ENVELOPE_VALUE_KEY in obj:
-            if len(obj) != 2:
+        if _ENVELOPE_TYPE_KEY in obj or _ENVELOPE_VALUE_KEY in obj:
+            if _ENVELOPE_TYPE_KEY not in obj or _ENVELOPE_VALUE_KEY not in obj or len(obj) != 2:
                 raise AuditIntegrityError(
-                    f"Corrupted checkpoint: invalid envelope shape for type {obj[_ENVELOPE_TYPE_KEY]!r} — "
-                    f"reserved envelope keys must not be mixed with extra keys"
+                    f"Corrupted checkpoint: invalid envelope shape for type {obj.get(_ENVELOPE_TYPE_KEY)!r} - "
+                    f"reserved envelope keys must appear together and must not be mixed with extra keys"
                 )
             envelope_type = obj[_ENVELOPE_TYPE_KEY]
             envelope_value = obj[_ENVELOPE_VALUE_KEY]
 
-            if envelope_type == "datetime" and isinstance(envelope_value, str):
-                dt = datetime.fromisoformat(envelope_value)
+            if not isinstance(envelope_type, str):
+                raise AuditIntegrityError(
+                    f"Checkpoint envelope type tag must be str, got "
+                    f"{type(envelope_type).__name__!r} - data may be corrupted"
+                )
+
+            if envelope_type == "datetime":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                dt = _parse_string_envelope(envelope_type, value, datetime.fromisoformat)
                 if dt.tzinfo is None:
                     raise AuditIntegrityError(
                         f"Corrupted checkpoint: datetime envelope contains naive datetime "
-                        f"{envelope_value!r} — timezone-aware datetimes are required"
+                        f"{value!r} — timezone-aware datetimes are required"
                     )
                 return dt
 
-            if envelope_type == "decimal" and isinstance(envelope_value, str):
-                restored = Decimal(envelope_value)
+            if envelope_type == "decimal":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                restored = _parse_string_envelope(envelope_type, value, Decimal)
                 # Re-validate finiteness on restore — symmetric with the write-side
                 # reject at line 115. Decimal("NaN")/Decimal("Infinity") construct
                 # successfully, so without this guard a corrupted or tampered
@@ -332,46 +353,39 @@ def _restore_types(obj: Any) -> Any:
                 if not restored.is_finite():
                     raise AuditIntegrityError(
                         f"Corrupted checkpoint: decimal envelope contains non-finite value "
-                        f"{envelope_value!r} — NaN/Infinity are not valid audit values"
+                        f"{value!r} — NaN/Infinity are not valid audit values"
                     )
                 return restored
 
-            if envelope_type == "date" and isinstance(envelope_value, str):
-                return date.fromisoformat(envelope_value)
+            if envelope_type == "date":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _parse_string_envelope(envelope_type, value, date.fromisoformat)
 
-            if envelope_type == "time" and isinstance(envelope_value, str):
-                return time.fromisoformat(envelope_value)
+            if envelope_type == "time":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _parse_string_envelope(envelope_type, value, time.fromisoformat)
 
-            if envelope_type == "bytes" and isinstance(envelope_value, str):
-                return _restore_bytes_envelope(envelope_value)
+            if envelope_type == "bytes":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _restore_bytes_envelope(value)
 
-            if envelope_type == "uuid" and isinstance(envelope_value, str):
-                return UUID(envelope_value)
+            if envelope_type == "uuid":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _parse_string_envelope(envelope_type, value, UUID)
 
-            if envelope_type == "escaped_dict" and isinstance(envelope_value, dict):
+            if envelope_type == "escaped_dict":
+                escaped_value = _require_envelope_value_type(envelope_type, envelope_value, dict)
                 # Unwrap the escaped dict and recurse into its values
-                return {k: _restore_types(v) for k, v in envelope_value.items()}
+                return {k: _restore_types(v) for k, v in escaped_value.items()}
 
-            if envelope_type == "tuple" and isinstance(envelope_value, list):
-                return tuple(_restore_types(v) for v in envelope_value)
+            if envelope_type == "tuple":
+                tuple_value = _require_envelope_value_type(envelope_type, envelope_value, list)
+                return tuple(_restore_types(v) for v in tuple_value)
 
             # Envelope shape detected — all known types handled above.
-            _KNOWN_ENVELOPE_TYPES = {
-                "datetime",
-                "decimal",
-                "date",
-                "time",
-                "bytes",
-                "uuid",
-                "escaped_dict",
-                "tuple",
-            }
             if envelope_type in _KNOWN_ENVELOPE_TYPES:
                 # Known type but value failed isinstance check above — wrong Python type
-                raise AuditIntegrityError(
-                    f"Checkpoint envelope type {envelope_type!r} has invalid value type "
-                    f"{type(envelope_value).__name__!r} — data may be corrupted"
-                )
+                _raise_invalid_envelope_value_type(envelope_type, envelope_value)
             raise AuditIntegrityError(f"Unknown checkpoint envelope type {envelope_type!r} — data may be corrupted or tampered")
 
         # Recurse into dict values
@@ -379,6 +393,29 @@ def _restore_types(obj: Any) -> Any:
     elif isinstance(obj, list):
         return [_restore_types(v) for v in obj]
     return obj
+
+
+def _require_envelope_value_type[T](envelope_type: str, envelope_value: object, value_type: type[T]) -> T:
+    if not isinstance(envelope_value, value_type):
+        _raise_invalid_envelope_value_type(envelope_type, envelope_value)
+    return cast(T, envelope_value)
+
+
+def _raise_invalid_envelope_value_type(envelope_type: str, envelope_value: object) -> None:
+    raise AuditIntegrityError(
+        f"Checkpoint envelope type {envelope_type!r} has invalid value type "
+        f"{type(envelope_value).__name__!r} — data may be corrupted"
+    )
+
+
+def _parse_string_envelope[T](envelope_type: str, envelope_value: str, parser: Callable[[str], T]) -> T:
+    try:
+        return parser(envelope_value)
+    except (InvalidOperation, ValueError) as exc:
+        raise AuditIntegrityError(
+            f"Corrupted checkpoint: {envelope_type} envelope contains invalid value "
+            f"{envelope_value!r} - data may be corrupted or tampered"
+        ) from exc
 
 
 def _restore_bytes_envelope(envelope_value: str) -> bytes:

@@ -129,6 +129,17 @@ def test_checkpoint_roundtrip_user_dict_with_reserved_key() -> None:
     assert result["config"]["other_key"] == 42
 
 
+@pytest.mark.parametrize("reserved_key", ["__elspeth_type__", "__elspeth_value__"])
+def test_checkpoint_roundtrip_user_dict_with_reserved_envelope_key(reserved_key: str) -> None:
+    """User dicts containing reserved envelope keys must survive round-trip."""
+    user_data = {"config": {reserved_key: "some_user_value", "other_key": 42}}
+    result = checkpoint_loads(checkpoint_dumps(user_data))
+
+    assert isinstance(result["config"], dict)
+    assert result["config"][reserved_key] == "some_user_value"
+    assert result["config"]["other_key"] == 42
+
+
 def test_checkpoint_roundtrip_datetime_still_works_with_new_envelope() -> None:
     """Datetime round-trip via the new collision-safe envelope."""
     dt = datetime(2026, 2, 8, 10, 15, 30, tzinfo=UTC)
@@ -238,6 +249,31 @@ def test_reserved_envelope_with_extra_keys_raises() -> None:
         checkpoint_loads(tampered)
 
 
+@pytest.mark.parametrize(
+    "tampered",
+    [
+        {"__elspeth_type__": "date"},
+        {"__elspeth_value__": "2026-01-01"},
+    ],
+)
+def test_partial_reserved_envelope_shape_raises(tampered: dict[str, object]) -> None:
+    """A raw partial reserved envelope shape must crash, not restore as user data."""
+    import json
+
+    corrupted = json.dumps({"data": tampered})
+    with pytest.raises(AuditIntegrityError, match="invalid envelope shape"):
+        checkpoint_loads(corrupted)
+
+
+def test_envelope_type_tag_must_be_string() -> None:
+    """Envelope type tags must be strings before dispatch."""
+    import json
+
+    corrupted = json.dumps({"data": {"__elspeth_type__": 42, "__elspeth_value__": "payload"}})
+    with pytest.raises(AuditIntegrityError, match="type tag"):
+        checkpoint_loads(corrupted)
+
+
 def test_known_envelope_wrong_value_type_datetime_raises() -> None:
     """datetime envelope with non-string value must crash — type corruption."""
     import json
@@ -272,6 +308,25 @@ def test_aware_datetime_in_envelope_accepted() -> None:
     data = json.dumps({"ts": {"__elspeth_type__": "datetime", "__elspeth_value__": "2026-03-15T10:00:00+00:00"}})
     result = checkpoint_loads(data)
     assert result["ts"].tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("envelope_type", "bad"),
+    [
+        ("datetime", "not-a-datetime"),
+        ("decimal", "not-a-decimal"),
+        ("date", "not-a-date"),
+        ("time", "not-a-time"),
+        ("uuid", "not-a-uuid"),
+    ],
+)
+def test_known_string_envelope_parse_failures_raise_audit_integrity(envelope_type: str, bad: str) -> None:
+    """Known string envelope parser failures must not leak raw parser errors."""
+    import json
+
+    corrupted = json.dumps({"data": {"__elspeth_type__": envelope_type, "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match=envelope_type):
+        checkpoint_loads(corrupted)
 
 
 # ===========================================================================

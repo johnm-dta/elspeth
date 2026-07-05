@@ -7,7 +7,8 @@ Extraction Properties:
 - Attribute access (row.field) is extracted
 - Item access (row["field"]) is extracted
 - Namespace filtering works correctly
-- Only static keys are extracted (dynamic ignored)
+- Field-only extraction returns only static keys
+- Structured usage reports dynamic row keys separately
 
 Return Type Properties:
 - Always returns frozenset (immutable)
@@ -31,6 +32,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.core.templates import (
+    extract_jinja2_field_usage,
     extract_jinja2_fields,
     extract_jinja2_fields_with_details,
 )
@@ -279,25 +281,31 @@ class TestDynamicKeyExclusionProperties:
     """Property tests for dynamic key handling (row[variable])."""
 
     def test_dynamic_key_ignored(self) -> None:
-        """Property: Dynamic keys (row[variable]) are NOT extracted.
+        """Property: Field-only extraction excludes dynamic keys.
 
-        We can't know what 'key' contains at parse time, so we correctly
-        ignore it. Developers must manually declare such dependencies.
+        We can't know what 'key' contains at parse time, so it is reported
+        through extract_jinja2_field_usage() instead of as a concrete field.
         """
         template = "{{ row[key] }}"  # key is a variable, not a string literal
         fields = extract_jinja2_fields(template)
+        usage = extract_jinja2_field_usage(template)
 
         assert len(fields) == 0
+        assert usage.fields == frozenset()
+        assert usage.dynamic_accesses == ("item",)
 
     @given(static_field=valid_field_names)
     @settings(max_examples=50)
     def test_static_keys_extracted_dynamic_ignored(self, static_field: str) -> None:
-        """Property: Static keys extracted, dynamic keys ignored."""
+        """Property: Static keys extracted, dynamic keys reported separately."""
         template = f'{{{{ row["{static_field}"] }}}} {{{{ row[dynamic_var] }}}}'
         fields = extract_jinja2_fields(template)
+        usage = extract_jinja2_field_usage(template)
 
         assert static_field in fields
         assert len(fields) == 1  # Only the static one
+        assert usage.fields == fields
+        assert usage.dynamic_accesses == ("item",)
 
 
 # =============================================================================

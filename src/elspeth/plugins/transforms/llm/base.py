@@ -162,6 +162,43 @@ class LLMConfig(TransformDataConfig):
             )
         return self
 
+    def _field_extraction_templates(self) -> tuple[str, ...]:
+        """Return every LLM Jinja2 template that can interpolate row data."""
+        templates = [self.prompt_template]
+        if isinstance(self.queries, dict):
+            for defn in self.queries.values():
+                if isinstance(defn, dict) and defn.get("template"):
+                    templates.append(defn["template"])
+        elif isinstance(self.queries, list):
+            for item in self.queries:
+                if isinstance(item, dict) and item.get("template"):
+                    templates.append(item["template"])
+        return tuple(templates)
+
+    @model_validator(mode="after")
+    def _validate_dynamic_row_access_requires_explicit_opt_out(self) -> LLMConfig:
+        """Fail closed when row fields are accessed through parse-time dynamic keys."""
+        if self.required_input_fields == []:
+            return self
+
+        from elspeth.core.templates import extract_jinja2_field_usage
+
+        dynamic_accesses: list[str] = []
+        for template in self._field_extraction_templates():
+            dynamic_accesses.extend(extract_jinja2_field_usage(template).dynamic_accesses)
+
+        if not dynamic_accesses:
+            return self
+
+        access_kinds = sorted(set(dynamic_accesses))
+        raise ValueError(
+            "LLM prompt_template uses dynamic row field access "
+            f"({', '.join(access_kinds)} via row[expr] or row.get(expr)). "
+            "Dynamic row keys cannot be audited against options.required_input_fields. "
+            "Use static row.field or row['field'] references, or set "
+            "options.required_input_fields: [] to explicitly opt out and accept runtime risk."
+        )
+
     @model_validator(mode="after")
     def _validate_required_input_fields_declared(self) -> LLMConfig:
         """Require explicit field declaration when template references row fields.

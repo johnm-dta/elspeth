@@ -110,11 +110,31 @@ class TestExtractJinja2Fields:
         assert result == frozenset({"status"})
 
     def test_row_get_with_dynamic_key_ignored(self) -> None:
-        """row.get(dynamic_key, default) is ignored (dynamic dependency)."""
+        """Field-only extraction excludes row.get(dynamic_key, default)."""
         from elspeth.core.templates import extract_jinja2_fields
 
         result = extract_jinja2_fields("{{ row.get(key, 'N/A') }}")
         assert result == frozenset()
+
+    def test_dynamic_item_access_reported_by_usage(self) -> None:
+        """Structured usage reports dynamic row[expr] access separately."""
+        from elspeth.core.templates import extract_jinja2_field_usage
+
+        result = extract_jinja2_field_usage('{% set k = "ssn" %}{{ row[k] }}')
+
+        assert result.fields == frozenset()
+        assert result.dynamic_accesses == ("item",)
+        assert result.has_dynamic_access is True
+
+    def test_dynamic_row_get_reported_by_usage(self) -> None:
+        """Structured usage reports dynamic row.get(expr) access separately."""
+        from elspeth.core.templates import extract_jinja2_field_usage
+
+        result = extract_jinja2_field_usage("{{ row.get(key, 'N/A') }}")
+
+        assert result.fields == frozenset()
+        assert result.dynamic_accesses == ("get",)
+        assert result.has_dynamic_access is True
 
     def test_for_loop(self) -> None:
         """Field used in for loop is extracted."""
@@ -227,8 +247,15 @@ class TestExtractJinja2FieldsWithDetails:
         assert result == {"status": ["item"]}
 
     def test_row_get_dynamic_key_details_ignored(self) -> None:
-        """row.get(dynamic_key) does not create a synthetic 'get' field detail."""
-        from elspeth.core.templates import extract_jinja2_fields_with_details
+        """row.get(dynamic_key) is visible as a dynamic access detail."""
+        from elspeth.core.templates import DYNAMIC_ROW_FIELD, extract_jinja2_fields_with_details
 
         result = extract_jinja2_fields_with_details("{{ row.get(key, 'N/A') }}")
-        assert result == {}
+        assert result == {DYNAMIC_ROW_FIELD: ["get_dynamic"]}
+
+    def test_dynamic_item_access_details_reported(self) -> None:
+        """row[dynamic_key] is visible as a dynamic item access detail."""
+        from elspeth.core.templates import DYNAMIC_ROW_FIELD, extract_jinja2_fields_with_details
+
+        result = extract_jinja2_fields_with_details('{% set k = "ssn" %}{{ row[k] }}')
+        assert result == {DYNAMIC_ROW_FIELD: ["item_dynamic"]}

@@ -39,6 +39,7 @@ from elspeth.engine.orchestrator.graph_wiring import build_source_id_map
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
     resolve_node_audit_metadata,
+    resolve_source_contracts_by_node_id,
 )
 from elspeth.engine.orchestrator.types import GraphArtifacts
 from elspeth.engine.orchestrator.validation import (
@@ -118,6 +119,10 @@ class GraphRegistrationService:
             aggregation_node_ids=aggregation_node_ids,
             coalesce_node_ids=coalesce_node_ids,
         )
+        source_contracts_by_node_id = resolve_source_contracts_by_node_id(
+            config,
+            source_id_map,
+        )
 
         # GRAPH phase - register nodes and edges in Landscape
         phase_start = time.perf_counter()
@@ -138,10 +143,10 @@ class GraphRegistrationService:
             register_nodes_with_landscape(
                 factory,
                 run_id,
-                config,
                 graph,
                 execution_order,
                 audit_metadata_by_node,
+                source_contracts_by_node_id,
             )
             self._record_declared_sources_ready(
                 factory=factory,

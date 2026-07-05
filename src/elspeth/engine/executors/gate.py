@@ -140,6 +140,7 @@ class GateExecutor:
         self._step_resolver = step_resolver
         self._edge_map = edge_map or {}
         self._route_resolution_map = route_resolution_map or {}
+        self._condition_parser_cache: dict[tuple[str, str, str], ExpressionParser] = {}
 
     def _resolve_route_destination(self, *, node_id: str, route_label: str) -> RouteDestination:
         """Resolve route label to concrete destination or fail closed."""
@@ -147,6 +148,16 @@ class GateExecutor:
             return self._route_resolution_map[(NodeID(node_id), route_label)]
         except KeyError as exc:
             raise MissingEdgeError(node_id=NodeID(node_id), label=route_label) from exc
+
+    def _get_condition_parser(self, *, gate_config: GateSettings, node_id: str) -> ExpressionParser:
+        """Return the parsed condition for this gate identity and condition."""
+        cache_key = (node_id, gate_config.name, gate_config.condition)
+        try:
+            return self._condition_parser_cache[cache_key]
+        except KeyError:
+            parser = ExpressionParser(gate_config.condition)
+            self._condition_parser_cache[cache_key] = parser
+            return parser
 
     def _dispatch_resolved_destination(
         self,
@@ -288,7 +299,7 @@ class GateExecutor:
             ):
                 start = time.perf_counter()
                 try:
-                    parser = ExpressionParser(gate_config.condition)
+                    parser = self._get_condition_parser(gate_config=gate_config, node_id=node_id)
                     # Pass PipelineRow directly - it implements __getitem__ and .get()
                     # This preserves dual-name access (normalized and original field names)
                     eval_result = parser.evaluate(token.row_data)

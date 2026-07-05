@@ -28,10 +28,9 @@ from pydantic import ValidationError
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
-    _json_schema_to_python_type,
     export_landscape,
-    reconstruct_schema_from_json,
 )
+from elspeth.engine.orchestrator.schema_reconstruction import _json_schema_to_python_type, reconstruct_schema_from_json
 
 
 @contextmanager
@@ -549,6 +548,23 @@ class TestExportCSVMultifile:
         assert row["nested.message"] == '\'=cmd|"/C calc"!A0'
         assert row["safe"] == "ordinary audit text"
         assert row["count"] == "3"
+
+
+def test_export_module_does_not_define_resume_schema_reconstruction_helpers() -> None:
+    """Resume schema reconstruction lives outside the post-run export module."""
+    repo_root = Path(__file__).parents[4]
+    path = repo_root / "src/elspeth/engine/orchestrator/export.py"
+    tree = ast.parse(path.read_text(), filename=str(path))
+    schema_helper_names = {
+        "reconstruct_schema_from_json",
+        "_create_schema_model",
+        "_model_name_for_field",
+        "_json_schema_to_python_type",
+    }
+
+    offenders = [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in schema_helper_names]
+
+    assert offenders == []
 
 
 # =============================================================================

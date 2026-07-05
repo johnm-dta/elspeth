@@ -4797,6 +4797,30 @@ class TestNodeStateGuard:
         kwargs = factory.execution.complete_node_state.call_args[1]
         assert kwargs["status"] == NodeStateStatus.COMPLETED
 
+    def test_complete_rejects_pending_without_standing_guard_down(self) -> None:
+        """PENDING is not terminal and cannot satisfy the guard invariant."""
+        from elspeth.engine.executors import NodeStateGuard
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="terminal"), guard:
+            guard.complete(NodeStateStatus.PENDING, duration_ms=10.0)
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception_type == "OrchestrationInvariantError"
+        assert "PENDING" in kwargs["error"].exception
+        assert guard.completed is False
+
     def test_state_id_accessible_inside_block(self) -> None:
         """guard.state_id is available after __enter__."""
         from elspeth.engine.executors import NodeStateGuard

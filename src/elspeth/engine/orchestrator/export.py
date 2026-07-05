@@ -37,6 +37,21 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.operations import track_operation
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+_CSV_FORMULA_ESCAPE_PREFIX = "'"
+
+
+def _neutralize_csv_formula_cell(value: Any) -> Any:
+    """Prefix spreadsheet-formula-looking string cells for CSV audit exports."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return f"{_CSV_FORMULA_ESCAPE_PREFIX}{value}"
+    return value
+
+
+def _neutralize_csv_formula_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy with spreadsheet-executable string cells neutralized."""
+    return {key: _neutralize_csv_formula_cell(value) for key, value in record.items()}
+
 
 def export_landscape(
     db: LandscapeDB,
@@ -185,7 +200,7 @@ def _export_csv_multifile(
         csv_path = export_dir / f"{record_type}.csv"
 
         # Flatten all records for CSV
-        flat_records = [formatter.format(r) for r in records]
+        flat_records = [_neutralize_csv_formula_record(formatter.format(r)) for r in records]
 
         # Get union of all keys (some records may have optional fields)
         all_keys: set[str] = set()

@@ -91,11 +91,9 @@ class LandscapeExporter:
         for record in exporter.export_run(run_id):
             json_file.write(json.dumps(record) + "\\n")
 
-        # Export to CSV (group by record_type)
-        records = list(exporter.export_run(run_id))
-        for rtype in ["run", "node", "edge", "row", "token"]:
-            typed_records = [r for r in records if r["record_type"] == rtype]
-            write_csv(f"{rtype}.csv", typed_records)
+        # Export to CSV without keeping every record in memory
+        for record_type, record in exporter.iter_run_records_by_type(run_id):
+            write_csv_record(record_type, record)
     """
 
     def __init__(
@@ -209,6 +207,21 @@ class LandscapeExporter:
             }
             manifest["signature"] = self._sign_record(manifest)
             yield manifest
+
+    def iter_run_records_by_type(
+        self,
+        run_id: str,
+        sign: bool = False,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Export audit data as a stream of ``(record_type, record)`` pairs.
+
+        This is the bounded-memory grouping surface for callers that need to
+        route records by type, such as multi-file CSV export. It preserves the
+        same deterministic order and signing behavior as :meth:`export_run`
+        without building a full ``record_type -> list[records]`` map.
+        """
+        for record in self.export_run(run_id, sign=sign):
+            yield record["record_type"], record
 
     def _iter_records(self, run_id: str) -> Iterator[ExportRecord]:
         """Internal: iterate over raw records (no signing).
@@ -773,8 +786,7 @@ class LandscapeExporter:
         """
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-        for record in self.export_run(run_id, sign=sign):
-            record_type = record["record_type"]
+        for record_type, record in self.iter_run_records_by_type(run_id, sign=sign):
             groups[record_type].append(record)
 
         # Return as regular dict with deterministic key order

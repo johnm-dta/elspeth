@@ -87,6 +87,13 @@ class _SinkDouble:
 class _ExporterDouble:
     def __init__(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
         self.export_run_grouped = _CallRecorder(return_value=grouped)
+        self.iter_run_records_by_type = _CallRecorder(return_value=self._iter_run_records_by_type(grouped))
+
+    @staticmethod
+    def _iter_run_records_by_type(grouped: dict[str, list[dict[str, Any]]]) -> Any:
+        for record_type, records in grouped.items():
+            for record in records:
+                yield record_type, record
 
 
 def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
@@ -168,6 +175,49 @@ class TestExportLandscapeJSON:
         sink.flush.assert_called_once()
         sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
+
+    def test_json_export_writes_records_in_bounded_batches(self) -> None:
+        """Large JSON exports write bounded batches instead of one full-run list."""
+        db = object()
+        settings = self._make_settings()
+        sink, factory = _make_sink_and_factory()
+        records = [{"record_type": "row", "index": i} for i in range(1001)]
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
+            exporter = MockExporter.return_value
+            exporter.export_run.return_value = records
+
+            export_landscape(db, "run-1", settings, factory)
+
+        assert [len(call[0][0]) for call in sink.write.calls] == [1000, 1]
+
+    def test_json_export_records_count_as_operation_output(self) -> None:
+        """JSON record_count is captured after streaming, not pre-counted as input."""
+        db = object()
+        settings = self._make_settings()
+        _sink, factory = _make_sink_and_factory()
+        captured: list[dict[str, Any]] = []
+
+        @contextmanager
+        def capture_track_operation(*_args: Any, **kwargs: Any) -> Any:
+            handle = SimpleNamespace(operation_id="op-export", output_data=None)
+            captured.append({"kwargs": kwargs, "handle": handle})
+            yield handle
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", capture_track_operation),
+        ):
+            exporter = MockExporter.return_value
+            exporter.export_run.return_value = [{"record_type": "run"}, {"record_type": "node"}]
+
+            export_landscape(db, "run-1", settings, factory)
+
+        assert captured[0]["kwargs"]["input_data"] == {"export_format": "json"}
+        assert captured[0]["handle"].output_data == {"record_count": 2, "batches_written": 1}
 
     def test_missing_sink_raises_valueerror(self) -> None:
         """Referencing non-existent sink raises clear error."""
@@ -441,6 +491,36 @@ class TestExportCSVMultifile:
             reader = csv.DictReader(f)
             rows = list(reader)
         assert len(rows) == 2
+
+    def test_streams_csv_records_without_grouped_materializer(self, tmp_path: Path) -> None:
+        """CSV export consumes typed records instead of whole-run grouped lists."""
+        export_dir = tmp_path / "export"
+        exporter = _ExporterDouble(
+            {
+                "rows": [
+                    {"row_id": "r1", "source_data_hash": "h1"},
+                    {"row_id": "r2", "source_data_hash": "h2"},
+                ]
+            }
+        )
+        exporter.export_run_grouped.side_effect = AssertionError("export_run_grouped materializes the full run")
+
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
+
+        exporter.iter_run_records_by_type.assert_called_once_with("run-1", sign=False)
+        with open(export_dir / "rows.csv") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        assert rows == [
+            {"row_id": "r1", "source_data_hash": "h1"},
+            {"row_id": "r2", "source_data_hash": "h2"},
+        ]
 
     def test_empty_record_types_skipped(self, tmp_path: Path) -> None:
         """Record types with empty lists don't produce files."""

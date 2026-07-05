@@ -41,13 +41,12 @@ from elspeth.contracts.declaration_contracts import (
     register_declaration_contract,
 )
 from elspeth.contracts.errors import (
-    FrameworkBugError,
     OrchestrationInvariantError,
     PassThroughContractViolation,
     PassThroughPayload,
 )
 from elspeth.contracts.schema_contract import PipelineRow
-from elspeth.engine.executors.declaration_flags import _require_bool_flag
+from elspeth.engine.executors.declaration_flags import _require_bool_flag, _runtime_observed_fields
 
 # Module-level counter — both call sites import this module and share the
 # same instrument.  Tests that need to assert on increments should monkeypatch
@@ -105,11 +104,7 @@ def verify_pass_through(
         )
 
     for emitted in emitted_rows:
-        if emitted.contract is None:
-            raise FrameworkBugError(f"Transform {transform_name!r} emitted row with no contract. Framework invariant violated.")
-        runtime_contract_fields = frozenset(fc.normalized_name for fc in emitted.contract.fields)
-        runtime_payload_fields = frozenset(emitted.keys())
-        runtime_observed = runtime_contract_fields & runtime_payload_fields
+        runtime_observed = _runtime_observed_fields(emitted, plugin_name=transform_name)
         divergence = input_fields - runtime_observed
         if divergence:
             _VIOLATIONS_COUNTER.add(1, {"transform": transform_name})

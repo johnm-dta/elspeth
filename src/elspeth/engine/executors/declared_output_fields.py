@@ -31,7 +31,6 @@ from elspeth.contracts.errors import (
     DeclaredOutputFieldRowViolationPayload,
     DeclaredOutputFieldsPayload,
     DeclaredOutputFieldsViolation,
-    FrameworkBugError,
     OrchestrationInvariantError,
 )
 from elspeth.contracts.plugin_roles import require_declared_output_fields_plugin
@@ -40,6 +39,7 @@ from elspeth.contracts.schema_contract import (
     PipelineRow,
     SchemaContract,
 )
+from elspeth.engine.executors.declaration_flags import _runtime_observed_fields
 
 _MAX_VIOLATION_SAMPLES = 10
 _MAX_RUNTIME_OBSERVED_FIELDS = 20
@@ -84,11 +84,7 @@ def verify_declared_output_fields(
     violations: list[DeclaredOutputFieldRowViolationPayload] = []
     violation_count = 0
     for emitted_index, emitted in enumerate(emitted_rows):
-        if emitted.contract is None:
-            raise FrameworkBugError(f"Transform {plugin_name!r} emitted row with no contract. Framework invariant violated.")
-        runtime_contract_fields = frozenset(fc.normalized_name for fc in emitted.contract.fields)
-        runtime_payload_fields = frozenset(emitted.keys())
-        runtime_observed = runtime_contract_fields & runtime_payload_fields
+        runtime_observed = _runtime_observed_fields(emitted, plugin_name=plugin_name)
         missing = declared_output_fields - runtime_observed
         if not missing:
             continue

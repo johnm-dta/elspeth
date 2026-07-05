@@ -1189,110 +1189,113 @@ class ResumeCoordinator:
         # ─────────────────────────────────────────────────────────────────
 
         self._checkpoints.set_active_graph(graph)
-
-        # 1. Setup (loads graph artifacts from original run's DB records)
-        artifacts = setup_resume_context(factory, run_id, config, graph)
-
-        # 2. Initialize context + processor (source on_start skipped)
-        run_ctx = self._context_factory.initialize_run_context(
-            factory,
-            run_id,
-            config,
-            graph,
-            settings,
-            artifacts,
-            payload_store,
-            include_source_on_start=False,
-            barrier_restore=barrier_restore,
-            shutdown_event=shutdown_event,
-            coordination_token=coordination_token,
-        )
-
-        # ADR-025 §3: schema contracts are plural-by-source on resume.
-        # ``ctx.contract`` is set per-row inside the resume loop via the
-        # per-source lookup; the previous singular write here was a dead
-        # assignment that the loop's per-row reassignment overwrote on
-        # the first row anyway. ``run_transform_runtime_preflights``
-        # does not read ``ctx.contract`` (it only sets ``ctx.node_id``
-        # per-transform). Setting ``ctx.contract`` to None here is not
-        # required — the field carries the prior run's value through
-        # nullcontext if no rows are reprocessed, which is irrelevant
-        # because the early-exit path skips this method entirely.
-        preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
         try:
-            run_transform_runtime_preflights(
+            # 1. Setup (loads graph artifacts from original run's DB records)
+            artifacts = setup_resume_context(factory, run_id, config, graph)
+
+            # 2. Initialize context + processor (source on_start skipped)
+            run_ctx = self._context_factory.initialize_run_context(
                 factory,
                 run_id,
                 config,
-                run_ctx.ctx,
-                retry_manager=preflight_retry_manager,
+                graph,
+                settings,
+                artifacts,
+                payload_store,
+                include_source_on_start=False,
+                barrier_restore=barrier_restore,
                 shutdown_event=shutdown_event,
-            )
-        except BaseException:
-            cleanup_plugins(config, run_ctx.ctx, include_source=False)
-            raise
-
-        loop_ctx = LoopContext(
-            counters=ExecutionCounters(),
-            pending_tokens={name: [] for name in config.sinks},
-            processor=run_ctx.processor,
-            ctx=run_ctx.ctx,
-            config=config,
-            agg_transform_lookup=run_ctx.agg_transform_lookup,
-            coalesce_executor=run_ctx.coalesce_executor,
-            coalesce_node_map=run_ctx.coalesce_node_map,
-        )
-        source_on_success_by_source: dict[NodeID, str] = {}
-        for source_name, source_id in artifacts.source_id_map.items():
-            source_on_success = config.sources[source_name].on_success
-            if source_on_success is None:
-                raise OrchestrationInvariantError(f"Cannot resume rows from source {source_name!r}: source on_success routing is missing.")
-            source_on_success_by_source[source_id] = source_on_success
-
-        try:
-            # 3. Process loop (resume path)
-            interrupted = run_resume_processing_loop(
-                loop_ctx,
-                unprocessed_rows,
-                incomplete_by_row=incomplete_by_row,
-                recovery_manager=recovery_manager,
-                payload_store=payload_store,
-                run_id=run_id,
-                resume_checkpoint_id=resume_checkpoint_id,
-                schema_contracts_by_source=schema_contracts_by_source,
-                source_on_success_by_source=source_on_success_by_source,
-                shutdown_event=shutdown_event,
-                check_coordination_latch=check_coordination_latch,
+                coordination_token=coordination_token,
             )
 
-            # 4. Flush + write sinks with checkpoint advancement
-            self._sink_flush.flush_and_write_sinks(
-                factory,
-                run_id,
-                loop_ctx,
-                artifacts.sink_id_map,
-                artifacts.edge_map,
-                interrupted,
-                on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                scheduler_terminalizer=run_ctx.processor,
+            # ADR-025 §3: schema contracts are plural-by-source on resume.
+            # ``ctx.contract`` is set per-row inside the resume loop via the
+            # per-source lookup; the previous singular write here was a dead
+            # assignment that the loop's per-row reassignment overwrote on
+            # the first row anyway. ``run_transform_runtime_preflights``
+            # does not read ``ctx.contract`` (it only sets ``ctx.node_id``
+            # per-transform). Setting ``ctx.contract`` to None here is not
+            # required — the field carries the prior run's value through
+            # nullcontext if no rows are reprocessed, which is irrelevant
+            # because the early-exit path skips this method entirely.
+            preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
+            try:
+                run_transform_runtime_preflights(
+                    factory,
+                    run_id,
+                    config,
+                    run_ctx.ctx,
+                    retry_manager=preflight_retry_manager,
+                    shutdown_event=shutdown_event,
+                )
+            except BaseException:
+                cleanup_plugins(config, run_ctx.ctx, include_source=False)
+                raise
+
+            loop_ctx = LoopContext(
+                counters=ExecutionCounters(),
+                pending_tokens={name: [] for name in config.sinks},
+                processor=run_ctx.processor,
+                ctx=run_ctx.ctx,
+                config=config,
+                agg_transform_lookup=run_ctx.agg_transform_lookup,
+                coalesce_executor=run_ctx.coalesce_executor,
+                coalesce_node_map=run_ctx.coalesce_node_map,
             )
+            source_on_success_by_source: dict[NodeID, str] = {}
+            for source_name, source_id in artifacts.source_id_map.items():
+                source_on_success = config.sources[source_name].on_success
+                if source_on_success is None:
+                    raise OrchestrationInvariantError(
+                        f"Cannot resume rows from source {source_name!r}: source on_success routing is missing."
+                    )
+                source_on_success_by_source[source_id] = source_on_success
 
-            # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b
-            # postconditions only after resume sink writes finish.
-            factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
-        except GracefulShutdownError:
-            raise
-        except Exception as exc:
-            raise _RunFailedWithPartialResultError(
-                original_error=exc,
-                partial_result=loop_ctx.counters.to_run_result(run_id, status=RunStatus.FAILED),
-            ) from exc
+            try:
+                # 3. Process loop (resume path)
+                interrupted = run_resume_processing_loop(
+                    loop_ctx,
+                    unprocessed_rows,
+                    incomplete_by_row=incomplete_by_row,
+                    recovery_manager=recovery_manager,
+                    payload_store=payload_store,
+                    run_id=run_id,
+                    resume_checkpoint_id=resume_checkpoint_id,
+                    schema_contracts_by_source=schema_contracts_by_source,
+                    source_on_success_by_source=source_on_success_by_source,
+                    shutdown_event=shutdown_event,
+                    check_coordination_latch=check_coordination_latch,
+                )
 
+                # 4. Flush + write sinks with checkpoint advancement
+                self._sink_flush.flush_and_write_sinks(
+                    factory,
+                    run_id,
+                    loop_ctx,
+                    artifacts.sink_id_map,
+                    artifacts.edge_map,
+                    interrupted,
+                    on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                    scheduler_terminalizer=run_ctx.processor,
+                )
+
+                # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b
+                # postconditions only after resume sink writes finish.
+                factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
+            except GracefulShutdownError:
+                raise
+            except Exception as exc:
+                raise _RunFailedWithPartialResultError(
+                    original_error=exc,
+                    partial_result=loop_ctx.counters.to_run_result(run_id, status=RunStatus.FAILED),
+                ) from exc
+
+            finally:
+                cleanup_plugins(config, run_ctx.ctx, include_source=False)
+
+            return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
         finally:
-            cleanup_plugins(config, run_ctx.ctx, include_source=False)
             self._checkpoints.set_active_graph(None)
-
-        return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
 
 
 def handle_incomplete_batches(

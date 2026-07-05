@@ -600,6 +600,7 @@ class TestResumeFinalizesAsFailed:
             coalesce_executor=None,
             coalesce_node_map={},
         )
+        graph = MagicMock(spec=ExecutionGraph)
 
         with (
             patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
@@ -615,7 +616,7 @@ class TestResumeFinalizesAsFailed:
                 MagicMock(spec=RecorderFactory),
                 "run-resume-runtime-preflight-fails",
                 config,
-                MagicMock(spec=ExecutionGraph),
+                graph,
                 unprocessed_rows=(),
                 barrier_restore=None,
                 payload_store=MagicMock(spec=PayloadStore),
@@ -627,6 +628,7 @@ class TestResumeFinalizesAsFailed:
 
         source.on_complete.assert_not_called()
         source.close.assert_not_called()
+        assert orch._checkpoints._active_graph is None
         transform.on_complete.assert_called_once_with(run_ctx.ctx)
         transform.close.assert_called_once_with()
         sink.on_complete.assert_called_once_with(run_ctx.ctx)

@@ -42,7 +42,6 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine._error_hash import compute_error_hash
-from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
 from elspeth.engine.executors.declaration_dispatch import (
     run_post_emission_checks,
     run_pre_emission_checks,
@@ -442,17 +441,8 @@ class TransformExecutor:
             emitted_rows = tuple(result.rows)
         else:
             emitted_rows = ()
+        used_success_empty = result.rows is not None and len(result.rows) == 0
         try:
-            verify_zero_emission_declaration_path(
-                plugin=transform,
-                plugin_name=transform.name,
-                node_id=node_id,
-                run_id=run_id,
-                row_id=token.row_id,
-                token_id=token.token_id,
-                emitted_count=len(emitted_rows),
-                used_success_empty=result.rows is not None and len(result.rows) == 0,
-            )
             run_post_emission_checks(
                 inputs=PostEmissionInputs(
                     plugin=transform,
@@ -464,7 +454,10 @@ class TransformExecutor:
                     static_contract=static_contract,
                     effective_input_fields=effective_input_fields,
                 ),
-                outputs=PostEmissionOutputs(emitted_rows=emitted_rows),
+                outputs=PostEmissionOutputs(
+                    emitted_rows=emitted_rows,
+                    used_success_empty=used_success_empty,
+                ),
             )
         except (
             DeclarationContractViolation,

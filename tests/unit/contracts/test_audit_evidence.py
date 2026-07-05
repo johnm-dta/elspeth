@@ -17,11 +17,19 @@ import pytest
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.errors import PassThroughContractViolation, PluginContractViolation
 
+REDACTED = "<redacted-secret>"
+
 
 def test_plugin_contract_violation_is_audit_evidence() -> None:
     # PluginContractViolation inherits AuditEvidenceBase (Task 4 migration).
     err = PluginContractViolation("hello")
     assert isinstance(err, AuditEvidenceBase)
+
+
+def test_plugin_contract_violation_audit_message_is_scrubbed() -> None:
+    err = PluginContractViolation("contract failed with api_key=sk-1234567890abcdef1234567890abcdef")  # secret-scan: allow-this-line
+    payload = err.to_audit_dict()
+    assert payload["message"] == REDACTED
 
 
 def test_pass_through_violation_is_audit_evidence() -> None:

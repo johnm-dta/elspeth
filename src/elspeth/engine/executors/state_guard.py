@@ -25,6 +25,7 @@ from elspeth.contracts.errors import (
     AuditIntegrityError,
     OrchestrationInvariantError,
 )
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -44,8 +45,9 @@ def _render_exception_message(exc_type: type[BaseException], exc_val: BaseExcept
     leave the node state permanently OPEN (elspeth-d67453c22f). Audit
     terminality outranks message fidelity: fall back to the exception type
     name (guaranteed non-empty) when the message is empty/whitespace or
-    unrenderable. No scrubbing — ``ExecutionError.exception`` is a Tier-2
-    audit DTO that records the real error verbatim.
+    unrenderable. ``ExecutionError.exception`` and guard-raised
+    ``AuditIntegrityError`` messages reuse this rendered string, so scrub it
+    at the shared source.
     """
     if exc_val is None:
         return exc_type.__name__
@@ -56,7 +58,7 @@ def _render_exception_message(exc_type: type[BaseException], exc_val: BaseExcept
         return exc_type.__name__
     if not message.strip():
         return exc_type.__name__
-    return message
+    return scrub_text_for_audit(message)
 
 
 class NodeStateGuard:
@@ -298,6 +300,9 @@ class NodeStateGuard:
             context = exc_val.to_audit_dict()
             if not isinstance(context, Mapping):
                 raise TypeError(f"Audit evidence must be a mapping, got {type(context).__name__}")
+            if any(type(key) is not str for key in context):
+                raise TypeError("Audit evidence keys must be strings")
+            context = scrub_payload_for_audit(context)
             canonical_json(context)
             return context, None
         except Exception as exc:

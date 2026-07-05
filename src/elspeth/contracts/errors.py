@@ -1308,7 +1308,7 @@ class PluginContractViolation(AuditEvidenceBase, RuntimeError):
         surface structured fields. Return value must be JSON-serializable —
         the Landscape records it through canonical JSON serialization.
         """
-        return {"exception_type": type(self).__name__, "message": str(self)}
+        return {"exception_type": type(self).__name__, "message": scrub_text_for_audit(str(self))}
 
 
 # TIER-2: Plugin success-empty misuse — row-level contract bug remains fully auditable and does not imply Tier-1 framework or audit-record corruption.

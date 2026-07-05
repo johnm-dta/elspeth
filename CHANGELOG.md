@@ -13,8 +13,8 @@ then the final wiring — is driven by a language model through the
 in-progress pipeline in place rather than asking the operator to author
 plugin options by hand. A revise mode reopens a committed stage and amends
 it against its current state, and the flow terminates at a new wiring stage
-whose completion is gated by an advisor sign-off. The design is recorded in
-`docs/superpowers/specs/2026-06-25-llm-primary-guided-creation-design.md`.
+whose completion is gated by an advisor sign-off. The guided-mode design
+records live under `docs/superpowers/specs/`.
 
 The web session database resets on upgrade and the Landscape audit database
 does not: `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at the 0.6.0

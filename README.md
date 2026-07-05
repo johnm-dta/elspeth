@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: 0.6.0](https://img.shields.io/badge/status-0.6.0-green.svg)
+![Status: 0.7.0](https://img.shields.io/badge/status-0.7.0-green.svg)
 
 Elspeth is a high-assurance pipeline substrate for consequential workflows:
 systems where the wrong output can cause operational, legal, safety, financial,
@@ -145,66 +145,79 @@ reasonable to let both authoring surfaces feed the same executor.
 
 ---
 
-## What Changed In 0.6.0
+## What Changed In 0.7.0
 
-0.6.0 is the single-worker-to-multi-worker transition. Multiple cooperating
-processes on one host can
-now operate against a single run backed by one WAL SQLite audit database: one
-**leader** owns source ingest, barrier evaluation, checkpoints, finalization,
-and sink I/O, while any number of **claim-only followers** attach through a new
-`elspeth join` entry point. The deployment shape, its alternatives, and the
-operator requirements are recorded in
-[ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md). The audit-database
-schema epoch advances to 21; per the delete-the-DB migration policy, operators
-delete the prior database before the first run on this version.
+0.7.0 makes guided pipeline creation **LLM-primary**. In the Web Composer's
+guided flow, each stage of a pipeline — source, then sink, then transforms,
+then the final wiring — is now driven by a language model through the
+`/guided/chat` endpoint, which applies the model's proposed change to the
+in-progress pipeline in place instead of asking the operator to hand-author
+plugin options. A revise mode reopens a committed stage and amends it against
+its current state, and the flow terminates at a new wiring stage (`STEP_4_WIRE`)
+whose completion is gated by an explicit confirm-wiring contract and an advisor
+sign-off. The guided-mode design records live under
+[`docs/superpowers/specs/`](docs/superpowers/specs/).
 
-Coordination deltas:
+Guided authoring deltas:
 
-- **`elspeth join <run_id>`** — attach a follower to a RUNNING run. Admission
-  is one atomic transaction gated on run status, pipeline-config-hash equality,
-  and a live leader seat, after a filesystem preflight that fails with an
-  operator-actionable error when the worker cannot write the database, its
-  directory, or the WAL sidecars. Racing `resume()` remains refused.
-- **Worker registry and heartbeat** — a dedicated heartbeat thread beats the
-  worker row and the leader seat in one transaction; liveness drives takeover
-  and reaping decisions.
-- **Dead-leader takeover** — a run left RUNNING under a dead leader is now
-  resumable via `elspeth resume` (previously a wedged, unrecoverable state); a
-  leader frozen holding the write lock surfaces an operator-actionable error
-  naming the process to terminate before resuming.
-- **Journal-first barrier buffers** — aggregation and coalesce acceptance is
-  durable in the scheduler journal before it enters executor memory, so barrier
-  state spans workers and survives takeover (ADR-029 amended).
-- **Epoch-fenced leader writes** — finalization, run-status changes,
-  checkpoints, barrier completion, lease recovery, and source ingest each
-  verify leadership inside their transaction; a superseded leader's writes are
-  refused, not applied.
-- **Liveness-aware lease recovery** — an expired item lease held by a worker
-  whose heartbeat is still live is revived, not reaped, so a long in-flight
-  model call is no longer mistaken for a dead worker.
+- **Conversational builder with live-graph verification** — the guided surface
+  becomes a docked chat paired with an always-visible verification panel: a
+  plain-language gloss and a validation summary sit above the live pipeline
+  graph so the operator can read what the model built as it is built. Each
+  interpretation decision renders as a read-only summary card that leads with
+  the model's own rationale, carries an `Explain` button backed by grounded
+  advisory context, and gates advancement behind a two-stage View→Approve
+  acknowledgement.
+- **Pending-interpretation gate** — guided sessions surface pending
+  interpretation cards (invented source, pipeline decision, …) at the persist
+  seam and block advancement until they are resolved.
+- **Always-on prompt-shield review** — the previously advisory prompt-shield
+  review is now always-on, with a three-state (A/B/C) shield model wired into
+  the confirm-wiring route.
+- **Passive first-run tutorial recut** — the hello-world tutorial teaches
+  source→transform→sink by having a model rate synthetic government-style pages
+  over a deterministic web-scrape source; it runs as a staged guided walk whose
+  stage is persisted, so a mid-tutorial reload resumes where it left off rather
+  than restarting at the welcome bookend.
+- **ELSPETH design system and marketing website** — a typed React primitive
+  library lands under `src/elspeth/web/frontend/src/components/ui/`, and a
+  standalone static, design-token-based marketing site is added under
+  `website/`, separate from the application frontend.
 
-Plugin-boundary correctness (the plugins-subsystem remediation) — fixes that
-keep plugins honest at the trust boundary:
+New plugin:
 
-- **`AzureBlobSource` parses CSV strictly** (`strict=True`), so a
-  malformed-quote row is quarantined with an audit record instead of being
-  silently coerced into adjacent fields.
-- **`batch_stats` skips and reports `None`** instead of raising and aborting
-  the run; an all-`None` group returns an audited validation error rather than
-  a fabricated `count=0`/`sum=0`.
-- **`batch_outlier_annotator` no longer fabricates `robust_z_score=0.0`** when
-  the median absolute deviation is zero — it falls back to a mean-absolute-
-  deviation modified z-score, or emits an honest `None` for a wholly identical
-  batch.
-- **The non-finite scanner uses `isinstance`**, so a `NaN`/`Infinity` nested
-  inside a `Mapping` or `tuple` subclass can no longer bypass the
-  source-boundary gate.
-- **`value_transform` retypes the output contract** when an overwrite changes a
-  field's runtime type, so the emitted row no longer fails its own contract.
+- **`azure_document_intelligence` enrichment transform** — enriches rows by
+  sending a document to Azure AI Document Intelligence and folding the extracted
+  layout/content back onto the row, declared as an external-call boundary with
+  fail-closed page-count handling and host:port endpoint pinning.
 
-See the rewritten N>1 lease-recovery runbook at
-[`docs/runbooks/scheduler-lease-recovery.md`](docs/runbooks/scheduler-lease-recovery.md)
-and [CHANGELOG.md](CHANGELOG.md) for the full detail.
+Security and boundary hardening:
+
+- **Key Vault `vault_url` is restricted** to the approved `*.vault.azure.net`
+  endpoint class by a host check, with an optional exact-URL pin via
+  `ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS`, closing an SSRF vector where a foreign
+  vault URL could redirect the managed-identity challenge.
+- **Composer blob sink paths are scoped to the owning session**, so one session
+  cannot address another session's blob paths.
+- **Database credentials are scrubbed before audit persistence** —
+  `odbc_connect` connection-string passwords and database-node DSN passwords no
+  longer reach an audit record or a fingerprint.
+- **Output-echoed fields reject environment-variable placeholders**, and audit
+  exports redact raw failing rows by default.
+
+**Operational — the web session database resets on upgrade; the audit database
+does not.** `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at 0.6.0) while
+`SQLITE_SCHEMA_EPOCH` — the Landscape audit DB — stays 21, so per the
+delete-the-DB migration policy this is a single-DB, session-only cutover.
+Before the first start on 0.7.0, stop `elspeth-web.service`, archive and remove
+`data/sessions.db` (and its `-wal`/`-shm` sidecars), and restart; the bootstrap
+recreates the session schema on first start. `data/auth.db` is a SEPARATE file —
+local user accounts are NOT reset.
+
+The 0.6.0 multi-worker deployment shape (`elspeth join`, leader/follower
+coordination over one WAL SQLite audit database) is unchanged; see
+[ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md) and
+[CHANGELOG.md](CHANGELOG.md) for the full release-by-release detail.
 
 ---
 
@@ -400,7 +413,7 @@ Current plugin families include:
 | ------ | -------- |
 | Sources and sinks | CSV, JSON, text, null, Azure Blob, Dataverse, database, Chroma, local file outputs |
 | Row transforms | Field mapping, type coercion, keyword filtering, truncation, line/json expansion |
-| LLM and safety | Regular `llm` transform with Azure OpenAI/OpenRouter support, multi-query and provider pooling, RAG retrieval, Azure Content Safety, Prompt Shield |
+| LLM and safety | Regular `llm` transform with Azure OpenAI/OpenRouter support, multi-query and provider pooling, RAG retrieval, Azure Content Safety, Prompt Shield, Azure Document Intelligence extraction |
 | Batch analytics | `batch_distribution_profile`, `batch_experiment_compare`, `batch_classifier_metrics`, `batch_paired_preference`, `batch_drift_compare`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_threshold_summary`, `batch_effect_size` |
 
 The old batch-specific LLM transforms, `azure_batch_llm` and
@@ -515,11 +528,14 @@ Elspeth is a dual-surface authoring and execution platform: a CLI-first
 auditable pipeline engine plus a Web Composer for guided authoring, over one
 shared execution and audit core.
 
-Current 0.6.0 behaviour:
+Current 0.7.0 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,
   validation, service-side YAML export, and optional advisor tools.
+- Guided pipeline creation is LLM-primary: each stage is built by a language
+  model through `/guided/chat`, presented in a conversational builder with a
+  live verification panel and gated at the wire stage by an advisor sign-off.
 - Composer validation and web execution use runtime-shaped engine setup rather
   than a standalone UI validator.
 - The executor still runs from runtime-assembled settings and graph objects, not
@@ -746,6 +762,9 @@ export ELSPETH_FINGERPRINT_KEY="your-stable-key"
 # Azure Key Vault (alternative to direct key)
 export ELSPETH_KEYVAULT_URL="https://your-vault.vault.azure.net/"
 export ELSPETH_KEYVAULT_SECRET_NAME="elspeth-fingerprint-key"
+# Optional: pin the exact allowed Key Vault URL(s), comma-separated, as an SSRF
+# hardening control; when unset, any https *.vault.azure.net host is accepted
+export ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS="https://your-vault.vault.azure.net/"
 
 # LLM API keys
 export AZURE_OPENAI_API_KEY="..."
@@ -852,12 +871,12 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.6.0` with the tag
+Elspeth can run from a published Docker image. Replace `v0.7.0` with the tag
 published for the release you are deploying; use the exact tag for an older
 release line when deploying an earlier version.
 
 ```bash
-IMAGE_TAG=v0.6.0
+IMAGE_TAG=v0.7.0
 
 # Run a pipeline
 docker run --rm \
@@ -909,7 +928,7 @@ elspeth/
 
 | Component | Technology | Purpose |
 | --------- | ---------- | ------- |
-| CLI | Typer | Commands: run, explain, validate, resume, purge |
+| CLI | Typer | Commands: run, join, explain, validate, resume, purge |
 | TUI | Textual | Interactive lineage explorer |
 | Config | Dynaconf + Pydantic | Multi-source with env var expansion |
 | Plugins | pluggy | Dynamic discovery, extensible components |

@@ -433,6 +433,8 @@ def _make_sink(
 class _AggregationTransformDouble:
     def __init__(self, *, name: str = "agg_transform") -> None:
         self.name = name
+        self.input_schema = _PermissiveSchema
+        self.output_schema = _PermissiveSchema
         self.process = _CallRecorder()
 
 
@@ -2641,6 +2643,62 @@ class TestAggregationExecutor:
         assert context_after.row_end == 2
         assert context_after.is_end_of_source is False
 
+    def test_execute_flush_validates_buffered_rows_before_process(self) -> None:
+        """Schema-invalid buffered rows must not reach batch transform execution."""
+        from elspeth.contracts import PluginSchema
+
+        class StrictInputSchema(PluginSchema):
+            count: int
+
+        executor, factory, nid = self._make_agg_executor(count=1)
+        contract = _make_contract()
+        executor.buffer_row(nid, _make_token(data={"count": "42"}, token_id="t1", contract=contract))
+
+        transform = _make_aggregation_transform("agg_transform")
+        transform.input_schema = StrictInputSchema
+        transform.process.return_value = TransformResult.success(
+            make_row({"value": "unused"}, contract=contract),
+            success_reason={"action": "unused"},
+        )
+        ctx = make_context()
+
+        with pytest.raises(PluginContractViolation, match="input validation failed"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        transform.process.assert_not_called()
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["error"].exception_type == "PluginContractViolation"
+        failed_batches = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
+        assert len(failed_batches) == 1
+
+    def test_execute_flush_validates_success_output_before_completed_state(self) -> None:
+        """Schema-invalid batch output must fail before node state is completed."""
+        from elspeth.contracts import PluginSchema
+
+        class StrictOutputSchema(PluginSchema):
+            count: int
+
+        executor, factory, nid = self._make_agg_executor(count=1)
+        contract = _make_contract()
+        executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
+
+        transform = _make_aggregation_transform("agg_transform")
+        transform.output_schema = StrictOutputSchema
+        transform.process.return_value = TransformResult.success(
+            make_row({"count": "42"}, contract=contract),
+            success_reason={"action": "aggregated"},
+        )
+        ctx = make_context()
+
+        with pytest.raises(PluginContractViolation, match="output validation failed"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["error"].exception_type == "PluginContractViolation"
+        assert all(c[1].get("status") != NodeStateStatus.COMPLETED for c in factory.execution.complete_node_state.call_args_list)
+        failed_batches = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
+        assert len(failed_batches) == 1
+
     def test_execute_flush_error_result_marks_batch_failed(self) -> None:
         """Error result from transform marks batch as FAILED."""
         executor, factory, nid = self._make_agg_executor(count=2)
@@ -2732,6 +2790,8 @@ class TestAggregationExecutor:
             """Tiny batch-aware transform that snapshots ctx.aggregation_batch."""
 
             name = "capturing_agg"
+            input_schema = _PermissiveSchema
+            output_schema = _PermissiveSchema
 
             def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
                 # ctx.aggregation_batch must be set by AggregationExecutor before process()
@@ -2873,6 +2933,8 @@ class TestAggregationExecutor:
 
         class _CapturingBatchTransform:
             name = "capturing_agg"
+            input_schema = _PermissiveSchema
+            output_schema = _PermissiveSchema
 
             def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
                 if ctx.aggregation_batch is None:

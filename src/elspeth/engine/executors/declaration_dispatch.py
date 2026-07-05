@@ -92,14 +92,24 @@ def _serialize_plugin_name(plugin: Any) -> str:
     return "".join((name,))
 
 
+def _violation_message_label(violation: AuditEvidenceBase) -> str:
+    """Return a non-secret child label for aggregate error text."""
+    contract_name = getattr(violation, "contract_name", None)
+    if contract_name:
+        return f"{type(violation).__name__}:{contract_name}"
+    return type(violation).__name__
+
+
 def _build_aggregate_message(violations: Sequence[AuditEvidenceBase]) -> str:
-    """Compose the aggregate's human-readable message from child messages.
+    """Compose the aggregate's human-readable message without child text.
 
     Structured per-child data travels in ``to_audit_dict()``'s ``violations``
-    list; the message is for triage read-ability.
+    list. The message is for triage readability and must not interpolate
+    raw child exception strings because those can carry plugin/row secrets
+    before audit DTO scrubbing runs.
     """
     exception_types = "/".join(type(v).__name__ for v in violations)
-    child_preview = "; ".join(str(v) for v in violations[:3])
+    child_preview = "; ".join(_violation_message_label(v) for v in violations[:3])
     if len(violations) > 3:
         child_preview += f"; ... [{len(violations) - 3} more]"
     return f"{len(violations)} declaration contracts fired on a single (row, call-site) tuple ({exception_types}): {child_preview}"

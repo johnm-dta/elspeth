@@ -579,6 +579,7 @@ class SinkExecutor:
         self,
         *,
         primary_states: list[tuple[TokenInfo, NodeStateOpen]],
+        divert_states: list[tuple[TokenInfo, NodeStateOpen]],
         artifact_info: ArtifactDescriptor,
         total_token_count: int,
         duration_ms: float,
@@ -594,6 +595,12 @@ class SinkExecutor:
         each primary state COMPLETED (bulk vs loop), registers the artifact,
         records durable terminal outcomes (with the COALESCED join-group guard),
         and runs the checkpoint callback. Returns the registered artifact.
+
+        divert_states are the diverted tokens' still-OPEN primary anchors. A
+        failure here propagates out of write() before Phase 3 runs, so nothing
+        downstream would ever terminalize them (elspeth-5a5e83d3e5) — the
+        cleanup envelope closes them FAILED alongside any not-yet-completed
+        primary states before re-raising.
         """
         # Amortize batch write time across ALL tokens (including diverted)
         # since sink.write() processed the entire batch
@@ -612,66 +619,91 @@ class SinkExecutor:
                     per_token_ms,
                 )
             )
-        if type(self._execution) is ExecutionRepository:
-            self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs))
-        else:
-            for state_id, sink_output, duration in primary_sink_outputs:
-                self._execution.complete_node_state(
-                    state_id=state_id,
-                    status=NodeStateStatus.COMPLETED,
-                    output_data=sink_output,
-                    duration_ms=duration,
-                )
-
-        # Register artifact (linked to first primary state)
-        first_state = primary_states[0][1]
-        artifact = self._execution.register_artifact(
-            run_id=self._run_id,
-            state_id=first_state.state_id,
-            sink_node_id=sink_node_id,
-            artifact_type=artifact_info.artifact_type,
-            path=artifact_info.path_or_uri,
-            content_hash=artifact_info.content_hash,
-            size_bytes=artifact_info.size_bytes,
-        )
-
-        # Record durable outcomes for primary tokens.
-        for token, _ in primary_states:
-            join_group_id: str | None = None
-            if pending_outcome.path == TerminalPath.COALESCED:
-                join_group_id = token.join_group_id
-                if join_group_id is None:
-                    raise OrchestrationInvariantError(
-                        f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
-                        "requires token.join_group_id before sink recording"
+        completed_primary_ids: set[str] = set()
+        try:
+            if type(self._execution) is ExecutionRepository:
+                # Single audit transaction: on failure nothing was completed,
+                # so leaving completed_primary_ids empty is accurate.
+                self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs))
+                completed_primary_ids.update(state_id for state_id, _output, _ms in primary_sink_outputs)
+            else:
+                for state_id, sink_output, duration in primary_sink_outputs:
+                    self._execution.complete_node_state(
+                        state_id=state_id,
+                        status=NodeStateStatus.COMPLETED,
+                        output_data=sink_output,
+                        duration_ms=duration,
                     )
-            self._data_flow.record_token_outcome(
-                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                outcome=pending_outcome.outcome,
-                path=pending_outcome.path,
-                error_hash=pending_outcome.error_hash,
-                sink_name=sink_name,
-                join_group_id=join_group_id,
+                    completed_primary_ids.add(state_id)
+
+            # Register artifact (linked to first primary state)
+            first_state = primary_states[0][1]
+            artifact = self._execution.register_artifact(
+                run_id=self._run_id,
+                state_id=first_state.state_id,
+                sink_node_id=sink_node_id,
+                artifact_type=artifact_info.artifact_type,
+                path=artifact_info.path_or_uri,
+                content_hash=artifact_info.content_hash,
+                size_bytes=artifact_info.size_bytes,
             )
 
-        # Checkpoint callback — only for primary tokens.
-        # Failures crash with AuditIntegrityError: the sink write is durable
-        # but the checkpoint record is missing, leaving the audit trail
-        # inconsistent. Logging-and-continuing would silently cause duplicate
-        # writes on resume — a worse outcome than crashing.
-        if on_token_written is not None:
+            # Record durable outcomes for primary tokens.
             for token, _ in primary_states:
-                try:
-                    on_token_written(token)
-                except contract_errors.TIER_1_ERRORS:
-                    raise
-                except Exception as exc:
-                    raise AuditIntegrityError(
-                        f"Checkpoint failed after durable sink write for token {token.token_id}. "
-                        f"Sink artifact exists but no checkpoint record created — "
-                        f"audit trail is inconsistent. "
-                        f"Original error: {type(exc).__name__}: {exc}"
-                    ) from exc
+                join_group_id: str | None = None
+                if pending_outcome.path == TerminalPath.COALESCED:
+                    join_group_id = token.join_group_id
+                    if join_group_id is None:
+                        raise OrchestrationInvariantError(
+                            f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
+                            "requires token.join_group_id before sink recording"
+                        )
+                self._data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                    outcome=pending_outcome.outcome,
+                    path=pending_outcome.path,
+                    error_hash=pending_outcome.error_hash,
+                    sink_name=sink_name,
+                    join_group_id=join_group_id,
+                )
+
+            # Checkpoint callback — only for primary tokens.
+            # Failures crash with AuditIntegrityError: the sink write is durable
+            # but the checkpoint record is missing, leaving the audit trail
+            # inconsistent. Logging-and-continuing would silently cause duplicate
+            # writes on resume — a worse outcome than crashing.
+            if on_token_written is not None:
+                for token, _ in primary_states:
+                    try:
+                        on_token_written(token)
+                    except contract_errors.TIER_1_ERRORS:
+                        raise
+                    except Exception as exc:
+                        raise AuditIntegrityError(
+                            f"Checkpoint failed after durable sink write for token {token.token_id}. "
+                            f"Sink artifact exists but no checkpoint record created — "
+                            f"audit trail is inconsistent. "
+                            f"Original error: {type(exc).__name__}: {exc}"
+                        ) from exc
+        except contract_errors.TIER_1_ERRORS as e:
+            remaining = [(t, s) for t, s in primary_states if s.state_id not in completed_primary_ids] + divert_states
+            if remaining:
+                self._best_effort_cleanup(remaining, e, "primary_audit_recording")
+            raise
+        except Exception as e:
+            audit_error = ExecutionError(
+                exception=str(e),
+                exception_type=type(e).__name__,
+                phase="primary_audit_recording",
+            )
+            remaining = [(t, s) for t, s in primary_states if s.state_id not in completed_primary_ids] + divert_states
+            if remaining:
+                self._complete_states_failed(
+                    states=remaining,
+                    duration_ms=0.0,
+                    error=audit_error,
+                )
+            raise
 
         return artifact
 
@@ -1209,6 +1241,13 @@ class SinkExecutor:
 
         artifact: Artifact | None = None
 
+        # Retrieve pre-opened states for diverted tokens. Built BEFORE Phase 2
+        # so its cleanup envelope can close these anchors if Phase 2 fails —
+        # Phase 3 would never run to terminalize them (elspeth-5a5e83d3e5).
+        primary_divert_states: list[tuple[TokenInfo, int, NodeStateOpen]] = [
+            (token, idx, state_by_token_id[token.token_id]) for token, idx in diverted_tokens
+        ]
+
         if primary_tokens:
             # Retrieve pre-opened states for primary tokens.
             primary_states: list[tuple[TokenInfo, NodeStateOpen]] = [
@@ -1216,6 +1255,7 @@ class SinkExecutor:
             ]
             artifact = self._complete_primary(
                 primary_states=primary_states,
+                divert_states=[(token, state) for token, _idx, state in primary_divert_states],
                 artifact_info=artifact_info,
                 total_token_count=len(tokens),
                 duration_ms=duration_ms,
@@ -1234,11 +1274,6 @@ class SinkExecutor:
         discard_count = 0
         if diverted_tokens:
             diversion_by_index = {d.row_index: d for d in diversions}
-
-            # Retrieve pre-opened states for diverted tokens.
-            primary_divert_states: list[tuple[TokenInfo, int, NodeStateOpen]] = [
-                (token, idx, state_by_token_id[token.token_id]) for token, idx in diverted_tokens
-            ]
 
             if failsink is not None:
                 failsink_count = self._handle_failsink_diversions(

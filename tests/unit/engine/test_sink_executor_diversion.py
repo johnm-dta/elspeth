@@ -1150,6 +1150,107 @@ class TestMidLoopAuditRecordingCleanup:
         assert failed_state_ids & completed_state_ids == set()
 
 
+class TestCompletePrimaryFailureClosesDivertAnchors:
+    """Phase-2 (_complete_primary) failures must not leave diverted anchors OPEN.
+
+    Regression tests for elspeth-5a5e83d3e5: a failure while recording the
+    primary tokens' completions/artifact/outcomes propagates out of write()
+    BEFORE Phase 3 runs, so the diverted tokens' pre-opened primary node_states
+    must be closed FAILED by the Phase-2 cleanup envelope — nothing downstream
+    would ever terminalize them.
+
+    RuntimeError deliberately exercises the generic arm; AuditIntegrityError
+    the TIER_1 best-effort arm (same convention as
+    TestUncoveredExceptArmCharacterization).
+    """
+
+    def test_outcome_recording_failure_closes_divert_anchor(self) -> None:
+        """A generic error from record_token_outcome (primary states already
+        COMPLETED) must close the diverted token's primary anchor as FAILED
+        with phase='primary_audit_recording' before re-raising."""
+        executor, execution, data_flow = _make_executor()
+        sink = _make_sink(diversions=(RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),))
+        tokens = [_make_token("t0"), _make_token("t1")]
+        data_flow.record_token_outcome.side_effect = RuntimeError("DB connection lost")
+
+        with pytest.raises(RuntimeError, match="DB connection lost"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        # state-1 = t0 primary (COMPLETED before the outcome loop raised);
+        # state-2 = t1 divert anchor (closed FAILED by the Phase-2 envelope).
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        assert completion_by_state["state-1"]["status"] == NodeStateStatus.COMPLETED
+        failed_kwargs = completion_by_state["state-2"]
+        assert failed_kwargs["status"] == NodeStateStatus.FAILED
+        assert failed_kwargs["error"].phase == "primary_audit_recording"
+        assert failed_kwargs["error"].exception_type == "RuntimeError"
+
+    def test_register_artifact_tier1_failure_closes_divert_anchor(self) -> None:
+        """A TIER_1 error from register_artifact hits the best-effort arm:
+        the diverted token's primary anchor is closed FAILED, the completed
+        primary state is left untouched, and the original error re-raises."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(diversions=(RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),))
+        tokens = [_make_token("t0"), _make_token("t1")]
+        execution.register_artifact.side_effect = AuditIntegrityError("artifact registry corrupted")
+
+        with pytest.raises(AuditIntegrityError, match="artifact registry corrupted"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        assert completion_by_state["state-1"]["status"] == NodeStateStatus.COMPLETED
+        failed_kwargs = completion_by_state["state-2"]
+        assert failed_kwargs["status"] == NodeStateStatus.FAILED
+        assert failed_kwargs["error"].phase == "primary_audit_recording"
+        assert failed_kwargs["error"].exception_type == "AuditIntegrityError"
+
+    def test_primary_completion_failure_closes_primary_and_divert_anchor(self) -> None:
+        """A failure while completing the primary states themselves must close
+        BOTH the not-yet-completed primary state and the divert anchor as
+        FAILED (per-state progress tracking, mirroring the Phase-3 pattern)."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(diversions=(RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),))
+        tokens = [_make_token("t0"), _make_token("t1")]
+        # First complete_node_state call (t0's COMPLETED attempt) raises;
+        # the two cleanup closes that follow succeed.
+        execution.complete_node_state.side_effect = [RuntimeError("audit write lost"), None, None]
+
+        with pytest.raises(RuntimeError, match="audit write lost"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        # The failed COMPLETED attempt for state-1 is also recorded by the
+        # _CallRecorder, so filter by status rather than asserting uniqueness.
+        complete_calls = execution.complete_node_state.call_args_list
+        failed_by_state = {c.kwargs["state_id"]: c.kwargs for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED}
+        assert set(failed_by_state) == {"state-1", "state-2"}
+        for state_id, kwargs in failed_by_state.items():
+            assert kwargs["error"].phase == "primary_audit_recording"
+            assert kwargs["error"].exception_type == "RuntimeError", state_id
+
+
 class TestSystemErrorStateCleanup:
     """Regression: FrameworkBugError/AuditIntegrityError paths must close OPEN states.
 

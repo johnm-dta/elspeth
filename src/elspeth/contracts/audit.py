@@ -563,6 +563,11 @@ class Checkpoint:
         if not self.upstream_topology_hash:
             raise ValueError("upstream_topology_hash is required and cannot be empty")
 
+    @property
+    def full_topology_hash(self) -> str:
+        """Full-DAG topology hash used for checkpoint compatibility."""
+        return self.upstream_topology_hash
+
 
 @dataclass(frozen=True, slots=True)
 class RowLineage:

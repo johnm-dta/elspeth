@@ -98,6 +98,14 @@ class Step1SourceChatResult:
 # opener. The wizard widgets remain functional; chat is best-effort.
 _SYNTHETIC_UNAVAILABLE_MESSAGE = "I'm unavailable right now; you can still use the wizard controls."
 
+# Message returned when the strict source/sink commit seam rejects a resolved
+# Step-1/Step-2 chat action. The service and model are not unavailable; the
+# proposed configuration simply was not applied, and the state is unchanged.
+_COMMIT_REJECTED_MESSAGE = (
+    "I couldn't apply that configuration, so I didn't change your pipeline. "
+    "Review the wizard fields and try again, or keep going with the wizard controls."
+)
+
 # Message returned when ``AssistantScaffoldLeakError`` rejects a reply.
 # Deliberately NOT the unavailability copy above: the service is fine — a
 # quality guard rejected THIS reply — so the message must not claim

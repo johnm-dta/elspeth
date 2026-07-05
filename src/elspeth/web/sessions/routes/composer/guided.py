@@ -18,7 +18,7 @@ from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_a
 from elspeth.web.sessions.schemas import StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
-    _SYNTHETIC_UNAVAILABLE_MESSAGE,
+    _COMMIT_REJECTED_MESSAGE,
     UTC,
     UUID,
     Any,
@@ -139,17 +139,19 @@ def _chat_turn_synthetic_failure_reason(
     """Classify a persisted ``ChatTurn``'s synthetic-failure cause (fp-review C-2).
 
     ``None`` on success. Otherwise ``"quality_guard"`` when a scaffold-leak
-    guard rejected the reply, or ``"unavailable"`` for everything else —
-    transient provider failures AND the STEP_1/STEP_2 commit-seam rejection
-    branches (``error_class="StepHandlerRejected"``), which currently reuse
-    the unavailability copy too (a known, separate miscalibration outside
-    this fix's scope). ``error_class`` is compared by the literal class name
-    string (``_guided_step_chat.py`` sets it via ``type(exc).__name__``);
-    ``"AssistantScaffoldLeakError"`` is the ONLY class the dedicated
-    scaffold-leak branches ever record. Persisted-only (elspeth-0ff5003755):
+    guard rejected the reply, or ``"unavailable"`` for transient provider /
+    solver failures. STEP_1/STEP_2 commit-seam rejection branches
+    (``error_class="StepHandlerRejected"``) deliberately return ``None``:
+    they are neither quality-guard nor availability events, and the audit row
+    carries the redaction-safe classifier. ``error_class`` is compared by the
+    literal class name string (``_guided_step_chat.py`` sets it via
+    ``type(exc).__name__``); ``"AssistantScaffoldLeakError"`` is the ONLY
+    class the dedicated scaffold-leak branches ever record. Persisted-only:
     the live ``GuidedChatResponse`` deliberately carries kind alone.
     """
     if status is ComposerChatTurnStatus.SUCCESS:
+        return None
+    if error_class == "StepHandlerRejected":
         return None
     return "quality_guard" if error_class == "AssistantScaffoldLeakError" else "unavailable"
 
@@ -2203,7 +2205,7 @@ async def post_guided_chat(
                         # (the prior 400 raised before any chat-turn audit, so the
                         # reason vanished entirely).
                         chat_result = StepChatResult(
-                            assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                            assistant_message=_COMMIT_REJECTED_MESSAGE,
                             status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                             latency_ms=int((_perf_counter() - started_perf) * 1000),
                             error_class="StepHandlerRejected",
@@ -2407,7 +2409,7 @@ async def post_guided_chat(
                         # Non-actionable: the strict commit seam rejected the
                         # proposal. Fall back to advisory (no mutation).
                         chat_result = StepChatResult(
-                            assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                            assistant_message=_COMMIT_REJECTED_MESSAGE,
                             status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                             latency_ms=latency_ms,
                             error_class="StepHandlerRejected",

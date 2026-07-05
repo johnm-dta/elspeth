@@ -217,12 +217,14 @@ class ChatTurn:
     existed — legacy turns round-trip with both ``None``, never a
     fabricated value. ``synthetic_failure_reason`` is only ever non-``None``
     when ``assistant_message_kind == "synthetic_failure"``; it distinguishes
-    a scaffold-leak guard rejection (``"quality_guard"``) from genuine
-    provider unavailability (``"unavailable"``) — the two causes that
-    already render distinct message copy. Deliberately asymmetric with the
-    LIVE ``GuidedChatResponse`` (kind-only, no reason field): the persisted
-    audit record carries the fuller distinction; the live response's
-    recovery affordance doesn't need it (elspeth-0ff5003755).
+    a scaffold-leak guard rejection (``"quality_guard"``) from provider /
+    solver unavailability (``"unavailable"``). Commit-seam rejections keep
+    the existing kind-only recovery behavior and leave this field ``None``;
+    their redaction-safe classifier lives in the chat-turn audit row
+    (``error_class="StepHandlerRejected"``). Deliberately asymmetric with the
+    LIVE ``GuidedChatResponse`` (kind-only, no reason field): the live
+    response's recovery affordance doesn't need a reason enum
+    (elspeth-0ff5003755).
     """
 
     role: ChatRole

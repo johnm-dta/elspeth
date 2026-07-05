@@ -18,7 +18,7 @@ These functions were extracted from ``Orchestrator`` (where they lived as
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from typing import TYPE_CHECKING
 
 from elspeth.contracts.enums import NodeType
@@ -45,6 +45,7 @@ def assign_plugin_node_ids(
     source_id_map: Mapping[str, NodeID],
     transform_id_map: Mapping[int, NodeID],
     sink_id_map: Mapping[SinkName, NodeID],
+    aggregation_node_ids: Set[NodeID] = frozenset(),
 ) -> None:
     """Explicitly assign node_id to all plugins with validation.
 
@@ -58,6 +59,8 @@ def assign_plugin_node_ids(
         source_id_map: Source name -> source node ID
         transform_id_map: Maps transform sequence -> node_id
         sink_id_map: Maps sink_name -> node_id
+        aggregation_node_ids: Graph aggregation node IDs whose transforms are
+            legitimately pre-populated before assignment
 
     Raises:
         OrchestrationInvariantError: If transform/sink not in ID map
@@ -70,12 +73,29 @@ def assign_plugin_node_ids(
             )
         source.node_id = source_id_map[source_name]
 
-    # Set node_id on transforms
-    # Note: Aggregation transforms already have node_id set by CLI (mapped from
-    # aggregation_id_map), so only assign for transforms without node_id.
+    # Set node_id on transforms.
+    # Aggregation transforms already have node_id set by CLI (mapped from the
+    # graph's aggregation_id_map). Only those graph-confirmed aggregation IDs
+    # may skip sequence-based assignment; stale regular transform IDs fail closed.
     for seq, transform in enumerate(transforms):
         if transform.node_id is not None:
-            # Already has node_id (e.g., aggregation transform) - skip
+            existing_node_id = NodeID(transform.node_id)
+            if existing_node_id in aggregation_node_ids:
+                continue
+            if seq not in transform_id_map:
+                raise OrchestrationInvariantError(
+                    f"Transform at sequence {seq} has pre-set node_id {transform.node_id!r}, "
+                    "but that sequence is not in the graph transform map and the node_id is not a graph aggregation node. "
+                    f"Graph has transform sequences: {list(transform_id_map.keys())}; "
+                    f"aggregation node IDs: {sorted(aggregation_node_ids)}."
+                )
+            expected_node_id = transform_id_map[seq]
+            if existing_node_id != expected_node_id:
+                raise OrchestrationInvariantError(
+                    f"Transform at sequence {seq} has pre-set node_id {transform.node_id!r}, "
+                    f"but the graph maps that sequence to {expected_node_id!r}. "
+                    "Only graph aggregation transforms may keep pre-set node IDs."
+                )
             continue
         if seq not in transform_id_map:
             raise OrchestrationInvariantError(

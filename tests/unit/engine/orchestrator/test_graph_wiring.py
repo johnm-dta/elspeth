@@ -43,8 +43,44 @@ def _build_wired_pipeline() -> tuple[PipelineConfig, ExecutionGraph]:
         source_id_map={"primary": graph.get_sources()[0]},
         transform_id_map=graph.get_transform_id_map(),
         sink_id_map=graph.get_sink_id_map(),
+        aggregation_node_ids=frozenset(graph.get_aggregation_id_map().values()),
     )
     return config, graph
+
+
+class TestAssignPluginNodeIds:
+    def test_pre_set_regular_transform_node_id_must_match_graph_map(self) -> None:
+        """A stale transform node_id is not an aggregation marker."""
+        transform = as_transform(PassTransform())
+        transform.node_id = "stale-transform"
+
+        with pytest.raises(OrchestrationInvariantError, match="stale-transform"):
+            assign_plugin_node_ids(
+                sources={},
+                transforms=[transform],
+                sinks={},
+                source_id_map={},
+                transform_id_map={0: NodeID("transform-0")},
+                sink_id_map={},
+                aggregation_node_ids=frozenset(),
+            )
+
+    def test_pre_set_aggregation_transform_node_id_is_allowed_when_in_aggregation_set(self) -> None:
+        """Aggregation transforms may keep the graph aggregation node id."""
+        transform = as_transform(PassTransform())
+        transform.node_id = "agg-transform-0"
+
+        assign_plugin_node_ids(
+            sources={},
+            transforms=[transform],
+            sinks={},
+            source_id_map={},
+            transform_id_map={},
+            sink_id_map={},
+            aggregation_node_ids=frozenset({NodeID("agg-transform-0")}),
+        )
+
+        assert transform.node_id == "agg-transform-0"
 
 
 class TestSharedGraphArtifactLoaders:

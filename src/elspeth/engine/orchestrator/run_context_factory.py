@@ -110,6 +110,7 @@ class RunContextFactory:
         coalesce_id_map = dict(artifacts.coalesce_id_map)
         edge_map = dict(artifacts.edge_map)
         route_resolution_map = graph.get_route_resolution_map()
+        aggregation_node_ids = frozenset(graph.get_aggregation_id_map().values())
 
         # Assign node_ids to all plugins
         assign_plugin_node_ids(
@@ -119,6 +120,7 @@ class RunContextFactory:
             source_id_map=artifacts.source_id_map,
             transform_id_map=transform_id_map,
             sink_id_map=sink_id_map,
+            aggregation_node_ids=aggregation_node_ids,
         )
 
         # Create context with the PluginAuditWriter

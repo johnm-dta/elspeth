@@ -829,6 +829,7 @@ class TestOrchestrator:
             source_id_map={"primary": source_id},
             transform_id_map=graph.get_transform_id_map(),
             sink_id_map=graph.get_sink_id_map(),
+            aggregation_node_ids=frozenset(graph.get_aggregation_id_map().values()),
         )
 
         graph_step_map = graph.build_step_map()

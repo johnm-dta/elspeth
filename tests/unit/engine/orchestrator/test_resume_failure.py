@@ -870,8 +870,8 @@ class TestResumeFinalizesAsFailed:
             patch("elspeth.engine.orchestrator.source_iteration.track_operation", _source_operation),
             patch.object(orch._source_driver, "load_source_with_events", side_effect=_load_source),
             # Slice 3 re-pin: the EOF flush seam moved into the
-            # run_end_of_input_barrier_flush helper (orchestrator/aggregation.py).
-            patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
+            # run_end_of_input_barrier_flush helper (orchestrator/leader_drain.py).
+            patch("elspeth.engine.orchestrator.leader_drain.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
             pytest.raises(RuntimeError, match="boom during EOF flush"),
         ):
             orch._source_driver.run_main_processing_loop(

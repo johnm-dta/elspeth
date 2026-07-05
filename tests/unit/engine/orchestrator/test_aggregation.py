@@ -31,8 +31,8 @@ from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     find_aggregation_transform,
     flush_remaining_aggregation_buffers,
-    handle_incomplete_batches,
 )
+from elspeth.engine.orchestrator.resume import handle_incomplete_batches
 from elspeth.engine.orchestrator.types import AggNodeEntry, PipelineConfig, RowProcessorHandle
 from elspeth.testing import make_row, make_token_info
 

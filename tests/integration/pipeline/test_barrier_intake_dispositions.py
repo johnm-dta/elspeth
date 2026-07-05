@@ -59,7 +59,7 @@ from elspeth.core.landscape.schema import (
 )
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor
-from elspeth.engine.orchestrator.aggregation import run_end_of_input_barrier_flush
+from elspeth.engine.orchestrator.leader_drain import run_end_of_input_barrier_flush
 from elspeth.engine.orchestrator.types import ExecutionCounters, PipelineConfig
 from elspeth.engine.processor import BarrierJournalRestoreContext, _LiveBarrierHold
 from elspeth.engine.spans import SpanFactory

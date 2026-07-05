@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
+from elspeth.web.sessions._guided_step_chat import _COMMIT_REJECTED_MESSAGE, _SYNTHETIC_UNAVAILABLE_MESSAGE
 
 # Reuse the verbatim drive helpers from the sibling e2e test.
 from tests.integration.web.composer.guided.test_step_3_e2e import (
@@ -227,11 +227,10 @@ def test_step_2_chat_from_schema_form_stamps_prior_record_answered(composer_test
 
 def test_step_2_chat_handler_rejection_falls_back_to_advisory_no_mutation(composer_test_client: TestClient) -> None:
     """When the sink driver resolves a sink but handle_step_2_sink rejects it
-    (strict commit seam), the STEP_2 branch must fall back to advisory: synthetic
-    unavailable message, next_turn=None, NO mutation, phase unchanged.
+    (strict commit seam), the STEP_2 branch must fall back to advisory: honest
+    commit-rejection message, next_turn=None, NO mutation, phase unchanged.
 
-    This is the only consumer of the StepChatResult/_SYNTHETIC_UNAVAILABLE_MESSAGE
-    fallback in the STEP_2 branch — the handler-rejection leg.
+    This is the only STEP_2 consumer of the commit-rejection fallback.
     """
     client = composer_test_client
     session_id = _create_session(client)
@@ -256,9 +255,16 @@ def test_step_2_chat_handler_rejection_falls_back_to_advisory_no_mutation(compos
     # Advisory fall-back: no next_turn, phase unchanged, no outputs committed.
     assert body["next_turn"] is None
     assert body["guided_session"]["step"] == "step_2_sink"
-    assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+    assert body["assistant_message"] == _COMMIT_REJECTED_MESSAGE
+    assert "unavailable" not in body["assistant_message"].lower()
+    assistant_turn = body["guided_session"]["chat_history"][-1]
+    assert assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert assistant_turn["synthetic_failure_reason"] is None
     after = _get_guided(client, session_id)
     assert before["composition_state"]["outputs"] == after["composition_state"]["outputs"]
+    persisted_assistant_turn = after["guided_session"]["chat_history"][-1]
+    assert persisted_assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert persisted_assistant_turn["synthetic_failure_reason"] is None
 
 
 def _fake_resolve_source_response(*, options: dict, assistant_message: str) -> SimpleNamespace:
@@ -398,11 +404,18 @@ def test_step_1_chat_handler_rejection_degrades_to_advisory_and_audits_classifie
     assert status == 200, body
     # Advisory degradation — NOT a fatal 400, NOT a successful apply.
     assert body["next_turn"] is None
-    assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+    assert body["assistant_message"] == _COMMIT_REJECTED_MESSAGE
+    assert "unavailable" not in body["assistant_message"].lower()
     assert body["guided_session"]["step"] == "step_1_source"
+    assistant_turn = body["guided_session"]["chat_history"][-1]
+    assert assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert assistant_turn["synthetic_failure_reason"] is None
     # No mutation: the rejected commit did not write a source.
     after = _get_guided(client, session_id)
     assert before["composition_state"].get("source") == after["composition_state"].get("source")
+    persisted_assistant_turn = after["guided_session"]["chat_history"][-1]
+    assert persisted_assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert persisted_assistant_turn["synthetic_failure_reason"] is None
     # Diagnosability with zero egress: the rejection is recorded as a fixed classifier.
     audit = _chat_turn_audit_bodies(client, session_id)
     assert audit, "expected a chat_turn audit on the degrade path"

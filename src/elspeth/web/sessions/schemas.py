@@ -341,8 +341,9 @@ class ChatTurnResponse(_StrictResponse):
     ``assistant_message_kind`` / ``synthetic_failure_reason`` (fp-review C-2
     persisted-history closure) mirror the same-named fields on
     :class:`elspeth.web.composer.guided.protocol.ChatTurn` — ``None`` on
-    every ``USER`` turn and on any turn persisted before this field existed
-    (legacy turns serialise with both ``None``, never a fabricated value).
+    every ``USER`` turn, on any turn persisted before this field existed, and
+    on commit-seam rejections whose redaction-safe classifier is carried by
+    the chat-turn audit row instead of this closed user-facing reason set.
     """
 
     role: str
@@ -505,11 +506,11 @@ class GuidedChatResponse(_StrictResponse):
     failure. ``assistant_message_kind`` is the wire discriminator that used
     to be missing (fp-review C-2): ``"assistant"`` for a real LLM reply,
     ``"synthetic_failure"`` for a fallback message the server generated
-    instead of forwarding a model response. The two synthetic-failure causes
-    (a scaffold-leak guard rejection vs genuine provider unavailability)
-    already render distinct message copy; both surface the same recovery
-    affordance, so this discriminator deliberately stops at kind and does not
-    also carry a reason.
+    instead of forwarding a model response. Synthetic-failure causes
+    (scaffold-leak guard rejection, commit-seam rejection, or provider /
+    solver unavailability) render distinct message copy; all surface the same
+    recovery affordance, so this discriminator deliberately stops at kind and
+    does not also carry a reason.
 
     ``guided_session`` always carries the updated chat history. Most chat
     remains advisory, but Step 1 schema-form chat may resolve a complete

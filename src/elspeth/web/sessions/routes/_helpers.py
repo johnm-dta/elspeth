@@ -150,6 +150,7 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limi
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import (
+    _COMMIT_REJECTED_MESSAGE,
     _SYNTHETIC_UNAVAILABLE_MESSAGE,
     Step2SinkChatResult,
     StepChatResult,
@@ -4083,6 +4084,7 @@ __all__ = [
     "SESSION_TERMINAL_RUN_STATUS_VALUES",
     "UTC",
     "UUID",
+    "_COMMIT_REJECTED_MESSAGE",
     "_COMPOSER_AUTHORING_VALIDATION_COUNTER",
     "_COMPOSER_EXCEPTION_CLASS_BUCKETS",
     "_COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER",

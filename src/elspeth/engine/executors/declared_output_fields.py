@@ -41,6 +41,9 @@ from elspeth.contracts.schema_contract import (
     SchemaContract,
 )
 
+_MAX_VIOLATION_SAMPLES = 10
+_MAX_RUNTIME_OBSERVED_FIELDS = 20
+
 
 def _build_contract(fields: tuple[str, ...]) -> SchemaContract:
     return SchemaContract(
@@ -79,6 +82,7 @@ def verify_declared_output_fields(
         return
 
     violations: list[DeclaredOutputFieldRowViolationPayload] = []
+    violation_count = 0
     for emitted_index, emitted in enumerate(emitted_rows):
         if emitted.contract is None:
             raise FrameworkBugError(f"Transform {plugin_name!r} emitted row with no contract. Framework invariant violated.")
@@ -88,18 +92,25 @@ def verify_declared_output_fields(
         missing = declared_output_fields - runtime_observed
         if not missing:
             continue
-        violations.append(
-            {
-                "emitted_index": emitted_index,
-                "runtime_observed": sorted(runtime_observed),
-                "missing": sorted(missing),
-            }
-        )
+        violation_count += 1
+        if len(violations) >= _MAX_VIOLATION_SAMPLES:
+            continue
+        sorted_runtime_observed = sorted(runtime_observed)
+        row_payload: DeclaredOutputFieldRowViolationPayload = {
+            "emitted_index": emitted_index,
+            "runtime_observed": sorted_runtime_observed[:_MAX_RUNTIME_OBSERVED_FIELDS],
+            "missing": sorted(missing),
+        }
+        if len(sorted_runtime_observed) > _MAX_RUNTIME_OBSERVED_FIELDS:
+            row_payload["runtime_observed_count"] = len(sorted_runtime_observed)
+            row_payload["runtime_observed_truncated"] = True
+        violations.append(row_payload)
 
-    if not violations:
+    if violation_count == 0:
         return
 
     failing_indexes = [entry["emitted_index"] for entry in violations]
+    violations_truncated = violation_count > len(violations)
     raise DeclaredOutputFieldsViolation(
         plugin=plugin_name,
         node_id=node_id,
@@ -108,12 +119,15 @@ def verify_declared_output_fields(
         token_id=token_id,
         payload={
             "declared": sorted(declared_output_fields),
+            "violation_count": violation_count,
+            "violations_truncated": violations_truncated,
             "violations": violations,
         },
         message=(
             f"Transform {plugin_name!r} (node {node_id!r}) declared output fields "
-            f"{sorted(declared_output_fields)!r} but emitted row(s) at indexes "
-            f"{failing_indexes!r} that violated the declaration for row {row_id!r}."
+            f"{sorted(declared_output_fields)!r} but emitted {violation_count} row(s) "
+            f"that violated the declaration for row {row_id!r}; sampled indexes "
+            f"{failing_indexes!r}."
         ),
     )
 

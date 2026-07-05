@@ -112,6 +112,8 @@ def test_declared_output_fields_violation_is_audit_evidence() -> None:
         token_id="tk",
         payload={
             "declared": ["new_a", "new_b"],
+            "violation_count": 1,
+            "violations_truncated": False,
             "violations": [
                 {
                     "emitted_index": 0,

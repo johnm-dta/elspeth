@@ -225,6 +225,13 @@ class SharedBatchAdapter:
         """
         key: WaiterKey = (token_id, state_id)
         with self._lock:
+            if key in self._entries:
+                raise OrchestrationInvariantError(
+                    "SharedBatchAdapter.register() called for an already registered waiter "
+                    f"with token_id={token_id!r}, state_id={state_id!r}. The existing waiter "
+                    "must receive a result, time out, or be cancelled before the same attempt "
+                    "can be registered again."
+                )
             entry = _WaiterEntry()
             self._entries[key] = entry
             return RowWaiter(key, entry, self._entries, self._lock)

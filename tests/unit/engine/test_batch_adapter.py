@@ -161,6 +161,19 @@ class TestSharedBatchAdapter:
         assert got_result.row.to_dict() == {"fast": True}
         assert elapsed < 0.1  # Should be nearly instant
 
+    def test_duplicate_register_fails_fast_and_preserves_existing_waiter(self) -> None:
+        """Duplicate register() for the same key must not orphan the first waiter."""
+        adapter = SharedBatchAdapter()
+        key = ("token-dup-register", "state-dup-register")
+
+        adapter.register(*key)
+        original_entry = adapter._entries[key]
+
+        with pytest.raises(OrchestrationInvariantError, match=r"token-dup-register.*state-dup-register"):
+            adapter.register(*key)
+
+        assert adapter._entries[key] is original_entry
+
     def test_timeout(self) -> None:
         """Test that wait() times out if result never arrives."""
         adapter = SharedBatchAdapter()

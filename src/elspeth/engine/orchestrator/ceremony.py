@@ -121,6 +121,29 @@ class RunCeremony:
             )
         )
 
+    def emit_partial_summary(
+        self,
+        *,
+        run_id: str,
+        result: RunResult,
+        start_time: float,
+    ) -> None:
+        """Emit a PARTIAL summary for post-completion failures such as export."""
+        total_duration = time.perf_counter() - start_time
+        self.emit_run_summary(
+            run_id=run_id,
+            status=RunCompletionStatus.PARTIAL,
+            rows_processed=result.rows_processed,
+            rows_succeeded=result.rows_succeeded,
+            rows_failed=result.rows_failed,
+            rows_quarantined=result.rows_quarantined,
+            duration_seconds=total_duration,
+            exit_code=1,
+            rows_routed_success=result.rows_routed_success,
+            rows_routed_failure=result.rows_routed_failure,
+            routed_destinations=result.routed_destinations,
+        )
+
     def emit_phase_error(
         self,
         phase: PipelinePhase,

@@ -47,7 +47,6 @@ from elspeth.contracts.events import (
     PhaseCompleted,
     PhaseStarted,
     PipelinePhase,
-    RunCompletionStatus,
     RunStarted,
 )
 from elspeth.core.landscape._helpers import generate_id
@@ -524,20 +523,7 @@ class RunLifecycleCoordinator:
                     # Export failed after successful run — emit PARTIAL status.
                     # RunFinished was already emitted before the export attempt,
                     # so only emit the EventBus RunSummary here.
-                    total_duration = time.perf_counter() - run_start_time
-                    self._ceremony.emit_run_summary(
-                        run_id=run.run_id,
-                        status=RunCompletionStatus.PARTIAL,
-                        rows_processed=result.rows_processed,
-                        rows_succeeded=result.rows_succeeded,
-                        rows_failed=result.rows_failed,
-                        rows_quarantined=result.rows_quarantined,
-                        duration_seconds=total_duration,
-                        exit_code=1,
-                        rows_routed_success=result.rows_routed_success,
-                        rows_routed_failure=result.rows_routed_failure,
-                        routed_destinations=result.routed_destinations,
-                    )
+                    self._ceremony.emit_partial_summary(run_id=run.run_id, result=result, start_time=run_start_time)
                 else:
                     self._ceremony.emit_failed_ceremony(
                         run.run_id,
@@ -564,20 +550,7 @@ class RunLifecycleCoordinator:
                     # Export failed after successful run — emit PARTIAL status.
                     # RunFinished was already emitted before the export attempt,
                     # so only emit the EventBus RunSummary here.
-                    total_duration = time.perf_counter() - run_start_time
-                    self._ceremony.emit_run_summary(
-                        run_id=run.run_id,
-                        status=RunCompletionStatus.PARTIAL,
-                        rows_processed=result.rows_processed,
-                        rows_succeeded=result.rows_succeeded,
-                        rows_failed=result.rows_failed,
-                        rows_quarantined=result.rows_quarantined,
-                        duration_seconds=total_duration,
-                        exit_code=1,
-                        rows_routed_success=result.rows_routed_success,
-                        rows_routed_failure=result.rows_routed_failure,
-                        routed_destinations=result.routed_destinations,
-                    )
+                    self._ceremony.emit_partial_summary(run_id=run.run_id, result=result, start_time=run_start_time)
                 else:
                     self._ceremony.emit_failed_ceremony(run.run_id, factory, run_start_time, token=coordination_token)
                     # Seat hygiene: after the FAILED finalize succeeded.

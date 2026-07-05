@@ -1636,6 +1636,174 @@ class TestBuildProcessorCallsCleanupOnFailure:
         # The config passed must be the same config object
         assert call_kwargs.args[0] is config
 
+    def test_transform_start_failure_cleans_only_successfully_started_plugins(self) -> None:
+        """A transform whose on_start fails must not receive teardown hooks."""
+        from elspeth.engine.orchestrator.types import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        config = MagicMock(spec=PipelineConfig)
+        started_source = _specced_source(name="source")
+        started_transform = _specced_transform(name="started-transform", node_id=None)
+        failing_transform = _specced_transform(name="failing-transform", node_id=None)
+        failing_transform.on_start.side_effect = RuntimeError("transform startup failed")
+        unstarted_sink = _specced_sink(name="unstarted-sink")
+        config.sources = {"source": started_source}
+        config.transforms = [started_transform, failing_transform]
+        config.sinks = {"sink": unstarted_sink}
+        config.config = {}
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"sink": NodeID("sink-1")},
+            transform_id_map={0: NodeID("transform-1"), 1: NodeID("transform-2")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        with (
+            patch.object(orch._processor_factory, "build_processor") as build_processor,
+            pytest.raises(RuntimeError, match="transform startup failed"),
+        ):
+            orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        build_processor.assert_not_called()
+        started_source.on_complete.assert_called_once()
+        started_source.close.assert_called_once()
+        started_transform.on_complete.assert_called_once()
+        started_transform.close.assert_called_once()
+        failing_transform.on_complete.assert_not_called()
+        failing_transform.close.assert_not_called()
+        unstarted_sink.on_start.assert_not_called()
+        unstarted_sink.on_complete.assert_not_called()
+        unstarted_sink.close.assert_not_called()
+
+    def test_source_start_failure_skips_failing_source_and_unstarted_plugins(self) -> None:
+        """A source whose on_start fails is not considered started for cleanup."""
+        from elspeth.engine.orchestrator.types import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        config = MagicMock(spec=PipelineConfig)
+        failing_source = _specced_source(name="failing-source")
+        failing_source.on_start.side_effect = RuntimeError("source startup failed")
+        unstarted_transform = _specced_transform(name="unstarted-transform", node_id=None)
+        unstarted_sink = _specced_sink(name="unstarted-sink")
+        config.sources = {"source": failing_source}
+        config.transforms = [unstarted_transform]
+        config.sinks = {"sink": unstarted_sink}
+        config.config = {}
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"sink": NodeID("sink-1")},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        with (
+            patch.object(orch._processor_factory, "build_processor") as build_processor,
+            pytest.raises(RuntimeError, match="source startup failed"),
+        ):
+            orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        build_processor.assert_not_called()
+        failing_source.on_complete.assert_not_called()
+        failing_source.close.assert_not_called()
+        unstarted_transform.on_start.assert_not_called()
+        unstarted_transform.on_complete.assert_not_called()
+        unstarted_transform.close.assert_not_called()
+        unstarted_sink.on_start.assert_not_called()
+        unstarted_sink.on_complete.assert_not_called()
+        unstarted_sink.close.assert_not_called()
+
+    def test_sink_start_failure_cleans_only_successfully_started_sinks(self) -> None:
+        """A sink whose on_start fails must not receive teardown hooks."""
+        from elspeth.engine.orchestrator.types import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        config = MagicMock(spec=PipelineConfig)
+        started_source = _specced_source(name="source")
+        started_transform = _specced_transform(name="started-transform", node_id=None)
+        started_sink = _specced_sink(name="started-sink")
+        failing_sink = _specced_sink(name="failing-sink")
+        failing_sink.on_start.side_effect = RuntimeError("sink startup failed")
+        config.sources = {"source": started_source}
+        config.transforms = [started_transform]
+        config.sinks = {"started": started_sink, "failing": failing_sink}
+        config.config = {}
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"started": NodeID("sink-1"), "failing": NodeID("sink-2")},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        with (
+            patch.object(orch._processor_factory, "build_processor") as build_processor,
+            pytest.raises(RuntimeError, match="sink startup failed"),
+        ):
+            orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        build_processor.assert_not_called()
+        started_source.on_complete.assert_called_once()
+        started_source.close.assert_called_once()
+        started_transform.on_complete.assert_called_once()
+        started_transform.close.assert_called_once()
+        started_sink.on_complete.assert_called_once()
+        started_sink.close.assert_called_once()
+        failing_sink.on_complete.assert_not_called()
+        failing_sink.close.assert_not_called()
+
 
 class TestCleanupPluginsReRaisesSystemExceptions:
     """Regression test: _cleanup_plugins must re-raise FrameworkBugError/AuditIntegrityError.

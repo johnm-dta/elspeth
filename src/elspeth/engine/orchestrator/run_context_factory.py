@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.factory import RecorderFactory
@@ -140,16 +141,22 @@ class RunContextFactory:
         # (e.g., malformed CSV rows) can be attributed to the source node
         ctx.node_id = source_id
 
+        started_sources: dict[str, SourceProtocol] = {}
+        started_transforms: list[TransformProtocol] = []
+        started_sinks: dict[str, SinkProtocol] = {}
         try:
             if include_source_on_start:
                 for source_name, source in config.sources.items():
                     ctx.node_id = artifacts.source_id_map[source_name]
                     source.on_start(ctx)
+                    started_sources[source_name] = source
                 ctx.node_id = source_id
             for transform in config.transforms:
                 transform.on_start(ctx)
-            for sink in config.sinks.values():
+                started_transforms.append(transform)
+            for sink_name, sink in config.sinks.items():
                 sink.on_start(ctx)
+                started_sinks[sink_name] = sink
 
             processor, coalesce_node_map, coalesce_executor = self._processor_factory.build_processor(
                 graph=graph,
@@ -167,7 +174,14 @@ class RunContextFactory:
                 coordination_token=coordination_token,
             )
         except Exception:
-            cleanup_plugins(config, ctx, include_source=include_source_on_start)
+            cleanup_plugins(
+                config,
+                ctx,
+                include_source=include_source_on_start,
+                started_sources=started_sources,
+                started_transforms=tuple(started_transforms),
+                started_sinks=started_sinks,
+            )
             raise
 
         # Pre-compute aggregation transform lookup for O(1) access per timeout check

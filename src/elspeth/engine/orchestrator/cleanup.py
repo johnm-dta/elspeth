@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -27,6 +27,7 @@ from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
+    from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
     from elspeth.engine.orchestrator.types import PipelineConfig
 
 slog = structlog.get_logger(__name__)
@@ -55,6 +56,9 @@ def cleanup_plugins(
     ctx: PluginContext,
     *,
     include_source: bool = True,
+    started_sources: Mapping[str, SourceProtocol] | None = None,
+    started_transforms: Sequence[TransformProtocol] | None = None,
+    started_sinks: Mapping[str, SinkProtocol] | None = None,
 ) -> None:
     """Clean up all plugins in the finally block.
 
@@ -81,6 +85,13 @@ def cleanup_plugins(
         ctx: Plugin context
         include_source: If True (default), calls on_complete() and close()
             on the source. Set to False for resume path where source wasn't opened.
+        started_sources: Optional subset of sources whose on_start() completed.
+            Defaults to all configured sources for steady-state run cleanup.
+        started_transforms: Optional subset of transforms whose on_start()
+            completed. Defaults to all configured transforms for steady-state
+            run cleanup.
+        started_sinks: Optional subset of sinks whose on_start() completed.
+            Defaults to all configured sinks for steady-state run cleanup.
 
     Raises:
         RuntimeError: If any plugin cleanup hook fails and no exception is
@@ -90,6 +101,9 @@ def cleanup_plugins(
     logger = slog
     pending_exc = sys.exc_info()[1]
     cleanup_errors: list[str] = []
+    sources_for_cleanup = started_sources if started_sources is not None else config.sources
+    transforms_for_cleanup = started_transforms if started_transforms is not None else config.transforms
+    sinks_for_cleanup = started_sinks if started_sinks is not None else config.sinks
 
     def record_cleanup_error(hook: str, plugin_name: str, error: Exception) -> None:
         public_error, error_digest, error_length = _safe_cleanup_error_text(error)
@@ -126,25 +140,25 @@ def cleanup_plugins(
     # functools.partial preserves the bound-method type for mypy and avoids
     # the loop-variable closure trap that lambdas would otherwise need
     # default-argument workarounds for.
-    for transform in config.transforms:
+    for transform in transforms_for_cleanup:
         run_hook("transform.on_complete", transform.name, partial(transform.on_complete, ctx))
-    for sink in config.sinks.values():
+    for sink in sinks_for_cleanup.values():
         run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
     if include_source:
-        for source in config.sources.values():
+        for source in sources_for_cleanup.values():
             run_hook("source.on_complete", source.name, partial(source.on_complete, ctx))
 
     # Close source (if included) and all sinks
     if include_source:
-        for source in config.sources.values():
+        for source in sources_for_cleanup.values():
             run_hook("source.close", source.name, source.close)
 
     # Close all transforms (release resources - file handles, connections, etc.)
-    for transform in config.transforms:
+    for transform in transforms_for_cleanup:
         run_hook("transform.close", transform.name, transform.close)
 
     # Close all sinks
-    for sink in config.sinks.values():
+    for sink in sinks_for_cleanup.values():
         run_hook("sink.close", sink.name, sink.close)
 
     if cleanup_errors:

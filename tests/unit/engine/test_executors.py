@@ -520,14 +520,16 @@ class TestGateOutcome:
         """FORK_TO_PATHS action with child_tokens is a valid routing outcome."""
         result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["path_a", "path_b"]))
         token = _make_token()
-        child = _make_token(token_id="child_1")
+        child_a = _make_token(token_id="child_1")
+        child_b = _make_token(token_id="child_2")
         outcome = GateOutcome(
             result=result,
             updated_token=token,
-            child_tokens=(child,),
+            child_tokens=(child_a, child_b),
         )
-        assert len(outcome.child_tokens) == 1
+        assert len(outcome.child_tokens) == 2
         assert outcome.child_tokens[0].token_id == "child_1"
+        assert outcome.child_tokens[1].token_id == "child_2"
         assert outcome.sink_name is None
 
     def test_frozen_rejects_field_reassignment(self) -> None:
@@ -542,11 +544,12 @@ class TestGateOutcome:
         """child_tokens is converted to tuple for deep immutability."""
         result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["a", "b"]))
         token = _make_token()
-        child = _make_token(token_id="child_1")
+        child_a = _make_token(token_id="child_1")
+        child_b = _make_token(token_id="child_2")
         outcome = GateOutcome(
             result=result,
             updated_token=token,
-            child_tokens=(child,),
+            child_tokens=(child_a, child_b),
         )
         assert isinstance(outcome.child_tokens, tuple)
 
@@ -579,6 +582,16 @@ class TestGateOutcome:
         result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["a", "b"]))
         with pytest.raises(ValueError, match="FORK_TO_PATHS action must have non-empty child_tokens"):
             GateOutcome(result=result, updated_token=_make_token())
+
+    def test_fork_requires_child_per_destination(self) -> None:
+        """FORK_TO_PATHS action must preserve action destination and child cardinality."""
+        result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["a", "b"]))
+        with pytest.raises(ValueError, match="FORK_TO_PATHS action destinations"):
+            GateOutcome(
+                result=result,
+                updated_token=_make_token(),
+                child_tokens=(_make_token(token_id="child_1"),),
+            )
 
     def test_fork_rejects_sink_name(self) -> None:
         """FORK_TO_PATHS action cannot have sink_name."""

@@ -2144,60 +2144,25 @@ class TestDispatchResolvedDestinationPerVariant:
             route_resolution_map=route_map,
         )
 
-    def test_continue_produces_continue_action(self) -> None:
-        """CONTINUE destination with continue_as_route=False produces CONTINUE kind."""
+    def test_continue_destination_raises_invariant_error(self) -> None:
+        """Resolved CONTINUE destinations are no longer part of the gate route model."""
         executor = self._make_executor()
         token = _make_token()
         ctx = make_context()
 
-        outcome = executor._dispatch_resolved_destination(
-            state_id="state_001",
-            node_id="gate_1",
-            route_label="true",
-            destination=RouteDestination.continue_(),
-            token=token,
-            ctx=ctx,
-            token_manager=None,
-            reason=None,
-            mode=RoutingMode.MOVE,
-            fork_branches=None,
-            continue_as_route=False,
-        )
-
-        assert outcome.action.kind == RoutingKind.CONTINUE
-        assert outcome.action.kind != RoutingKind.ROUTE  # type: ignore[comparison-overlap]
-        assert outcome.action.kind != RoutingKind.FORK_TO_PATHS  # type: ignore[comparison-overlap]
-        assert outcome.sink_name is None
-        assert outcome.next_node_id is None
-        assert outcome.child_tokens == ()
-
-    def test_continue_as_route_produces_route_action(self) -> None:
-        """CONTINUE destination with continue_as_route=True produces ROUTE kind."""
-        edge_map = {(NodeID("gate_1"), "continue"): "edge_cont"}
-        executor = self._make_executor(edge_map=edge_map)
-        token = _make_token()
-        ctx = make_context()
-
-        outcome = executor._dispatch_resolved_destination(
-            state_id="state_001",
-            node_id="gate_1",
-            route_label="true",
-            destination=RouteDestination.continue_(),
-            token=token,
-            ctx=ctx,
-            token_manager=None,
-            reason=None,
-            mode=RoutingMode.MOVE,
-            fork_branches=None,
-            continue_as_route=True,
-        )
-
-        assert outcome.action.kind == RoutingKind.ROUTE
-        assert outcome.action.kind != RoutingKind.CONTINUE  # type: ignore[comparison-overlap]
-        assert outcome.action.destinations == ("continue",)
-        assert outcome.sink_name is None
-        assert outcome.next_node_id is None
-        assert outcome.child_tokens == ()
+        with pytest.raises(OrchestrationInvariantError, match="Unsupported route destination kind"):
+            executor._dispatch_resolved_destination(
+                state_id="state_001",
+                node_id="gate_1",
+                route_label="true",
+                destination=RouteDestination.continue_(),
+                token=token,
+                ctx=ctx,
+                token_manager=None,
+                reason=None,
+                mode=RoutingMode.MOVE,
+                fork_branches=None,
+            )
 
     def test_fork_produces_fork_action_with_children(self) -> None:
         """FORK destination produces FORK_TO_PATHS kind with child tokens."""
@@ -2224,7 +2189,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.COPY,
             fork_branches=["path_a", "path_b"],
-            continue_as_route=False,
         )
 
         assert outcome.action.kind == RoutingKind.FORK_TO_PATHS
@@ -2252,7 +2216,6 @@ class TestDispatchResolvedDestinationPerVariant:
                 reason=None,
                 mode=RoutingMode.COPY,
                 fork_branches=None,
-                continue_as_route=False,
             )
 
     def test_fork_without_token_manager_raises_invariant_error(self) -> None:
@@ -2273,7 +2236,6 @@ class TestDispatchResolvedDestinationPerVariant:
                 reason=None,
                 mode=RoutingMode.COPY,
                 fork_branches=["path_a", "path_b"],
-                continue_as_route=False,
             )
 
     def test_sink_produces_sink_outcome(self) -> None:
@@ -2294,7 +2256,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         assert outcome.action.kind == RoutingKind.ROUTE
@@ -2320,7 +2281,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         assert outcome.action.kind == RoutingKind.ROUTE
@@ -2354,7 +2314,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         node_outcome = executor._dispatch_resolved_destination(
@@ -2368,7 +2327,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         # SINK must have sink_name, not next_node_id
@@ -2378,36 +2336,6 @@ class TestDispatchResolvedDestinationPerVariant:
         # PROCESSING_NODE must have next_node_id, not sink_name
         assert node_outcome.next_node_id == NodeID("next_node")
         assert node_outcome.sink_name is None
-
-    def test_continue_does_not_match_other_kinds(self) -> None:
-        """CONTINUE must not fall through to FORK, SINK, or PROCESSING_NODE branches.
-
-        Kills ``== CONTINUE`` → ``>= CONTINUE`` mutants where StrEnum ordering
-        might cause CONTINUE to match later branches.
-        """
-        executor = self._make_executor()
-        token = _make_token()
-        ctx = make_context()
-
-        outcome = executor._dispatch_resolved_destination(
-            state_id="state_001",
-            node_id="gate_1",
-            route_label="true",
-            destination=RouteDestination.continue_(),
-            token=token,
-            ctx=ctx,
-            token_manager=None,
-            reason=None,
-            mode=RoutingMode.MOVE,
-            fork_branches=None,
-            continue_as_route=False,
-        )
-
-        # Must be CONTINUE, not accidentally matching FORK/SINK/PROCESSING_NODE
-        assert outcome.action.kind == RoutingKind.CONTINUE
-        assert outcome.child_tokens == ()
-        assert outcome.sink_name is None
-        assert outcome.next_node_id is None
 
     def test_fork_does_not_match_continue(self) -> None:
         """FORK must not fall into the CONTINUE branch.
@@ -2438,7 +2366,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.COPY,
             fork_branches=["branch_x", "branch_y"],
-            continue_as_route=False,
         )
 
         # Must be FORK_TO_PATHS, definitely not CONTINUE
@@ -2447,40 +2374,6 @@ class TestDispatchResolvedDestinationPerVariant:
         assert len(outcome.child_tokens) == 2
         # fork_token must have been called (not skipped by hitting CONTINUE branch)
         tm.fork_token.assert_called_once()
-
-    def test_continue_as_route_inversion_changes_action_kind(self) -> None:
-        """continue_as_route=True vs False must produce different action kinds.
-
-        Kills the ``continue_as_route`` boolean inversion mutant.
-        """
-        edge_map = {(NodeID("gate_1"), "continue"): "edge_cont"}
-        executor = self._make_executor(edge_map=edge_map)
-        token = _make_token()
-        ctx = make_context()
-
-        base_kwargs: dict[str, Any] = {
-            "state_id": "state_001",
-            "node_id": "gate_1",
-            "route_label": "true",
-            "destination": RouteDestination.continue_(),
-            "token": token,
-            "ctx": ctx,
-            "token_manager": None,
-            "reason": None,
-            "mode": RoutingMode.MOVE,
-            "fork_branches": None,
-        }
-
-        outcome_normal = executor._dispatch_resolved_destination(**base_kwargs, continue_as_route=False)
-        outcome_as_route = executor._dispatch_resolved_destination(**base_kwargs, continue_as_route=True)
-
-        # Normal continue: CONTINUE kind
-        assert outcome_normal.action.kind == RoutingKind.CONTINUE
-        # As route: ROUTE kind with "continue" destination
-        assert outcome_as_route.action.kind == RoutingKind.ROUTE
-        assert outcome_as_route.action.destinations == ("continue",)
-        # They must differ
-        assert outcome_normal.action.kind != outcome_as_route.action.kind  # type: ignore[comparison-overlap]
 
 
 # =============================================================================

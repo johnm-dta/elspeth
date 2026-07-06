@@ -136,6 +136,49 @@ def test_enqueue_ready_records_single_idempotent_scheduler_event() -> None:
     assert json.loads(event.context_json) == {}
 
 
+def test_enqueue_ready_mismatch_diagnostics_redact_row_payload_values() -> None:
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    secret = "sk-" + ("a" * 32)
+    alternate_payload = TokenSchedulerRepository.serialize_row_payload(
+        PipelineRow({"id": 1, "api_key": secret}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+    )
+
+    repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+
+    with pytest.raises(LandscapeRecordError) as exc_info:
+        repo.enqueue_ready(
+            run_id="run-1",
+            token_id="token-1",
+            row_id="row-1",
+            node_id="normalize",
+            step_index=1,
+            ingest_sequence=0,
+            available_at=now,
+            row_payload_json=alternate_payload,
+        )
+
+    message = str(exc_info.value)
+    assert "row_payload_json" in message
+    assert "sha256=" in message
+    assert "bytes=" in message
+    assert secret not in message
+    assert alternate_payload not in message
+
+
 def test_enqueue_ready_claimed_records_enqueue_and_claim_events_in_one_operation() -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository

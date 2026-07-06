@@ -21,6 +21,8 @@ from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import nodes_table, rows_table, token_work_items_table, tokens_table
 
+_SENSITIVE_MISMATCH_FIELDS = frozenset({"row_payload_json", "pending_error_message"})
+
 
 def work_item_id(run_id: str, token_id: str, node_id: str | None, attempt: int) -> str:
     node_key = "<terminal>" if node_id is None else node_id
@@ -33,6 +35,15 @@ def work_item_identity(values: dict[str, object]) -> str:
         f"run_id={values['run_id']!r} token_id={values['token_id']!r} row_id={values['row_id']!r} "
         f"node_id={values['node_id']!r} attempt={values['attempt']!r}"
     )
+
+
+def mismatch_diagnostic_value(field_name: str, value: object) -> object:
+    if field_name not in _SENSITIVE_MISMATCH_FIELDS:
+        return value
+    if value is None:
+        return "<redacted none>"
+    encoded = str(value).encode("utf-8", errors="replace")
+    return f"<redacted bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}>"
 
 
 def item_from_mapping(row: RowMapping) -> TokenWorkItem:
@@ -253,7 +264,10 @@ def insert_work_item_idempotent(conn: Connection, *, values: dict[str, object], 
         "attempt",
     )
     mismatches = {
-        field_name: {"expected": values[field_name], "actual": existing[field_name]}
+        field_name: {
+            "expected": mismatch_diagnostic_value(field_name, values[field_name]),
+            "actual": mismatch_diagnostic_value(field_name, existing[field_name]),
+        }
         for field_name in comparable_fields
         if existing[field_name] != values[field_name]
     }

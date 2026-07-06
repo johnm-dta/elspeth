@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+from jinja2 import TemplateSyntaxError
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.hashing import stable_hash
@@ -162,17 +163,18 @@ class LLMConfig(TransformDataConfig):
             )
         return self
 
-    def _field_extraction_templates(self) -> tuple[str, ...]:
-        """Return every LLM Jinja2 template that can interpolate row data."""
-        templates = [self.prompt_template]
+    def _field_extraction_templates(self) -> tuple[tuple[str, str], ...]:
+        """Return (label, template) for every LLM Jinja2 template that can interpolate row data."""
+        templates = [("prompt_template", self.prompt_template)]
         if isinstance(self.queries, dict):
-            for defn in self.queries.values():
+            for name, defn in self.queries.items():
                 if isinstance(defn, dict) and defn.get("template"):
-                    templates.append(defn["template"])
+                    templates.append((f"query {name!r} template", defn["template"]))
         elif isinstance(self.queries, list):
-            for item in self.queries:
+            for index, item in enumerate(self.queries):
                 if isinstance(item, dict) and item.get("template"):
-                    templates.append(item["template"])
+                    label = item.get("name", index)
+                    templates.append((f"query {label!r} template", item["template"]))
         return tuple(templates)
 
     @model_validator(mode="after")
@@ -184,8 +186,15 @@ class LLMConfig(TransformDataConfig):
         from elspeth.core.templates import extract_jinja2_field_usage
 
         dynamic_accesses: list[str] = []
-        for template in self._field_extraction_templates():
-            dynamic_accesses.extend(extract_jinja2_field_usage(template).dynamic_accesses)
+        for label, template in self._field_extraction_templates():
+            try:
+                extraction = extract_jinja2_field_usage(template)
+            except TemplateSyntaxError as e:
+                # An unparseable template cannot be proven free of dynamic row
+                # access, so it must fail here — as the structured TemplateError
+                # the constructor advertises, not a raw jinja2 exception.
+                raise TemplateError(f"Invalid template syntax in {label}: {e}") from e
+            dynamic_accesses.extend(extraction.dynamic_accesses)
 
         if not dynamic_accesses:
             return self

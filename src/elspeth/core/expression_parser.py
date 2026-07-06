@@ -507,10 +507,8 @@ class _ExpressionEvaluator(ast.NodeVisitor):
         try:
             return value[key]
         except KeyError as e:
-            # Provide helpful error message with available fields
             if isinstance(value, dict):
-                available = list(value.keys())
-                msg = f"Field '{key}' not found. Available fields: {available}"
+                msg = f"Field '{key}' not found in dict"
             else:
                 msg = f"Key '{key}' not found in {type(value).__name__}"
             raise ExpressionEvaluationError(msg) from e

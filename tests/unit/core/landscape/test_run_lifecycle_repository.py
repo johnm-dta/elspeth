@@ -1257,7 +1257,7 @@ class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv_file", plugin_version="1.0"),
             SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="json_file", plugin_version="1.0"),
         )
-        with pytest.raises(LandscapeRecordError, match="64 lowercase hex chars"):
+        with pytest.raises(LandscapeRecordError, match="openrouter_catalog_sha256 must be 64 lowercase hex chars"):
             repo.record_synthesised_run(
                 pipeline_yaml="version: 1",
                 rows=(),
@@ -1265,7 +1265,7 @@ class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
                 llm_call_count=0,
                 node_specs=node_specs,
                 started_at=datetime.now(UTC),
-                metadata={"seeded_from_cache": True, "cache_key": "ck"},
+                metadata={"seeded_from_cache": True, "cache_key": "c" * 64},
                 openrouter_catalog_sha256="not-a-sha",
                 openrouter_catalog_source="bundled",
             )

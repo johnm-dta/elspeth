@@ -56,6 +56,7 @@ from elspeth.contracts.enums import (
     TerminalPath,
     TriggerType,
 )
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
 from elspeth.core.landscape.exporter import LandscapeExporter
 
@@ -271,6 +272,42 @@ _NODE_STATE_FAILED = NodeStateFailed(
     output_hash=None,
     context_before_json='{"prompt": "test"}',
     context_after_json=None,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _UnknownNodeStateVariant:
+    state_id: str
+    token_id: str
+    node_id: str
+    step_index: int
+    attempt: int
+    status: NodeStateStatus
+    input_hash: str
+    output_hash: str | None
+    duration_ms: float
+    started_at: datetime
+    completed_at: datetime
+    context_before_json: str
+    context_after_json: str | None
+    error_json: str
+
+
+_UNKNOWN_NODE_STATE_VARIANT = _UnknownNodeStateVariant(
+    state_id="state-unknown",
+    token_id="tok-1",
+    node_id="node-2",
+    step_index=1,
+    attempt=1,
+    status=NodeStateStatus.FAILED,
+    input_hash="in-hash",
+    output_hash=None,
+    duration_ms=100.0,
+    started_at=_DT,
+    completed_at=_DT2,
+    context_before_json='{"prompt": "test"}',
+    context_after_json=None,
+    error_json='{"error": "timeout"}',
 )
 
 _ROUTING_EVENT = RoutingEvent(
@@ -1063,6 +1100,16 @@ class TestNodeStateRecords:
         assert s["status"] == "failed"
         assert s["error_json"] == '{"error": "timeout"}'
         assert s["success_reason_json"] is None
+
+    def test_unknown_state_variant_raises(self) -> None:
+        exporter = _make_exporter(
+            rows=[_ROW],
+            tokens=[_TOKEN],
+            node_states=[_UNKNOWN_NODE_STATE_VARIANT],
+        )
+
+        with pytest.raises(AuditIntegrityError, match="Unknown NodeState variant"):
+            list(exporter.export_run("run-1"))
 
 
 # ===========================================================================

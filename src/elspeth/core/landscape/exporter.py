@@ -21,9 +21,6 @@ from elspeth.contracts import (
     BatchMember,
     Call,
     NodeState,
-    NodeStateCompleted,
-    NodeStateOpen,
-    NodeStatePending,
     RoutingEvent,
     Row,
     Token,
@@ -39,7 +36,6 @@ from elspeth.contracts.export_records import (
     EdgeExportRecord,
     ExportRecord,
     NodeExportRecord,
-    NodeStateExportRecord,
     OperationExportRecord,
     RoutingEventExportRecord,
     RowExportRecord,
@@ -55,6 +51,7 @@ from elspeth.contracts.export_records import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.export_mappers import node_state_to_export_record
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -616,89 +613,7 @@ class LandscapeExporter:
                 # R1) avoids defaultdict inflating itself with a throwaway
                 # empty list for every token that has no node states.
                 for state in states_by_token[token.token_id] if token.token_id in states_by_token else ():
-                    # Handle discriminated union types
-                    node_state_record: NodeStateExportRecord
-                    if isinstance(state, NodeStateOpen):
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": None,
-                            "duration_ms": None,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": None,
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": None,  # OPEN states don't have after context
-                            "error_json": None,  # OPEN states aren't failed
-                            "success_reason_json": None,  # OPEN states aren't completed
-                        }
-                    elif isinstance(state, NodeStatePending):
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": None,
-                            "duration_ms": state.duration_ms,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": state.completed_at.isoformat(),
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": state.context_after_json,
-                            "error_json": None,  # PENDING states aren't failed
-                            "success_reason_json": None,  # PENDING states aren't completed yet
-                        }
-                    elif isinstance(state, NodeStateCompleted):
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": state.output_hash,
-                            "duration_ms": state.duration_ms,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": state.completed_at.isoformat(),
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": state.context_after_json,
-                            "error_json": None,  # COMPLETED states aren't failed
-                            "success_reason_json": state.success_reason_json,
-                        }
-                    else:  # NodeStateFailed
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": state.output_hash,
-                            "duration_ms": state.duration_ms,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": state.completed_at.isoformat(),
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": state.context_after_json,
-                            "error_json": state.error_json,
-                            "success_reason_json": None,  # FAILED states aren't completed
-                        }
-                    yield node_state_record
+                    yield node_state_to_export_record(run_id, state)
 
                     # Routing events for this state (from pre-loaded dict).
                     # An explicit `in` guard (not `.get(key, default)`, which

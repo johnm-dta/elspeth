@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
 from elspeth.core.config import RateLimitSettings, ServiceRateLimit
 from elspeth.core.rate_limit.limiter import RateLimiter
@@ -360,11 +362,11 @@ class TestRateLimitRegistryNameCollision:
     """elspeth-2af4e98ee2: distinct service names must not collide onto one
     persistent SQLite bucket via a non-injective sanitizer."""
 
-    def _config(self, tmp_path: Path, rpm: int = 1) -> RuntimeRateLimitConfig:
+    def _config(self, rpm: int = 1) -> RuntimeRateLimitConfig:
         settings = RateLimitSettings(
             enabled=True,
             default_requests_per_minute=rpm,
-            persistence_path=str(tmp_path / "rl.db"),
+            persistence_path="rl.db",
         )
         return RuntimeRateLimitConfig.from_settings(settings)
 
@@ -373,8 +375,9 @@ class TestRateLimitRegistryNameCollision:
         assert isinstance(limiter, RateLimiter)
         return limiter
 
-    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path: Path) -> None:
-        registry = RateLimitRegistry(self._config(tmp_path, rpm=1))
+    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        registry = RateLimitRegistry(self._config(rpm=1))
         try:
             a = self._rate_limiter(registry, "api.example")
             b = self._rate_limiter(registry, "api_example")
@@ -387,18 +390,22 @@ class TestRateLimitRegistryNameCollision:
         finally:
             registry.close()
 
-    def test_already_valid_name_bucket_is_unchanged(self, tmp_path: Path) -> None:
+    def test_already_valid_name_bucket_is_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stability guard: an already-valid service name keeps its byte-identical
         bucket name (edge-only migration — common case is untouched)."""
-        registry = RateLimitRegistry(self._config(tmp_path, rpm=10))
+        monkeypatch.chdir(tmp_path)
+        registry = RateLimitRegistry(self._config(rpm=10))
         try:
             assert self._rate_limiter(registry, "openai").name == "openai"
             assert self._rate_limiter(registry, "api_example").name == "api_example"
         finally:
             registry.close()
 
-    def test_valid_service_name_matching_rewritten_bucket_gets_independent_bucket(self, tmp_path: Path) -> None:
-        registry = RateLimitRegistry(self._config(tmp_path, rpm=1))
+    def test_valid_service_name_matching_rewritten_bucket_gets_independent_bucket(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        registry = RateLimitRegistry(self._config(rpm=1))
         try:
             rewritten = self._rate_limiter(registry, "api.example")
             matching_raw = self._rate_limiter(registry, rewritten.name)

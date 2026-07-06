@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has incomplete type stubs
@@ -198,6 +199,7 @@ class RateLimiter:
 
         # Create bucket (persistent or in-memory)
         if persistence_path:
+            Path(persistence_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             self._conn = sqlite3.connect(persistence_path, check_same_thread=False)
             table_name = f"ratelimit_{name}"
             self._conn.execute(SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name))

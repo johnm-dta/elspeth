@@ -24,6 +24,7 @@ If a test fails after adding a new field to a Settings class:
 3. If the field is internal-only: Add it to internal_fields with explanation
 """
 
+from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
 
@@ -644,7 +645,7 @@ class TestExplicitFieldMappings:
         settings = RateLimitSettings(
             enabled=True,
             default_requests_per_minute=500,
-            persistence_path="/tmp/limits.db",
+            persistence_path="limits.db",
             services={},
         )
         config = RuntimeRateLimitConfig.from_settings(settings)
@@ -659,7 +660,7 @@ class TestExplicitFieldMappings:
         assert config.default_requests_per_minute == float(settings.default_requests_per_minute), (
             "default_requests_per_minute: direct mapping (int->float)"
         )
-        assert config.persistence_path == settings.persistence_path, "persistence_path: direct mapping"
+        assert config.persistence_path == str((Path("data") / "limits.db").resolve()), "persistence_path: resolved under state dir"
         # RuntimeServiceRateLimit vs ServiceRateLimit: different types compared for value equality
         # to verify settings-to-runtime mapping produces equivalent values.
         assert config.services == dict(settings.services), "services: direct mapping"  # type: ignore[comparison-overlap]
@@ -879,7 +880,14 @@ class TestPropertyBasedRoundtrip:
         @given(
             enabled=st.booleans(),
             rpm=st.integers(min_value=1, max_value=100000),
-            path=st.one_of(st.none(), st.text(min_size=1, max_size=50).filter(lambda s: "/" not in s or s.startswith("/"))),
+            path=st.one_of(
+                st.none(),
+                st.text(
+                    alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="_.-"),
+                    min_size=1,
+                    max_size=50,
+                ).filter(lambda s: s not in {".", ".."} and not s.lower().startswith("file")),
+            ),
         )
         @settings(max_examples=100)
         def check_roundtrip(
@@ -896,7 +904,8 @@ class TestPropertyBasedRoundtrip:
 
             assert config.enabled == enabled
             assert config.default_requests_per_minute == rpm
-            assert config.persistence_path == path
+            expected_path = None if path is None else str((Path("data") / path).resolve())
+            assert config.persistence_path == expected_path
 
         check_roundtrip()
 

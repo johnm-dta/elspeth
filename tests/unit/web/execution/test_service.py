@@ -1268,6 +1268,46 @@ class TestB3Construction:
         # B3: PayloadStore constructed from settings path
         mock_payload_cls.assert_called_once_with(base_path=Path("/tmp/test_payloads"))
 
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_rate_limit_config_uses_web_data_dir(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_load: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_settings: _WebSettingsStub,
+    ) -> None:
+        """Rate-limit persistence must be confined to the web app state root."""
+        _configure_runtime_success(
+            mock_load=mock_load,
+            mock_instantiate=mock_instantiate,
+            mock_graph_cls=mock_graph_cls,
+            mock_orch_cls=mock_orch_cls,
+        )
+        mock_settings.data_dir = Path("/tmp/custom-web-state")
+
+        with (
+            patch(
+                "elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=SimpleNamespace()
+            ) as mock_from_settings,
+            patch("elspeth.core.rate_limit.RateLimitRegistry", return_value=SimpleNamespace(close=lambda: None)),
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+            ),
+        ):
+            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+
+        mock_from_settings.assert_called_once_with(mock_load.return_value.rate_limit, state_dir=Path("/tmp/custom-web-state"))
+
 
 @pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestInlineBlobRuntimePreflight:

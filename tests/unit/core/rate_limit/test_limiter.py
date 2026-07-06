@@ -151,6 +151,21 @@ class TestRateLimiter:
         assert limiter2.try_acquire() is False
         limiter2.close()
 
+    def test_limiter_creates_persistence_parent_directory(self, tmp_path: Path) -> None:
+        """Nested SQLite persistence paths create their parent directory."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        db_path = tmp_path / "rate_limit" / "limits.db"
+
+        with RateLimiter(
+            name="persistent",
+            requests_per_minute=60,
+            persistence_path=str(db_path),
+        ):
+            pass
+
+        assert db_path.exists()
+
     def test_limiter_context_manager(self) -> None:
         """RateLimiter can be used as context manager."""
         from elspeth.core.rate_limit import RateLimiter

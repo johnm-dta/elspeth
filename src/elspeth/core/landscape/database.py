@@ -785,7 +785,7 @@ class LandscapeDB:
             )
 
     @staticmethod
-    def _create_sqlcipher_engine(url: str, passphrase: str) -> Engine:
+    def _create_sqlcipher_engine(url: str, passphrase: str, *, read_only: bool = False) -> Engine:
         """Create a SQLAlchemy engine backed by SQLCipher (AES-256 encryption).
 
         Uses the creator callback pattern to keep the passphrase out of the
@@ -798,6 +798,7 @@ class LandscapeDB:
         Args:
             url: SQLAlchemy SQLite URL (e.g., "sqlite:///./data/audit.db")
             passphrase: Encryption passphrase for PRAGMA key
+            read_only: Open the encrypted SQLite file through a mode=ro URI.
 
         Returns:
             Configured SQLAlchemy Engine
@@ -864,12 +865,16 @@ class LandscapeDB:
                 # URI-style param (mode, cache, immutable, vfs, etc.)
                 uri_params[key] = value
 
+        if read_only:
+            uri_params["mode"] = "ro"
+            uri_params.pop("immutable", None)
+
         # When URI params are present, build a file: URI and enable uri=True
         # so that SQLite interprets them via the URI interface.
         if uri_params:
             from urllib.parse import quote, urlencode
 
-            file_uri = f"file:{quote(resolved_path)}?{urlencode(uri_params)}"
+            file_uri = f"file:{quote(resolved_path, safe='/:')}?{urlencode(uri_params)}"
             connect_kwargs["uri"] = True
         else:
             file_uri = None
@@ -1327,7 +1332,7 @@ class LandscapeDB:
             raise ValueError("read_only=True cannot enable dump_to_jsonl")
 
         if passphrase is not None:
-            engine = cls._create_sqlcipher_engine(url, passphrase)
+            engine = cls._create_sqlcipher_engine(url, passphrase, read_only=read_only)
             cls._configure_sqlite(engine, read_only=read_only)
             if not read_only:
                 # Tier-1 PRAGMA probe — see _verify_sqlite_pragmas docstring.
@@ -1475,11 +1480,11 @@ class LandscapeDB:
         For SQLite, sets PRAGMA query_only = ON at the connection level and,
         on writable engines only, resets it to OFF in the finally block so the
         pooled DBAPI connection is returned in a writable state. Read-only
-        engines (``from_url(read_only=True)``) keep query_only armed: it is
-        the only write barrier on SQLCipher read-only opens, which have no
-        mode=ro file-level backstop. For PostgreSQL, marks the current
-        transaction READ ONLY. Unsupported backends fail closed instead of
-        yielding a writable transaction.
+        engines (``from_url(read_only=True)``) keep query_only armed; SQLite
+        file-backed read-only handles also open through a ``mode=ro`` URI, so
+        query_only is defense in depth rather than the sole write barrier. For
+        PostgreSQL, marks the current transaction READ ONLY. Unsupported
+        backends fail closed instead of yielding a writable transaction.
         """
         dialect_name = self.engine.dialect.name
         with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:

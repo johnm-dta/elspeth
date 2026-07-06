@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from elspeth.contracts import RouteDestination, RoutingMode, error_edge_label
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import FrameworkBugError
-from elspeth.contracts.schema import FieldDefinition, SchemaConfig, get_raw_schema_config
+from elspeth.contracts.schema import SchemaConfig, get_raw_schema_config
 from elspeth.contracts.types import (
     AggregationName,
     BranchName,
@@ -28,10 +28,7 @@ from elspeth.contracts.types import (
     SinkName,
 )
 from elspeth.core.canonical import canonical_json
-from elspeth.core.dag.coalesce_merge import (
-    merge_guaranteed_fields,
-    merge_union_fields,
-)
+from elspeth.core.dag.coalesce_merge import merge_coalesce_schema
 from elspeth.core.dag.models import (
     _NODE_ID_MAX_LENGTH,
     BranchInfo,
@@ -1062,81 +1059,16 @@ def build_execution_graph(
                 # Use replace() to preserve any future BranchInfo fields automatically
                 branch_info[branch_key] = replace(branch_info[branch_key], schema=schema)
 
-        # Collect contract fields from ALL branches for propagation.
-        #   guaranteed_fields = policy-aware merge of branches that declare:
-        #                         require_all → UNION (every branch always
-        #                                       arrives, any branch's guarantee
-        #                                       survives dict.update in the
-        #                                       merged row)
-        #                         others      → INTERSECTION (branches may be
-        #                                       lost / only first/quorum arrives,
-        #                                       so only fields guaranteed by
-        #                                       every branch survive)
-        #   audit_fields = union (any audit field from any branch)
-        #
-        # Only branches that declare guarantees participate. See
-        # SchemaConfig.declares_guaranteed_fields for the None-vs-empty contract
-        # (None = abstain, () = participate with empty set).
-        #
-        # This stored tuple must match ExecutionGraph.get_effective_guaranteed_fields()
-        # for the same COALESCE node at runtime — consumers that read the stored
-        # schema directly (deferred config gates via _best_schema_config,
-        # nested coalesces via get_schema_config_from_node, and any non-COALESCE
-        # path through get_guaranteed_fields) rely on this equivalence.
-        # Use extracted merge function for guaranteed_fields
-        merged_guaranteed_tuple = merge_guaranteed_fields(
+        merged_schema = merge_coalesce_schema(
             branch_to_schema,
+            merge_strategy=coal_config.merge,
             require_all=coal_config.has_all_branch_semantics,
+            collision_policy=coal_config.union_collision_policy,
+            branch_order=tuple(coal_config.branches.keys()),
+            select_branch=coal_config.select_branch,
+            coalesce_id=str(coalesce_id),
         )
-
-        # Audit fields always use union (any audit field from any branch)
-        audit_sets: list[set[str]] = []
-        for schema_cfg in branch_to_schema.values():
-            af = schema_cfg.audit_fields
-            if af is not None:
-                audit_sets.append(set(af))
-        merged_audit_tuple = tuple(sorted(set.union(*audit_sets))) if audit_sets else None
-
-        if coal_config.merge == "union":
-            # Union merge: use extracted merge function for field-level logic
-            # See merge_union_fields() docstring for OR/AND semantics explanation
-            merged_schema = merge_union_fields(
-                branch_to_schema,
-                require_all=coal_config.has_all_branch_semantics,
-                collision_policy=coal_config.union_collision_policy,
-                branch_order=tuple(coal_config.branches.keys()),
-                coalesce_id=coalesce_id,
-                guaranteed_fields=merged_guaranteed_tuple,
-                audit_fields=merged_audit_tuple,
-            )
-            _assign_schema(coalesce_id, merged_schema)
-        elif coal_config.merge == "select":
-            # Select merge: use selected branch's schema directly.
-            select_branch = coal_config.select_branch
-            assert select_branch is not None  # Guaranteed by validate_merge_requirements
-            if select_branch not in branch_to_schema:
-                raise GraphValidationError(
-                    f"Coalesce node '{coalesce_id}' select_branch '{select_branch}' "
-                    f"has no schema mapping. Available branches: "
-                    f"{sorted(branch_to_schema.keys())}. "
-                    "This indicates a graph construction bug.",
-                    component_id=str(coalesce_id),
-                    component_type="coalesce",
-                )
-            _assign_schema(coalesce_id, branch_to_schema[select_branch])
-        else:
-            # Nested merge: output has branch names as top-level fields, each
-            # containing the branch's row data as a nested dict.  Since the type
-            # system only supports flat types, declare branch fields as "any".
-            # For partial-arrival policies, branch fields are optional since not
-            # all branches may arrive at runtime.
-            optional = not coal_config.has_all_branch_semantics
-            nested_fields = tuple(FieldDefinition(name=branch, field_type="any", required=not optional) for branch in branch_to_schema)
-            nested_schema = SchemaConfig(
-                mode="flexible",
-                fields=nested_fields,
-            )
-            _assign_schema(coalesce_id, nested_schema)
+        _assign_schema(coalesce_id, merged_schema)
 
     # Update branch_info on the graph now that schemas are populated.
     # The initial set_branch_info (line ~821) stored entries without schemas.

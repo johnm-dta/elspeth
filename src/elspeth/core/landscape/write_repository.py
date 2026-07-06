@@ -24,6 +24,7 @@ from elspeth.core.landscape.schema import nodes_table, rows_table, run_attributi
 __all__ = ["LandscapeWriteRepository", "SynthesisedNodeSpec"]
 
 _ROW_IDENTITY_KEYS = frozenset({"source_node_index", "source_row_index", "ingest_sequence", "source_data_hash"})
+_SYNTHESISED_RUN_METADATA_KEYS = frozenset({"seeded_from_cache", "cache_key"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,16 @@ class LandscapeWriteRepository:
         """
         source_node_indices = self._validate_node_specs(node_specs)
         validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        metadata_keys = frozenset(metadata)
+        if metadata_keys != _SYNTHESISED_RUN_METADATA_KEYS:
+            details = []
+            if _SYNTHESISED_RUN_METADATA_KEYS - metadata_keys:
+                details.append("missing required metadata keys")
+            if metadata_keys - _SYNTHESISED_RUN_METADATA_KEYS:
+                details.append("unexpected metadata keys")
+            raise LandscapeRecordError(
+                f"record_synthesised_run metadata must contain only seeded_from_cache and cache_key ({'; '.join(details)})"
+            )
         seeded_from_cache = metadata["seeded_from_cache"]
         cache_key = metadata["cache_key"]
         if type(seeded_from_cache) is not bool:
@@ -92,9 +103,13 @@ class LandscapeWriteRepository:
             )
 
         run_id = generate_id()
+        audit_metadata = {
+            "seeded_from_cache": seeded_from_cache,
+            "cache_key": cache_key,
+        }
         config = {
             "pipeline_yaml": pipeline_yaml,
-            "metadata": dict(metadata),
+            "metadata": audit_metadata,
         }
         source_node_ids_by_index = {index: self._node_id(run_id, index) for index in source_node_indices}
 

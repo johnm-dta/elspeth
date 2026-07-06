@@ -71,26 +71,6 @@ from elspeth.core.landscape.reproducibility import (
 )
 from elspeth.core.landscape.row_data import CallDataResult, CallDataState, RowDataResult, RowDataState
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
-from elspeth.core.landscape.schema import (
-    artifacts_table,
-    auth_events_table,
-    batch_members_table,
-    batch_outputs_table,
-    batches_table,
-    calls_table,
-    edges_table,
-    metadata,
-    node_states_table,
-    nodes_table,
-    routing_events_table,
-    rows_table,
-    run_sources_table,
-    runs_table,
-    scheduler_events_table,
-    token_parents_table,
-    token_work_items_table,
-    tokens_table,
-)
 from elspeth.core.landscape.write_repository import LandscapeWriteRepository
 
 __all__ = [
@@ -138,27 +118,9 @@ __all__ = [
     "Token",
     "TokenParent",
     "ValidationErrorWithContract",
-    "artifacts_table",
-    "auth_events_table",
-    "batch_members_table",
-    "batch_outputs_table",
-    "batches_table",
-    "calls_table",
     "compute_grade",
     "dataclass_to_dict",
-    "edges_table",
     "explain",
-    "metadata",
-    "node_states_table",
-    "nodes_table",
-    "routing_events_table",
-    "rows_table",
-    "run_sources_table",
-    "runs_table",
-    "scheduler_events_table",
     "serialize_datetime",
-    "token_parents_table",
-    "token_work_items_table",
-    "tokens_table",
     "update_grade_after_purge",
 ]

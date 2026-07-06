@@ -116,6 +116,204 @@ class TestDnsTimeoutEffectiveness:
         assert _dns_pool._max_workers == _DNS_POOL_SIZE
         assert _DNS_POOL_SIZE <= 16, "Pool size should be modest to prevent resource exhaustion"
 
+    def test_timed_out_dns_tasks_do_not_leave_unbounded_queued_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Timed-out resolver tasks must apply backpressure before executor queue growth."""
+        import threading
+
+        from elspeth.core.security import web as web_security
+
+        class _NeverCompletingFuture:
+            def __init__(self) -> None:
+                self.cancel_attempts = 0
+                self._callbacks = []
+
+            def result(self, timeout: float | None = None) -> list[str]:
+                raise TimeoutError
+
+            def cancel(self) -> bool:
+                self.cancel_attempts += 1
+                return False
+
+            def add_done_callback(self, callback: object) -> None:
+                self._callbacks.append(callback)
+
+        class _RecordingPool:
+            def __init__(self) -> None:
+                self.futures: list[_NeverCompletingFuture] = []
+
+            def submit(self, fn: object, hostname: str) -> _NeverCompletingFuture:
+                future = _NeverCompletingFuture()
+                self.futures.append(future)
+                return future
+
+        pool = _RecordingPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(
+            web_security,
+            "_dns_capacity",
+            threading.BoundedSemaphore(web_security._DNS_POOL_SIZE),
+            raising=False,
+        )
+
+        for index in range(web_security._DNS_POOL_SIZE):
+            with pytest.raises(NetworkError, match="DNS resolution timeout"):
+                validate_url_for_ssrf(f"https://example-{index}.com/path", timeout=0.001)
+
+        with pytest.raises(NetworkError, match="DNS resolution capacity exhausted"):
+            validate_url_for_ssrf("https://overflow.example.com/path", timeout=0.001)
+
+        assert len(pool.futures) == web_security._DNS_POOL_SIZE
+        assert all(future.cancel_attempts == 1 for future in pool.futures)
+
+    def test_dns_capacity_releases_after_successful_future(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Completed resolver futures must release capacity for later requests."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _SuccessfulPool:
+            def __init__(self) -> None:
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> Future[list[str]]:
+                self.submitted += 1
+                future: Future[list[str]] = Future()
+                future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _SuccessfulPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        assert web_security._submit_dns_resolution("first.example.com").result() == ["93.184.216.34"]
+        assert web_security._submit_dns_resolution("second.example.com").result() == ["93.184.216.34"]
+        assert pool.submitted == 2
+
+    def test_dns_capacity_releases_after_exception_future(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Resolver futures that complete with an exception must release capacity."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _ExceptionThenSuccessPool:
+            def __init__(self) -> None:
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> Future[list[str]]:
+                self.submitted += 1
+                future: Future[list[str]] = Future()
+                if self.submitted == 1:
+                    future.set_exception(NetworkError("resolver failure"))
+                else:
+                    future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _ExceptionThenSuccessPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        with pytest.raises(NetworkError, match="resolver failure"):
+            web_security._submit_dns_resolution("first.example.com").result()
+
+        assert web_security._submit_dns_resolution("second.example.com").result() == ["93.184.216.34"]
+        assert pool.submitted == 2
+
+    def test_dns_capacity_releases_when_submit_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A submit failure after capacity acquisition must not leak capacity."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _FailOncePool:
+            def __init__(self) -> None:
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> Future[list[str]]:
+                self.submitted += 1
+                if self.submitted == 1:
+                    raise RuntimeError("submit failed")
+                future: Future[list[str]] = Future()
+                future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _FailOncePool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            web_security._submit_dns_resolution("first.example.com")
+
+        assert web_security._submit_dns_resolution("second.example.com").result() == ["93.184.216.34"]
+        assert pool.submitted == 2
+
+    def test_dns_capacity_releases_when_queued_timeout_cancels(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cancelled queued timeout must release capacity through the done callback."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _CancellableTimeoutFuture:
+            def __init__(self) -> None:
+                self.cancel_attempts = 0
+                self._callbacks = []
+
+            def result(self, timeout: float | None = None) -> list[str]:
+                raise TimeoutError
+
+            def cancel(self) -> bool:
+                self.cancel_attempts += 1
+                for callback in self._callbacks:
+                    callback(self)
+                return True
+
+            def add_done_callback(self, callback: object) -> None:
+                self._callbacks.append(callback)
+
+        class _TimeoutThenSuccessPool:
+            def __init__(self) -> None:
+                self.timeout_future = _CancellableTimeoutFuture()
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> object:
+                self.submitted += 1
+                if self.submitted == 1:
+                    return self.timeout_future
+                future: Future[list[str]] = Future()
+                future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _TimeoutThenSuccessPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        with pytest.raises(NetworkError, match="DNS resolution timeout"):
+            validate_url_for_ssrf("https://first.example.com/path", timeout=0.001)
+
+        result = validate_url_for_ssrf("https://second.example.com/path", timeout=0.001)
+
+        assert result.resolved_ip == "93.184.216.34"
+        assert pool.timeout_future.cancel_attempts == 1
+        assert pool.submitted == 2
+
 
 # ===========================================================================
 # Bug 7.6: Port parsing

@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import threading
 import urllib.parse
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from ipaddress import IPv4Network, IPv6Network
 
@@ -82,10 +84,12 @@ ALWAYS_BLOCKED_RANGES = (
     ipaddress.ip_network("ff00::/8"),  # IPv6 multicast
 )
 
-# Bounded thread pool for DNS resolution.  Caps concurrent getaddrinfo threads
-# so repeated timeouts (e.g. blackholed resolver) cannot exhaust OS threads.
+# Bounded thread pool for DNS resolution. Caps concurrent getaddrinfo threads
+# and outstanding resolver work so repeated timeouts (e.g. blackholed resolver)
+# cannot exhaust OS threads or accumulate an unbounded executor queue.
 _DNS_POOL_SIZE = 8
 _dns_pool = ThreadPoolExecutor(max_workers=_DNS_POOL_SIZE, thread_name_prefix="dns_resolve")
+_dns_capacity = threading.BoundedSemaphore(_DNS_POOL_SIZE)
 
 
 def validate_url_scheme(url: str) -> None:
@@ -149,6 +153,22 @@ def _resolve_hostname(hostname: str) -> list[str]:
         # not IDNA-encodable (Tier 3 external input). Both are recoverable external
         # boundary failures, surfaced as the documented NetworkError — never crashed.
         raise NetworkError(f"DNS resolution failed: {hostname}: {e}") from e
+
+
+def _submit_dns_resolution(hostname: str) -> Future[list[str]]:
+    """Submit a DNS resolution task only when resolver capacity is available."""
+    capacity = _dns_capacity
+    if not capacity.acquire(blocking=False):
+        raise NetworkError(f"DNS resolution capacity exhausted: {hostname}")
+
+    try:
+        future = _dns_pool.submit(_resolve_hostname, hostname)
+    except BaseException:
+        capacity.release()
+        raise
+
+    future.add_done_callback(lambda _future: capacity.release())
+    return future
 
 
 def _validate_ip_address(
@@ -330,22 +350,25 @@ def validate_url_for_ssrf(
     if parsed.fragment:
         path = f"{path}#{parsed.fragment}"
 
-    # Step 3: Resolve DNS with timeout via bounded thread pool.
+    # Step 3: Resolve DNS with timeout via bounded thread pool and a bounded
+    # outstanding-task semaphore.
     # Using a shared ThreadPoolExecutor (max _DNS_POOL_SIZE workers) instead
     # of spawning one daemon thread per call.  Under repeated timeouts (e.g.
     # blackholed DNS resolver), at most _DNS_POOL_SIZE threads are blocked in
-    # getaddrinfo; additional requests queue and time out without creating new
-    # threads.
+    # getaddrinfo, and additional requests fail fast instead of accumulating in
+    # the executor's unbounded internal queue.
     #
     # Future.result(timeout=) re-raises the worker's exception with its original
     # type, so SSRFBlockedError / NetworkError propagate unchanged and any other
     # exception (a bug in our own resolver code) crashes rather than being
-    # laundered into NetworkError. On timeout the worker keeps running in the
-    # pool (bounded), and control returns to the caller immediately.
-    future = _dns_pool.submit(_resolve_hostname, hostname)
+    # laundered into NetworkError. On timeout we try to cancel the future; if it
+    # is already running, the capacity slot is released by the completion
+    # callback when the resolver eventually returns.
+    future = _submit_dns_resolution(hostname)
     try:
         ip_list = future.result(timeout=timeout)
-    except TimeoutError as exc:
+    except FutureTimeoutError as exc:
+        future.cancel()
         raise NetworkError(f"DNS resolution timeout ({timeout}s): {hostname}") from exc
 
     if not ip_list:

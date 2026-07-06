@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from elspeth.contracts.enums import NodeType, RoutingMode
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.core.dag.models import BranchInfo, GraphValidationError
@@ -126,3 +127,53 @@ class TestSelectMergeCoalesceRaisesOnBrokenBranch:
         # Returns None because gate has no output_schema — that's fine,
         # the important thing is it didn't raise an error
         assert result is None
+
+
+class TestExecutionGraphConstructionApi:
+    def test_set_node_output_schema_updates_node_info_through_graph_api(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="csv")
+
+        schema = SchemaConfig(mode="observed", fields=None)
+
+        graph.set_node_output_schema("source", schema)
+
+        assert graph.get_node_info("source").output_schema_config is schema
+
+    def test_topological_processing_order_filters_to_processing_nodes(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("transform", node_type=NodeType.TRANSFORM, plugin_name="classifier")
+        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
+        graph.add_edge("source", "transform", label="continue")
+        graph.add_edge("transform", "sink", label="continue")
+
+        order = graph.topological_processing_order({NodeID("transform")})
+
+        assert order == [NodeID("transform")]
+
+    def test_topological_processing_order_preserves_cycle_error_contract(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node("first", node_type=NodeType.TRANSFORM, plugin_name="a")
+        graph.add_node("second", node_type=NodeType.TRANSFORM, plugin_name="b")
+        graph.add_edge("first", "second", label="forward")
+        graph.add_edge("second", "first", label="back")
+
+        with pytest.raises(GraphValidationError, match="Pipeline contains a cycle"):
+            graph.topological_processing_order({NodeID("first"), NodeID("second")})
+
+    def test_finalize_node_configs_deep_freezes_node_config(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node(
+            "source",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+            config={"options": {"columns": ["name"]}},
+        )
+
+        graph.finalize_node_configs()
+
+        config = graph.get_node_info("source").config
+        assert config["options"]["columns"] == ("name",)
+        with pytest.raises(TypeError):
+            config["new"] = "value"

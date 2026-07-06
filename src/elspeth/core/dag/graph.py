@@ -12,7 +12,7 @@ corresponding ExecutionGraph methods are thin delegating facades
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 import networkx as nx
@@ -25,6 +25,7 @@ from elspeth.contracts import (
     RoutingMode,
 )
 from elspeth.contracts.enums import NodeType
+from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema import SchemaConfig, get_raw_schema_config
 from elspeth.contracts.types import (
     AggregationName,
@@ -182,6 +183,17 @@ class ExecutionGraph:
             passes_through_input=passes_through_input,
         )
         self._graph.add_node(node_id, info=info)
+
+    def set_node_output_schema(self, node_id: str, schema: SchemaConfig) -> None:
+        """Set a node's output schema during graph construction."""
+        info = self.get_node_info(node_id)
+        object.__setattr__(info, "output_schema_config", schema)
+
+    def finalize_node_configs(self) -> None:
+        """Deep-freeze mutable node configs after construction is complete."""
+        for info in self.get_nodes():
+            if isinstance(info.config, dict):
+                object.__setattr__(info, "config", deep_freeze(info.config))
 
     def add_edge(
         self,
@@ -367,6 +379,20 @@ class ExecutionGraph:
             return list(nx.topological_sort(self._graph))
         except nx.NetworkXUnfeasible as e:
             raise GraphValidationError(f"Cannot sort graph: {e}") from e
+
+    def topological_processing_order(self, processing_node_ids: Iterable[NodeID]) -> list[NodeID]:
+        """Return processing nodes filtered from the graph's topological order."""
+        processing_nodes = set(processing_node_ids)
+        try:
+            topo_order = [NodeID(raw_id) for raw_id in nx.topological_sort(self._graph)]
+        except nx.NetworkXUnfeasible as unfeasible_exc:
+            try:
+                cycle = nx.find_cycle(self._graph)
+                cycle_str = " -> ".join(f"{edge[0]}" for edge in cycle)
+                raise GraphValidationError(f"Pipeline contains a cycle: {cycle_str}") from unfeasible_exc
+            except nx.NetworkXNoCycle as exc:
+                raise GraphValidationError("Pipeline contains a cycle") from exc
+        return [node_id for node_id in topo_order if node_id in processing_nodes]
 
     def get_sources(self) -> list[NodeID]:
         """Get all source node IDs."""

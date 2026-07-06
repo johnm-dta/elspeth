@@ -15,12 +15,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-import networkx as nx
-
 from elspeth.contracts import RouteDestination, RoutingMode, error_edge_label
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import FrameworkBugError
-from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig, get_raw_schema_config
 from elspeth.contracts.types import (
     AggregationName,
@@ -214,8 +211,7 @@ def build_execution_graph(
         upstream producers. This sets the typed SchemaConfig so all consumers
         can read it directly without fallback chains.
         """
-        target_info = graph.get_node_info(target_nid)
-        object.__setattr__(target_info, "output_schema_config", schema)
+        graph.set_node_output_schema(target_nid, schema)
 
     def _sink_name_set() -> set[str]:
         return {str(name) for name in sink_ids}
@@ -966,16 +962,7 @@ def build_execution_graph(
     processing_node_ids.update(config_gate_ids.values())
     processing_node_ids.update(coalesce_ids.values())
 
-    try:
-        topo_order = [NodeID(raw_id) for raw_id in nx.topological_sort(graph._graph)]
-    except nx.NetworkXUnfeasible as unfeasible_exc:
-        try:
-            cycle = nx.find_cycle(graph._graph)
-            cycle_str = " -> ".join(f"{edge[0]}" for edge in cycle)
-            raise GraphValidationError(f"Pipeline contains a cycle: {cycle_str}") from unfeasible_exc
-        except nx.NetworkXNoCycle as exc:
-            raise GraphValidationError("Pipeline contains a cycle") from exc
-    pipeline_nodes = [node_id for node_id in topo_order if node_id in processing_node_ids]
+    pipeline_nodes = graph.topological_processing_order(processing_node_ids)
 
     branch_info: dict[BranchName, BranchInfo] = {}
     if coalesce_settings:
@@ -1005,8 +992,8 @@ def build_execution_graph(
             coalesce_id_to_config[cid] = coalesce_config
 
     for coalesce_id in coalesce_ids.values():
-        incoming_edges_with_data = list(graph._graph.in_edges(coalesce_id, data=True, keys=True))
-        if not incoming_edges_with_data:
+        incoming_edges = graph.get_incoming_edges(coalesce_id)
+        if not incoming_edges:
             raise GraphValidationError(
                 f"Coalesce node '{coalesce_id}' has no incoming branches; cannot determine schema for audit.",
                 component_id=str(coalesce_id),
@@ -1021,10 +1008,10 @@ def build_execution_graph(
         # correlate via the coalesce config's branch_input → branch_name mapping.
         branch_to_schema: dict[str, SchemaConfig] = {}
 
-        for from_id, _to_id, _key, data in incoming_edges_with_data:
-            edge_label = data["label"]
-            edge_mode = data["mode"]
-            schema = _best_schema_config(NodeID(from_id))
+        for edge in incoming_edges:
+            edge_label = edge.label
+            edge_mode = edge.mode
+            schema = _best_schema_config(edge.from_node)
 
             if edge_mode == RoutingMode.COPY and edge_label in coal_config.branches:
                 # Identity branch: COPY edge labelled with branch name
@@ -1037,7 +1024,7 @@ def build_execution_graph(
                 # match via the source node.  Check each branch's input
                 # connection to find which branch this edge serves.
                 for branch_name, input_conn in coal_config.branches.items():
-                    if input_conn != branch_name and input_conn in producers and producers[input_conn][0] == NodeID(from_id):
+                    if input_conn != branch_name and input_conn in producers and producers[input_conn][0] == edge.from_node:
                         branch_to_schema[branch_name] = schema
                         break
 
@@ -1150,10 +1137,7 @@ def build_execution_graph(
     # NodeInfo.__post_init__ cannot freeze config because the builder mutates
     # it during multi-step schema propagation (gate/coalesce schema assignment).
     # deep_freeze converts nested dicts/lists to MappingProxyType/tuple recursively.
-    for _, attrs in graph._graph.nodes(data=True):
-        info = attrs["info"]
-        if isinstance(info.config, dict):
-            object.__setattr__(info, "config", deep_freeze(info.config))
+    graph.finalize_node_configs()
 
     # Step maps and node sequence support node_id-based processor traversal.
     graph.set_pipeline_nodes(pipeline_nodes)

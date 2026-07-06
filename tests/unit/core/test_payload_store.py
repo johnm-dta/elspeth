@@ -55,6 +55,33 @@ class TestFilesystemPayloadStore:
         retrieved = store.retrieve(content_hash)
         assert retrieved == content
 
+    def test_relative_base_path_is_pinned_at_construction(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        original_cwd = tmp_path / "original"
+        other_cwd = tmp_path / "other"
+        original_cwd.mkdir()
+        other_cwd.mkdir()
+
+        monkeypatch.chdir(original_cwd)
+        store = FilesystemPayloadStore(base_path=Path("payloads"))
+
+        monkeypatch.chdir(other_cwd)
+        content = b"content after cwd drift"
+        content_hash = store.store(content)
+
+        original_path = original_cwd / "payloads" / content_hash[:2] / content_hash
+        other_path = other_cwd / "payloads" / content_hash[:2] / content_hash
+
+        assert store.base_path == (original_cwd / "payloads").resolve()
+        assert original_path.read_bytes() == content
+        assert not other_path.exists()
+        assert store.retrieve(content_hash) == content
+
     def test_exists_returns_true_for_stored(self, tmp_path: Path) -> None:
         from elspeth.core.payload_store import FilesystemPayloadStore
 

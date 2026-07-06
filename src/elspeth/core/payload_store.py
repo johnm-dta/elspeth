@@ -46,7 +46,7 @@ class FilesystemPayloadStore:
         Args:
             base_path: Root directory for payload storage
         """
-        self.base_path = base_path
+        self.base_path = base_path.expanduser().resolve()
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path_for_hash(self, content_hash: str) -> Path:

@@ -159,6 +159,36 @@ def test_synthesised_cache_run_rejects_non_hex_cache_key() -> None:
     assert recorded_runs == []
 
 
+@pytest.mark.parametrize("llm_call_count", [-1, True, "1"])
+def test_synthesised_cache_run_rejects_invalid_llm_call_count(llm_call_count: object) -> None:
+    from elspeth.core.landscape.errors import LandscapeRecordError
+    from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
+
+    db = make_landscape_db()
+    repo = LandscapeWriteRepository(db)
+
+    with pytest.raises(LandscapeRecordError, match="llm_call_count must be a non-negative integer"):
+        repo.record_synthesised_run(
+            pipeline_yaml="source: {}\n",
+            rows=[{"url": "ato.gov.au"}],
+            source_data_hash="a" * 64,
+            llm_call_count=llm_call_count,  # type: ignore[arg-type]
+            node_specs=[
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
+                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="tutorial_summary", plugin_version="1.0"),
+            ],
+            started_at=datetime(2026, 5, 15, tzinfo=UTC),
+            metadata={"seeded_from_cache": True, "cache_key": "a" * 64},
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+        )
+
+    with db.connection() as conn:
+        recorded_runs = conn.execute(select(runs_table.c.run_id)).all()
+
+    assert recorded_runs == []
+
+
 def test_synthesised_single_source_rows_keep_legacy_identity_when_payload_keys_collide() -> None:
     from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
 

@@ -95,6 +95,8 @@ class LandscapeWriteRepository:
             raise LandscapeRecordError("record_synthesised_run metadata['cache_key'] must be str")
         if not is_valid_sha256_hex(cache_key):
             raise LandscapeRecordError(f"record_synthesised_run cache_key must be 64 lowercase hex chars, got {cache_key!r}")
+        if type(llm_call_count) is not int or llm_call_count < 0:
+            raise LandscapeRecordError(f"record_synthesised_run llm_call_count must be a non-negative integer, got {llm_call_count!r}")
         if type(openrouter_catalog_sha256) is not str or not is_valid_sha256_hex(openrouter_catalog_sha256):
             raise LandscapeRecordError(
                 f"record_synthesised_run openrouter_catalog_sha256 must be 64 lowercase hex chars, got {openrouter_catalog_sha256!r}"

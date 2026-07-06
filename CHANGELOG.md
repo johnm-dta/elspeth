@@ -135,6 +135,32 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   Design:
   `docs/superpowers/specs/2026-06-30-azure-document-intelligence-transform-design.md`.
 
+#### Blob-backed document ingestion transforms
+
+- **`blob_fetch` transform** — a new HTTP(S) fetch transform stores an
+  operator-authorised remote document in the run payload store and emits a
+  blob reference plus fetch metadata (`content_type`, `size_bytes`,
+  `sha256`, HTTP status, final URL, and final resolved IP). The transform is
+  an external-call audit boundary, uses the existing SSRF-safe HTTP client,
+  requires wire-visible `abuse_contact` and `fetch_reason` headers, and keeps
+  the accepted file surface behind an explicit content-type allowlist for
+  text, CSV, JSON/JSONL, and XML payloads.
+- **`blob_csv_expand` transform** — a new row-expansion transform reads a
+  payload-store CSV blob and emits one output row per CSV data row while
+  preserving the upstream row, so URL/document identifiers continue to
+  disambiguate rows after expansion. It supports header normalization,
+  explicit columns for headerless CSVs, field mappings, row-index emission,
+  blob-size and row-count limits, and schema-contract propagation for the
+  expanded rows.
+- **Web/composer integration for blob workflows** — guided composer guidance
+  now treats remote document ingestion as a manifest source followed by
+  `blob_fetch` and a parser transform, not as a new source plugin. Web
+  execution validation applies the same public-only SSRF policy to
+  `blob_fetch` as `web_scrape`, audit-readiness now classifies parser
+  transforms with `Determinism.IO_READ` as boundary surfaces, and
+  `examples/blob_transforms/` demonstrates both offline CSV blob expansion
+  and an opt-in hosted tutorial HTML fetch.
+
 #### ELSPETH design system and marketing website
 
 - **Typed React primitive library (`components/ui`)** — a typed primitive

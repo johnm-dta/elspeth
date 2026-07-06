@@ -4065,8 +4065,10 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
-    def test_load_settings_from_yaml_string_expands_env_vars_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The in-memory loader preserves historical ${VAR} expansion by default."""
+    def test_load_settings_from_yaml_string_preserves_env_placeholders_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The in-memory loader treats ${VAR} as literal user data by default."""
         from elspeth.core.config import load_settings_from_yaml_string
 
         monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
@@ -4085,6 +4087,31 @@ sinks:
     on_write_failure: discard
     options: {}
 """
+        )
+
+        assert settings.sources["primary"].options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+
+    def test_load_settings_from_yaml_string_can_opt_into_env_expansion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Trusted in-process callers can explicitly request host environment expansion."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+""",
+            expand_env_vars=True,
         )
 
         assert settings.sources["primary"].options["prompt_template"] == "prefix-server-secret-value-suffix"

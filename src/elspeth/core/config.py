@@ -2566,7 +2566,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = True) -> ElspethSettings:
+def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = False) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
     This is used by the web execution service to load pipeline configs
@@ -2579,13 +2579,13 @@ def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool =
     Args:
         yaml_content: YAML configuration as a string.
         expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
-            patterns from the host environment. Keep this enabled for
-            operator-authored, CLI-loaded config files (see load_settings()).
-            The web execution and validation paths pass ``False``: web-authored
-            YAML is user-controlled, known secret inventory names are resolved
-            via the audited resolve_secret_refs() path beforehand, and any
-            remaining ``${VAR}`` must stay literal data rather than become a
-            host-environment lookup.
+            patterns from the host environment. Defaults to ``False`` because
+            this in-memory loader is used for web-authored YAML, which is
+            user-controlled. Known secret inventory names are resolved via the
+            audited resolve_secret_refs() path beforehand, and any remaining
+            ``${VAR}`` must stay literal data rather than become a
+            host-environment lookup. Trusted in-process callers that intentionally
+            want host environment expansion must opt in explicitly.
 
     Returns:
         Validated ElspethSettings instance.

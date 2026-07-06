@@ -863,14 +863,17 @@ def test_claim_ready_rolls_back_work_item_update_when_scheduler_event_insert_fai
         available_at=now,
         row_payload_json=payload,
     )
-    original_record_scheduler_event = repo._record_scheduler_event
+    original_record_scheduler_event = repo.events.record
 
     def fail_claim_event(conn, *, event_type, **kwargs):
         if event_type is SchedulerEventType.CLAIM_READY:
             raise LandscapeRecordError("forced scheduler event failure")
         return original_record_scheduler_event(conn, event_type=event_type, **kwargs)
 
-    monkeypatch.setattr(repo, "_record_scheduler_event", fail_claim_event)
+    # The shared SchedulerEventStore instance is the single event-plane seam:
+    # every component records through it, so patching it intercepts the
+    # lease repository's internal CLAIM_READY write.
+    monkeypatch.setattr(repo.events, "record", fail_claim_event)
 
     with pytest.raises(LandscapeRecordError, match="forced scheduler event failure"):
         repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1))

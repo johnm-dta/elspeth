@@ -42,6 +42,7 @@ from elspeth.contracts import NodeType
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.scheduler import SchedulerEventStore, SchedulerLeaseRepository, SchedulerQueueRepository
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
     nodes_table,
@@ -219,10 +220,10 @@ class TestSchedulerConnectionPragmaDiscipline:
             )
 
 
-class _RivalInterposingRepository(TokenSchedulerRepository):
+class _RivalInterposingLeases(SchedulerLeaseRepository):
     """Test seam: a rival connection tries to claim between our SELECT and CAS-UPDATE.
 
-    ``claim_ready`` SELECTs the next READY row, then ``_claim_ready_row``
+    ``claim_ready`` SELECTs the next READY row, then ``claim_ready_row``
     issues the CAS-UPDATE.  Overriding the seam lets a second writer
     connection attempt a full claim in exactly that window, then delegates
     to the real production code — the SQL under test is unchanged.  Under
@@ -230,13 +231,20 @@ class _RivalInterposingRepository(TokenSchedulerRepository):
     its own ``BEGIN IMMEDIATE``; the seam records the outcome either way.
     """
 
-    def __init__(self, engine: object, rival: TokenSchedulerRepository, *, now: datetime) -> None:
-        super().__init__(engine)  # type: ignore[arg-type]  # branded engine forwarded verbatim
+    def __init__(
+        self,
+        engine: object,
+        *,
+        events: SchedulerEventStore,
+        rival: TokenSchedulerRepository,
+        now: datetime,
+    ) -> None:
+        super().__init__(engine, events=events)  # type: ignore[arg-type]  # branded engine forwarded verbatim
         self._rival = rival
         self._now = now
         self.rival_outcome: TokenWorkItem | OperationalError | None = None
 
-    def _claim_ready_row(
+    def claim_ready_row(
         self,
         conn: Connection,
         *,
@@ -256,7 +264,7 @@ class _RivalInterposingRepository(TokenSchedulerRepository):
             )
         except OperationalError as exc:
             self.rival_outcome = exc
-        return super()._claim_ready_row(
+        return super().claim_ready_row(
             conn,
             row=row,
             run_id=run_id,
@@ -265,6 +273,26 @@ class _RivalInterposingRepository(TokenSchedulerRepository):
             now=now,
             membership_fenced=membership_fenced,
         )
+
+
+class _RivalInterposingRepository(TokenSchedulerRepository):
+    """Facade wired with the rival-interposing lease component.
+
+    The claim seam lives on :class:`SchedulerLeaseRepository` since the god
+    -repository split (filigree elspeth-ef9c36d767); the queue component is
+    re-wired too because it composes the same lease CAS.
+    """
+
+    def __init__(self, engine: object, rival: TokenSchedulerRepository, *, now: datetime) -> None:
+        super().__init__(engine)  # type: ignore[arg-type]  # branded engine forwarded verbatim
+        self.leases = _RivalInterposingLeases(engine, events=self.events, rival=rival, now=now)  # type: ignore[arg-type]
+        self.queue = SchedulerQueueRepository(engine, events=self.events, leases=self.leases)  # type: ignore[arg-type]
+
+    @property
+    def rival_outcome(self) -> TokenWorkItem | OperationalError | None:
+        interposing = self.leases
+        assert isinstance(interposing, _RivalInterposingLeases)
+        return interposing.rival_outcome
 
 
 class TestClaimReadyUnderSecondWriterConnection:

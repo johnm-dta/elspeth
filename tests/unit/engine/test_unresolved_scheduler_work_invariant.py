@@ -4,7 +4,7 @@ The orchestrator refuses to complete a run (core.py post-source-loop) or a
 resume (resume.py post-EOF-flush) while ``has_unresolved_scheduler_work()``
 is true. The merge into the decomposed orchestrator refined this invariant
 from PENDING_SINK-inclusive ``has_scheduled_work()`` to the unresolved-work
-predicate (scheduler_repository.``_unresolved_work_predicate``): sink-bound
+predicate (scheduler.read_model.``unresolved_work_predicate``): sink-bound
 rows whose producer work is durably complete legitimately park until
 post-invariant sink durability and must NOT block run completion.
 

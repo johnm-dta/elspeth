@@ -13,6 +13,7 @@ from elspeth.core.security.web import (
     SSRFBlockedError,
     _validate_ip_address,
     validate_url_for_ssrf,
+    validate_url_scheme,
 )
 
 
@@ -71,6 +72,94 @@ class TestSSRFDnsFailureBranches:
 
         with pytest.raises(NetworkError, match=r"DNS resolution returned no addresses: example\.com"):
             validate_url_for_ssrf("https://example.com")
+
+
+class TestURLSchemeErrorRedaction:
+    """Scheme-validation diagnostics must not echo attacker-controlled URLs."""
+
+    def test_missing_scheme_error_omits_raw_url_query_fragment_and_secret(self) -> None:
+        token = "sk-" + ("M" * 24)
+        raw_url = f"example.com/path?api_key={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "URL is missing a scheme" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "api_key" not in message
+        assert "fragment" not in message
+
+    def test_forbidden_scheme_error_omits_userinfo_query_fragment_and_secret(self) -> None:
+        token = "sk-" + ("F" * 24)
+        raw_url = f"ftp://operator:{token}@example.com/download?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "Forbidden URL scheme 'ftp'" in message
+        assert "host='example.com'" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "download" not in message
+        assert "fragment" not in message
+
+    def test_embedded_credentials_are_rejected_without_echoing_secret(self) -> None:
+        token = "sk-" + ("C" * 24)
+        raw_url = f"https://operator:{token}@example.com/private?token={token}"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "URL credentials are not allowed" in message
+        assert "host='example.com'" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "private" not in message
+
+    def test_parser_error_omits_raw_netloc_userinfo_and_secret(self) -> None:
+        token = "sk-" + ("P" * 24)
+        raw_url = f"http://operator:{token}@\uff0fevil.com/private?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "Malformed URL" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "private" not in message
+        assert "fragment" not in message
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    def test_ssrf_validator_parser_error_omits_raw_netloc_userinfo_and_secret(self) -> None:
+        token = "sk-" + ("V" * 24)
+        raw_url = f"http://operator:{token}@\uff0fevil.com/private?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_for_ssrf(raw_url)
+
+        message = str(exc_info.value)
+        assert "Malformed URL" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "private" not in message
+        assert "fragment" not in message
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
 
 # ===========================================================================
@@ -327,6 +416,24 @@ class TestPortParsing:
         """Port 0 is falsy but must be explicitly blocked."""
         with pytest.raises(SSRFBlockedError, match="Port 0"):
             validate_url_for_ssrf("https://example.com:0/path")
+
+    def test_invalid_port_error_omits_secret_from_exception_chain(self) -> None:
+        token = "sk-" + ("I" * 24)
+        raw_url = f"https://example.com:{token}/private?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_for_ssrf(raw_url)
+
+        message = str(exc_info.value)
+        assert "Invalid port in URL" in message
+        assert "host='example.com'" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "private" not in message
+        assert "fragment" not in message
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
     def test_explicit_port_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Explicit port (non-zero) should be used in the request."""

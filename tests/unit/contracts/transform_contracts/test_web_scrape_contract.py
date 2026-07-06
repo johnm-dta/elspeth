@@ -324,6 +324,67 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
         mock_httpx.return_value.stream.assert_not_called()
 
+    def test_validation_error_redacts_attacker_controlled_url(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        mock_httpx: Mock,
+    ) -> None:
+        """URL validation failures must not copy raw attacker URLs into row errors."""
+        token = "sk-" + ("W" * 24)
+        raw_url = f"ftp://operator:{token}@example.com/private?token={token}#fragment"
+
+        result = transform.process(make_pipeline_row({"url": raw_url}), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["error_type"] == "SSRFBlockedError"
+
+        error_text = result.reason["error"]
+        assert "Forbidden URL scheme 'ftp'" in error_text
+        assert "host='example.com'" in error_text
+        assert "url_sha256=" in error_text
+        assert raw_url not in error_text
+        assert token not in error_text
+        assert "operator:" not in error_text
+        assert "private" not in error_text
+        assert "fragment" not in error_text
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
+
+    def test_parser_validation_error_redacts_attacker_controlled_url(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        mock_httpx: Mock,
+    ) -> None:
+        """Parser-level URL validation failures must not leak raw attacker URLs."""
+        token = "sk-" + ("P" * 24)
+        raw_url = f"http://operator:{token}@\uff0fevil.com/private?token={token}#fragment"
+
+        result = transform.process(make_pipeline_row({"url": raw_url}), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["error_type"] == "SSRFBlockedError"
+
+        error_text = result.reason["error"]
+        assert "Malformed URL" in error_text
+        assert "url_sha256=" in error_text
+        assert raw_url not in error_text
+        assert token not in error_text
+        assert "operator:" not in error_text
+        assert "private" not in error_text
+        assert "fragment" not in error_text
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
+
     def test_response_without_request_crashes_before_payload_storage(
         self,
         transform: TransformProtocol,

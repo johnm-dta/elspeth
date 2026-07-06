@@ -19,6 +19,7 @@ the TOCTOU (Time-of-Check to Time-of-Use) vulnerability in traditional SSRF defe
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import socket
 import threading
@@ -92,6 +93,61 @@ _dns_pool = ThreadPoolExecutor(max_workers=_DNS_POOL_SIZE, thread_name_prefix="d
 _dns_capacity = threading.BoundedSemaphore(_DNS_POOL_SIZE)
 
 
+def _url_sha256(url: str) -> str:
+    """Return a stable diagnostic hash for a user-supplied URL."""
+    return hashlib.sha256(url.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _safe_url_diagnostic_from_parts(url: str, *, scheme: str, host: str) -> str:
+    return f"scheme={scheme!r}, host={host!r}, url_sha256={_url_sha256(url)}"
+
+
+def _safe_unparsed_scheme_hint(url: str) -> str:
+    if url[:6].lower().startswith("https:"):
+        return "https"
+    if url[:5].lower().startswith("http:"):
+        return "http"
+    return "invalid"
+
+
+def _safe_unparsed_url_diagnostic(url: str) -> str:
+    return _safe_url_diagnostic_from_parts(url, scheme=_safe_unparsed_scheme_hint(url), host="invalid")
+
+
+def _safe_url_diagnostic(url: str, parsed: urllib.parse.ParseResult) -> str:
+    """Return URL diagnostics without userinfo, path, query, fragment, or raw input."""
+    scheme = parsed.scheme.lower() if parsed.scheme else "missing"
+    try:
+        host = parsed.hostname or "unknown"
+    except ValueError:
+        host = "invalid"
+    return _safe_url_diagnostic_from_parts(url, scheme=scheme, host=host)
+
+
+def _parse_url_for_validation(url: str) -> urllib.parse.ParseResult:
+    try:
+        return urllib.parse.urlparse(url)
+    except ValueError:
+        pass
+    raise SSRFBlockedError(f"Malformed URL; {_safe_unparsed_url_diagnostic(url)}.")
+
+
+def _validated_url_hostname(url: str, parsed: urllib.parse.ParseResult) -> str | None:
+    try:
+        return parsed.hostname
+    except ValueError:
+        pass
+    raise SSRFBlockedError(f"Malformed URL; {_safe_url_diagnostic(url, parsed)}.")
+
+
+def _validated_url_port(url: str, parsed: urllib.parse.ParseResult) -> int | None:
+    try:
+        return parsed.port
+    except ValueError:
+        pass
+    raise SSRFBlockedError(f"Invalid port in URL; {_safe_url_diagnostic(url, parsed)}.")
+
+
 def validate_url_scheme(url: str) -> None:
     """Validate URL scheme is in allowlist (http/https only).
 
@@ -103,18 +159,22 @@ def validate_url_scheme(url: str) -> None:
         SSRFBlockedError: If scheme is not in allowlist
     """
     if type(url) is not str:
-        raise TypeError(f"url must be str, got {type(url).__name__}: {url!r}")
+        raise TypeError(f"url must be str, got {type(url).__name__}")
 
-    parsed = urllib.parse.urlparse(url)
+    parsed = _parse_url_for_validation(url)
     scheme = parsed.scheme.lower()
-    if scheme in ALLOWED_SCHEMES:
-        return
     if not scheme:
         raise SSRFBlockedError(
             f"URL is missing a scheme (expected 'https://' or 'http://' prefix); "
-            f"got {url!r}. Add the scheme to the input value, e.g. 'https://{url}'."
+            f"{_safe_url_diagnostic(url, parsed)}. Add an explicit 'https://' or 'http://' prefix."
         )
-    raise SSRFBlockedError(f"Forbidden URL scheme {parsed.scheme!r} — only http and https are allowed; got {url!r}.")
+    if scheme in ALLOWED_SCHEMES:
+        if parsed.username is not None or parsed.password is not None:
+            raise SSRFBlockedError(f"URL credentials are not allowed; {_safe_url_diagnostic(url, parsed)}.")
+        return
+    raise SSRFBlockedError(
+        f"Forbidden URL scheme {parsed.scheme!r} — only http and https are allowed; {_safe_url_diagnostic(url, parsed)}."
+    )
 
 
 def _resolve_hostname(hostname: str) -> list[str]:
@@ -323,18 +383,15 @@ def validate_url_for_ssrf(
     validate_url_scheme(url)
 
     # Step 2: Parse URL components
-    parsed = urllib.parse.urlparse(url)
-    hostname = parsed.hostname
+    parsed = _parse_url_for_validation(url)
+    hostname = _validated_url_hostname(url, parsed)
     if not hostname:
         raise SSRFBlockedError("URL has no hostname")
 
     # Determine port (explicit or default)
     # parsed.port can raise ValueError for out-of-range ports (e.g. 99999).
     # Port 0 is falsy but must be explicitly rejected (not a valid HTTP port).
-    try:
-        explicit_port = parsed.port
-    except ValueError as e:
-        raise SSRFBlockedError(f"Invalid port in URL: {e}") from e
+    explicit_port = _validated_url_port(url, parsed)
 
     if explicit_port is not None:
         if explicit_port == 0:

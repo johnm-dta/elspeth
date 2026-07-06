@@ -8,7 +8,7 @@ and routing-event recording with post-insert reason materialization.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import bindparam, func, select
 from sqlalchemy.engine import Connection
@@ -48,6 +48,8 @@ _TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateS
 # IN-clause chunk size for token-id lookups — stays under SQLite's default
 # 999 bound-parameter ceiling with headroom for the fixed predicates.
 _TOKEN_ID_CHUNK_SIZE = 500
+# Same ceiling for state-id readback/validation batches.
+_STATE_ID_CHUNK_SIZE = 500
 
 
 def _validate_transform_success_reason(success_reason: object) -> None:
@@ -463,9 +465,14 @@ class NodeStateRepository:
         )
         try:
             with self._db.write_connection() as conn:
-                before_rows = conn.execute(
-                    select(node_states_table.c.state_id, node_states_table.c.status).where(node_states_table.c.state_id.in_(state_ids))
-                ).fetchall()
+                before_rows: list[Any] = []
+                for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
+                    chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]
+                    before_rows.extend(
+                        conn.execute(
+                            select(node_states_table.c.state_id, node_states_table.c.status).where(node_states_table.c.state_id.in_(chunk))
+                        ).fetchall()
+                    )
                 before_by_id = {row.state_id: row.status for row in before_rows}
                 missing = [state_id for state_id in state_ids if state_id not in before_by_id]
                 if missing:
@@ -486,7 +493,10 @@ class NodeStateRepository:
                         f"complete_node_states_completed_many affected {result.rowcount} rows for {len(params)} states; "
                         "expected one audit update per token."
                     )
-                after_rows = conn.execute(select(node_states_table).where(node_states_table.c.state_id.in_(state_ids))).fetchall()
+                after_rows: list[Any] = []
+                for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
+                    chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]
+                    after_rows.extend(conn.execute(select(node_states_table).where(node_states_table.c.state_id.in_(chunk))).fetchall())
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
                 f"complete_node_states_completed_many failed for {len(params)} states — database rejected audit update: "

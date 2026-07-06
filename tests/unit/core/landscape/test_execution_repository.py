@@ -298,6 +298,56 @@ class TestCompleteNodeStateCrashPaths:
             stable_hash({"row": {"name": "second"}, "artifact_path": "out.csv", "content_hash": "hash"}),
         }
 
+    def test_batch_complete_chunks_validation_and_readback_state_id_selects(self) -> None:
+        """Large batch validation/readback must stay below SQLite parameter ceilings."""
+        _db, repo, fac, _tok = _make_repo_with_token()
+        state_count = 501
+        begin_entries: list[tuple[str, str, str, int, dict[str, object]]] = []
+        for index in range(state_count):
+            row_id = f"row-bulk-{index}"
+            token_id = f"tok-bulk-{index}"
+            fac.data_flow.create_row(
+                "run-1",
+                "source-0",
+                index + 1,
+                {"name": f"bulk-{index}"},
+                row_id=row_id,
+                source_row_index=index + 1,
+                ingest_sequence=index + 1,
+            )
+            fac.data_flow.create_token(row_id, token_id=token_id)
+            begin_entries.append((token_id, "sink-0", "run-1", 2, {"name": f"bulk-{index}"}))
+        states = repo.begin_node_states_many(tuple(begin_entries))
+
+        original_connection = repo._db.write_connection
+        observed_select_sizes: list[int] = []
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def bounded_state_select_connection():
+            with original_connection() as conn:
+                original_execute = conn.execute
+
+                def patched_execute(stmt, *args: Any, **kwargs: Any):
+                    if getattr(stmt, "is_select", False):
+                        compiled = stmt.compile(dialect=conn.dialect, compile_kwargs={"render_postcompile": True})
+                        statement = str(compiled)
+                        if "FROM node_states" in statement and "node_states.state_id IN" in statement:
+                            state_id_param_count = sum(1 for name in compiled.params if name.startswith("state_id_"))
+                            observed_select_sizes.append(state_id_param_count)
+                            assert state_id_param_count <= 500
+                    return original_execute(stmt, *args, **kwargs)
+
+                conn.execute = patched_execute
+                yield conn
+
+        repo._db.write_connection = bounded_state_select_connection  # type: ignore[method-assign]
+
+        repo.complete_node_states_completed_many(tuple((state.state_id, {"completed": index}, 1.0) for index, state in enumerate(states)))
+
+        assert sorted(observed_select_sizes) == [1, 1, 500, 500]
+
     def test_batch_begin_rowcount_mismatch_rolls_back_inserted_open_states(self) -> None:
         """Rowcount mismatches must abort inside the write transaction."""
         db, repo, fac, tok = _make_repo_with_token()

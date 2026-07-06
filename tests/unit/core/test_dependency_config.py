@@ -1,4 +1,4 @@
-"""Tests for dependency, commencement gate, and collection probe config models."""
+"""Tests for dependency config declarations and preflight result contracts."""
 
 from __future__ import annotations
 
@@ -7,14 +7,12 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.config import ElspethSettings
 from elspeth.core.dependency_config import (
     CollectionProbeConfig,
     CommencementGateConfig,
-    CommencementGateResult,
     DependencyConfig,
-    DependencyRunResult,
-    PreflightResult,
 )
 from elspeth.core.expression_parser import ExpressionSecurityError
 from elspeth.engine.commencement import validate_gate_expressions

@@ -238,6 +238,7 @@ from elspeth.contracts.plugin_protocols import (
     SourceProtocol,
     TransformProtocol,
 )
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.contracts.probes import CollectionProbe, CollectionReadinessResult
 from elspeth.contracts.results import (
     ArtifactDescriptor,
@@ -545,6 +546,10 @@ __all__ = [  # Grouped by category for readability
     "UNSUPPORTED_CONTRACT_TYPE",
     "PipelineRow",
     "PipelineRunner",
+    # preflight
+    "CommencementGateResult",
+    "DependencyRunResult",
+    "PreflightResult",
     "SchemaContract",
     # Schema contracts — audit trail records
     "ContractAuditRecord",

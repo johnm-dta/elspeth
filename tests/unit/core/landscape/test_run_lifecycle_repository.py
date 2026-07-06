@@ -27,7 +27,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
-from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError

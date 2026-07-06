@@ -6,13 +6,13 @@ from pathlib import Path
 
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.pipeline_runner import PipelineRunner
-from elspeth.contracts.probes import CollectionProbe
-from elspeth.core.config import ElspethSettings
-from elspeth.core.dependency_config import (
+from elspeth.contracts.preflight import (
     CommencementGateResult,
     DependencyRunResult,
     PreflightResult,
 )
+from elspeth.contracts.probes import CollectionProbe
+from elspeth.core.config import ElspethSettings
 
 
 def resolve_preflight(

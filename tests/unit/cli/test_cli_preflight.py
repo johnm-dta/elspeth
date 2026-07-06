@@ -16,7 +16,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from elspeth.cli import app
-from elspeth.core.dependency_config import DependencyRunResult, PreflightResult
+from elspeth.contracts.preflight import DependencyRunResult, PreflightResult
 
 runner = CliRunner()
 

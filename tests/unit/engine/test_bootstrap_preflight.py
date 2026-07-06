@@ -16,10 +16,9 @@ import pytest
 
 from elspeth.contracts.errors import CommencementGateFailedError
 from elspeth.contracts.pipeline_runner import PipelineRunner
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult
 from elspeth.core.dependency_config import (
     CommencementGateConfig,
-    CommencementGateResult,
-    DependencyRunResult,
 )
 
 

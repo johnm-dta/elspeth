@@ -13,8 +13,9 @@ from pydantic import ValidationError
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import DependencyFailedError
 from elspeth.contracts.pipeline_runner import PipelineRunner
+from elspeth.contracts.preflight import DependencyRunResult
 from elspeth.core.canonical import canonical_json
-from elspeth.core.dependency_config import DependencyConfig, DependencyRunResult
+from elspeth.core.dependency_config import DependencyConfig
 from elspeth.engine.error_boundary import reraise_if_engine_crash_through
 
 

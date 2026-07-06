@@ -7,11 +7,12 @@ from typing import Any
 
 from elspeth.contracts.errors import CommencementGateFailedError
 from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.preflight import CommencementGateResult
 from elspeth.core.commencement_gate_expression import (
     COMMENCEMENT_GATE_ALLOWED_NAMES,
     validate_commencement_gate_condition,
 )
-from elspeth.core.dependency_config import CommencementGateConfig, CommencementGateResult
+from elspeth.core.dependency_config import CommencementGateConfig
 from elspeth.core.expression_parser import ExpressionParser
 from elspeth.engine.error_boundary import reraise_if_engine_crash_through
 

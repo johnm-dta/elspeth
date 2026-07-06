@@ -70,9 +70,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.preflight import PreflightResult
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
-    from elspeth.core.dependency_config import PreflightResult
     from elspeth.core.events import EventBusProtocol
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine.orchestrator.ceremony import RunCeremony

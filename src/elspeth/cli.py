@@ -29,11 +29,11 @@ from elspeth.contracts.errors import (
     GracefulShutdownError,
     IncompleteSourceResumeError,
 )
+from elspeth.contracts.preflight import PreflightResult
 from elspeth.contracts.types import AggregationName
 from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
-from elspeth.core.dependency_config import PreflightResult
 from elspeth.core.security.config_secrets import SecretLoadError, load_secrets_from_config
 
 if TYPE_CHECKING:

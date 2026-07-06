@@ -18,10 +18,6 @@ allowed_external_types:
   - "engine/orchestrator/types:AggregationFlushResult"
   - "engine/orchestrator/types:ExecutionCounters"
   # BufferEntry moved to contracts/engine.py — no longer an external type exception
-  # Dependency/gate result types - used only by engine bootstrap and resolver
-  - "core/dependency_config:DependencyRunResult"
-  - "core/dependency_config:CommencementGateResult"
-  - "core/dependency_config:PreflightResult"
   # Resume/recovery identity spec - built exclusively from checkpoint DB columns by
   # core RecoveryManager, consumed only by the engine resume path; subsystem-internal
   # plumbing kept with its producer, not a universal data contract like TokenInfo.

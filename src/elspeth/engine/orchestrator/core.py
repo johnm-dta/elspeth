@@ -61,10 +61,10 @@ if TYPE_CHECKING:
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig, RuntimeConcurrencyConfig
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.preflight import PreflightResult
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
-    from elspeth.core.dependency_config import PreflightResult
     from elspeth.core.events import EventBusProtocol
     from elspeth.core.landscape import LandscapeDB
     from elspeth.core.landscape.factory import RecorderFactory

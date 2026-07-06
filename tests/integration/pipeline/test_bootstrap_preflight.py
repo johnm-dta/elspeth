@@ -19,9 +19,9 @@ from unittest.mock import patch
 import pytest
 
 from elspeth.contracts.errors import CommencementGateFailedError
+from elspeth.contracts.preflight import DependencyRunResult
 from elspeth.core.dependency_config import (
     CommencementGateConfig,
-    DependencyRunResult,
 )
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
 

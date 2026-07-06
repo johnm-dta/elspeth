@@ -34,10 +34,10 @@ from elspeth.contracts.coordination import (
 )
 from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError, RunLeadershipLostError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.preflight import PreflightResult
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.canonical import canonical_json, stable_hash
-from elspeth.core.dependency_config import PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import generate_id, now
 from elspeth.core.landscape.database import LandscapeDB

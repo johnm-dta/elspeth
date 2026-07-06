@@ -107,6 +107,36 @@ class TestRuntimePreflightFailedError:
         assert audit["cause_type"] == "RuntimeError"
 
 
+class TestWriteLockHeldError:
+    """Tests for write-lock contention diagnostics."""
+
+    def test_default_message_omits_worker_forensics(self) -> None:
+        from elspeth.contracts.coordination import RegisteredWorker
+        from elspeth.contracts.errors import WriteLockHeldError
+
+        err = WriteLockHeldError(
+            run_id="run-sensitive",
+            workers=(
+                RegisteredWorker(
+                    worker_id="worker-secret",
+                    role="leader",
+                    status="active",
+                    pid=4242,
+                    hostname="build-host.internal",
+                ),
+            ),
+        )
+
+        message = str(err)
+        assert err.workers[0].worker_id == "worker-secret"
+        assert "1 registered worker" in message
+        assert "worker-secret" not in message
+        assert "leader" not in message
+        assert "active" not in message
+        assert "4242" not in message
+        assert "build-host.internal" not in message
+
+
 class TestRoutingReasonSchema:
     """Tests for RoutingReason union type schema introspection."""
 

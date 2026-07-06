@@ -736,7 +736,7 @@ class ResumeCoordinator:
         NonResumableRunError with zero mutation; a terminally-successful run is
         refused by the immutable-success durable backstop (AuditIntegrityError);
         a held WAL write lock surfaces as the operator-actionable
-        WriteLockHeldError naming the registered workers' pids.
+        WriteLockHeldError carrying structured registered-worker forensics.
         """
         return snapshot.factory.run_coordination.acquire_run_leadership(
             run_id=snapshot.run_id,

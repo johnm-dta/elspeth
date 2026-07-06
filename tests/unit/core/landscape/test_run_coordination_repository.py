@@ -14,8 +14,8 @@ Dedicated tests for the seat lifecycle and the shared leader epoch fence
 - ``fence_refusal`` eventing on a FRESH connection even though the refused
   payload transaction rolled back (and best-effort: never raises);
 - BUSY-vs-CAS-loss discrimination: a held write lock surfaces as the
-  operator-actionable ``WriteLockHeldError`` naming registered pids — never
-  as "leadership held".
+  operator-actionable ``WriteLockHeldError`` carrying structured registered
+  worker forensics — never as "leadership held".
 
 Real file-backed Tier-1 SQLite (two engine handles where a second
 lock-holding connection is needed — the races-test pattern). All clocks are
@@ -478,7 +478,7 @@ class TestFencedLeaderTransaction:
 class TestWriteLockHeld:
     """§B.4 BUSY discrimination: a held write lock is NOT 'leadership held'."""
 
-    def test_acquire_raises_write_lock_held_with_registered_pids(
+    def test_acquire_raises_write_lock_held_with_structured_worker_forensics(
         self, engines: tuple[Tier1Engine, Tier1Engine], repo: RunCoordinationRepository
     ) -> None:
         engine, holder_engine = engines
@@ -509,7 +509,8 @@ class TestWriteLockHeld:
         assert leader_a in roster
         assert roster[leader_a].pid == os.getpid()
         assert roster[leader_a].role == "leader"
-        assert str(os.getpid()) in str(err)
+        assert str(os.getpid()) not in str(err)
+        assert leader_a not in str(err)
         # Distinct failure mode: NOT NonResumableRunError, and zero mutation.
         assert _seat_row(engine)["leader_epoch"] == 1
 

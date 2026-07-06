@@ -921,8 +921,8 @@ class FollowerSeatDeadError(Exception):
 # CAS could not even begin (SQLITE_BUSY after the busy_timeout poll). NOT
 # "leadership held": ADR-030 §B.4 requires BUSY to be reported distinctly from a
 # clean CAS loss. The remediation is operator SIGKILL of the wedged holder
-# (locks release on process death); the registered-worker forensics
-# (pid/hostname) carried here make that actionable.
+# (locks release on process death); registered-worker forensics remain structured
+# on the exception for trusted operator surfaces.
 # TIER-2: Operator-actionable environmental refusal — a held WAL write lock surfaced with pid forensics for remediation; the audit DB is intact, not corruption.
 class WriteLockHeldError(Exception):
     """Raised when a coordination write times out on the audit DB write lock.
@@ -930,8 +930,8 @@ class WriteLockHeldError(Exception):
     Distinct from ``NonResumableRunError`` (clean seat-CAS loss to a live
     leader): a busy timeout means some process — live or frozen — holds the
     WAL write lock. Carries the run's registered workers (pid/hostname/role
-    forensics from ``run_workers``) so the operator knows what to inspect or
-    SIGKILL.
+    forensics from ``run_workers``) as structured data for trusted operator
+    surfaces, while the default string is safe for generic CLI/API error paths.
 
     Attributes:
         run_id: The run whose coordination write was refused.
@@ -943,14 +943,12 @@ class WriteLockHeldError(Exception):
     def __init__(self, *, run_id: str, workers: tuple["RegisteredWorker", ...]) -> None:
         self.run_id = run_id
         self.workers = workers
-        roster = (
-            "; ".join(f"worker_id={w.worker_id!r} role={w.role} status={w.status} pid={w.pid} hostname={w.hostname!r}" for w in workers)
-            or "<none readable>"
-        )
+        worker_count = len(workers)
+        worker_label = "registered worker" if worker_count == 1 else "registered workers"
         super().__init__(
             f"The audit DB write lock is held by a live or frozen process; the "
             f"coordination write for run {run_id!r} timed out at BEGIN IMMEDIATE. "
-            f"Registered workers: {roster}. If a worker is frozen inside a "
+            f"Registered workers: {worker_count} {worker_label}. If a worker is frozen inside a "
             "transaction, SIGKILL it (SQLite locks release on process death) and retry."
         )
 

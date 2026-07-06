@@ -428,8 +428,9 @@ class RunCoordinationRepository:
         BUSY-vs-CAS-loss discrimination (§B.4): a busy timeout at BEGIN (or
         anywhere inside) is NOT "leadership held" — it means a live-or-frozen
         process holds the WAL write lock; raised as the operator-actionable
-        :class:`WriteLockHeldError` naming the registered workers (pids read
-        on a plain read connection — WAL readers don't block on the writer).
+        :class:`WriteLockHeldError` carrying structured registered-worker
+        forensics (pids read on a plain read connection — WAL readers don't
+        block on the writer).
         """
         try:
             with begin_write(self._engine) as conn:

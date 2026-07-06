@@ -73,6 +73,7 @@ from tests.fixtures.base_classes import (
 )
 from tests.fixtures.factories import wire_transforms
 from tests.fixtures.landscape import make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -883,7 +884,8 @@ class TestResumeIdempotence:
             )
 
         # Create checkpoint at row 2 (0-indexed, so rows 0-2 processed)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=3,
             barrier_scalars=None,
@@ -1247,7 +1249,8 @@ class TestCheckpointRecovery:
             conn.commit()
 
         # Checkpoint at row 2 (token tok-002)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -1371,7 +1374,8 @@ class TestCheckpointRecovery:
             aggregation={"test_agg": AggregationNodeScalars(count_fire_offset=2.0, condition_fire_offset=None)},
             coalesce={},
         )
-        original_checkpoint = checkpoint_mgr1.create_checkpoint(
+        original_checkpoint = create_checkpoint(
+            checkpoint_mgr1,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=_scalars,
@@ -1547,7 +1551,8 @@ class TestAggregationRecovery:
         )
 
         # Create checkpoint with barrier scalars
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=2,
             barrier_scalars=scalars,

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import Connection, select, update
 from sqlalchemy.engine import Row
 
-from elspeth.contracts import Checkpoint, Determinism, NodeType, RunStatus
+from elspeth.contracts import Checkpoint, CheckpointDraft, Determinism, NodeType, RunStatus
 from elspeth.contracts.barrier_scalars import (
     AggregationNodeScalars,
     BarrierScalars,
@@ -20,7 +20,6 @@ from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.checkpoint.manager import CheckpointManager, _validate_barrier_scalars_json_size
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import checkpoints_table, nodes_table, rows_table, runs_table, tokens_table
-from tests.fixtures.factories import make_graph_linear
 from tests.fixtures.landscape import make_landscape_db
 
 
@@ -97,14 +96,45 @@ def _select_checkpoint(db: LandscapeDB, checkpoint_id: str) -> Row[Any]:
     return row
 
 
-def test_create_checkpoint_requires_graph(checkpoint_manager: CheckpointManager) -> None:
-    with pytest.raises(ValueError, match="graph parameter is required"):
-        checkpoint_manager.create_checkpoint(
-            run_id="run-001",
-            sequence_number=1,
-            barrier_scalars=None,
-            graph=None,  # type: ignore[arg-type]  # testing None rejection
-        )
+def _draft(
+    *,
+    run_id: str = "run-001",
+    sequence_number: int = 1,
+    barrier_scalars: BarrierScalars | None = None,
+    upstream_topology_hash: str = "a" * 64,
+) -> CheckpointDraft:
+    return CheckpointDraft(
+        run_id=run_id,
+        sequence_number=sequence_number,
+        barrier_scalars=barrier_scalars,
+        upstream_topology_hash=upstream_topology_hash,
+    )
+
+
+def test_create_checkpoint_persists_precomputed_topology_hash_without_graph(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+) -> None:
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn, run_id="run-draft")
+
+    draft = _draft(
+        run_id="run-draft",
+        sequence_number=1,
+        barrier_scalars=None,
+        upstream_topology_hash="f" * 64,
+    )
+
+    checkpoint = checkpoint_manager.create_checkpoint(draft=draft)
+
+    assert checkpoint.upstream_topology_hash == "f" * 64
+    row = _select_checkpoint(db, checkpoint.checkpoint_id)
+    assert row.upstream_topology_hash == "f" * 64
+
+
+def test_create_checkpoint_requires_draft(checkpoint_manager: CheckpointManager) -> None:
+    with pytest.raises(TypeError, match="draft must be CheckpointDraft"):
+        checkpoint_manager.create_checkpoint(draft=None)  # type: ignore[arg-type]
 
 
 def test_validate_barrier_scalars_json_size_rejects_large_payload() -> None:
@@ -118,17 +148,11 @@ def test_create_checkpoint_persists_barrier_scalars(db: LandscapeDB, checkpoint_
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
-    graph = make_graph_linear("node-001")
     scalars = BarrierScalars(
         aggregation={"agg-1": AggregationNodeScalars(count_fire_offset=2.25, condition_fire_offset=None)},
         coalesce={},
     )
-    cp = checkpoint_manager.create_checkpoint(
-        run_id="run-001",
-        sequence_number=1,
-        barrier_scalars=scalars,
-        graph=graph,
-    )
+    cp = checkpoint_manager.create_checkpoint(draft=_draft(barrier_scalars=scalars))
 
     row = _select_checkpoint(db, cp.checkpoint_id)
     assert row.barrier_scalars_json is not None
@@ -145,13 +169,9 @@ def test_create_checkpoint_empty_scalars_persist_null(db: LandscapeDB, checkpoin
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
-    graph = make_graph_linear("node-001")
-    cp_none = checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
+    cp_none = checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1, barrier_scalars=None))
     cp_empty = checkpoint_manager.create_checkpoint(
-        run_id="run-001",
-        sequence_number=2,
-        barrier_scalars=BarrierScalars(aggregation={}, coalesce={}),
-        graph=graph,
+        draft=_draft(sequence_number=2, barrier_scalars=BarrierScalars(aggregation={}, coalesce={}))
     )
 
     assert cp_none.barrier_scalars_json is None
@@ -164,10 +184,9 @@ def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, check
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
-    graph = make_graph_linear("node-001")
-    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=5, barrier_scalars=None, graph=graph)
-    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
-    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=3, barrier_scalars=None, graph=graph)
+    checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=5))
+    checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1))
+    checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=3))
 
     checkpoints = checkpoint_manager.get_checkpoints("run-001")
     assert [cp.sequence_number for cp in checkpoints] == [1, 3, 5]
@@ -178,11 +197,10 @@ def test_create_checkpoint_rejects_duplicate_sequence_for_run(db: LandscapeDB, c
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
-    graph = make_graph_linear("node-001")
-    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
+    checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1))
 
     with pytest.raises(OrchestrationInvariantError, match="Duplicate checkpoint sequence_number"):
-        checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
+        checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1))
 
 
 def test_create_checkpoint_round_trips_coalesce_scalars(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
@@ -190,15 +208,13 @@ def test_create_checkpoint_round_trips_coalesce_scalars(db: LandscapeDB, checkpo
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
-    graph = make_graph_linear("node-001")
     checkpoint = checkpoint_manager.create_checkpoint(
-        run_id="run-001",
-        sequence_number=1,
-        barrier_scalars=BarrierScalars(
-            aggregation={},
-            coalesce={("merge_paths", "row-001"): CoalescePendingScalars(lost_branches={"branch_b": "timeout"})},
-        ),
-        graph=graph,
+        draft=_draft(
+            barrier_scalars=BarrierScalars(
+                aggregation={},
+                coalesce={("merge_paths", "row-001"): CoalescePendingScalars(lost_branches={"branch_b": "timeout"})},
+            )
+        )
     )
 
     assert checkpoint.barrier_scalars_json is not None
@@ -223,12 +239,8 @@ def test_get_latest_checkpoint_loads_raw_format_versions(
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn, run_id=run_id)
 
-    graph = make_graph_linear("node-001")
     created = checkpoint_manager.create_checkpoint(
-        run_id=run_id,
-        sequence_number=1,
-        barrier_scalars=None,
-        graph=graph,
+        draft=_draft(run_id=run_id, sequence_number=1, barrier_scalars=None),
     )
 
     with db.engine.begin() as conn:
@@ -244,9 +256,8 @@ def test_delete_checkpoints_removes_all_for_run(db: LandscapeDB, checkpoint_mana
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
-    graph = make_graph_linear("node-001")
-    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
-    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=2, barrier_scalars=None, graph=graph)
+    checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1))
+    checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=2))
 
     deleted = checkpoint_manager.delete_checkpoints("run-001")
     assert deleted == 2

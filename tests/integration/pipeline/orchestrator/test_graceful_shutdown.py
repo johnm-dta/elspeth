@@ -37,6 +37,7 @@ from tests.fixtures.base_classes import (
 from tests.fixtures.landscape import insert_crashed_leader_seat
 from tests.fixtures.pipeline import build_linear_pipeline, build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
+from tests.helpers.checkpoint import create_checkpoint
 
 if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
@@ -1085,7 +1086,8 @@ class TestInterruptAndResume:
         # Create checkpoint at last processed row
         if processed_count > 0:
             checkpoint_mgr = CheckpointManager(db)
-            checkpoint_mgr.create_checkpoint(
+            create_checkpoint(
+                checkpoint_mgr,
                 run_id=run_id,
                 sequence_number=processed_count - 1,
                 barrier_scalars=None,

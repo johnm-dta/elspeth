@@ -42,6 +42,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from tests.fixtures.landscape import make_landscape_db
+from tests.helpers.checkpoint import checkpoint_draft
 
 
 @pytest.fixture
@@ -80,6 +81,24 @@ def _create_graph(*, node_id: str = "checkpoint-node", config: dict[str, Any] | 
     graph = ExecutionGraph()
     graph.add_node(node_id, node_type=NodeType.TRANSFORM, plugin_name="test", config=config or {})
     return graph
+
+
+def _create_checkpoint(
+    checkpoint_manager: CheckpointManager,
+    *,
+    run_id: str,
+    sequence_number: int,
+    graph: ExecutionGraph,
+    barrier_scalars: BarrierScalars | None = None,
+) -> Checkpoint:
+    return checkpoint_manager.create_checkpoint(
+        draft=checkpoint_draft(
+            run_id=run_id,
+            sequence_number=sequence_number,
+            graph=graph,
+            barrier_scalars=barrier_scalars,
+        )
+    )
 
 
 def _insert_run(
@@ -286,7 +305,8 @@ def _create_failed_run_with_checkpoint(
         _insert_row(conn, run_id, "row-0", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-0", "row-0")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=barrier_scalars,
@@ -557,7 +577,8 @@ def test_get_unprocessed_rows_orders_by_ingest_sequence(
         conn.execute(rows_table.update().where(rows_table.c.row_id == "row-a").values(ingest_sequence=10))
         conn.execute(rows_table.update().where(rows_table.c.row_id == "row-b").values(ingest_sequence=5))
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -596,7 +617,8 @@ def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
             completed=True,
         )
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -647,7 +669,8 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         _insert_token(conn, run_id, "tok-mixed-pending", "row-mixed-buffering")
         _insert_blocked_work_item(conn, run_id, "tok-mixed-buffered", "row-mixed-buffering", barrier_key="agg-node")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=10,
         barrier_scalars=None,
@@ -692,7 +715,8 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
         _insert_token(conn, run_id, "tok-c", "row-c")
         _insert_blocked_work_item(conn, run_id, "tok-c", "row-c", barrier_key="agg-node")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -726,7 +750,8 @@ def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
         _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-pending", "row-pending")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -763,7 +788,8 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
         _insert_row(conn, run_id, "row-free", row_index=2, source_data_ref=None)
         _insert_token(conn, run_id, "tok-free", "row-free")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -793,7 +819,8 @@ def test_get_unprocessed_rows_coalesce_multi_branch_collects_all_tokens(
         _insert_blocked_work_item(conn, run_id, "tok-branch-a", "row-multi", barrier_key="merge1")
         _insert_blocked_work_item(conn, run_id, "tok-branch-b", "row-multi", barrier_key="merge1")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -825,7 +852,8 @@ def test_buffered_exclusion_reads_journal_not_blob(
         _insert_token(conn, run_id, "t1", "r1")
         _insert_blocked_work_item(conn, run_id, "t1", "r1", barrier_key="agg-node")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -855,7 +883,8 @@ def test_queue_held_token_stays_in_redrive_work_set(
         _insert_token(conn, run_id, "tok-queued", "row-queued")
         _insert_blocked_work_item(conn, run_id, "tok-queued", "row-queued", barrier_key=None, queue_key="llm-rate-limit")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -887,7 +916,8 @@ def test_post_checkpoint_buffered_token_is_restored_not_redriven(
         _insert_token(conn, run_id, "tok-late-buffer", "row-late-buffer")
 
     # Checkpoint (the resume baseline, with scalars) predates the BLOCKED row.
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=BarrierScalars(
@@ -920,7 +950,8 @@ def test_get_incomplete_tokens_by_row_excludes_journal_blocked_tokens(
         _insert_token(conn, run_id, "tok-live", "row-mixed")
         _insert_blocked_work_item(conn, run_id, "tok-held", "row-mixed", barrier_key="merge1")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -1201,7 +1232,8 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
         _insert_token(conn, run_id, "tok-child", "row-forked-complete")
         _insert_terminal_outcome(conn, run_id, "tok-child", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -1313,7 +1345,8 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
 ) -> None:
     run_id = "run-latest-checkpoint"
     graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=99,
         barrier_scalars=None,
@@ -1383,7 +1416,8 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
         _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-pending", "row-pending")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,

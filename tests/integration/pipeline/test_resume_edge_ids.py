@@ -20,6 +20,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import edges_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 from tests.fixtures.landscape import make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 
 class TestResumeEdgeIDs:
@@ -229,7 +230,8 @@ class TestResumeEdgeIDs:
             tokens.append(token)
 
         # 4. Create checkpoint (simulating partial run)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=1,
             barrier_scalars=None,

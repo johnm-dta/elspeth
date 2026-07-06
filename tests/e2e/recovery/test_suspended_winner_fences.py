@@ -88,6 +88,7 @@ from tests.e2e.recovery.harness import (
     _run_workers,
     _usurp_seat,
 )
+from tests.helpers.checkpoint import create_checkpoint
 
 WORKER_OLD = "worker-old"
 USURPER = "worker-usurper"
@@ -318,7 +319,8 @@ class TestSuspendedWinnerFences:
         contested_seq = max_seq_before + 1
 
         with pytest.raises(RunLeadershipLostError) as exc_info:
-            crashed.checkpoint_mgr.create_checkpoint(
+            create_checkpoint(
+                crashed.checkpoint_mgr,
                 run_id=crashed.run_id,
                 sequence_number=contested_seq,
                 barrier_scalars=None,
@@ -331,7 +333,8 @@ class TestSuspendedWinnerFences:
         _assert_refusal_contract(crashed, verb="create_checkpoint", stale_epoch=token_old.leader_epoch, seat_before=seat_before)
 
         # Positive control: the SAME sequence number is genuinely uncontested.
-        crashed.checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            crashed.checkpoint_mgr,
             run_id=crashed.run_id,
             sequence_number=contested_seq,
             barrier_scalars=None,

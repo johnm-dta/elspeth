@@ -28,6 +28,7 @@ from tests.fixtures.base_classes import as_sink, as_source
 from tests.fixtures.landscape import expire_leader_seat
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
+from tests.helpers.checkpoint import create_checkpoint
 
 
 class _ResumeSourceSchema(PluginSchema):
@@ -86,7 +87,8 @@ def _persist_resume_point(env: dict[str, Any], run_id: str, graph: Any) -> Resum
     current graph, so tests targeting DOWNSTREAM guardrails must supply a
     genuine current baseline rather than a synthetic one.
     """
-    checkpoint = env["checkpoint_manager"].create_checkpoint(
+    checkpoint = create_checkpoint(
+        env["checkpoint_manager"],
         run_id=run_id,
         sequence_number=0,
         barrier_scalars=None,
@@ -397,7 +399,8 @@ class TestResumeGuardrails:
 
         stale_point = _persist_resume_point(resume_test_env, run_id, graph)
         # A later checkpoint supersedes the one the resume point names.
-        resume_test_env["checkpoint_manager"].create_checkpoint(
+        create_checkpoint(
+            resume_test_env["checkpoint_manager"],
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,

@@ -19,7 +19,8 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, NodeType, RunStatus
+from elspeth.contracts import Checkpoint, Determinism, NodeType, RunStatus
+from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -27,6 +28,7 @@ from elspeth.core.checkpoint import CheckpointManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from tests.fixtures.landscape import make_factory
+from tests.helpers.checkpoint import checkpoint_draft
 
 
 def _create_test_schema_contract() -> tuple[str, str, SchemaContract]:
@@ -47,6 +49,24 @@ def _create_test_schema_contract() -> tuple[str, str, SchemaContract]:
     contract = SchemaContract(fields=field_contracts, mode="FIXED", locked=True)
     audit_record = ContractAuditRecord.from_contract(contract)
     return audit_record.to_json(), contract.version_hash(), contract
+
+
+def _create_checkpoint(
+    checkpoint_mgr: CheckpointManager,
+    *,
+    run_id: str,
+    sequence_number: int,
+    graph: ExecutionGraph,
+    barrier_scalars: BarrierScalars | None = None,
+) -> Checkpoint:
+    return checkpoint_mgr.create_checkpoint(
+        draft=checkpoint_draft(
+            run_id=run_id,
+            sequence_number=sequence_number,
+            graph=graph,
+            barrier_scalars=barrier_scalars,
+        )
+    )
 
 
 class TestCheckpointRecoveryIntegration:
@@ -119,13 +139,15 @@ class TestCheckpointRecoveryIntegration:
         run_id = self._setup_partial_run(db, checkpoint_mgr, mock_graph)
 
         # Create additional checkpoints at different sequence numbers
-        checkpoint_mgr.create_checkpoint(
+        _create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=3,
             barrier_scalars=None,
             graph=mock_graph,
         )
-        checkpoint_mgr.create_checkpoint(
+        _create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=4,
             barrier_scalars=None,
@@ -337,7 +359,8 @@ class TestCheckpointRecoveryIntegration:
             conn.commit()
 
         # Create checkpoint at row 2 (simulating partial progress)
-        checkpoint_mgr.create_checkpoint(
+        _create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -430,7 +453,8 @@ class TestCheckpointTopologyHashAtomicity:
         expected_hash = compute_full_topology_hash(graph)
 
         # Create checkpoint with current graph state
-        checkpoint = checkpoint_mgr.create_checkpoint(
+        checkpoint = _create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -460,8 +484,8 @@ class TestCheckpointTopologyHashAtomicity:
             # Graph modification changed the hash (as expected for topology changes)
             assert checkpoint.upstream_topology_hash != modified_hash, "Checkpoint should NOT have hash from modified graph"
 
-    def test_checkpoint_validates_graph_parameter(self, test_env: dict[str, Any]) -> None:
-        """Verify create_checkpoint() rejects None graph (Bug #9 early fix)."""
+    def test_checkpoint_validates_draft_parameter(self, test_env: dict[str, Any]) -> None:
+        """Verify create_checkpoint() requires a persistence-ready draft."""
         from elspeth.contracts.schema import SchemaConfig
 
         checkpoint_mgr = test_env["checkpoint_manager"]
@@ -496,14 +520,8 @@ class TestCheckpointTopologyHashAtomicity:
         )
         factory.data_flow.create_token(row_id=row.row_id)
 
-        # Attempt to create checkpoint with None graph
-        with pytest.raises(ValueError, match="graph parameter is required"):
-            checkpoint_mgr.create_checkpoint(
-                run_id=run.run_id,
-                sequence_number=0,
-                barrier_scalars=None,
-                graph=None,
-            )
+        with pytest.raises(TypeError, match="draft must be CheckpointDraft"):
+            checkpoint_mgr.create_checkpoint(draft=None)  # type: ignore[arg-type]
 
 
 class TestResumeCheckpointCleanup:
@@ -594,7 +612,8 @@ class TestResumeCheckpointCleanup:
         factory.data_flow.create_token(row_id=row.row_id)
 
         # Create checkpoint
-        checkpoint = checkpoint_mgr.create_checkpoint(
+        checkpoint = _create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -709,7 +728,8 @@ class TestCanResumeErrorHandling:
         factory.run_lifecycle.update_run_status(run.run_id, status=RunStatus.FAILED)
 
         # Create checkpoint
-        checkpoint_mgr.create_checkpoint(
+        _create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=1,
             barrier_scalars=None,

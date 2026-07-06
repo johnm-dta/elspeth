@@ -26,11 +26,13 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import create_autospec
 
+from elspeth.contracts import NodeType
 from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointManager
+from elspeth.core.dag import ExecutionGraph
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 
 
@@ -48,7 +50,9 @@ def _make_coordinator(run_id: str) -> CheckpointCoordinator:
         checkpoint_manager=create_autospec(CheckpointManager, instance=True, spec_set=True),
         checkpoint_config=config,
     )
-    coordinator.set_active_graph(SimpleNamespace(name="test-graph"))
+    graph = ExecutionGraph()
+    graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="test", config={})
+    coordinator.set_active_graph(graph)
     # Checkpoint writes fail closed without a leader token bound to the run
     # being written (elspeth-fab455790d).
     coordinator.bind_coordination(CoordinationToken(run_id=run_id, worker_id="test-leader", leader_epoch=1))
@@ -95,8 +99,8 @@ class TestFlushEmptiedAggregationCheckpoints:
 
         coordinator._checkpoint_manager.create_checkpoint.assert_called_once()
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
-        assert isinstance(kwargs["barrier_scalars"], BarrierScalars)
-        assert kwargs["barrier_scalars"].has_state is False
+        assert isinstance(kwargs["draft"].barrier_scalars, BarrierScalars)
+        assert kwargs["draft"].barrier_scalars.has_state is False
 
     def test_latched_nodes_persist_their_scalars(self) -> None:
         """Latched aggregation nodes surface as per-node BarrierScalars entries.
@@ -116,7 +120,7 @@ class TestFlushEmptiedAggregationCheckpoints:
 
         coordinator._checkpoint_manager.create_checkpoint.assert_called_once()
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
-        scalars = kwargs["barrier_scalars"]
+        scalars = kwargs["draft"].barrier_scalars
         assert isinstance(scalars, BarrierScalars)
         assert set(scalars.aggregation) == {"agg_latched"}
         assert scalars.aggregation["agg_latched"].count_fire_offset == 0.25
@@ -135,5 +139,5 @@ class TestFlushEmptiedAggregationCheckpoints:
 
         coordinator._checkpoint_manager.create_checkpoint.assert_called_once()
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
-        assert kwargs["run_id"] == "run-no-anchor"
-        assert kwargs["barrier_scalars"].has_state is False
+        assert kwargs["draft"].run_id == "run-no-anchor"
+        assert kwargs["draft"].barrier_scalars.has_state is False

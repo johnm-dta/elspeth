@@ -37,7 +37,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import insert, select, update
 
-from elspeth.contracts import NodeType, RunStatus
+from elspeth.contracts import CheckpointDraft, NodeType, RunStatus
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import (
     AuditIntegrityError,
@@ -63,7 +63,6 @@ from elspeth.core.landscape.schema import (
     token_work_items_table,
     tokens_table,
 )
-from tests.fixtures.factories import make_graph_linear
 from tests.fixtures.landscape import make_landscape_db
 
 RUN_ID = "run-fence-1"
@@ -75,6 +74,15 @@ SOURCE_NODE_ID = "source-1"
 
 def _payload_json() -> str:
     return TokenSchedulerRepository.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+
+
+def _checkpoint_draft(sequence_number: int) -> CheckpointDraft:
+    return CheckpointDraft(
+        run_id=RUN_ID,
+        sequence_number=sequence_number,
+        upstream_topology_hash="a" * 64,
+        barrier_scalars=None,
+    )
 
 
 @pytest.fixture
@@ -234,10 +242,7 @@ class TestStaleTokenFenceRefusals:
         _bump_epoch(db)
         with pytest.raises(RunLeadershipLostError):
             manager.create_checkpoint(
-                run_id=RUN_ID,
-                sequence_number=1,
-                barrier_scalars=None,
-                graph=make_graph_linear(),
+                draft=_checkpoint_draft(1),
                 coordination_token=token,
             )
         with db.engine.connect() as conn:
@@ -248,10 +253,7 @@ class TestStaleTokenFenceRefusals:
     def test_delete_checkpoints_refused(self, db: LandscapeDB, token: CoordinationToken) -> None:
         manager = CheckpointManager(db)
         manager.create_checkpoint(
-            run_id=RUN_ID,
-            sequence_number=0,
-            barrier_scalars=None,
-            graph=make_graph_linear(),
+            draft=_checkpoint_draft(0),
             coordination_token=token,
         )
         _bump_epoch(db)
@@ -585,10 +587,7 @@ class TestValidTokenFenceSemantics:
                 update(run_coordination_table).where(run_coordination_table.c.run_id == RUN_ID).values(leader_heartbeat_expires_at=before)
             )
         manager.create_checkpoint(
-            run_id=RUN_ID,
-            sequence_number=1,
-            barrier_scalars=None,
-            graph=make_graph_linear(),
+            draft=_checkpoint_draft(1),
             coordination_token=token,
         )
         with db.engine.connect() as conn:

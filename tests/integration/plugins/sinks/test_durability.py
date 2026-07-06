@@ -25,6 +25,7 @@ from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.base_classes import create_observed_contract, inject_write_failure
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 
 class FlushProbe:
@@ -194,7 +195,8 @@ class TestSinkDurability:
 
         def checkpoint_callback(token_info):
             nonlocal checkpoint_created
-            checkpoint_mgr.create_checkpoint(
+            create_checkpoint(
+                checkpoint_mgr,
                 run_id=run.run_id,
                 sequence_number=0,
                 barrier_scalars=None,
@@ -361,7 +363,8 @@ class TestSinkDurability:
 
         def tracking_checkpoint_callback(token_info):
             call_order.append("checkpoint")
-            checkpoint_mgr.create_checkpoint(
+            create_checkpoint(
+                checkpoint_mgr,
                 run_id=run.run_id,
                 sequence_number=0,
                 barrier_scalars=None,

@@ -23,11 +23,13 @@ from unittest.mock import Mock
 
 import pytest
 
+from elspeth.contracts import NodeType
 from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.checkpoint import CheckpointManager
+from elspeth.core.dag import ExecutionGraph
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 
 RUN_ID = "run-fenced"
@@ -48,7 +50,9 @@ def _make_coordinator(
     config.enabled = enabled
     config.frequency = frequency
     coordinator = CheckpointCoordinator(checkpoint_manager=resolved_manager, checkpoint_config=config)
-    coordinator.set_active_graph(SimpleNamespace())
+    graph = ExecutionGraph()
+    graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="test", config={})
+    coordinator.set_active_graph(graph)
     return coordinator, resolved_manager
 
 
@@ -119,7 +123,7 @@ class TestCreatePathsFailClosed:
         _fire(coordinator, path)
         assert manager.create_checkpoint.call_count == 1
         assert manager.create_checkpoint.call_args.kwargs["coordination_token"] is token
-        assert manager.create_checkpoint.call_args.kwargs["run_id"] == RUN_ID
+        assert manager.create_checkpoint.call_args.kwargs["draft"].run_id == RUN_ID
 
 
 class TestDeleteFailsClosed:

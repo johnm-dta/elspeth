@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import asc, delete, desc, select
 
-from elspeth.contracts import Checkpoint
+from elspeth.contracts import Checkpoint, CheckpointDraft
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.compatibility import IncompatibleCheckpointError as IncompatibleCheckpointError
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB, begin_write
@@ -25,9 +24,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Connection
 
-    from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.coordination import CoordinationToken
-    from elspeth.core.dag import ExecutionGraph
 
 
 class CheckpointCorruptionError(Exception):
@@ -109,21 +106,15 @@ class CheckpointManager:
     def create_checkpoint(
         self,
         *,
-        run_id: str,
-        sequence_number: int,
-        barrier_scalars: BarrierScalars | None,
-        graph: ExecutionGraph,
+        draft: CheckpointDraft,
         coordination_token: CoordinationToken | None = None,
     ) -> Checkpoint:
         """Create a checkpoint at current progress point.
 
         Args:
-            run_id: The run being checkpointed
-            sequence_number: Monotonic progress marker
-            barrier_scalars: Scalar barrier metadata for in-flight
-                aggregation/coalesce barriers, or None. Empty scalars
-                (``has_state`` False) persist NULL, same as None.
-            graph: Execution graph for topology validation (REQUIRED)
+            draft: Persistence-ready checkpoint data. The topology hash is
+                computed by the orchestration/compatibility boundary before
+                reaching this repository.
             coordination_token: Leader fencing token (ADR-030). When
                 supplied, the verify-and-extend epoch fence is the first
                 statement of the write transaction; a stale epoch raises
@@ -131,24 +122,20 @@ class CheckpointManager:
 
         Returns:
             The created Checkpoint
-
-        Raises:
-            ValueError: If graph is None
         """
-        # Validate parameters early
-        if graph is None:
-            raise ValueError("graph parameter is required for checkpoint creation")
+        if not isinstance(draft, CheckpointDraft):
+            raise TypeError(f"draft must be CheckpointDraft, got {type(draft).__name__}")
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
         with self._fenced_or_plain_write(coordination_token=coordination_token, verb="create_checkpoint") as conn:
             existing_sequence = conn.execute(
                 select(checkpoints_table.c.checkpoint_id)
-                .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
+                .where((checkpoints_table.c.run_id == draft.run_id) & (checkpoints_table.c.sequence_number == draft.sequence_number))
                 .limit(1)
             ).fetchone()
             if existing_sequence is not None:
                 raise OrchestrationInvariantError(
-                    f"Duplicate checkpoint sequence_number={sequence_number} for run '{run_id}' "
+                    f"Duplicate checkpoint sequence_number={draft.sequence_number} for run '{draft.run_id}' "
                     f"would make resume ordering ambiguous; existing checkpoint={existing_sequence.checkpoint_id}"
                 )
 
@@ -162,38 +149,31 @@ class CheckpointManager:
             # Note: We don't use canonical_json because it normalizes floats to
             # integers, breaking round-trip for the float trigger-offset latches.
             scalars_json: str | None = None
-            if barrier_scalars is not None and barrier_scalars.has_state:
-                scalars_json = checkpoint_dumps(barrier_scalars.to_dict())
+            if draft.barrier_scalars is not None and draft.barrier_scalars.has_state:
+                scalars_json = checkpoint_dumps(draft.barrier_scalars.to_dict())
                 _validate_barrier_scalars_json_size(scalars_json)
-
-            # Compute topology hash inside transaction
-            # This ensures hash matches graph state at exact moment of checkpoint creation
-            # Use FULL topology hash (every node's id + config hash + all edges).
-            # This ensures changes to ANY branch (including sibling sink branches)
-            # are detected during resume validation, enforcing "one run = one config".
-            upstream_topology_hash = compute_full_topology_hash(graph)
 
             conn.execute(
                 checkpoints_table.insert().values(
                     checkpoint_id=checkpoint_id,
-                    run_id=run_id,
-                    sequence_number=sequence_number,
+                    run_id=draft.run_id,
+                    sequence_number=draft.sequence_number,
                     barrier_scalars_json=scalars_json,
                     created_at=created_at,
-                    upstream_topology_hash=upstream_topology_hash,
-                    format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+                    upstream_topology_hash=draft.upstream_topology_hash,
+                    format_version=draft.format_version,
                 )
             )
             # begin() auto-commits on clean exit, auto-rollbacks on exception
 
         return Checkpoint(
             checkpoint_id=checkpoint_id,
-            run_id=run_id,
-            sequence_number=sequence_number,
+            run_id=draft.run_id,
+            sequence_number=draft.sequence_number,
             created_at=created_at,
-            upstream_topology_hash=upstream_topology_hash,
+            upstream_topology_hash=draft.upstream_topology_hash,
             barrier_scalars_json=scalars_json,
-            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+            format_version=draft.format_version,
         )
 
     def get_latest_checkpoint(self, run_id: str) -> Checkpoint | None:

@@ -26,6 +26,7 @@ from tests.fixtures.landscape import insert_crashed_leader_seat
 from tests.fixtures.pipeline import build_linear_pipeline
 from tests.fixtures.plugins import CollectSink, PassTransform
 from tests.fixtures.stores import MockPayloadStore
+from tests.helpers.checkpoint import create_checkpoint
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _ERROR_HASH = "facefeed" * 8
@@ -369,7 +370,8 @@ def _setup_adr019_failed_resume_run(
         # checkpoint-borne state is scalar barrier metadata. This linear
         # fixture has no in-flight aggregation/coalesce barriers, so None
         # (persisted as NULL) is the truthful value.
-        CheckpointManager(db).create_checkpoint(
+        create_checkpoint(
+            CheckpointManager(db),
             run_id=run_id,
             sequence_number=processed_count - 1,
             barrier_scalars=None,

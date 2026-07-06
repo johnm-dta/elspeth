@@ -49,6 +49,7 @@ from elspeth.plugins.transforms.passthrough import PassThrough
 from elspeth.testing import make_contract, make_row
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.landscape import insert_crashed_leader_seat, make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 
 def _null_source(on_success: str = "default") -> NullSource:
@@ -239,7 +240,8 @@ def _build_two_source_failed_run(
             )
         )
 
-    checkpoint_mgr.create_checkpoint(
+    create_checkpoint(
+        checkpoint_mgr,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -564,7 +566,8 @@ class TestResumeComprehensive:
             )
 
         # Create checkpoint at row 2
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -651,7 +654,8 @@ class TestResumeComprehensive:
         output_path = tmp_path / "scheduler_resume_output.csv"
         run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=1, checkpoint_at=0)
 
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -814,7 +818,8 @@ class TestResumeComprehensive:
             )
 
         # Create checkpoint
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -1056,7 +1061,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1301,7 +1307,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1531,7 +1538,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1759,7 +1767,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1967,7 +1976,8 @@ class TestResumeComprehensive:
             )
 
         # Create checkpoint
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -2078,7 +2088,8 @@ class TestResumeComprehensive:
 
         # Create checkpoint at the last row so resume's recovery path is
         # exercised even though no rows remain to process.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=4,
             barrier_scalars=None,
@@ -2264,7 +2275,8 @@ class TestResumeComprehensive:
         # Create checkpoint at the last row so resume's recovery path is
         # exercised even though no rows remain to process.  Mirrors the
         # gate-MOVE test setup.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=4,
             barrier_scalars=None,
@@ -2715,7 +2727,8 @@ class TestMultiSourceResumeContractDispatch:
                 )
             )
 
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,

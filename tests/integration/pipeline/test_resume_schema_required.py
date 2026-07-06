@@ -22,6 +22,7 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.testing import make_contract
 from tests.fixtures.landscape import make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 
 class SourceWithoutSchema(BaseSource):
@@ -163,7 +164,8 @@ class TestResumeSchemaRequired:
         factory.data_flow.create_token(row_id=row.row_id)
 
         # Create checkpoint
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=0,
             barrier_scalars=None,

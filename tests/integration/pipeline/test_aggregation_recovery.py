@@ -49,6 +49,7 @@ from elspeth.plugins.infrastructure.results import TransformResult
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory
 from tests.fixtures.plugins import CollectSink, ListSource
+from tests.helpers.checkpoint import create_checkpoint
 
 
 def _create_test_schema_contract() -> SchemaContract:
@@ -538,7 +539,8 @@ class TestAggregationRecoveryIntegration:
 
         # Checkpoint before flush — journal era: scalar-only checkpoint row
         # (buffered payloads live in journal BLOCKED rows, not in a blob).
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -647,7 +649,8 @@ class TestAggregationRecoveryIntegration:
         factory.execution.update_batch_status(count_batch.batch_id, BatchStatus.EXECUTING)
 
         # Checkpoint at last processed token — journal era: scalar-only row.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=3,
             barrier_scalars=None,
@@ -706,7 +709,8 @@ class TestAggregationRecoveryIntegration:
         factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
 
         # Checkpoint (journal era: scalar-only row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=4,
             barrier_scalars=None,

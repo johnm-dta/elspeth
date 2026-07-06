@@ -52,6 +52,7 @@ from tests.fixtures.plugins import (
     PassTransform,
 )
 from tests.fixtures.stores import MockPayloadStore
+from tests.helpers.checkpoint import create_checkpoint
 
 # =============================================================================
 # Audit Verification Helpers
@@ -749,7 +750,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run.run_id)
         # Create a checkpoint (required for recovery to work)
         checkpoint_manager = CheckpointManager(db)
-        checkpoint_manager.create_checkpoint(
+        create_checkpoint(
+            checkpoint_manager,
             run_id=run.run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -890,7 +892,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # A checkpoint is the precondition for resume.
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -1052,7 +1055,8 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2220,7 +2224,8 @@ class TestForkRecoveryInvariant:
             )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2508,7 +2513,8 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Create the checkpoint (F1: scalars only — no barrier blob) ──
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2714,7 +2720,8 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2997,7 +3004,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -3330,7 +3338,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -3592,7 +3601,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db_b, run_id)
         # Create checkpoint + mark run failed (resume preconditions).
         checkpoint_mgr = CheckpointManager(db_b)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -3893,7 +3903,8 @@ class TestForkRecoveryInvariant:
         # ── Resume ────────────────────────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -4155,7 +4166,8 @@ class TestForkRecoveryInvariant:
         # reconstructs the cumulative counters from the intact audit trail.
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -4265,7 +4277,7 @@ class TestForkRecoveryInvariant:
         run_id = run_b1.run_id
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(run_id=run_id, sequence_number=1, barrier_scalars=None, graph=graph)
+        create_checkpoint(checkpoint_mgr, run_id=run_id, sequence_number=1, barrier_scalars=None, graph=graph)
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
             conn.commit()
@@ -4449,7 +4461,8 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -5193,7 +5206,8 @@ class TestForkRecoveryInvariant:
         assert spec.token_data_ref == merged_data_ref, f"recovery must surface the merged token_data_ref; got {spec.token_data_ref!r}"
 
         # ── Resume ──
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -5407,7 +5421,8 @@ class TestForkRecoveryInvariant:
 
         # A checkpoint is the resume precondition (get_unprocessed_rows returns []
         # for a run with no checkpoint). F1: it carries scalars only — no blob.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,

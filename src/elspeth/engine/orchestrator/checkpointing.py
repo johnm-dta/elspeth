@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from elspeth.contracts import CheckpointDraft
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 
 if TYPE_CHECKING:
     from elspeth.contracts.barrier_scalars import BarrierScalars
@@ -101,6 +103,22 @@ class CheckpointCoordinator:
             )
         return token
 
+    def _build_checkpoint_draft(
+        self,
+        *,
+        run_id: str,
+        sequence_number: int,
+        barrier_scalars: BarrierScalars | None,
+        graph: ExecutionGraph,
+    ) -> CheckpointDraft:
+        """Build persistence-ready checkpoint data at the topology boundary."""
+        return CheckpointDraft(
+            run_id=run_id,
+            sequence_number=sequence_number,
+            barrier_scalars=barrier_scalars,
+            upstream_topology_hash=CheckpointCompatibilityValidator().compute_full_topology_hash(graph),
+        )
+
     def reset_sequence(self) -> None:
         """Reset checkpoint ordering for a fresh run."""
         self._sequence_number = 0
@@ -135,10 +153,12 @@ class CheckpointCoordinator:
         token = self._require_fence(run_id)
 
         manager.create_checkpoint(
-            run_id=run_id,
-            sequence_number=0,
-            barrier_scalars=None,
-            graph=graph,
+            draft=self._build_checkpoint_draft(
+                run_id=run_id,
+                sequence_number=0,
+                barrier_scalars=None,
+                graph=graph,
+            ),
             coordination_token=token,
         )
 
@@ -197,10 +217,12 @@ class CheckpointCoordinator:
 
         if should_checkpoint:
             manager.create_checkpoint(
-                run_id=run_id,
-                sequence_number=self._sequence_number,
-                barrier_scalars=barrier_scalars,
-                graph=graph,
+                draft=self._build_checkpoint_draft(
+                    run_id=run_id,
+                    sequence_number=self._sequence_number,
+                    barrier_scalars=barrier_scalars,
+                    graph=graph,
+                ),
                 coordination_token=token,
             )
 
@@ -278,10 +300,12 @@ class CheckpointCoordinator:
 
         self._sequence_number += 1
         manager.create_checkpoint(
-            run_id=run_id,
-            sequence_number=self._sequence_number,
-            barrier_scalars=loop_ctx.processor.get_barrier_scalars(),
-            graph=graph,
+            draft=self._build_checkpoint_draft(
+                run_id=run_id,
+                sequence_number=self._sequence_number,
+                barrier_scalars=loop_ctx.processor.get_barrier_scalars(),
+                graph=graph,
+            ),
             coordination_token=token,
         )
 

@@ -965,6 +965,15 @@ class TestDeriveJournalPath:
         url = f"sqlite:///{db_path}"
         assert LandscapeDB._derive_journal_path(url, None) == LandscapeDB._derive_journal_path(url)
 
+    @pytest.mark.parametrize("suffix", ["../escape", "abc/123", "ABC123", "", "abc.123"])
+    def test_derive_journal_path_rejects_non_lowercase_hex_worker_suffix(self, tmp_path: Path, suffix: str) -> None:
+        """Worker suffixes are filename components, so only lowercase hex is accepted."""
+        db_path = tmp_path / "landscape.db"
+        url = f"sqlite:///{db_path}"
+
+        with pytest.raises(ValueError, match="dump_to_jsonl_worker_suffix"):
+            LandscapeDB._derive_journal_path(url, suffix)
+
     def test_two_workers_write_distinct_journal_files(self, tmp_path: Path) -> None:
         """Two follower instances with distinct hex suffixes write separate files.
 

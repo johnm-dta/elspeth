@@ -5,6 +5,7 @@ with appropriate settings for each.
 """
 
 import os
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -55,6 +56,8 @@ Tier1Engine = NewType("Tier1Engine", Engine)
 # dashboard connections never carry it, so they never contend for the write
 # lock at BEGIN.
 WRITE_INTENT_OPTION = "elspeth_write_intent"
+
+_JOURNAL_WORKER_SUFFIX_RE = re.compile(r"[0-9a-f]+")
 
 # Canonical SQLite PRAGMA invariants for the Landscape audit DB.
 #
@@ -607,7 +610,10 @@ class LandscapeDB:
         self._require_existing_schema = False
         self._read_only = False
         if dump_to_jsonl:
-            journal_path = dump_to_jsonl_path or self._derive_journal_path(connection_string)
+            journal_path = self._resolve_journal_path(
+                connection_string,
+                explicit_path=dump_to_jsonl_path,
+            )
             self._journal = LandscapeJournal(
                 journal_path,
                 fail_on_error=dump_to_jsonl_fail_on_error,
@@ -1352,7 +1358,11 @@ class LandscapeDB:
 
         journal: LandscapeJournal | None = None
         if dump_to_jsonl:
-            journal_path = dump_to_jsonl_path or cls._derive_journal_path(url, dump_to_jsonl_worker_suffix)
+            journal_path = cls._resolve_journal_path(
+                url,
+                explicit_path=dump_to_jsonl_path,
+                worker_suffix=dump_to_jsonl_worker_suffix,
+            )
             journal = LandscapeJournal(
                 journal_path,
                 fail_on_error=dump_to_jsonl_fail_on_error,
@@ -1379,6 +1389,37 @@ class LandscapeDB:
             instance._create_additive_indexes()
             instance._sync_sqlite_schema_epoch()
         return instance
+
+    @staticmethod
+    def _resolve_journal_path(
+        connection_string: str,
+        *,
+        explicit_path: str | None,
+        worker_suffix: str | None = None,
+    ) -> str:
+        """Resolve the JSONL journal path at the database boundary."""
+        url = make_url(connection_string)
+        explicit_path = explicit_path or None
+        if not url.drivername.startswith("sqlite"):
+            if explicit_path is None:
+                raise ValueError("dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases")
+            return explicit_path
+
+        db_path = LandscapeDB._journal_sqlite_db_path(url)
+        if explicit_path is None:
+            return LandscapeDB._derive_journal_path(connection_string, worker_suffix)
+
+        allowed_root = db_path.parent.resolve()
+        raw_path = Path(explicit_path)
+        candidate = raw_path if raw_path.is_absolute() else allowed_root / raw_path
+        resolved_path = candidate.resolve()
+        try:
+            resolved_path.relative_to(allowed_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"dump_to_jsonl_path escapes allowed journal root {allowed_root}: {explicit_path!r} -> {resolved_path}"
+            ) from exc
+        return str(resolved_path)
 
     @property
     def is_read_only(self) -> bool:
@@ -1421,17 +1462,23 @@ class LandscapeDB:
             future release.
         """
         url = make_url(connection_string)
+        db_path = LandscapeDB._journal_sqlite_db_path(url)
+        if worker_suffix is None:
+            # N=1 leader path: byte-for-byte unchanged.
+            return str(db_path.with_suffix(".journal.jsonl"))
+        if _JOURNAL_WORKER_SUFFIX_RE.fullmatch(worker_suffix) is None:
+            raise ValueError("dump_to_jsonl_worker_suffix must be a non-empty lowercase hex string")
+        # N>1 follower path: embed the hex suffix before the extension.
+        return str(db_path.parent / f"{db_path.stem}.journal.{worker_suffix}.jsonl")
+
+    @staticmethod
+    def _journal_sqlite_db_path(url: Any) -> Path:
         if not url.drivername.startswith("sqlite"):
             raise ValueError("dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases")
         database = url.database
         if database is None or database == ":memory:":
             raise ValueError("dump_to_jsonl requires a file-backed SQLite database")
-        db_path = Path(database)
-        if worker_suffix is None:
-            # N=1 leader path: byte-for-byte unchanged.
-            return str(db_path.with_suffix(".journal.jsonl"))
-        # N>1 follower path: embed the hex suffix before the extension.
-        return str(db_path.parent / f"{db_path.stem}.journal.{worker_suffix}.jsonl")
+        return Path(database)
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:

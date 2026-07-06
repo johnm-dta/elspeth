@@ -1505,3 +1505,63 @@ class TestJournalPathGuards:
         """In-memory SQLite has no file path, so automatic journal derivation must fail."""
         with pytest.raises(ValueError, match="dump_to_jsonl requires a file-backed SQLite database"):
             LandscapeDB.from_url("sqlite:///:memory:", dump_to_jsonl=True)
+
+    def test_from_url_dump_to_jsonl_rejects_blank_path_for_non_sqlite(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Blank explicit non-SQLite paths preserve the old missing-path behavior."""
+        create_engine_fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", create_engine_fake)
+
+        with pytest.raises(ValueError, match="dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases"):
+            LandscapeDB.from_url("postgresql://user@host/db", dump_to_jsonl=True, dump_to_jsonl_path="")
+
+        create_engine_fake.assert_called_once_with("postgresql://user@host/db", echo=False)
+
+    def test_from_url_dump_to_jsonl_rejects_explicit_path_outside_sqlite_db_dir(self, tmp_path: Path) -> None:
+        """Explicit SQLite journal paths must not escape the database directory."""
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        db_path = db_dir / "landscape.db"
+        outside_journal = tmp_path / "outside" / "leak.jsonl"
+
+        with pytest.raises(ValueError, match="escapes allowed journal root"):
+            LandscapeDB.from_url(
+                f"sqlite:///{db_path}",
+                dump_to_jsonl=True,
+                dump_to_jsonl_path=str(outside_journal),
+            )
+
+    def test_from_url_dump_to_jsonl_resolves_relative_path_under_sqlite_db_dir(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Relative explicit journal paths are rooted at the SQLite DB directory, not cwd."""
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        db_path = db_dir / "landscape.db"
+
+        db = LandscapeDB.from_url(
+            f"sqlite:///{db_path}",
+            dump_to_jsonl=True,
+            dump_to_jsonl_path="journals/audit.jsonl",
+        )
+        try:
+            assert db._journal is not None
+            assert db._journal._path == db_dir / "journals" / "audit.jsonl"
+            assert not (cwd / "journals").exists()
+        finally:
+            db.close()
+
+    def test_from_url_dump_to_jsonl_blank_path_uses_default_sqlite_journal_path(self, tmp_path: Path) -> None:
+        """Blank explicit SQLite paths preserve the old default-path fallback."""
+        db_path = tmp_path / "landscape.db"
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", dump_to_jsonl=True, dump_to_jsonl_path="")
+        try:
+            assert db._journal is not None
+            assert db._journal._path == tmp_path / "landscape.journal.jsonl"
+        finally:
+            db.close()

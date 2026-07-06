@@ -37,7 +37,7 @@ from typing import Any, cast
 
 import pytest
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import Checkpoint, RunStatus
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError
 from elspeth.core.checkpoint.recovery import NonResumableRunError, check_run_status_resumable
@@ -138,6 +138,7 @@ def _full_resume_point(
             sequence_number=sequence_number,
             upstream_topology_hash=topology_hash,
             full_topology_hash=topology_hash,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         ),
         sequence_number=sequence_number,
     )
@@ -157,6 +158,7 @@ def _latest_checkpoint(
         sequence_number=sequence_number,
         upstream_topology_hash=topology_hash,
         full_topology_hash=topology_hash,
+        format_version=Checkpoint.CURRENT_FORMAT_VERSION,
     )
 
 

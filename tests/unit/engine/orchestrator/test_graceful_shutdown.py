@@ -346,7 +346,7 @@ class TestCheckpointInterruptedProgress:
 
             orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
             call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
-            assert call_kwargs["barrier_scalars"] is scalars
+            assert call_kwargs["draft"].barrier_scalars is scalars
             # Scheduler terminalization is no longer this callback's concern
             # (elspeth-107a29d02e): the progress callback only checkpoints.
             assert processor.terminalized_batches == []
@@ -479,7 +479,7 @@ class TestCheckpointInterruptedProgress:
 
             orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
             call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
-            assert call_kwargs["barrier_scalars"] is scalars
-            assert set(call_kwargs["barrier_scalars"].coalesce) == {("merge_1", "row-1"), ("merge_2", "row-2")}
+            assert call_kwargs["draft"].barrier_scalars is scalars
+            assert set(call_kwargs["draft"].barrier_scalars.coalesce) == {("merge_1", "row-1"), ("merge_2", "row-2")}
         finally:
             db.close()

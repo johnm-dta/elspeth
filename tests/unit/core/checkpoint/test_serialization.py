@@ -38,16 +38,18 @@ def test_checkpoint_dumps_raises_for_unserializable_type() -> None:
 
 
 def test_checkpoint_dumps_raises_for_custom_class_naming_type() -> None:
-    """A genuinely unserializable custom instance raises a clear typed error naming the type."""
+    """A genuinely unserializable custom instance names the type without raw value repr."""
 
     class CustomThing:
         def __repr__(self) -> str:
-            return "<CustomThing instance>"
+            return "<CustomThing token=github_pat_leaked_123>"
 
     with pytest.raises(TypeError, match="'CustomThing'") as exc_info:
         checkpoint_dumps({"obj": CustomThing()})
     message = str(exc_info.value)
-    assert "<CustomThing instance>" in message  # value repr included
+    assert "github_pat_leaked_123" not in message
+    assert "<CustomThing" not in message
+    assert "value=" not in message
     assert "JSON-native" in message
 
 

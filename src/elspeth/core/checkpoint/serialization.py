@@ -187,15 +187,12 @@ class CheckpointEncoder(json.JSONEncoder):
         # Offensive-programming boundary: the SchemaContract `object` type is an
         # unbounded catch-all, so the serializer cannot be made total. Replace the
         # cryptic stdlib "Object of type X is not JSON serializable" with a clear
-        # audit-fidelity error that NAMES the type and the offending value. Tier-1
-        # checkpoints (token_data_ref envelopes, aggregation state) must contain
-        # only JSON-native values or one of the envelope-tagged types.
-        value_repr = repr(obj)
-        if len(value_repr) > 200:
-            value_repr = value_repr[:200] + "…"
+        # audit-fidelity error that names the type without previewing raw payload
+        # data. Tier-1 checkpoints (token_data_ref envelopes, aggregation state)
+        # must contain only JSON-native values or one of the envelope-tagged types.
         raise TypeError(
             f"Cannot serialize value of type {type(obj).__name__!r} into a checkpoint payload "
-            f"(value={value_repr}). Checkpoint payloads are a Tier-1 audit-fidelity boundary: "
+            f"at the Tier-1 audit-fidelity boundary. "
             f"every value must be JSON-native (int, float, str, bool, None, list, dict) or one of "
             f"the type-preserving envelopes (datetime, Decimal, date, time, bytes, UUID, tuple). "
             f"numpy scalars are accepted and normalized to Python primitives. To record this value, "

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import asc, delete, desc, select
 
@@ -54,6 +54,35 @@ def _validate_barrier_scalars_json_size(serialized: str) -> None:
         f"Barrier scalars carry only trigger latches and lost-branch records; "
         f"a payload this large indicates a bug in barrier state construction."
     )
+
+
+def _validated_persisted_barrier_scalars_json(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"barrier_scalars_json must be str or None, got {type(value).__name__}")
+    try:
+        _validate_barrier_scalars_json_size(value)
+    except OrchestrationInvariantError as exc:
+        raise ValueError(f"barrier_scalars_json is invalid: {exc}") from exc
+    return value
+
+
+def _checkpoint_from_row(row: Any, *, requested_run_id: str) -> Checkpoint:
+    try:
+        return Checkpoint(
+            checkpoint_id=row.checkpoint_id,
+            run_id=row.run_id,
+            sequence_number=row.sequence_number,
+            created_at=row.created_at,
+            upstream_topology_hash=row.upstream_topology_hash,
+            barrier_scalars_json=_validated_persisted_barrier_scalars_json(row.barrier_scalars_json),
+            format_version=row.format_version,  # None for legacy checkpoints
+        )
+    except ValueError as e:
+        raise CheckpointCorruptionError(
+            f"Checkpoint corruption detected for run '{requested_run_id}', checkpoint '{row.checkpoint_id}': {e}"
+        ) from e
 
 
 class CheckpointManager:
@@ -199,22 +228,7 @@ class CheckpointManager:
         if result is None:
             return None
 
-        try:
-            checkpoint = Checkpoint(
-                checkpoint_id=result.checkpoint_id,
-                run_id=result.run_id,
-                sequence_number=result.sequence_number,
-                created_at=result.created_at,
-                upstream_topology_hash=result.upstream_topology_hash,
-                barrier_scalars_json=result.barrier_scalars_json,
-                format_version=result.format_version,  # None for legacy checkpoints
-            )
-        except ValueError as e:
-            raise CheckpointCorruptionError(
-                f"Checkpoint corruption detected for run '{run_id}', checkpoint '{result.checkpoint_id}': {e}"
-            ) from e
-
-        return checkpoint
+        return _checkpoint_from_row(result, requested_run_id=run_id)
 
     def get_checkpoints(self, run_id: str) -> list[Checkpoint]:
         """Get all checkpoints for a run, ordered by sequence.
@@ -232,22 +246,7 @@ class CheckpointManager:
 
         checkpoints = []
         for r in results:
-            try:
-                checkpoints.append(
-                    Checkpoint(
-                        checkpoint_id=r.checkpoint_id,
-                        run_id=r.run_id,
-                        sequence_number=r.sequence_number,
-                        created_at=r.created_at,
-                        upstream_topology_hash=r.upstream_topology_hash,
-                        barrier_scalars_json=r.barrier_scalars_json,
-                        format_version=r.format_version,  # None for legacy checkpoints
-                    )
-                )
-            except ValueError as e:
-                raise CheckpointCorruptionError(
-                    f"Checkpoint corruption detected for run '{run_id}', checkpoint '{r.checkpoint_id}': {e}"
-                ) from e
+            checkpoints.append(_checkpoint_from_row(r, requested_run_id=run_id))
         return checkpoints
 
     def delete_checkpoints(self, run_id: str, *, coordination_token: CoordinationToken | None = None) -> int:

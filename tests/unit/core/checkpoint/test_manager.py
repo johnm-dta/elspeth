@@ -17,7 +17,8 @@ from elspeth.contracts.barrier_scalars import (
     CoalescePendingScalars,
 )
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.core.checkpoint.manager import CheckpointManager, _validate_barrier_scalars_json_size
+from elspeth.core.checkpoint import manager as checkpoint_manager_module
+from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, _validate_barrier_scalars_json_size
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import checkpoints_table, nodes_table, rows_table, runs_table, tokens_table
 from tests.fixtures.landscape import make_landscape_db
@@ -250,6 +251,54 @@ def test_get_latest_checkpoint_loads_raw_format_versions(
     assert loaded is not None
     assert loaded.checkpoint_id == created.checkpoint_id
     assert loaded.format_version == format_version
+
+
+def test_get_latest_checkpoint_rejects_non_string_barrier_scalars_json(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+) -> None:
+    run_id = "run-tampered-type"
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn, run_id=run_id)
+
+    checkpoint_manager.create_checkpoint(draft=_draft(run_id=run_id, sequence_number=1, barrier_scalars=None))
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(checkpoints_table)
+            .where(checkpoints_table.c.run_id == run_id)
+            .values(barrier_scalars_json=b'{"aggregation": {}, "coalesce": {}}')
+        )
+
+    with pytest.raises(CheckpointCorruptionError, match="barrier_scalars_json"):
+        checkpoint_manager.get_latest_checkpoint(run_id)
+
+
+@pytest.mark.parametrize("read_all", [False, True])
+def test_checkpoint_reads_reject_oversized_persisted_barrier_scalars_json(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    monkeypatch: pytest.MonkeyPatch,
+    read_all: bool,
+) -> None:
+    run_id = "run-tampered-size"
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn, run_id=run_id)
+
+    checkpoint_manager.create_checkpoint(draft=_draft(run_id=run_id, sequence_number=1, barrier_scalars=None))
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(checkpoints_table).where(checkpoints_table.c.run_id == run_id).values(barrier_scalars_json='{"too_big": "xxxx"}')
+        )
+
+    monkeypatch.setattr(checkpoint_manager_module, "_MAX_BARRIER_SCALARS_BYTES", 5)
+
+    with pytest.raises(CheckpointCorruptionError, match="barrier_scalars_json"):
+        if read_all:
+            checkpoint_manager.get_checkpoints(run_id)
+        else:
+            checkpoint_manager.get_latest_checkpoint(run_id)
 
 
 def test_delete_checkpoints_removes_all_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:

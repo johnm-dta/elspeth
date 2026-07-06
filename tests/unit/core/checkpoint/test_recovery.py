@@ -1092,6 +1092,52 @@ def test_get_unprocessed_row_data_chunked_lookup_and_type_restoration(
     ]
 
 
+def test_unprocessed_row_data_paths_share_payload_restoration_helper(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with db.connection() as conn:
+        _insert_run(conn, "run-shared-restore", status=RunStatus.FAILED)
+        _insert_node(conn, "run-shared-restore", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, "run-shared-restore", "row-1", row_index=3, source_data_ref="payload-ref")
+
+    calls: list[tuple[str, str, PayloadStore, type[PluginSchema]]] = []
+
+    def restore_row_data(
+        row_id: str,
+        source_data_ref: str,
+        payload_store_arg: PayloadStore,
+        source_schema_class: type[PluginSchema],
+    ) -> dict[str, Any]:
+        calls.append((row_id, source_data_ref, payload_store_arg, source_schema_class))
+        return {"id": 99}
+
+    monkeypatch.setattr(recovery_manager, "_restore_row_data", restore_row_data)
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+
+    single_source_rows = recovery_manager.get_unprocessed_row_data(
+        "run-shared-restore",
+        payload_store,
+        source_schema_class=_SimpleSchema,
+    )
+    multi_source_rows = recovery_manager.get_unprocessed_row_data_by_source(
+        "run-shared-restore",
+        payload_store,
+        source_schema_classes={NodeID("source-node"): _SimpleSchema},
+    )
+
+    assert single_source_rows == [
+        ResumedRow(row_id="row-1", row_index=3, source_node_id=NodeID("source-node"), row_data={"id": 99})
+    ]
+    assert multi_source_rows == single_source_rows
+    assert calls == [
+        ("row-1", "payload-ref", payload_store, _SimpleSchema),
+        ("row-1", "payload-ref", payload_store, _SimpleSchema),
+    ]
+
+
 def test_verify_contract_integrity_returns_contract(
     db: LandscapeDB,
     recovery_manager: RecoveryManager,

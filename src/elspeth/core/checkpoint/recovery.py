@@ -237,6 +237,54 @@ class RecoveryManager:
         self._checkpoint_manager = checkpoint_manager
         self._checkpoint_state_cache: dict[_CheckpointStateCacheKey, BarrierScalars | None] = {}
 
+    @staticmethod
+    def _restore_row_data(
+        row_id: str,
+        source_data_ref: str,
+        payload_store: PayloadStore,
+        source_schema_class: type[PluginSchema],
+    ) -> dict[str, Any]:
+        try:
+            payload_bytes = payload_store.retrieve(source_data_ref)
+        except PayloadNotFoundError as exc:
+            raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
+
+        try:
+            degraded_data = json.loads(
+                payload_bytes.decode("utf-8"),
+                parse_constant=_reject_source_row_json_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, AuditIntegrityError) as exc:
+            raise AuditIntegrityError(
+                f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                f"cannot decode persisted row data (Tier 1 violation). "
+                f"Error: {exc}"
+            ) from exc
+
+        if type(degraded_data) is not dict:
+            raise AuditIntegrityError(
+                f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
+            )
+
+        # Restore datetime, Decimal, and other types that canonical JSON
+        # degraded to strings. Resume requires schema validation; there is no
+        # degraded-type fallback.
+        validated = source_schema_class.model_validate(degraded_data)
+        row_data = validated.to_row()
+
+        # Defense in depth: detect schemas that silently discard every field.
+        if degraded_data and not row_data:
+            raise ValueError(
+                f"Resume failed for row {row_id}: Schema validation returned empty data "
+                f"but source had {len(degraded_data)} fields. "
+                f"Schema class '{source_schema_class.__name__}' appears to have no fields defined. "
+                f"Cannot resume - this would silently discard all row data. "
+                f"The source plugin's schema must declare fields matching the stored row structure."
+            )
+
+        return row_data
+
     def can_resume(self, run_id: str, graph: ExecutionGraph) -> ResumeCheck:
         """Check if a run can be resumed.
 
@@ -437,49 +485,7 @@ class RecoveryManager:
                     f"Re-run the pipeline from scratch instead of resuming."
                 )
 
-            # Retrieve from payload store
-            try:
-                payload_bytes = payload_store.retrieve(source_data_ref)
-            except PayloadNotFoundError as exc:
-                raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
-
-            try:
-                degraded_data = json.loads(
-                    payload_bytes.decode("utf-8"),
-                    parse_constant=_reject_source_row_json_constant,
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError, AuditIntegrityError) as exc:
-                raise AuditIntegrityError(
-                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
-                    f"cannot decode persisted row data (Tier 1 violation). "
-                    f"Error: {exc}"
-                ) from exc
-
-            if type(degraded_data) is not dict:
-                raise AuditIntegrityError(
-                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
-                    f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
-                )
-
-            # TYPE FIDELITY RESTORATION:
-            # Re-validate through source schema to restore types.
-            # This is critical for datetime, Decimal, and other coerced types
-            # that canonical_json normalizes to strings.
-            # Schema is now REQUIRED - no fallback to degraded types.
-            validated = source_schema_class.model_validate(degraded_data)
-            row_data = validated.to_row()
-
-            # DEFENSE-IN-DEPTH: Detect silent data loss from empty schemas
-            # If source data has fields but restored data is empty, the schema is losing data.
-            # This catches bugs like NullSourceSchema (no fields) being used for resume.
-            if degraded_data and not row_data:
-                raise ValueError(
-                    f"Resume failed for row {row_id}: Schema validation returned empty data "
-                    f"but source had {len(degraded_data)} fields. "
-                    f"Schema class '{source_schema_class.__name__}' appears to have no fields defined. "
-                    f"Cannot resume - this would silently discard all row data. "
-                    f"The source plugin's schema must declare fields matching the stored row structure."
-                )
+            row_data = self._restore_row_data(row_id, source_data_ref, payload_store, source_schema_class)
 
             result.append(
                 ResumedRow(
@@ -553,40 +559,8 @@ class RecoveryManager:
                     f"Re-run the pipeline from scratch instead of resuming."
                 )
 
-            try:
-                payload_bytes = payload_store.retrieve(source_data_ref)
-            except PayloadNotFoundError as exc:
-                raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
-
-            try:
-                degraded_data = json.loads(
-                    payload_bytes.decode("utf-8"),
-                    parse_constant=_reject_source_row_json_constant,
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError, AuditIntegrityError) as exc:
-                raise AuditIntegrityError(
-                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
-                    f"cannot decode persisted row data (Tier 1 violation). "
-                    f"Error: {exc}"
-                ) from exc
-
-            if type(degraded_data) is not dict:
-                raise AuditIntegrityError(
-                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
-                    f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
-                )
-
             source_schema_class = source_schema_classes[source_node_id]
-            validated = source_schema_class.model_validate(degraded_data)
-            row_data = validated.to_row()
-            if degraded_data and not row_data:
-                raise ValueError(
-                    f"Resume failed for row {row_id}: Schema validation returned empty data "
-                    f"but source had {len(degraded_data)} fields. "
-                    f"Schema class '{source_schema_class.__name__}' appears to have no fields defined. "
-                    f"Cannot resume - this would silently discard all row data. "
-                    f"The source plugin's schema must declare fields matching the stored row structure."
-                )
+            row_data = self._restore_row_data(row_id, source_data_ref, payload_store, source_schema_class)
 
             result.append(
                 ResumedRow(

@@ -29,8 +29,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from elspeth.contracts.enums import OutputMode, RunMode
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
 from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT
+from elspeth.core import template_materialization
 from elspeth.core.dependency_config import CollectionProbeConfig, CommencementGateConfig, DependencyConfig
 from elspeth.core.secrets import is_secret_field
+
+TemplateFileError = template_materialization.TemplateFileError
+TemplateOptionMaterializer = template_materialization.TemplateOptionMaterializer
+_expand_template_files = template_materialization._expand_template_files
 
 # Reserved edge labels that cannot be used as user-defined routing names.
 # "continue" is used for sequential edges, "fork" is a gate-only routing action,
@@ -85,13 +90,6 @@ _DYNACONF_INTERNAL_KEYS = frozenset(
         # "secrets" is handled by SecretsConfig in the CLI, not by ElspethSettings.
         # It passes through Dynaconf but is consumed before Pydantic validation.
         "secrets",
-    }
-)
-_FILE_BACKED_TEMPLATE_OPTION_KEYS = frozenset(
-    {
-        "template_file",
-        "lookup_file",
-        "system_prompt_file",
     }
 )
 _STRUCTURAL_OPTION_KEYS = frozenset({"schema", "schema_config"})
@@ -2153,59 +2151,12 @@ def _expand_config_templates(
     if settings_path is None:
         return raw_config
 
-    config = dict(raw_config)
-
-    # === Transform plugin options - expand template files ===
-    if "transforms" in config and isinstance(config["transforms"], list):
-        plugins = []
-        for plugin_config in config["transforms"]:
-            if isinstance(plugin_config, dict):
-                plugin = dict(plugin_config)
-                if "options" in plugin and isinstance(plugin["options"], dict):
-                    plugin["options"] = _expand_template_files(plugin["options"], settings_path)
-                plugins.append(plugin)
-            else:
-                plugins.append(plugin_config)
-        config["transforms"] = plugins
-
-    # === Aggregation options - expand template files ===
-    if "aggregations" in config and isinstance(config["aggregations"], list):
-        aggregations = []
-        for agg_config in config["aggregations"]:
-            if isinstance(agg_config, dict):
-                agg = dict(agg_config)
-                if "options" in agg and isinstance(agg["options"], dict):
-                    agg["options"] = _expand_template_files(agg["options"], settings_path)
-                aggregations.append(agg)
-            else:
-                aggregations.append(agg_config)
-        config["aggregations"] = aggregations
-
-    return config
+    return TemplateOptionMaterializer(settings_path).materialize_config(raw_config)
 
 
 def _reject_file_backed_template_options_for_in_memory_loader(raw_config: Mapping[str, object]) -> None:
     """Reject file-backed template expansion options without a settings file root."""
-    for collection_name in ("transforms", "aggregations"):
-        collection = raw_config[collection_name] if collection_name in raw_config else None
-        if type(collection) is not list:
-            continue
-        for index, plugin_config in enumerate(collection):
-            if type(plugin_config) is not dict:
-                continue
-            options = plugin_config["options"] if "options" in plugin_config else None
-            if type(options) is not dict:
-                continue
-            present = sorted(key for key in _FILE_BACKED_TEMPLATE_OPTION_KEYS if key in options)
-            if not present:
-                continue
-            raw_name = plugin_config["name"] if "name" in plugin_config else index
-            raise ValueError(
-                "load_settings_from_yaml_string() cannot expand file-backed template options "
-                f"{present} for {collection_name}[{raw_name!r}] because in-memory web execution "
-                "has no trusted settings file base path. Use load_settings() for file-backed "
-                "configs, or inline prompt_template, lookup, and system_prompt before web validation/execution."
-            )
+    TemplateOptionMaterializer.reject_file_backed_options(raw_config)
 
 
 def _sanitize_dsn_option_for_audit(
@@ -2335,110 +2286,6 @@ def _fingerprint_config_for_audit(
                     exporter["options"] = _fingerprint_secrets(exporter["options"], fail_if_no_key=fail_if_no_key)
 
     return config
-
-
-class TemplateFileError(Exception):
-    """Error loading template or lookup file."""
-
-
-def _resolve_template_path(file_ref: str, settings_path: Path, label: str) -> Path:
-    """Resolve a template/lookup/prompt file path with containment check.
-
-    Relative paths are resolved against the settings file's parent directory.
-    Absolute paths are used as-is. In both cases, the resolved path must remain
-    within the settings directory tree to prevent path traversal attacks.
-
-    Args:
-        file_ref: File reference from config (relative or absolute)
-        settings_path: Path to the settings file
-        label: Human-readable label for error messages (e.g. "Template file")
-
-    Returns:
-        Resolved, validated Path
-
-    Raises:
-        TemplateFileError: If path escapes settings directory or file not found
-    """
-    config_root = settings_path.parent.resolve()
-    file_path = Path(file_ref)
-    if not file_path.is_absolute():
-        file_path = (config_root / file_path).resolve()
-    else:
-        file_path = file_path.resolve()
-
-    # Containment check: resolved path must be under the config directory
-    try:
-        file_path.relative_to(config_root)
-    except ValueError as exc:
-        raise TemplateFileError(
-            f"{label} path traversal blocked: {file_ref!r} resolves to {file_path} which is outside config directory {config_root}"
-        ) from exc
-
-    if not file_path.exists():
-        raise TemplateFileError(f"{label} not found: {file_path}")
-
-    return file_path
-
-
-def _expand_template_files(
-    options: dict[str, Any],
-    settings_path: Path,
-) -> dict[str, Any]:
-    """Expand template_file, lookup_file, and system_prompt_file to loaded content.
-
-    Args:
-        options: Plugin options dict
-        settings_path: Path to settings file for resolving relative paths
-
-    Returns:
-        New dict with files loaded and paths recorded:
-        - template_file → prompt_template (content) + prompt_template_source (path)
-        - lookup_file → lookup (content) + lookup_source (path)
-        - system_prompt_file → system_prompt (content) + system_prompt_source (path)
-
-    Raises:
-        TemplateFileError: If files not found, invalid, or path traversal detected
-    """
-    result = dict(options)
-
-    # Handle template_file
-    if "template_file" in result:
-        if "prompt_template" in result:
-            raise TemplateFileError("Cannot specify both 'prompt_template' and 'template_file'")
-        template_file = result.pop("template_file")
-        template_path = _resolve_template_path(template_file, settings_path, "Template file")
-
-        result["prompt_template"] = template_path.read_text(encoding="utf-8")
-        result["prompt_template_source"] = template_file
-
-    # Handle lookup_file
-    if "lookup_file" in result:
-        if "lookup" in result:
-            raise TemplateFileError("Cannot specify both 'lookup' and 'lookup_file'")
-        lookup_file = result.pop("lookup_file")
-        lookup_path = _resolve_template_path(lookup_file, settings_path, "Lookup file")
-
-        try:
-            loaded = yaml.safe_load(lookup_path.read_text(encoding="utf-8"))
-            # Coerce None (empty file) to {} so it gets a distinct hash from "no lookup"
-            # This ensures empty lookup files are auditable as "intentionally empty"
-            result["lookup"] = loaded if loaded is not None else {}
-        except yaml.YAMLError as e:
-            raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
-
-        result["lookup_source"] = lookup_file
-
-    # Handle system_prompt_file
-    if "system_prompt_file" in result:
-        if "system_prompt" in result:
-            raise TemplateFileError("Cannot specify both 'system_prompt' and 'system_prompt_file'")
-        system_prompt_file = result.pop("system_prompt_file")
-        system_prompt_path = _resolve_template_path(system_prompt_file, settings_path, "System prompt file")
-
-        result["system_prompt"] = system_prompt_path.read_text(encoding="utf-8")
-        result["system_prompt_source"] = system_prompt_file
-
-    return result
 
 
 def _merge_dicts_preserving_env_override(base: dict[Any, Any], override: dict[Any, Any]) -> dict[Any, Any]:

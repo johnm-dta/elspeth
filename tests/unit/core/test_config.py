@@ -3579,6 +3579,43 @@ class TestRunModeSettings:
 class TestExpandTemplateFiles:
     """Tests for _expand_template_files function."""
 
+    def test_template_option_materializer_registry_drives_plugin_collections(self, tmp_path: Path) -> None:
+        from elspeth.core.template_materialization import FILE_BACKED_TEMPLATE_OPTION_KEYS, TemplateOptionMaterializer
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "template.j2").write_text("Hello {{ row.name }}")
+        (prompts_dir / "lookup.yaml").write_text("categories:\n  - Clothing\n")
+        (prompts_dir / "system.txt").write_text("Use concise labels.")
+
+        materializer = TemplateOptionMaterializer(tmp_path / "settings.yaml")
+        config = materializer.materialize_config(
+            {
+                "transforms": [
+                    {
+                        "name": "classify",
+                        "options": {
+                            "template_file": "prompts/template.j2",
+                            "lookup_file": "prompts/lookup.yaml",
+                        },
+                    }
+                ],
+                "aggregations": [
+                    {
+                        "name": "summarize",
+                        "options": {
+                            "system_prompt_file": "prompts/system.txt",
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert frozenset({"template_file", "lookup_file", "system_prompt_file"}) == FILE_BACKED_TEMPLATE_OPTION_KEYS
+        assert config["transforms"][0]["options"]["prompt_template"] == "Hello {{ row.name }}"
+        assert config["transforms"][0]["options"]["lookup"] == {"categories": ["Clothing"]}
+        assert config["aggregations"][0]["options"]["system_prompt"] == "Use concise labels."
+
     def test_expand_template_file_not_found(self, tmp_path: Path) -> None:
         """Missing template file raises TemplateFileError."""
         from elspeth.core.config import TemplateFileError, _expand_template_files
@@ -4212,6 +4249,40 @@ sinks:
         )
 
         assert settings.sources["primary"].options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+
+    def test_load_settings_from_yaml_string_rejects_aggregation_file_backed_options(self) -> None:
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        with pytest.raises(ValueError) as exc_info:
+            load_settings_from_yaml_string(
+                """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: batch_input
+    options: {}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+aggregations:
+  - name: summarize
+    plugin: llm
+    input: batch_input
+    on_success: output
+    on_error: discard
+    trigger:
+      count: 10
+    options:
+      system_prompt_file: prompts/system.txt
+"""
+            )
+
+        message = str(exc_info.value)
+        assert "system_prompt_file" in message
+        assert "aggregations['summarize']" in message
+        assert "load_settings()" in message
 
 
 class TestBoundedYamlStringLoader:

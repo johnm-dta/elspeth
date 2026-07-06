@@ -1814,6 +1814,16 @@ class TestIDORCoverageDrift:
             # inventory entry was missed at the original PR open and is
             # caught now as part of the post-merge residual closeout.
             "get_run_audit_story",
+            # Playwright E2E state-seed endpoint (``POST /{session_id}/state/
+            # e2e-seed``, hidden from the schema and gated behind
+            # ``e2e_state_seed_enabled``). The feature-flag 404 fires first,
+            # but for deployments that enable the flag the endpoint is a
+            # full state-write, so it gates on ``_verify_session_ownership``
+            # like every other session-scoped route. Cross-session walk
+            # coverage lives in ``test_idor_session_crud`` (which enables
+            # the flag so the ownership gate — not the flag gate — is what
+            # returns the 404).
+            "seed_state_for_e2e",
         }
     )
 
@@ -2015,6 +2025,7 @@ class TestIDORProtection:
     - ``POST /{session_id}/fork``            (fork_from_message)
     - ``GET  /{session_id}/guided``          (get_guided)
     - ``GET  /{session_id}/guided/tutorial-sample`` (get_guided_tutorial_sample)
+    - ``POST /{session_id}/state/e2e-seed``  (seed_state_for_e2e)
     - ``POST /{session_id}/guided/reenter``  (post_guided_reenter)
     - ``POST /{session_id}/guided/respond``  (post_guided_respond)
     - ``POST /{session_id}/guided/chat``     (post_guided_chat)
@@ -2055,6 +2066,11 @@ class TestIDORProtection:
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
                 shareable_link_signing_key=b"\x00" * 32,
+                # ON so the e2e-seed walk assertion below exercises the
+                # ownership gate: the handler's feature-flag 404 fires
+                # BEFORE _verify_session_ownership, so with the flag off
+                # bob's 404 would prove nothing about IDOR.
+                e2e_state_seed_enabled=True,
             )
             app.state.catalog_service = None
 
@@ -2245,6 +2261,18 @@ class TestIDORProtection:
         # of whether a tutorial session exists. An ownership bypass would
         # let an attacker learn Alice's resolved sample origin.
         resp = bob_client.get(f"/api/sessions/{session_id}/guided/tutorial-sample")
+        assert resp.status_code == 404
+
+        # Bob tries to POST state/e2e-seed — should be 404. The Playwright
+        # seed endpoint is a full composition-state write; with the flag
+        # enabled (see WebSettings above) an ownership bypass would let an
+        # attacker overwrite Alice's state wholesale. The ownership check
+        # runs before the body is even parsed, so bob's 404 fires on
+        # ownership, not on request validation.
+        resp = bob_client.post(
+            f"/api/sessions/{session_id}/state/e2e-seed",
+            json={"state": {}},
+        )
         assert resp.status_code == 404
 
         # Alice can still access her own session

@@ -31,10 +31,12 @@ across multiple workers is deferred to a future release.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from threading import Lock
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, NotRequired, TextIO, TypedDict, cast
 
 import structlog
 from sqlalchemy import event
@@ -48,6 +50,9 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 logger = structlog.get_logger(__name__)
 
 _BUFFER_STACK_KEY = "landscape_journal_buffer_stack"
+_JOURNAL_DIRECTORY_MODE = 0o700
+_JOURNAL_FILE_MODE = 0o600
+_NON_OWNER_PERMISSION_BITS = stat.S_IRWXG | stat.S_IRWXO
 
 
 class PayloadInfo(TypedDict, total=False):
@@ -114,7 +119,7 @@ class LandscapeJournal:
         self._consecutive_failures = 0
         self._total_dropped = 0
 
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_owner_only_parent(self._path)
 
     def attach(self, engine: Engine) -> None:
         """Attach journal listeners to a SQLAlchemy engine.
@@ -227,7 +232,7 @@ class LandscapeJournal:
                     return
 
             try:
-                with self._path.open("a", encoding="utf-8") as handle:
+                with self._open_owner_only_append() as handle:
                     handle.write(payload)
                 if self._consecutive_failures > 0:
                     logger.info(
@@ -258,6 +263,57 @@ class LandscapeJournal:
                         total_dropped=self._total_dropped,
                     )
                     self._disabled = True
+
+    @staticmethod
+    def _ensure_owner_only_parent(path: Path) -> None:
+        if os.name == "nt":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return
+
+        missing: list[Path] = []
+        current = path.parent
+        while not current.exists():
+            missing.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+        for directory in reversed(missing):
+            try:
+                directory.mkdir(mode=_JOURNAL_DIRECTORY_MODE)
+            except FileExistsError:
+                continue
+            directory.chmod(_JOURNAL_DIRECTORY_MODE)
+
+    def _open_owner_only_append(self) -> TextIO:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+
+        fd = os.open(self._path, flags, _JOURNAL_FILE_MODE)
+        try:
+            self._verify_owner_only_file(fd)
+            return os.fdopen(fd, "a", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def _verify_owner_only_file(fd: int) -> None:
+        if os.name == "nt":
+            return
+
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("Landscape journal path must be a regular file")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise PermissionError("Landscape journal file must be owned by the current user")
+        if mode & _NON_OWNER_PERMISSION_BITS:
+            raise PermissionError("Landscape journal file must be owner-only before appending")
 
     @staticmethod
     def _serialize_record(record: JournalRecord) -> str:

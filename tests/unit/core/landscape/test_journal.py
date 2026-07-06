@@ -14,6 +14,8 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -269,6 +271,19 @@ class TestConstructor:
         LandscapeJournal(str(nested / "journal.jsonl"), fail_on_error=False)
         assert nested.exists()
 
+    def test_creates_missing_parent_directories_owner_only(self, tmp_path: Path) -> None:
+        old_umask = os.umask(0)
+        try:
+            nested = tmp_path / "deep" / "nested"
+            LandscapeJournal(str(nested / "journal.jsonl"), fail_on_error=False)
+        finally:
+            os.umask(old_umask)
+
+        created_dirs = [tmp_path / "deep", tmp_path / "deep" / "nested"]
+        for created_dir in created_dirs:
+            mode = stat.S_IMODE(created_dir.stat().st_mode)
+            assert mode & 0o077 == 0
+
     def test_include_payloads_requires_base_path(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="payload_base_path is required"):
             LandscapeJournal(
@@ -459,6 +474,31 @@ class TestAfterRollback:
 
 class TestAppendRecordsFailureHandling:
     """Tests for _append_records — circuit breaker after consecutive failures."""
+
+    def test_creates_journal_file_owner_only(self, tmp_path: Path) -> None:
+        journal = _make_journal(tmp_path, fail_on_error=True)
+        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
+
+        old_umask = os.umask(0)
+        try:
+            journal._append_records([record])
+        finally:
+            os.umask(old_umask)
+
+        journal_path = tmp_path / "journal.jsonl"
+        mode = stat.S_IMODE(journal_path.stat().st_mode)
+        assert mode & 0o077 == 0
+
+    def test_rejects_existing_group_readable_journal_file(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        journal_path.write_text("", encoding="utf-8")
+        journal_path.chmod(0o640)
+        journal = _make_journal(tmp_path, fail_on_error=True)
+        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
+
+        with pytest.raises(PermissionError, match="owner-only"):
+            journal._append_records([record])
+        assert journal_path.read_text(encoding="utf-8") == ""
 
     def test_fail_on_error_raises(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path, fail_on_error=True)

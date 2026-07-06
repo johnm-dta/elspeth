@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 import pytest
 
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
+from elspeth.contracts.types import BranchName, CoalesceName
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings, TransformSettings
 from elspeth.core.dag import ExecutionGraph, WiredTransform
 from elspeth.core.dag.models import GraphValidationError
@@ -49,6 +50,70 @@ class _BuilderValidationTransform:
         self.name = name
         self.config = {"schema": {"mode": "observed"}}
         self._output_schema_config = output_schema_config
+
+
+class TestCoalesceBranchPlanning:
+    """Builder should store one coherent plan per coalesce branch."""
+
+    def test_branch_info_carries_identity_and_transform_branch_plan(self) -> None:
+        source = _BuilderValidationMockSource()
+        transform = _BuilderValidationTransform(
+            name="slow_branch_transform",
+            output_schema_config=SchemaConfig(mode="observed", fields=None),
+        )
+
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
+            transforms=[
+                WiredTransform(
+                    plugin=transform,  # type: ignore[arg-type]
+                    settings=TransformSettings(
+                        name="slow_branch_transform",
+                        plugin=transform.name,
+                        input="slow_branch",
+                        on_success="slow_out",
+                        on_error="discard",
+                        options={},
+                    ),
+                )
+            ],
+            sinks={"output": _BuilderValidationMockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[
+                GateSettings(
+                    name="splitter",
+                    input="source_out",
+                    condition="True",
+                    routes={"true": "fork", "false": "output"},
+                    fork_to=["fast_branch", "slow_branch"],
+                )
+            ],
+            coalesce_settings=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches={"fast_branch": "fast_branch", "slow_branch": "slow_out"},
+                    policy="require_all",
+                    merge="union",
+                    on_success="output",
+                )
+            ],
+        )
+
+        branch_info = graph.get_branch_info_map()
+
+        fast_branch = branch_info[BranchName("fast_branch")]
+        assert fast_branch.input_connection == "fast_branch"
+        assert fast_branch.uses_transform_chain is False
+
+        slow_branch = branch_info[BranchName("slow_branch")]
+        assert slow_branch.input_connection == "slow_out"
+        assert slow_branch.uses_transform_chain is True
+
+        branch_schemas = graph.get_coalesce_branch_schemas(CoalesceName("merge_results"))
+        assert set(branch_schemas) == {"fast_branch", "slow_branch"}
+        assert fast_branch.schema == branch_schemas["fast_branch"]
+        assert slow_branch.schema == branch_schemas["slow_branch"]
 
 
 class TestCoalesceUnionMergeMixedObservedExplicit:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import RouteDestination, RoutingMode, error_edge_label
@@ -51,6 +51,53 @@ if TYPE_CHECKING:
     )
     from elspeth.core.dag.graph import ExecutionGraph
     from elspeth.core.dag.models import NodeConfig, WiredTransform
+
+
+@dataclass(frozen=True, slots=True)
+class _CoalesceBranchSpec:
+    branch_name: BranchName
+    coalesce_name: CoalesceName
+    coalesce_node_id: NodeID
+    input_connection: str
+    uses_transform_chain: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _CoalesceBranchPlan:
+    branch_name: BranchName
+    coalesce_name: CoalesceName
+    coalesce_node_id: NodeID
+    gate_name: GateName
+    gate_node_id: NodeID
+    input_connection: str
+    uses_transform_chain: bool
+
+    @classmethod
+    def from_spec(cls, spec: _CoalesceBranchSpec, *, gate_name: GateName, gate_node_id: NodeID) -> _CoalesceBranchPlan:
+        return cls(
+            branch_name=spec.branch_name,
+            coalesce_name=spec.coalesce_name,
+            coalesce_node_id=spec.coalesce_node_id,
+            gate_name=gate_name,
+            gate_node_id=gate_node_id,
+            input_connection=spec.input_connection,
+            uses_transform_chain=spec.uses_transform_chain,
+        )
+
+    def to_branch_info(self) -> BranchInfo:
+        return BranchInfo(
+            coalesce_name=self.coalesce_name,
+            gate_node_id=self.gate_node_id,
+            input_connection=self.input_connection,
+            uses_transform_chain=self.uses_transform_chain,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _CoalescePlan:
+    name: CoalesceName
+    node_id: NodeID
+    branches: tuple[_CoalesceBranchSpec, ...]
 
 
 def _validate_output_schema_contract(transform: Any) -> None:
@@ -434,10 +481,11 @@ def build_execution_graph(
     # ===== COALESCE IMPLEMENTATION (BUILD NODES AND MAPPINGS FIRST) =====
     # Build coalesce nodes BEFORE connecting gates (needed for branch routing)
     coalesce_ids: dict[CoalesceName, NodeID] = {}
+    coalesce_branch_specs: dict[BranchName, _CoalesceBranchSpec] = {}
+    coalesce_plans: dict[CoalesceName, _CoalescePlan] = {}
     if coalesce_settings:
-        branch_to_coalesce: dict[BranchName, CoalesceName] = {}
-
         for coalesce_config in coalesce_settings:
+            coalesce_name = CoalesceName(coalesce_config.name)
             # Coalesce merges - no schema transformation
             # Note: Pydantic validates min_length=2 for branches field
             config_dict: NodeConfig = {
@@ -453,13 +501,15 @@ def build_execution_graph(
                 config_dict["select_branch"] = coalesce_config.select_branch
 
             cid = node_id("coalesce", coalesce_config.name, config_dict)
-            coalesce_ids[CoalesceName(coalesce_config.name)] = cid
+            coalesce_ids[coalesce_name] = cid
 
             # Map branches to this coalesce - check for duplicates
-            for branch_name in coalesce_config.branches:
-                if BranchName(branch_name) in branch_to_coalesce:
+            branch_specs: list[_CoalesceBranchSpec] = []
+            for branch_name, input_connection in coalesce_config.branches.items():
+                branch_key = BranchName(branch_name)
+                if branch_key in coalesce_branch_specs:
                     # Branch already mapped to another coalesce
-                    existing_coalesce = branch_to_coalesce[BranchName(branch_name)]
+                    existing_coalesce = coalesce_branch_specs[branch_key].coalesce_name
                     raise GraphValidationError(
                         f"Duplicate branch name '{branch_name}' found in coalesce settings.\n"
                         f"Branch '{branch_name}' is already mapped to coalesce '{existing_coalesce}', "
@@ -468,7 +518,20 @@ def build_execution_graph(
                         component_id=coalesce_config.name,
                         component_type="coalesce",
                     )
-                branch_to_coalesce[BranchName(branch_name)] = CoalesceName(coalesce_config.name)
+                spec = _CoalesceBranchSpec(
+                    branch_name=branch_key,
+                    coalesce_name=coalesce_name,
+                    coalesce_node_id=cid,
+                    input_connection=input_connection,
+                    uses_transform_chain=input_connection != branch_name,
+                )
+                coalesce_branch_specs[branch_key] = spec
+                branch_specs.append(spec)
+            coalesce_plans[coalesce_name] = _CoalescePlan(
+                name=coalesce_name,
+                node_id=cid,
+                branches=tuple(branch_specs),
+            )
 
             graph.add_node(
                 cid,
@@ -478,28 +541,12 @@ def build_execution_graph(
             )
 
         graph.set_coalesce_id_map(coalesce_ids)
-        # branch_to_coalesce is combined with branch_gate_map into BranchInfo below
-    else:
-        branch_to_coalesce = {}
-
-    # ===== DETERMINE WHICH BRANCHES HAVE TRANSFORMS =====
-    # A branch has transforms when its coalesce input_connection differs from
-    # the branch name (identity mapping = no transforms).
-    transformed_branches: set[str] = set()
-    branch_input_connections: dict[str, str] = {}  # branch_name → input_connection
-    if coalesce_settings:
-        for coalesce_config in coalesce_settings:
-            for branch_name, input_connection in coalesce_config.branches.items():
-                branch_input_connections[branch_name] = input_connection
-                if input_connection != branch_name:
-                    transformed_branches.add(branch_name)
 
     # ===== CONNECT FORK GATES - EXPLICIT DESTINATIONS ONLY =====
     # CRITICAL: No fallback behavior. All fork branches must have explicit destinations.
     # This prevents silent configuration bugs (typos, missing destinations).
-    fork_branch_owner: dict[str, str] = {}
-    # Track which coalesce nodes need consumer registration for transform branches
-    coalesce_transform_consumers: list[tuple[str, str, CoalesceName]] = []  # (branch, input_conn, coalesce)
+    fork_branch_owner: dict[BranchName, GateName] = {}
+    coalesce_branch_plans: dict[BranchName, _CoalesceBranchPlan] = {}
     for gate_entry in gate_entries:
         if gate_entry.fork_to:
             branch_counts = Counter(gate_entry.fork_to)
@@ -511,28 +558,31 @@ def build_execution_graph(
                     component_type="gate",
                 )
             for branch_name in gate_entry.fork_to:
-                if branch_name in fork_branch_owner:
+                branch_key = BranchName(branch_name)
+                if branch_key in fork_branch_owner:
                     raise GraphValidationError(
                         f"Fork branch '{branch_name}' is declared by multiple gates: "
-                        f"'{fork_branch_owner[branch_name]}' and '{gate_entry.name}'. "
+                        f"'{fork_branch_owner[branch_key]}' and '{gate_entry.name}'. "
                         "Fork branch names must be globally unique across all gates.",
                         component_id=gate_entry.name,
                         component_type="gate",
                     )
-                fork_branch_owner[branch_name] = gate_entry.name
-                if BranchName(branch_name) in branch_to_coalesce:
-                    coalesce_name = branch_to_coalesce[BranchName(branch_name)]
-                    coalesce_nid = coalesce_ids[coalesce_name]
-                    if branch_name in transformed_branches:
-                        # Transform branch: branch name becomes a produced connection
-                        # from the gate. The coalesce consumes the final transform's
-                        # output (input_connection). Connection resolution wires the chain.
-                        # Direct COPY edge NOT created — routing goes through transforms.
-                        input_conn = branch_input_connections[branch_name]
-                        coalesce_transform_consumers.append((branch_name, input_conn, coalesce_name))
-                    else:
+                fork_branch_owner[branch_key] = GateName(gate_entry.name)
+                if branch_key in coalesce_branch_specs:
+                    plan = _CoalesceBranchPlan.from_spec(
+                        coalesce_branch_specs[branch_key],
+                        gate_name=GateName(gate_entry.name),
+                        gate_node_id=gate_entry.node_id,
+                    )
+                    coalesce_branch_plans[branch_key] = plan
+                    if not plan.uses_transform_chain:
                         # Identity branch: direct COPY edge (current behavior)
-                        graph.add_edge(gate_entry.node_id, coalesce_nid, label=branch_name, mode=RoutingMode.COPY)
+                        graph.add_edge(
+                            gate_entry.node_id,
+                            plan.coalesce_node_id,
+                            label=branch_name,
+                            mode=RoutingMode.COPY,
+                        )
                 elif SinkName(branch_name) in sink_ids:
                     # Explicit sink destination (branch name matches sink name)
                     graph.add_edge(
@@ -549,7 +599,7 @@ def build_execution_graph(
                         f"  1. Be listed in a coalesce 'branches' dict/list, or\n"
                         f"  2. Match a sink name exactly\n"
                         f"\n"
-                        f"Available coalesce branches: {sorted(branch_to_coalesce.keys())}\n"
+                        f"Available coalesce branches: {sorted(coalesce_branch_specs.keys())}\n"
                         f"Available sinks: {sorted(sink_ids.keys())}",
                         component_id=gate_entry.name,
                         component_type="gate",
@@ -557,25 +607,18 @@ def build_execution_graph(
 
     # ===== VALIDATE COALESCE BRANCHES ARE PRODUCED BY GATES =====
     # All branches declared in coalesce settings must be produced by some fork gate
-    if coalesce_settings and branch_to_coalesce:
-        # Collect all branches produced by gates
-        produced_branches: set[str] = set()
-        for gate_entry in gate_entries:
-            if gate_entry.fork_to:
-                produced_branches.update(gate_entry.fork_to)
-
-        # Check that all coalesce branches are produced
-        for branch_name, coalesce_name in branch_to_coalesce.items():
-            if branch_name not in produced_branches:
+    if coalesce_branch_specs:
+        for branch_name, spec in coalesce_branch_specs.items():
+            if branch_name not in coalesce_branch_plans:
                 raise GraphValidationError(
-                    f"Coalesce '{coalesce_name}' declares branch '{branch_name}', "
+                    f"Coalesce '{spec.coalesce_name}' declares branch '{branch_name}', "
                     f"but no gate produces this branch.\n"
                     f"Branches must be listed in a gate's fork_to list to be valid.\n"
                     f"\n"
-                    f"Branches produced by gates: {sorted(produced_branches) if produced_branches else '(none)'}\n"
-                    f"Coalesce '{coalesce_name}' expects branches: "
-                    f"{sorted([b for b, c in branch_to_coalesce.items() if c == coalesce_name])}",
-                    component_id=str(coalesce_name),
+                    f"Branches produced by gates: {sorted(fork_branch_owner.keys()) if fork_branch_owner else '(none)'}\n"
+                    f"Coalesce '{spec.coalesce_name}' expects branches: "
+                    f"{sorted(branch.branch_name for branch in coalesce_plans[spec.coalesce_name].branches)}",
+                    component_id=str(spec.coalesce_name),
                     component_type="coalesce",
                 )
 
@@ -639,14 +682,14 @@ def build_execution_graph(
 
     # Register fork branches as produced connections (only for branches with transforms).
     # Identity branches use direct COPY edges and don't need connection registration.
-    for branch_name in transformed_branches:
-        gate_name = fork_branch_owner[branch_name]
-        gate_nid = config_gate_ids[GateName(gate_name)]
+    for plan in coalesce_branch_plans.values():
+        if not plan.uses_transform_chain:
+            continue
         register_producer(
-            branch_name,
-            gate_nid,
-            branch_name,
-            f"fork branch '{branch_name}' from gate '{gate_name}'",
+            plan.branch_name,
+            plan.gate_node_id,
+            plan.branch_name,
+            f"fork branch '{plan.branch_name}' from gate '{plan.gate_name}'",
         )
 
     # ===== BUILD CONSUMER REGISTRY =====
@@ -683,11 +726,13 @@ def build_execution_graph(
     # For transform branches, the coalesce consumes from the final transform's
     # output connection (not the branch name). The connection resolution system
     # will create MOVE edges through the transform chain automatically.
-    for branch_name, input_conn, coal_name in coalesce_transform_consumers:
+    for plan in coalesce_branch_plans.values():
+        if not plan.uses_transform_chain:
+            continue
         register_consumer(
-            input_conn,
-            coalesce_ids[coal_name],
-            f"coalesce '{coal_name}' branch '{branch_name}'",
+            plan.input_connection,
+            plan.coalesce_node_id,
+            f"coalesce '{plan.coalesce_name}' branch '{plan.branch_name}'",
         )
 
     for gate_id, route_label, target in gate_route_connections:
@@ -964,18 +1009,7 @@ def build_execution_graph(
 
     pipeline_nodes = graph.topological_processing_order(processing_node_ids)
 
-    branch_info: dict[BranchName, BranchInfo] = {}
-    if coalesce_settings:
-        for gate_entry in gate_entries:
-            if gate_entry.fork_to is None:
-                continue
-            for branch_name in gate_entry.fork_to:
-                branch_key = BranchName(branch_name)
-                if branch_key in branch_to_coalesce:
-                    branch_info[branch_key] = BranchInfo(
-                        coalesce_name=branch_to_coalesce[branch_key],
-                        gate_node_id=gate_entry.node_id,
-                    )
+    branch_info: dict[BranchName, BranchInfo] = {branch_name: plan.to_branch_info() for branch_name, plan in coalesce_branch_plans.items()}
     graph.set_branch_info(branch_info)
 
     # ===== POPULATE COALESCE SCHEMA CONFIG =====
@@ -1002,31 +1036,22 @@ def build_execution_graph(
 
         coal_config = coalesce_id_to_config[coalesce_id]
 
-        # Build a branch_name → schema mapping using edge labels.
-        # Identity branches have COPY edges labelled with branch_name.
-        # Transform branches have MOVE edges from the last transform — we
-        # correlate via the coalesce config's branch_input → branch_name mapping.
+        # Build a branch_name → schema mapping from the branch plan created
+        # during fork/coalesce wiring. Identity branches use the producing
+        # gate schema; transform branches use their configured input
+        # connection's producer.
         branch_to_schema: dict[str, SchemaConfig] = {}
 
-        for edge in incoming_edges:
-            edge_label = edge.label
-            edge_mode = edge.mode
-            schema = _best_schema_config(edge.from_node)
-
-            if edge_mode == RoutingMode.COPY and edge_label in coal_config.branches:
-                # Identity branch: COPY edge labelled with branch name
-                branch_to_schema[edge_label] = schema
-            elif edge_mode == RoutingMode.MOVE:
-                # Transform branch: MOVE edge from last transform in chain.
-                # The producer connection name was registered as the branch's
-                # input_connection — look up the corresponding branch name.
-                # For "continue" edges from connection resolution, we need to
-                # match via the source node.  Check each branch's input
-                # connection to find which branch this edge serves.
-                for branch_name, input_conn in coal_config.branches.items():
-                    if input_conn != branch_name and input_conn in producers and producers[input_conn][0] == edge.from_node:
-                        branch_to_schema[branch_name] = schema
-                        break
+        coalesce_plan = coalesce_plans[CoalesceName(coal_config.name)]
+        for branch_spec in coalesce_plan.branches:
+            if branch_spec.branch_name not in coalesce_branch_plans:
+                continue
+            branch_plan = coalesce_branch_plans[branch_spec.branch_name]
+            if branch_plan.uses_transform_chain:
+                producer_node, _producer_label = producers[branch_plan.input_connection]
+            else:
+                producer_node = branch_plan.gate_node_id
+            branch_to_schema[str(branch_plan.branch_name)] = _best_schema_config(producer_node)
 
         # Update branch_info with schema information for runtime tracking of
         # lost branch fields. When a branch is diverted at runtime, the coalesce

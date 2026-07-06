@@ -127,9 +127,9 @@ class GraphValidationWarning:
 class BranchInfo:
     """Properties of a fork branch that routes to a coalesce node.
 
-    Consolidates two parallel dicts that were both keyed by BranchName:
-    - branch_to_coalesce (BranchName -> CoalesceName)
-    - branch_gate_map (BranchName -> NodeID)
+    Consolidates branch routing facts that used to be carried by several
+    builder-local structures: destination coalesce, producing gate, coalesce
+    input connection, and whether the branch goes through a transform chain.
 
     The optional ``schema`` field stores the branch's producer schema,
     enabling runtime tracking of which fields would have been contributed
@@ -139,6 +139,8 @@ class BranchInfo:
 
     coalesce_name: CoalesceName
     gate_node_id: NodeID
+    input_connection: str = ""
+    uses_transform_chain: bool = False
     schema: SchemaConfig | None = None
 
     def __post_init__(self) -> None:

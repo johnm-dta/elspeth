@@ -795,6 +795,10 @@ class ExecutionGraph:
         """
         return {name: info.coalesce_name for name, info in self._branch_info.items()}
 
+    def get_branch_info_map(self) -> dict[BranchName, BranchInfo]:
+        """Get immutable branch routing plans keyed by branch name."""
+        return dict(self._branch_info)
+
     def get_coalesce_branch_schemas(
         self,
         coalesce_name: CoalesceName,

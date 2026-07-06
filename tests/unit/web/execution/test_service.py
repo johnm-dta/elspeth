@@ -1280,7 +1280,7 @@ class TestInlineBlobRuntimePreflight:
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
-    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.load_settings_from_config_dict")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_resolves_inline_content_and_records_audit_before_settings_load(
@@ -1336,15 +1336,14 @@ class TestInlineBlobRuntimePreflight:
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions.side_effect = record_blob_inline_resolutions
 
-        def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> SimpleNamespace:
+        def load_settings(config_dict: dict[str, Any], *, expand_env_vars: bool = True) -> SimpleNamespace:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
             # Inline blobs were substituted -> env expansion must be disabled so
             # the smuggled ${VAR} stays literal and the host secret never resolves.
             assert expand_env_vars is False
-            assert "You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}." in yaml_text
-            assert "server-secret-value" not in yaml_text
-            assert "blob_ref" not in yaml_text
-            assert "inline_content" not in yaml_text
+            system_prompt = config_dict["transforms"][0]["options"]["system_prompt"]
+            assert system_prompt == "You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}."
+            assert "server-secret-value" not in system_prompt
             order.append("load")
             return _mock_pipeline_settings()
 
@@ -6215,6 +6214,33 @@ class TestResolveYamlPaths:
 
         with pytest.raises(TypeError, match="non-dict top-level"):
             resolve_runtime_yaml_paths("just a string", "/srv/data")
+
+    def test_aliased_yaml_rejected_before_path_rewrite(self) -> None:
+        """The first execution-path YAML parse rejects anchors/aliases."""
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths
+
+        yaml_str = """
+source:
+  plugin: csv
+  options:
+    path: &path data/input.csv
+    copied_path: *path
+"""
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            resolve_runtime_yaml_paths(yaml_str, "/srv/data")
+
+    def test_deep_yaml_rejected_before_path_rewrite(self) -> None:
+        """Depth is bounded before recursive path-rewrite traversal."""
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths
+
+        lines = ["metadata:"]
+        for depth in range(70):
+            lines.append(f"{'  ' * (depth + 1)}level_{depth}:")
+        lines.append(f"{'  ' * 71}value: done")
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            resolve_runtime_yaml_paths("\n".join(lines), "/srv/data")
 
     def test_no_source_or_sinks_is_noop(self) -> None:
         """YAML with no source/sinks passes through without error."""

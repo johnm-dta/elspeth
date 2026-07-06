@@ -41,7 +41,7 @@ from elspeth.core.blobs_inline import (
     _substitute_blob_content_refs_for_validation,
     _validate_blob_content_refs_sync,
 )
-from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_config_dict, load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.core.secrets import (
     collect_credential_field_violations,
@@ -1400,7 +1400,7 @@ def validate_pipeline(
     pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
 
     if blob_get_metadata is not None and "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml:
-        config_dict = yaml.safe_load(pipeline_yaml)
+        config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
         if type(config_dict) is not dict:
             raise TypeError(
                 f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
@@ -1630,9 +1630,9 @@ def validate_pipeline(
     # Step 1b's existence check was wrong — that's an internal bug
     # and must crash per the W18 rule.
     try:
-        settings_yaml = pipeline_yaml
+        settings_config: dict[str, Any] | None = None
         if secret_service is not None and user_id is not None and all_refs:
-            config_dict = yaml.safe_load(pipeline_yaml)
+            config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
             if not isinstance(config_dict, dict):
                 raise TypeError(
                     f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
@@ -1643,8 +1643,8 @@ def validate_pipeline(
                 user_id,
                 env_ref_names=env_ref_names,
             )
-            settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
-        elif secret_service is None:
+            settings_config = resolved_dict
+        elif secret_service is None and "secret_ref" in pipeline_yaml:
             # No-resolver path (YAML-export preflight withholds the resolver so
             # resolved secret values can never reach plugin error prose). A wired
             # {secret_ref: NAME} marker is valid wiring, but plugin config models
@@ -1655,18 +1655,18 @@ def validate_pipeline(
             # The export YAML is generated separately from the original state
             # (generate_public_yaml), so the real marker is preserved on the wire
             # — the placeholder lives only in this loader-local copy.
-            config_dict = yaml.safe_load(pipeline_yaml)
+            config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
             if isinstance(config_dict, dict):
-                settings_yaml = yaml.dump(
-                    redact_secret_refs_for_validation(config_dict),
-                    default_flow_style=False,
-                )
+                settings_config = redact_secret_refs_for_validation(config_dict)
 
         # Web-authored pipeline YAML must never expand host ${VAR} placeholders
         # (parity with the execution path). Known secret inventory names are
         # resolved above via resolve_secret_refs; any remaining ${VAR} is
         # user-authored data, not a host-environment lookup.
-        elspeth_settings = load_settings_from_yaml_string(settings_yaml, expand_env_vars=False)
+        if settings_config is None:
+            elspeth_settings = load_settings_from_yaml_string(pipeline_yaml, expand_env_vars=False)
+        else:
+            elspeth_settings = load_settings_from_config_dict(settings_config, expand_env_vars=False)
         checks.append(
             ValidationCheck(
                 name=_CHECK_SETTINGS,

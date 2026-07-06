@@ -42,7 +42,7 @@ from elspeth.core.blobs_inline import (
     _fetch_blob_contents,
     _substitute_blob_content_refs,
 )
-from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_config_dict, load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
@@ -1106,15 +1106,12 @@ class ExecutionServiceImpl:
             # Resolve secret refs before writing YAML to temp file.
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
-            resolved_yaml = pipeline_yaml
             resolved_dict: dict[str, Any] | None = None
             secret_resolution_inputs: list[SecretResolutionInput] = []
             inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
             needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
             if needs_config_tree:
-                import yaml as _yaml
-
-                config_dict = _yaml.safe_load(pipeline_yaml)
+                config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
                 if type(config_dict) is not dict:
                     raise TypeError(
                         f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
@@ -1249,18 +1246,18 @@ class ExecutionServiceImpl:
                         )
                     )
 
-                if secret_resolution_inputs or inline_refs:
-                    resolved_yaml = _yaml.dump(resolved_dict, default_flow_style=False)
-
-            # Load settings from YAML string — never write resolved secrets
-            # to disk.  load_settings_from_yaml_string() parses in-process,
-            # bypassing Dynaconf file I/O. Web-authored pipeline YAML must
-            # never expand host ${VAR} placeholders: known secret inventory
-            # names are resolved above via the audited resolve_secret_refs
-            # path, and any remaining ${VAR} is user-authored data, not a
-            # licence to read the host environment. (Operator ${VAR} expansion
-            # remains available on the CLI loader, load_settings().)
-            settings = load_settings_from_yaml_string(resolved_yaml, expand_env_vars=False)
+            # Load settings in-process — never write resolved secrets or inline
+            # blob contents to disk, and never serialize them back through YAML.
+            # Web-authored pipeline YAML must not expand host ${VAR}
+            # placeholders: known secret inventory names are resolved above via
+            # the audited resolve_secret_refs path, and any remaining ${VAR} is
+            # user-authored data, not a licence to read the host environment.
+            # Operator ${VAR} expansion remains available on the CLI loader,
+            # load_settings().
+            if resolved_dict is None:
+                settings = load_settings_from_yaml_string(pipeline_yaml, expand_env_vars=False)
+            else:
+                settings = load_settings_from_config_dict(resolved_dict, expand_env_vars=False)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph

@@ -4147,6 +4147,164 @@ sinks:
         assert settings.sources["primary"].options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
 
 
+class TestBoundedYamlStringLoader:
+    """In-memory web-facing YAML loader hardening."""
+
+    def test_load_settings_from_yaml_string_accepts_inline_blob_aggregate_sized_content(self) -> None:
+        """Resolved inline content up to the blob aggregate cap fits under the YAML cap."""
+        from elspeth.core.blobs_inline import BLOB_INLINE_AGGREGATE_BYTE_CAP
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        inline_content = "x" * BLOB_INLINE_AGGREGATE_BYTE_CAP
+        settings = load_settings_from_yaml_string(
+            f"""
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      inline_content: {inline_content}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {{}}
+"""
+        )
+
+        assert settings.sources["primary"].options["inline_content"] == inline_content
+
+    def test_load_settings_from_config_dict_accepts_content_that_would_dump_over_yaml_cap(self) -> None:
+        """Resolved inline content is not serialized back through the YAML byte cap."""
+        import yaml
+
+        from elspeth.core.blobs_inline import BLOB_INLINE_AGGREGATE_BYTE_CAP
+        from elspeth.core.config import MAX_IN_MEMORY_PIPELINE_YAML_BYTES, load_settings_from_config_dict
+
+        inline_content = "\x00" * BLOB_INLINE_AGGREGATE_BYTE_CAP
+        config_dict = {
+            "sources": {
+                "primary": {
+                    "plugin": "csv_local",
+                    "on_success": "output",
+                    "options": {"inline_content": inline_content},
+                }
+            },
+            "sinks": {
+                "output": {
+                    "plugin": "json",
+                    "on_write_failure": "discard",
+                    "options": {},
+                }
+            },
+        }
+        assert len(yaml.dump(config_dict, default_flow_style=False).encode("utf-8")) > MAX_IN_MEMORY_PIPELINE_YAML_BYTES
+
+        settings = load_settings_from_config_dict(config_dict)
+
+        assert settings.sources["primary"].options["inline_content"] == inline_content
+
+    def test_load_settings_from_yaml_string_rejects_oversized_yaml_before_parse(self) -> None:
+        """Web-facing YAML must be byte-capped before PyYAML parses it."""
+        from elspeth.core.config import MAX_IN_MEMORY_PIPELINE_YAML_BYTES, load_settings_from_yaml_string
+
+        oversized = (
+            """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options: {}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+            + "\n#"
+            + ("x" * MAX_IN_MEMORY_PIPELINE_YAML_BYTES)
+        )
+
+        with pytest.raises(ValueError, match="byte YAML limit"):
+            load_settings_from_yaml_string(oversized)
+
+    def test_load_settings_from_yaml_string_rejects_aliases_before_construction(self) -> None:
+        """Aliases are rejected so small YAML cannot amplify during object construction."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        aliased = """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      shared: &shared
+        value: one
+      copied: *shared
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            load_settings_from_yaml_string(aliased)
+
+    def test_load_settings_from_yaml_string_rejects_excessive_depth(self) -> None:
+        """Deep but textually small YAML is rejected before recursive construction."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        lines = [
+            "sources:",
+            "  primary:",
+            "    plugin: csv_local",
+            "    on_success: output",
+            "    options:",
+            "      nested:",
+        ]
+        for depth in range(70):
+            lines.append(f"{'      ' + ('  ' * (depth + 1))}level_{depth}:")
+        lines.append(f"{'      ' + ('  ' * 71)}value: done")
+        lines.extend(
+            [
+                "sinks:",
+                "  output:",
+                "    plugin: json",
+                "    on_write_failure: discard",
+                "    options: {}",
+            ]
+        )
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            load_settings_from_yaml_string("\n".join(lines))
+
+    def test_load_settings_from_yaml_string_rejects_excessive_node_count(self) -> None:
+        """Many small YAML nodes are rejected even when the byte cap is not reached."""
+        from elspeth.core.config import MAX_IN_MEMORY_PIPELINE_YAML_BYTES, load_settings_from_yaml_string
+
+        option_lines = [f"      key_{index}: value" for index in range(5_100)]
+        yaml_content = "\n".join(
+            [
+                "sources:",
+                "  primary:",
+                "    plugin: csv_local",
+                "    on_success: output",
+                "    options:",
+                *option_lines,
+                "sinks:",
+                "  output:",
+                "    plugin: json",
+                "    on_write_failure: discard",
+                "    options: {}",
+            ]
+        )
+        assert len(yaml_content.encode("utf-8")) < MAX_IN_MEMORY_PIPELINE_YAML_BYTES
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            load_settings_from_yaml_string(yaml_content)
+
+
 class TestSinkNameCasing:
     """Sink names must be lowercase - explicit validation, no silent transformation."""
 

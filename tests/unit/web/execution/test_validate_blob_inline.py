@@ -6,11 +6,11 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-import yaml
 from pydantic import SecretBytes
 
 from elspeth.contracts.enums import CreationModality
@@ -181,7 +181,7 @@ def test_validate_blob_inline_failure_has_no_duplicate_check_results(tmp_path: P
 @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
 @patch("elspeth.web.execution.validation.build_runtime_graph")
 @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
-@patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+@patch("elspeth.web.execution.validation.load_settings_from_config_dict")
 def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
     mock_load_settings: MagicMock,
     mock_instantiate: MagicMock,
@@ -191,14 +191,12 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
 ) -> None:
     session_id = uuid4()
 
-    def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> SimpleNamespace:
+    def load_settings(config_dict: dict[str, Any], *, expand_env_vars: bool = True) -> SimpleNamespace:
         # Web preflight must not expand host ${VAR} placeholders.
         assert expand_env_vars is False
-        doc = yaml.safe_load(yaml_text)
-        prompt_template = doc["transforms"][0]["options"]["prompt_template"]
+        prompt_template = config_dict["transforms"][0]["options"]["prompt_template"]
         assert type(prompt_template) is str
-        assert "blob_ref" not in yaml_text
-        assert "inline_content" not in yaml_text
+        assert config_dict["transforms"][0]["options"]["api_key"] == "elspeth-preflight-secret-placeholder"
         return SimpleNamespace()
 
     mock_load_settings.side_effect = load_settings
@@ -246,10 +244,10 @@ async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_
             composer_rate_limit_per_minute=60,
             shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         ),
-        session_service=_UnusedSessionService(),
+        session_service=cast(Any, _UnusedSessionService()),
         yaml_generator=composer_yaml_generator,
         telemetry=build_sessions_telemetry(),
-        blob_service=blob_service,
+        blob_service=cast(Any, blob_service),
     )
     try:
         result = await service.validate_state(_state_with_inline_prompt(tmp_path), user_id="user-1")
@@ -278,10 +276,10 @@ async def test_execution_service_validate_state_treats_cross_session_inline_blob
             composer_rate_limit_per_minute=60,
             shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         ),
-        session_service=_UnusedSessionService(),
+        session_service=cast(Any, _UnusedSessionService()),
         yaml_generator=composer_yaml_generator,
         telemetry=build_sessions_telemetry(),
-        blob_service=blob_service,
+        blob_service=cast(Any, blob_service),
     )
     try:
         result = await service.validate_state(

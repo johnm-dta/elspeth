@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretBytes
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.data import CompatibilityResult
@@ -133,7 +133,7 @@ def _make_settings(data_dir: str = "/tmp/test_data") -> WebSettings:
         composer_max_discovery_turns=5,
         composer_timeout_seconds=30.0,
         composer_rate_limit_per_minute=60,
-        shareable_link_signing_key=b"\x00" * 32,
+        shareable_link_signing_key=SecretBytes(b"\x00" * 32),
     )
 
 
@@ -210,7 +210,7 @@ def _runtime_graph_mock(
     graph.get_config_gate_id_map.return_value = {}
     graph.get_aggregation_id_map.return_value = {}
     graph.get_coalesce_id_map.return_value = {}
-    return graph
+    return cast(MagicMock, graph)
 
 
 @dataclass(frozen=True)
@@ -354,7 +354,7 @@ def _elspeth_settings_missing_parts_error(present: set[str]) -> PydanticValidati
         sources: dict[str, Any]
         sinks: dict[str, Any]
 
-    data = {name: {"placeholder": {}} for name in present}
+    data: dict[str, Any] = {name: {"placeholder": {}} for name in present}
     try:
         _RequiredParts.model_validate(data)
     except PydanticValidationError as exc:
@@ -723,7 +723,8 @@ class TestWebLlmBaseUrlPolicyHelper:
         assert web_llm_base_url_policy_error("llm", {"model": "openai/gpt-4o"}) is None
 
     def test_canonical_base_url_is_allowed_with_or_without_trailing_slash(self) -> None:
-        from elspeth.web.provider_config_policy import OPENROUTER_BASE_URL, web_llm_base_url_policy_error
+        from elspeth.plugins.transforms.llm.providers.openrouter import OPENROUTER_BASE_URL
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
 
         assert web_llm_base_url_policy_error("llm", {"base_url": OPENROUTER_BASE_URL}) is None
         assert web_llm_base_url_policy_error("llm", {"base_url": OPENROUTER_BASE_URL + "/"}) is None
@@ -794,7 +795,7 @@ class TestValidatePipelineLlmBaseUrlPolicy:
         assert result.errors[0].error_code == "llm_base_url_not_allowed"
 
     def test_canonical_base_url_passes_gate_and_reaches_yaml_generation(self) -> None:
-        from elspeth.web.provider_config_policy import OPENROUTER_BASE_URL
+        from elspeth.plugins.transforms.llm.providers.openrouter import OPENROUTER_BASE_URL
 
         state = _make_state(
             nodes=(_make_node(plugin="llm", options=self._llm_options(OPENROUTER_BASE_URL)),),
@@ -3249,14 +3250,14 @@ class TestSecretRefResolutionBeforeSettingsLoad:
     expect string values, not dicts.
     """
 
-    @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.validation.load_settings_from_config_dict")
     @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
     @patch("elspeth.web.execution.validation.build_runtime_graph")
     def test_secret_refs_resolved_before_settings_load(
         self,
         mock_build_graph: MagicMock,
         mock_instantiate: MagicMock,
-        mock_load_string: MagicMock,
+        mock_load_config: MagicMock,
     ) -> None:
         """When secrets are present, validation resolves them in-memory."""
         state = _make_state(
@@ -3272,7 +3273,7 @@ class TestSecretRefResolutionBeforeSettingsLoad:
         secret_svc = FakeSecretService(available_refs={"MY_KEY"})
 
         mock_settings = _fake_settings()
-        mock_load_string.return_value = mock_settings
+        mock_load_config.return_value = mock_settings
         mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
         mock_graph = _runtime_graph_mock()
@@ -3286,23 +3287,22 @@ class TestSecretRefResolutionBeforeSettingsLoad:
             user_id="user-1",
         )
 
-        # In-memory loader was used
-        mock_load_string.assert_called_once()
-        # Parse the resolved YAML to verify secret was replaced (not string-scan)
-        resolved_yaml = mock_load_string.call_args.args[0]
-        parsed = yaml.safe_load(resolved_yaml)
-        assert parsed["source"]["options"]["api_key"] == "fake"
+        # In-memory dict loader was used after secret resolution; resolved
+        # secrets are not serialized back through YAML.
+        mock_load_config.assert_called_once()
+        resolved_config = mock_load_config.call_args.args[0]
+        assert resolved_config["source"]["options"]["api_key"] == "fake"
         # Settings load check passed
         assert _check(result, "settings_load").passed is True
 
-    @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.validation.load_settings_from_config_dict")
     @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
     @patch("elspeth.web.execution.validation.build_runtime_graph")
     def test_raw_env_marker_for_inventory_secret_resolves_before_settings_load(
         self,
         mock_build_graph: MagicMock,
         mock_instantiate: MagicMock,
-        mock_load_string: MagicMock,
+        mock_load_config: MagicMock,
     ) -> None:
         """Exact ${NAME} markers for known secrets use resolver, not blind env expansion."""
         state = _make_state(
@@ -3318,7 +3318,7 @@ class TestSecretRefResolutionBeforeSettingsLoad:
         secret_svc = FakeSecretService(available_refs={"OPENROUTER_API_KEY"})
 
         mock_settings = _fake_settings()
-        mock_load_string.return_value = mock_settings
+        mock_load_config.return_value = mock_settings
         mock_bundle = _FakeRuntimeBundle()
         mock_instantiate.return_value = mock_bundle
         mock_graph = _runtime_graph_mock()
@@ -3332,10 +3332,9 @@ class TestSecretRefResolutionBeforeSettingsLoad:
             user_id="user-1",
         )
 
-        mock_load_string.assert_called_once()
-        resolved_yaml = mock_load_string.call_args.args[0]
-        parsed = yaml.safe_load(resolved_yaml)
-        assert parsed["source"]["options"]["api_key"] == "fake"
+        mock_load_config.assert_called_once()
+        resolved_config = mock_load_config.call_args.args[0]
+        assert resolved_config["source"]["options"]["api_key"] == "fake"
         assert _check(result, "settings_load").passed is True
 
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
@@ -3430,8 +3429,8 @@ class TestValidatePipelineRuntimePathResolution:
     def _loaded_yaml_from_settings_loader(mock_load: MagicMock) -> str:
         call = mock_load.call_args
         if call.args:
-            return call.args[0]
-        return call.kwargs["yaml_content"]
+            return cast(str, call.args[0])
+        return cast(str, call.kwargs["yaml_content"])
 
     def test_validate_pipeline_resolves_relative_source_and_sink_paths_before_settings_load(self) -> None:
         state = CompositionState(

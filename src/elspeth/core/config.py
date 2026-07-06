@@ -95,6 +95,66 @@ _FILE_BACKED_TEMPLATE_OPTION_KEYS = frozenset(
     }
 )
 _STRUCTURAL_OPTION_KEYS = frozenset({"schema", "schema_config"})
+# The web execution path may substitute up to 1 MiB of inline blob content
+# before this in-memory loader parses resolved YAML. Keep the document cap
+# bounded but above that aggregate payload plus ordinary YAML overhead.
+MAX_IN_MEMORY_PIPELINE_YAML_BYTES = 2 * 1024 * 1024
+MAX_IN_MEMORY_PIPELINE_YAML_NODES = 10_000
+MAX_IN_MEMORY_PIPELINE_YAML_DEPTH = 64
+
+
+class _BoundedInMemoryYamlLoader(yaml.SafeLoader):
+    """SafeLoader variant for web-facing in-memory pipeline YAML."""
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._elspeth_node_count = 0
+        self._elspeth_depth = 0
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        # PyYAML's parser/composer methods are untyped upstream.
+        if self.check_event(yaml.events.AliasEvent):  # type: ignore[no-untyped-call]
+            event = self.get_event()  # type: ignore[no-untyped-call]
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                "aliases are not permitted in in-memory pipeline YAML",
+                event.start_mark,
+            )
+
+        self._elspeth_node_count += 1
+        if self._elspeth_node_count > MAX_IN_MEMORY_PIPELINE_YAML_NODES:
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                f"YAML node count exceeds the {MAX_IN_MEMORY_PIPELINE_YAML_NODES} node limit",
+                self.peek_event().start_mark,  # type: ignore[no-untyped-call]
+            )
+
+        self._elspeth_depth += 1
+        try:
+            if self._elspeth_depth > MAX_IN_MEMORY_PIPELINE_YAML_DEPTH:
+                raise yaml.composer.ComposerError(
+                    None,
+                    None,
+                    f"YAML nesting depth exceeds the {MAX_IN_MEMORY_PIPELINE_YAML_DEPTH} level limit",
+                    self.peek_event().start_mark,  # type: ignore[no-untyped-call]
+                )
+            return super().compose_node(parent, index)
+        finally:
+            self._elspeth_depth -= 1
+
+
+def load_bounded_pipeline_yaml(yaml_content: str) -> Any:
+    """Parse in-memory pipeline YAML with safe construction and local limits."""
+    if len(yaml_content.encode("utf-8")) > MAX_IN_MEMORY_PIPELINE_YAML_BYTES:
+        raise ValueError(f"YAML content exceeds the {MAX_IN_MEMORY_PIPELINE_YAML_BYTES} byte YAML limit")
+    try:
+        # Explicit Loader= is intentional: _BoundedInMemoryYamlLoader subclasses
+        # SafeLoader and only tightens alias/depth/node limits.
+        return yaml.load(yaml_content, Loader=_BoundedInMemoryYamlLoader)
+    except (yaml.YAMLError, RecursionError) as exc:
+        raise ValueError(f"YAML parse failed: {exc.__class__.__name__}") from exc
 
 
 def _validate_max_length(value: str, *, field_label: str, max_length: int) -> str:
@@ -2566,6 +2626,45 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
+def load_settings_from_config_dict(config_dict: dict[str, Any], *, expand_env_vars: bool = False) -> ElspethSettings:
+    """Load settings from an already parsed in-memory config dict.
+
+    This is the common post-parse path for web execution and validation.
+    It skips Dynaconf (no env var merging) and file I/O, ensuring resolved
+    secrets and inline blob contents never need to be serialized back to
+    YAML before validation. File-backed template options (template_file,
+    lookup_file, system_prompt_file) are rejected because there is no
+    trusted settings-file root for resolving them.
+
+    Args:
+        config_dict: Parsed YAML configuration mapping.
+        expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
+            patterns from the host environment. Defaults to ``False`` because
+            this in-memory loader is used for web-authored YAML, which is
+            user-controlled. Known secret inventory names are resolved via the
+            audited resolve_secret_refs() path beforehand, and any remaining
+            ``${VAR}`` must stay literal data rather than become a
+            host-environment lookup. Trusted in-process callers that intentionally
+            want host environment expansion must opt in explicitly.
+
+    Returns:
+        Validated ElspethSettings instance.
+    """
+    raw_config = _lowercase_schema_keys(config_dict)
+    known_fields = set(ElspethSettings.model_fields.keys())
+
+    unknown_keys = sorted(k for k in raw_config if k not in known_fields)
+    if unknown_keys:
+        raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
+
+    raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    _reject_file_backed_template_options_for_in_memory_loader(raw_config)
+    _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config)
+    if expand_env_vars:
+        raw_config = _expand_env_vars(raw_config)
+    return ElspethSettings(**raw_config)
+
+
 def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = False) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
@@ -2590,22 +2689,10 @@ def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool =
     Returns:
         Validated ElspethSettings instance.
     """
-    config_dict = yaml.safe_load(yaml_content)
+    config_dict = load_bounded_pipeline_yaml(yaml_content)
     if not isinstance(config_dict, dict):
         raise ValueError(f"Configuration must be a YAML mapping (key: value), not {type(config_dict).__name__}")
-    raw_config = _lowercase_schema_keys(config_dict)
-    known_fields = set(ElspethSettings.model_fields.keys())
-
-    unknown_keys = sorted(k for k in raw_config if k not in known_fields)
-    if unknown_keys:
-        raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
-
-    raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
-    _reject_file_backed_template_options_for_in_memory_loader(raw_config)
-    _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config)
-    if expand_env_vars:
-        raw_config = _expand_env_vars(raw_config)
-    return ElspethSettings(**raw_config)
+    return load_settings_from_config_dict(config_dict, expand_env_vars=expand_env_vars)
 
 
 def resolve_config(settings: ElspethSettings) -> dict[str, Any]:

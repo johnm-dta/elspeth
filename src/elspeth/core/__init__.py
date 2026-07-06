@@ -42,7 +42,6 @@ from elspeth.core.dag import (
     GraphValidationWarning,
     NodeConfig,
     NodeInfo,
-    WiredTransform,
 )
 from elspeth.core.events import (
     EventBus,
@@ -101,7 +100,6 @@ __all__ = [
     "SourceSettings",
     "TransformSettings",
     "UtcClock",
-    "WiredTransform",
     "canonical_json",
     "configure_logging",
     "get_logger",

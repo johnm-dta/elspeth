@@ -50,8 +50,8 @@ from elspeth.engine.orchestrator.value_source_validation import ValueSourceFindi
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
     from elspeth.core.config import AggregationSettings, ElspethSettings
-    from elspeth.core.dag import WiredTransform
     from elspeth.core.dag.graph import ExecutionGraph
+    from elspeth.core.dag.wiring import WiredTransform
 
 
 def assemble_and_validate_pipeline_config(

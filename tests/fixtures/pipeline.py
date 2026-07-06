@@ -30,7 +30,7 @@ from tests.fixtures.plugins import CollectSink, ListSource, PassTransform
 
 if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, GateSettings
-    from elspeth.core.dag import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
     from elspeth.engine.orchestrator import PipelineConfig
 
 

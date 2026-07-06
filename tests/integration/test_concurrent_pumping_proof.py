@@ -33,7 +33,7 @@ from sqlalchemy import literal_column, select
 from elspeth.contracts import Determinism, PluginSchema, RunStatus
 from elspeth.core.config import QueueSettings, SourceSettings, TransformSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.dag.models import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import rows_table, scheduler_events_table, tokens_table
 from elspeth.core.payload_store import FilesystemPayloadStore

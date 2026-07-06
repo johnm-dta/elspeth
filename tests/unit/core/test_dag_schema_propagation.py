@@ -25,7 +25,8 @@ from elspeth.core.config import (
     TransformSettings,
     TriggerConfig,
 )
-from elspeth.core.dag import ExecutionGraph, WiredTransform
+from elspeth.core.dag import ExecutionGraph
+from elspeth.core.dag.wiring import WiredTransform
 
 
 class MockTransformWithSchemaConfig:

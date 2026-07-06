@@ -59,7 +59,7 @@ if TYPE_CHECKING:
         QueueSettings,
         SourceSettings,
     )
-    from elspeth.core.dag.models import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
 
 
 # Sentinel for the empty declared_required_fields default. Sharing a single

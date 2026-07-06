@@ -16,8 +16,9 @@ from elspeth.contracts import RouteDestination
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings, TransformSettings
-from elspeth.core.dag import ExecutionGraph, WiredTransform
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.dag.wiring import WiredTransform
 
 
 class _BuilderValidationMockSource:

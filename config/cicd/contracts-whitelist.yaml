@@ -3,8 +3,9 @@
 allowed_external_types:
   # TUI display types - presentation-specific, not cross-boundary contracts
   - "tui/types:TokenDisplayInfo"
-  # DAG wiring helper type shared between CLI instantiation and graph construction
-  - "core/dag/models:WiredTransform"
+  # DAG wiring helper type shared between runtime instantiation and graph construction.
+  # It carries live plugin instances, so it is not a serializable L0 contract DTO.
+  - "core/dag/wiring:WiredTransform"
   # DAG validation warnings stay with graph construction; web validation only projects them
   # into API-facing ValidationWarning rows and does not own their construction semantics.
   - "core/dag/models:GraphValidationWarning"

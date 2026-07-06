@@ -20,9 +20,10 @@ from elspeth.core.config import (
     SourceSettings,
     TransformSettings,
 )
-from elspeth.core.dag import ExecutionGraph, WiredTransform
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.dag.coalesce_merge import merge_coalesce_schema, merge_union_fields
 from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.dag.wiring import WiredTransform
 from tests.helpers.coalesce import _add_coalesce_with_computed_schema
 
 

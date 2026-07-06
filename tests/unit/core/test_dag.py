@@ -222,7 +222,7 @@ def test_mixed_multi_source_graph_records_direct_source_sink_edge() -> None:
     """A direct source->sink route must be visible even when other sources use transforms."""
     from elspeth.contracts import NodeType, RoutingMode
     from elspeth.core.config import SourceSettings, TransformSettings
-    from elspeth.core.dag.models import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
     from tests.fixtures.plugins import CollectSink, ListSource, PassTransform
 
     direct_source = ListSource([{"id": 1}], name="direct_source", on_success="direct_out")

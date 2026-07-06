@@ -63,7 +63,7 @@ from elspeth.core.config import (
     load_settings_from_yaml_string,
 )
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.dag.models import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (

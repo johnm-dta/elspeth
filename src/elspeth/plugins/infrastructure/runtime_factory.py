@@ -16,7 +16,7 @@ from elspeth.contracts.freeze import freeze_fields
 
 if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, ElspethSettings, SourceSettings, TransformSettings
-    from elspeth.core.dag import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +63,7 @@ def instantiate_plugins_from_config(
     plugin_preflight_mode_enabled() and may defer side-effectful client setup
     to lifecycle/operation methods.
     """
-    from elspeth.core.dag import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
     from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 
@@ -132,7 +132,7 @@ def instantiate_plugins_from_config(
 
 def _value_source_wired_transforms(bundle: PluginBundle) -> tuple[WiredTransform, ...]:
     """Return ordinary and aggregation-backed transforms for value-source checks."""
-    from elspeth.core.dag import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
 
     aggregation_transforms = tuple(
         WiredTransform(plugin=transform, settings=cast("TransformSettings", agg_settings))

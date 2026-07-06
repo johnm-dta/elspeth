@@ -17,8 +17,7 @@ from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.types import NODE_ID_MAX_LENGTH, CoalesceName, NodeID
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PluginSchema, TransformProtocol
-    from elspeth.core.config import TransformSettings
+    from elspeth.contracts import PluginSchema
 
 
 class GraphValidationError(ValueError):
@@ -271,23 +270,6 @@ class _GateEntry:
         if len(self.routes) == 0:
             raise ValueError("_GateEntry.routes must have at least one entry")
         freeze_fields(self, "routes")
-
-
-@dataclass(frozen=True, slots=True)
-class WiredTransform:
-    """Pair a transform plugin instance with its wiring settings."""
-
-    plugin: TransformProtocol
-    settings: TransformSettings
-
-    def __post_init__(self) -> None:
-        """Ensure wiring metadata matches the instantiated plugin."""
-        if self.plugin.name != self.settings.plugin:
-            raise GraphValidationError(
-                f"WiredTransform mismatch: settings.plugin='{self.settings.plugin}' but plugin instance name='{self.plugin.name}'.",
-                component_id=self.settings.name,
-                component_type="transform",
-            )
 
 
 def _suggest_similar(name: str, candidates: list[str]) -> list[str]:

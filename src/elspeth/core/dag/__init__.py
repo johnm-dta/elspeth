@@ -6,7 +6,6 @@ from elspeth.core.dag.models import (
     GraphValidationWarning,
     NodeConfig,
     NodeInfo,
-    WiredTransform,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "GraphValidationWarning",
     "NodeConfig",
     "NodeInfo",
-    "WiredTransform",
 ]

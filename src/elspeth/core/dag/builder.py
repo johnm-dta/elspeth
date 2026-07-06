@@ -47,7 +47,8 @@ if TYPE_CHECKING:
         SourceSettings,
     )
     from elspeth.core.dag.graph import ExecutionGraph
-    from elspeth.core.dag.models import NodeConfig, WiredTransform
+    from elspeth.core.dag.models import NodeConfig
+    from elspeth.core.dag.wiring import WiredTransform
 
 
 @dataclass(frozen=True, slots=True)

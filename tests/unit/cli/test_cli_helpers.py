@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from elspeth.core.config import load_settings
-from elspeth.core.dag import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.plugins.infrastructure.base import BaseSink, BaseSource, BaseTransform
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 

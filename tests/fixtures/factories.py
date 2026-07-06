@@ -25,11 +25,12 @@ from elspeth.contracts.node_state_context import (
     PoolStatsSnapshot,
     QueryOrderEntry,
 )
+from elspeth.core.dag.wiring import WiredTransform
 
 if TYPE_CHECKING:
     from elspeth.contracts import TransformProtocol
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.core.dag import ExecutionGraph, WiredTransform
+    from elspeth.core.dag import ExecutionGraph
 
 __all__ = [
     "make_artifact",
@@ -379,7 +380,7 @@ def wire_transforms(
     source_connection -> t0 -> t1 -> ... -> tN -> final_sink.
     """
     from elspeth.core.config import TransformSettings
-    from elspeth.core.dag import WiredTransform
+    from elspeth.core.dag.wiring import WiredTransform
 
     if names is not None and len(names) != len(transforms):
         raise ValueError(f"names length ({len(names)}) must match transforms length ({len(transforms)})")

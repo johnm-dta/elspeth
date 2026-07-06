@@ -265,6 +265,22 @@ def test_partial_reserved_envelope_shape_raises(tampered: dict[str, object]) -> 
         checkpoint_loads(corrupted)
 
 
+def test_checkpoint_loads_rejects_duplicate_json_object_keys() -> None:
+    """Ambiguous duplicate keys must crash before JSON object collapse."""
+    corrupted = '{"data": {"safe": 1, "safe": 2}}'
+
+    with pytest.raises(AuditIntegrityError, match="duplicate JSON object key"):
+        checkpoint_loads(corrupted)
+
+
+def test_checkpoint_loads_rejects_duplicate_envelope_keys() -> None:
+    """Duplicate envelope keys must not select one type tag before restore."""
+    corrupted = '{"data": {"__elspeth_type__": "bytes", "__elspeth_type__": "date", "__elspeth_value__": "2026-01-01"}}'
+
+    with pytest.raises(AuditIntegrityError, match="duplicate JSON object key"):
+        checkpoint_loads(corrupted)
+
+
 def test_envelope_type_tag_must_be_string() -> None:
     """Envelope type tags must be strings before dispatch."""
     import json

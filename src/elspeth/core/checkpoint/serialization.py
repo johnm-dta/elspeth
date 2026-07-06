@@ -328,8 +328,7 @@ def _restore_types(obj: Any) -> Any:
 
             if not isinstance(envelope_type, str):
                 raise AuditIntegrityError(
-                    f"Checkpoint envelope type tag must be str, got "
-                    f"{type(envelope_type).__name__!r} - data may be corrupted"
+                    f"Checkpoint envelope type tag must be str, got {type(envelope_type).__name__!r} - data may be corrupted"
                 )
 
             if envelope_type == "datetime":
@@ -337,8 +336,7 @@ def _restore_types(obj: Any) -> Any:
                 dt = _parse_string_envelope(envelope_type, value, datetime.fromisoformat)
                 if dt.tzinfo is None:
                     raise AuditIntegrityError(
-                        f"Corrupted checkpoint: datetime envelope contains naive datetime "
-                        f"{value!r} — timezone-aware datetimes are required"
+                        f"Corrupted checkpoint: datetime envelope contains naive datetime {value!r} — timezone-aware datetimes are required"
                     )
                 return dt
 
@@ -403,8 +401,7 @@ def _require_envelope_value_type[T](envelope_type: str, envelope_value: object, 
 
 def _raise_invalid_envelope_value_type(envelope_type: str, envelope_value: object) -> None:
     raise AuditIntegrityError(
-        f"Checkpoint envelope type {envelope_type!r} has invalid value type "
-        f"{type(envelope_value).__name__!r} — data may be corrupted"
+        f"Checkpoint envelope type {envelope_type!r} has invalid value type {type(envelope_value).__name__!r} — data may be corrupted"
     )
 
 
@@ -413,8 +410,7 @@ def _parse_string_envelope[T](envelope_type: str, envelope_value: str, parser: C
         return parser(envelope_value)
     except (InvalidOperation, ValueError) as exc:
         raise AuditIntegrityError(
-            f"Corrupted checkpoint: {envelope_type} envelope contains invalid value "
-            f"{envelope_value!r} - data may be corrupted or tampered"
+            f"Corrupted checkpoint: {envelope_type} envelope contains invalid value {envelope_value!r} - data may be corrupted or tampered"
         ) from exc
 
 
@@ -423,15 +419,13 @@ def _restore_bytes_envelope(envelope_value: str) -> bytes:
         restored = base64.b64decode(envelope_value, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise AuditIntegrityError(
-            f"Corrupted checkpoint: bytes envelope contains invalid Base64 "
-            f"{envelope_value!r} - data may be corrupted or tampered"
+            f"Corrupted checkpoint: bytes envelope contains invalid Base64 {envelope_value!r} - data may be corrupted or tampered"
         ) from exc
 
     canonical = base64.b64encode(restored).decode("ascii")
     if canonical != envelope_value:
         raise AuditIntegrityError(
-            f"Corrupted checkpoint: bytes envelope contains non-canonical Base64 "
-            f"{envelope_value!r} - expected {canonical!r}"
+            f"Corrupted checkpoint: bytes envelope contains non-canonical Base64 {envelope_value!r} - expected {canonical!r}"
         )
     return restored
 
@@ -450,6 +444,15 @@ def _reject_json_constant(constant: str) -> Any:
     ``_restore_types`` applies the matching ``is_finite()`` guard.)
     """
     raise AuditIntegrityError(f"Corrupted checkpoint: non-finite JSON constant {constant!r} — NaN/Infinity are not valid audit values")
+
+
+def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    restored: dict[str, object] = {}
+    for key, value in pairs:
+        if key in restored:
+            raise AuditIntegrityError(f"Corrupted checkpoint: duplicate JSON object key {key!r} — data may be corrupted or tampered")
+        restored[key] = value
+    return restored
 
 
 def checkpoint_loads(s: str) -> Any:
@@ -473,5 +476,5 @@ def checkpoint_loads(s: str) -> Any:
         json.JSONDecodeError: If string is not valid JSON
         AuditIntegrityError: If the payload carries a non-finite NaN/Infinity value
     """
-    data = json.loads(s, parse_constant=_reject_json_constant)
+    data = json.loads(s, parse_constant=_reject_json_constant, object_pairs_hook=_reject_duplicate_object_pairs)
     return _restore_types(data)

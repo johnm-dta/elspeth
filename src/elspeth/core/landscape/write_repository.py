@@ -97,6 +97,8 @@ class LandscapeWriteRepository:
             raise LandscapeRecordError(
                 f"record_synthesised_run openrouter_catalog_sha256 must be 64 lowercase hex chars, got {openrouter_catalog_sha256!r}"
             )
+        if type(source_data_hash) is not str or not is_valid_sha256_hex(source_data_hash):
+            raise LandscapeRecordError(f"record_synthesised_run source_data_hash must be 64 lowercase hex chars, got {source_data_hash!r}")
         if openrouter_catalog_source not in ("live", "bundled"):
             raise LandscapeRecordError(
                 f"record_synthesised_run openrouter_catalog_source must be 'live' or 'bundled', got {openrouter_catalog_source!r}"
@@ -263,8 +265,10 @@ class LandscapeWriteRepository:
             raise LandscapeRecordError("record_synthesised_run row source_row_index must be a non-negative integer")
         if type(ingest_sequence) is not int or ingest_sequence < 0:
             raise LandscapeRecordError("record_synthesised_run row ingest_sequence must be a non-negative integer")
-        if type(row_source_data_hash) is not str or not row_source_data_hash:
-            raise LandscapeRecordError("record_synthesised_run row source_data_hash must be a non-empty string")
+        if type(row_source_data_hash) is not str or not is_valid_sha256_hex(row_source_data_hash):
+            raise LandscapeRecordError(
+                f"record_synthesised_run row source_data_hash must be 64 lowercase hex chars, got {row_source_data_hash!r}"
+            )
         return _SynthesisedRowIdentity(
             source_node_index=source_node_index,
             source_row_index=source_row_index,

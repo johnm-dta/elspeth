@@ -25,7 +25,7 @@ def test_audit_story_reads_real_landscape_rows() -> None:
     run_id = write_repo.record_synthesised_run(
         pipeline_yaml="source: {}\n",
         rows=[{"url": "ato.gov.au", "rating": 5}],
-        source_data_hash="a7f3e2cached",
+        source_data_hash="1" * 64,
         llm_call_count=0,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -46,7 +46,7 @@ def test_audit_story_reads_real_landscape_rows() -> None:
     assert story.run_id == "session-run-1"
     assert story.session_id == "session-1"
     assert story.llm_call_count == 0
-    assert story.source_data_hash == "a7f3e2cached"
+    assert story.source_data_hash == "1" * 64
     assert "output_file_hash" not in story.model_dump()
     assert story.started_at == datetime(2026, 5, 15, tzinfo=UTC).replace(tzinfo=None) or story.started_at == datetime(
         2026, 5, 15, tzinfo=UTC
@@ -62,7 +62,7 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
     run_id = write_repo.record_synthesised_run(
         pipeline_yaml="source: {}\n",
         rows=[{"url": "ato.gov.au"}, {"url": "data.gov.au"}],
-        source_data_hash="initial",
+        source_data_hash="2" * 64,
         llm_call_count=0,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -97,7 +97,7 @@ def _record_run(db: object) -> str:
     return LandscapeWriteRepository(db).record_synthesised_run(  # type: ignore[arg-type]
         pipeline_yaml="source: {}\n",
         rows=[{"url": "ato.gov.au"}],
-        source_data_hash="a7f3e2cached",
+        source_data_hash="3" * 64,
         llm_call_count=1,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),

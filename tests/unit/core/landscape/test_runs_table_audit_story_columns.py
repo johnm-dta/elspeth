@@ -72,7 +72,7 @@ def test_landscape_write_repository_records_synthesised_cache_run() -> None:
     run_id = repo.record_synthesised_run(
         pipeline_yaml="source: {}\n",
         rows=[{"url": "ato.gov.au", "rating": 5}],
-        source_data_hash="a7f3e2cached",
+        source_data_hash="1" * 64,
         llm_call_count=0,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -108,7 +108,7 @@ def test_synthesised_cache_run_rejects_unexpected_metadata_keys() -> None:
         repo.record_synthesised_run(
             pipeline_yaml="source: {}\n",
             rows=[{"url": "ato.gov.au"}],
-            source_data_hash="a7f3e2cached",
+            source_data_hash="a" * 64,
             llm_call_count=0,
             node_specs=[
                 SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -147,7 +147,7 @@ def test_synthesised_single_source_rows_keep_legacy_identity_when_payload_keys_c
                 "source_data_hash": "payload-field-not-audit-identity",
             }
         ],
-        source_data_hash="single-source-run-hash",
+        source_data_hash="2" * 64,
         llm_call_count=0,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -165,7 +165,36 @@ def test_synthesised_single_source_rows_keep_legacy_identity_when_payload_keys_c
     assert row.source_node_id == f"{run_id}-n0"
     assert row.source_row_index == 0
     assert row.ingest_sequence == 0
-    assert row.source_data_hash == "single-source-run-hash"
+    assert row.source_data_hash == "2" * 64
+
+
+def test_synthesised_single_source_rows_reject_invalid_fallback_source_data_hash() -> None:
+    from elspeth.core.landscape.errors import LandscapeRecordError
+    from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
+
+    db = make_landscape_db()
+    repo = LandscapeWriteRepository(db)
+
+    with pytest.raises(LandscapeRecordError, match="source_data_hash must be 64 lowercase hex chars"):
+        repo.record_synthesised_run(
+            pipeline_yaml="source: {}\n",
+            rows=[{"url": "ato.gov.au"}],
+            source_data_hash="not-a-sha",
+            llm_call_count=0,
+            node_specs=[
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
+                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="tutorial_summary", plugin_version="1.0"),
+            ],
+            started_at=datetime(2026, 5, 15, tzinfo=UTC),
+            metadata={"seeded_from_cache": True, "cache_key": "b" * 64},
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+        )
+
+    with db.connection() as conn:
+        recorded_rows = conn.execute(select(rows_table.c.row_id)).all()
+
+    assert recorded_rows == []
 
 
 def test_synthesised_run_records_one_node_per_occurrence_with_plugin_reuse() -> None:
@@ -198,7 +227,7 @@ def test_synthesised_run_records_one_node_per_occurrence_with_plugin_reuse() -> 
     run_id = repo.record_synthesised_run(
         pipeline_yaml="# canonical reuse + multi-sink fixture\n",
         rows=[{"url": "ato.gov.au"}],
-        source_data_hash="hash-mixed-roles",
+        source_data_hash="3" * 64,
         llm_call_count=2,
         node_specs=node_specs,
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
@@ -262,22 +291,22 @@ def test_synthesised_run_records_multi_source_row_identity() -> None:
                 "source_node_index": 0,
                 "source_row_index": 0,
                 "ingest_sequence": 0,
-                "source_data_hash": "orders-hash",
+                "source_data_hash": "4" * 64,
             },
             {
                 "source_node_index": 1,
                 "source_row_index": 0,
                 "ingest_sequence": 1,
-                "source_data_hash": "refunds-hash",
+                "source_data_hash": "5" * 64,
             },
             {
                 "source_node_index": 0,
                 "source_row_index": 1,
                 "ingest_sequence": 2,
-                "source_data_hash": "orders-hash-2",
+                "source_data_hash": "6" * 64,
             },
         ],
-        source_data_hash="coalesced-run-hash",
+        source_data_hash="7" * 64,
         llm_call_count=1,
         node_specs=node_specs,
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
@@ -300,10 +329,47 @@ def test_synthesised_run_records_multi_source_row_identity() -> None:
         ).all()
 
     assert [(row.source_node_id, row.row_index, row.source_row_index, row.ingest_sequence, row.source_data_hash) for row in rows] == [
-        (f"{run_id}-n0", 0, 0, 0, "orders-hash"),
-        (f"{run_id}-n1", 1, 0, 1, "refunds-hash"),
-        (f"{run_id}-n0", 2, 1, 2, "orders-hash-2"),
+        (f"{run_id}-n0", 0, 0, 0, "4" * 64),
+        (f"{run_id}-n1", 1, 0, 1, "5" * 64),
+        (f"{run_id}-n0", 2, 1, 2, "6" * 64),
     ]
+
+
+def test_synthesised_multi_source_rows_reject_invalid_explicit_source_data_hash() -> None:
+    from elspeth.core.landscape.errors import LandscapeRecordError
+    from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
+
+    db = make_landscape_db()
+    repo = LandscapeWriteRepository(db)
+
+    with pytest.raises(LandscapeRecordError, match="source_data_hash must be 64 lowercase hex chars"):
+        repo.record_synthesised_run(
+            pipeline_yaml="# canonical multi-source fixture\n",
+            rows=[
+                {
+                    "source_node_index": 0,
+                    "source_row_index": 0,
+                    "ingest_sequence": 0,
+                    "source_data_hash": "not-a-sha",
+                }
+            ],
+            source_data_hash="a" * 64,
+            llm_call_count=1,
+            node_specs=[
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1.0"),
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="json", plugin_version="1.2"),
+                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1.0"),
+            ],
+            started_at=datetime(2026, 5, 15, tzinfo=UTC),
+            metadata={"seeded_from_cache": True, "cache_key": "f" * 64},
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+        )
+
+    with db.connection() as conn:
+        recorded_rows = conn.execute(select(rows_table.c.row_id)).all()
+
+    assert recorded_rows == []
 
 
 def test_synthesised_run_rejects_misshapen_node_specs() -> None:
@@ -322,7 +388,7 @@ def test_synthesised_run_rejects_misshapen_node_specs() -> None:
         return repo.record_synthesised_run(
             pipeline_yaml="# fixture\n",
             rows=rows,
-            source_data_hash="h",
+            source_data_hash="8" * 64,
             llm_call_count=0,
             node_specs=node_specs,
             started_at=datetime(2026, 5, 15, tzinfo=UTC),
@@ -378,24 +444,24 @@ def test_synthesised_run_rejects_misshapen_node_specs() -> None:
             "missing .*source_data_hash",
         ),
         (
-            [{"source_node_index": 2, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": "h"}],
+            [{"source_node_index": 2, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": "a" * 64}],
             "does not reference a SOURCE node",
         ),
         (
-            [{"source_node_index": True, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": "h"}],
+            [{"source_node_index": True, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": "a" * 64}],
             "source_node_index must be a non-negative integer",
         ),
         (
-            [{"source_node_index": 0, "source_row_index": -1, "ingest_sequence": 0, "source_data_hash": "h"}],
+            [{"source_node_index": 0, "source_row_index": -1, "ingest_sequence": 0, "source_data_hash": "a" * 64}],
             "source_row_index must be a non-negative integer",
         ),
         (
-            [{"source_node_index": 0, "source_row_index": 0, "ingest_sequence": "0", "source_data_hash": "h"}],
+            [{"source_node_index": 0, "source_row_index": 0, "ingest_sequence": "0", "source_data_hash": "a" * 64}],
             "ingest_sequence must be a non-negative integer",
         ),
         (
             [{"source_node_index": 0, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": ""}],
-            "source_data_hash must be a non-empty string",
+            "source_data_hash must be 64 lowercase hex chars",
         ),
     ],
 )
@@ -409,7 +475,7 @@ def test_synthesised_multi_source_rows_reject_malformed_identity(rows: Sequence[
         repo.record_synthesised_run(
             pipeline_yaml="# fixture\n",
             rows=rows,
-            source_data_hash="coalesced-run-hash",
+            source_data_hash="9" * 64,
             llm_call_count=0,
             node_specs=[
                 SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1"),

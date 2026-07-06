@@ -993,6 +993,123 @@ class TestGetCallResponseData:
         with pytest.raises(AuditIntegrityError, match="expected JSON object"):
             factory.execution.get_call_response_data(call.call_id)
 
+    def test_raises_when_response_payload_ref_hash_mismatches_audit_row(self, tmp_path):
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = make_landscape_db()
+        store = FilesystemPayloadStore(tmp_path / "payloads")
+        factory = RecorderFactory(db, payload_store=store)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
+        register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
+
+        forged_response_ref = store.store(b'{"text":"forged"}')
+
+        idx = factory.execution.allocate_call_index(state.state_id)
+        call = factory.execution.record_call(
+            state.state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"prompt": "hello"}),
+            response_data=RawCallPayload({"text": "world"}),
+            response_ref=forged_response_ref,
+        )
+
+        assert call.response_hash == stable_hash({"text": "world"})
+        with pytest.raises(AuditIntegrityError, match="response payload hash mismatch"):
+            factory.execution.get_call_response_data(call.call_id)
+
+    def test_raises_audit_integrity_for_non_finite_response_payload(self, tmp_path):
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = make_landscape_db()
+        store = FilesystemPayloadStore(tmp_path / "payloads")
+        factory = RecorderFactory(db, payload_store=store)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
+        register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
+
+        non_finite_response_ref = store.store(b'{"text": NaN}')
+
+        idx = factory.execution.allocate_call_index(state.state_id)
+        call = factory.execution.record_call(
+            state.state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"prompt": "hello"}),
+            response_data=RawCallPayload({"text": "world"}),
+            response_ref=non_finite_response_ref,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="Corrupt call response payload"):
+            factory.execution.get_call_response_data(call.call_id)
+
+    def test_raises_when_available_response_payload_has_no_audit_hash(self, tmp_path):
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = make_landscape_db()
+        store = FilesystemPayloadStore(tmp_path / "payloads")
+        factory = RecorderFactory(db, payload_store=store)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
+        register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
+
+        ref_without_audit_hash = store.store(b'{"text":"orphaned"}')
+
+        idx = factory.execution.allocate_call_index(state.state_id)
+        call = factory.execution.record_call(
+            state.state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"prompt": "hello"}),
+            response_ref=ref_without_audit_hash,
+        )
+
+        assert call.response_hash is None
+        with pytest.raises(AuditIntegrityError, match="without response hash"):
+            factory.execution.get_call_response_data(call.call_id)
+
+    def test_returns_response_payload_with_bytes_canonical_hash_domain(self, tmp_path):
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = make_landscape_db()
+        store = FilesystemPayloadStore(tmp_path / "payloads")
+        factory = RecorderFactory(db, payload_store=store)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
+        register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
+
+        idx = factory.execution.allocate_call_index(state.state_id)
+        call = factory.execution.record_call(
+            state.state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"prompt": "hello"}),
+            response_data=RawCallPayload({"blob": b"abc"}),
+        )
+
+        assert call.response_hash == call.response_ref
+        result = factory.execution.get_call_response_data(call.call_id)
+
+        assert result.state == CallDataState.AVAILABLE
+        assert result.data == {"blob": {"__elspeth_canonical_type__": "bytes", "base64": "YWJj"}}
+
     def test_returns_dict_response_payload_successfully(self, tmp_path):
         """Bug gxan: valid dict payload should return correctly."""
         from elspeth.core.payload_store import FilesystemPayloadStore

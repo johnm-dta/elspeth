@@ -8,6 +8,7 @@ post-insert materialization into the payload store.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from threading import Lock
 from typing import TYPE_CHECKING, NamedTuple
@@ -46,6 +47,10 @@ class _PreparedCallData(NamedTuple):
     error_json: str | None
     request_bytes: bytes | None
     response_bytes: bytes | None
+
+
+def _reject_non_finite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value!r}")
 
 
 class CallAuditRepository:
@@ -554,12 +559,18 @@ class CallAuditRepository:
 
         # Everything below is Tier 1: our data, crash on anomaly
         try:
-            decoded = json.loads(payload_bytes.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            decoded = json.loads(payload_bytes.decode("utf-8"), parse_constant=_reject_non_finite_json_constant)
+        except (UnicodeDecodeError, ValueError) as e:
             raise AuditIntegrityError(f"Corrupt call response payload for call_id={call_id} (ref={row.response_ref}): {e}") from e
         if type(decoded) is not dict:
             raise AuditIntegrityError(
                 f"Corrupt call response payload for call_id={call_id} (ref={row.response_ref}): "
                 f"expected JSON object, got {type(decoded).__name__}"
             )
+        response_hash = row.response_hash
+        if response_hash is None:
+            raise AuditIntegrityError(f"Call response payload ref without response hash for call_id={call_id} (ref={row.response_ref})")
+        decoded_hash = hashlib.sha256(payload_bytes).hexdigest()
+        if decoded_hash != response_hash:
+            raise AuditIntegrityError(f"Call response payload hash mismatch for call_id={call_id} (ref={row.response_ref})")
         return CallDataResult(state=CallDataState.AVAILABLE, data=decoded)

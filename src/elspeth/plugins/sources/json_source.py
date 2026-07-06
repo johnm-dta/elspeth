@@ -124,7 +124,7 @@ class JSONSourceConfig(SourceDataConfig):
     @model_validator(mode="after")
     def _validate_field_mapping(self) -> "JSONSourceConfig":
         """Validate field_mapping values are valid identifiers."""
-        from elspeth.core.identifiers import validate_field_names
+        from elspeth.contracts.identifiers import validate_field_names
 
         if self.field_mapping is not None and self.field_mapping:
             validate_field_names(list(self.field_mapping.values()), "field_mapping values")

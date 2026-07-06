@@ -29,7 +29,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from elspeth.core.identifiers import validate_field_names
+from elspeth.contracts.identifiers import validate_field_names
 
 # =============================================================================
 # Strategies for generating field names

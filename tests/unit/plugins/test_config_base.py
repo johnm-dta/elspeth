@@ -621,6 +621,17 @@ class TestTransformDataConfig:
 
         assert config.required_input_fields == ["id", "name"]
 
+    def test_transform_config_rejects_required_input_field_keyword(self) -> None:
+        """TransformDataConfig required_input_fields rejects Python keywords."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.infrastructure.config_base import TransformDataConfig
+
+        with pytest.raises(ValidationError, match="Python keyword"):
+            TransformDataConfig(
+                schema_config=SchemaConfig.from_dict({"mode": "fixed", "fields": ["id: int"]}),
+                required_input_fields=["class"],
+            )
+
     def test_transform_config_required_input_fields_optional(self) -> None:
         """required_input_fields defaults to None when not specified."""
         from elspeth.contracts.schema import SchemaConfig

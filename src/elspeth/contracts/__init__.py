@@ -215,6 +215,7 @@ from elspeth.contracts.header_modes import (
     parse_header_mode,
     resolve_headers,
 )
+from elspeth.contracts.identifiers import validate_field_name, validate_field_names
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.node_state_context import (
     AggregationFlushContext,
@@ -414,6 +415,9 @@ __all__ = [  # Grouped by category for readability
     "error_edge_label",
     # identity
     "TokenInfo",
+    # identifiers
+    "validate_field_name",
+    "validate_field_names",
     # scheduler
     "SchedulerEvent",
     "SchedulerEventType",

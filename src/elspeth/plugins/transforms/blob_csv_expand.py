@@ -81,7 +81,7 @@ class BlobCSVExpandConfig(TransformDataConfig):
 
     @model_validator(mode="after")
     def _validate_normalization_options(self) -> BlobCSVExpandConfig:
-        from elspeth.core.identifiers import validate_field_names
+        from elspeth.contracts.identifiers import validate_field_names
 
         if self.columns is not None:
             validate_field_names(self.columns, "columns")

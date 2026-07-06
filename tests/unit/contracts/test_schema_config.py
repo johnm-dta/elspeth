@@ -73,6 +73,13 @@ class TestFieldDefinition:
         with pytest.raises(ValueError, match="cannot start with a digit"):
             FieldDefinition.parse("123field: int")
 
+    def test_parse_keyword_field_name_raises(self) -> None:
+        """String-form field names reject Python keywords."""
+        from elspeth.contracts.schema import FieldDefinition
+
+        with pytest.raises(ValueError, match="Python keyword"):
+            FieldDefinition.parse("class: str")
+
     # Dict-form identifier validation tests (Bug: P1-RC5-dict-identifier)
     # The dict format must enforce the same identifier rules as string format.
 
@@ -96,6 +103,13 @@ class TestFieldDefinition:
 
         with pytest.raises(ValueError, match="cannot start with a digit"):
             FieldDefinition.parse({"name": "123field", "type": "int", "required": True, "nullable": False})
+
+    def test_parse_dict_keyword_field_name_raises(self) -> None:
+        """Dict-form field names reject Python keywords."""
+        from elspeth.contracts.schema import FieldDefinition
+
+        with pytest.raises(ValueError, match="Python keyword"):
+            FieldDefinition.parse({"name": "class", "type": "int", "required": True, "nullable": False})
 
     def test_to_dict_includes_nullable(self) -> None:
         """to_dict() must include nullable for audit trail completeness (D4 fix).
@@ -233,6 +247,14 @@ class TestSchemaConfig:
                     "fields": ["id: int", "id: str"],
                 }
             )
+
+    def test_keyword_contract_field_name_raises(self) -> None:
+        """Contract field lists reject Python keywords consistently."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        for field_name in ("guaranteed_fields", "required_fields", "audit_fields"):
+            with pytest.raises(ValueError, match="Python keyword"):
+                SchemaConfig.from_dict({"mode": "observed", field_name: ["class"]})
 
     def test_dict_form_field_specs(self) -> None:
         """Dict-form field specs (YAML: - id: int) parse correctly.

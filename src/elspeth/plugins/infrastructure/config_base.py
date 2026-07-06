@@ -419,7 +419,7 @@ class TabularSourceDataConfig(SourceDataConfig):
     @model_validator(mode="after")
     def _validate_normalization_options(self) -> Self:
         """Validate field normalization option interactions."""
-        from elspeth.core.identifiers import validate_field_names
+        from elspeth.contracts.identifiers import validate_field_names
 
         # Validate columns entries are valid identifiers and not keywords
         if self.columns is not None:
@@ -440,7 +440,7 @@ def validate_headers_value(v: str | dict[str, str] | None) -> str | dict[str, st
     if v is None:
         return v
     if isinstance(v, dict):
-        from elspeth.core.identifiers import validate_field_names
+        from elspeth.contracts.identifiers import validate_field_names
 
         if not v:
             raise ValueError("headers custom mapping must not be empty — use 'normalized' or 'original' for non-custom modes")
@@ -563,25 +563,9 @@ class TransformDataConfig(DataPluginConfig):
         if len(v) == 0:
             return []
 
-        # Element type (str) is already guaranteed by the field annotation
-        # (list[str]); Pydantic rejects non-str elements before this after-mode
-        # validator runs, so we only enforce the semantic rules (non-empty,
-        # valid identifier, no duplicates) here.
-        result: list[str] = []
-        for i, name in enumerate(v):
-            name = name.strip()
-            if not name:
-                raise ValueError(f"required_input_fields[{i}] cannot be empty")
-            if not name.isidentifier():
-                raise ValueError(f"required_input_fields[{i}] must be a valid Python identifier, got '{name}'")
-            result.append(name)
+        from elspeth.contracts.identifiers import validate_field_names
 
-        # Check for duplicates
-        if len(result) != len(set(result)):
-            duplicates = sorted({n for n in result if result.count(n) > 1})
-            raise ValueError(f"Duplicate field names in required_input_fields: {', '.join(duplicates)}")
-
-        return result
+        return list(validate_field_names(v, "required_input_fields", strip=True))
 
     @property
     def declared_input_fields(self) -> frozenset[str]:

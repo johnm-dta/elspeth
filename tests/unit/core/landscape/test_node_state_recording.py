@@ -1827,7 +1827,9 @@ class TestRecordRoutingEvents:
         )
 
         payload_store = _RecordingPayloadStore()
-        factory.execution._payload_store = payload_store
+        # Routing events live on the node_states component; injecting on the
+        # facade would no longer reach the recording path.
+        factory.execution.node_states._payload_store = payload_store
 
         reason = {"action": "continue", "match": "default"}
         events = factory.execution.record_routing_events(state.state_id, routes=[], reason=reason)

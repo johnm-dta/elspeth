@@ -13,6 +13,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from elspeth.core.landscape.errors import LandscapeRecordError
 
 
+def _safe_database_error_message(
+    *,
+    operation: str,
+    action: str,
+    exc: SQLAlchemyError,
+    context: str = "",
+) -> str:
+    detail = f" ({context})" if context else ""
+    return f"{operation} failed{detail} — database rejected audit {action}: {type(exc).__name__}"
+
+
 class LandscapeConnectionProvider(Protocol):
     """Connection surface required by database operation helpers."""
 
@@ -52,7 +63,9 @@ class ReadOnlyDatabaseOps:
                 result = conn.execute(query)
                 rows = result.fetchmany(2)
         except SQLAlchemyError as exc:
-            raise LandscapeRecordError(f"execute_fetchone failed — database rejected audit query: {type(exc).__name__}: {exc}") from exc
+            raise LandscapeRecordError(
+                _safe_database_error_message(operation="execute_fetchone", action="query", exc=exc)
+            ) from exc
 
         if len(rows) > 1:
             raise LandscapeRecordError("execute_fetchone matched multiple rows — single-row audit query is ambiguous")
@@ -67,7 +80,9 @@ class ReadOnlyDatabaseOps:
                 result = conn.execute(query)
                 return list(result.fetchall())
         except SQLAlchemyError as exc:
-            raise LandscapeRecordError(f"execute_fetchall failed — database rejected audit query: {type(exc).__name__}: {exc}") from exc
+            raise LandscapeRecordError(
+                _safe_database_error_message(operation="execute_fetchall", action="query", exc=exc)
+            ) from exc
 
 
 class DatabaseOps(ReadOnlyDatabaseOps):
@@ -93,7 +108,7 @@ class DatabaseOps(ReadOnlyDatabaseOps):
                 result = conn.execute(stmt)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
-                f"execute_insert failed{detail} — database rejected audit write: {type(exc).__name__}: {exc}"
+                _safe_database_error_message(operation="execute_insert", action="write", exc=exc, context=context)
             ) from exc
         if result.rowcount == 0:
             raise LandscapeRecordError(
@@ -116,7 +131,7 @@ class DatabaseOps(ReadOnlyDatabaseOps):
                 result = conn.execute(stmt)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
-                f"execute_update failed{detail} — database rejected audit update: {type(exc).__name__}: {exc}"
+                _safe_database_error_message(operation="execute_update", action="update", exc=exc, context=context)
             ) from exc
         if result.rowcount == 0:
             raise LandscapeRecordError(f"execute_update: zero rows affected{detail} — target row does not exist (audit data corruption)")

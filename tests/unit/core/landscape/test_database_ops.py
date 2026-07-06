@@ -108,6 +108,52 @@ class TestExecuteFetchall:
         db.close()
 
 
+class TestDatabaseOpsErrorScrubbing:
+    """DatabaseOps errors must not echo SQLAlchemy statement text or bound values."""
+
+    SENTINEL = "SECRET_BOUND_VALUE_SHOULD_NOT_LEAK"
+
+    def _assert_safe_message(self, exc: BaseException, *, operation: str, context: str | None = None) -> None:
+        message = str(exc)
+        assert operation in message
+        assert "OperationalError" in message
+        if context is not None:
+            assert context in message
+        assert self.SENTINEL not in message
+        assert "parameters" not in message
+        assert "missing_table" not in message
+
+    def test_fetchone_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_fetchone(sa.text("SELECT * FROM missing_table WHERE value = :value").bindparams(value=self.SENTINEL))
+
+        self._assert_safe_message(exc_info.value, operation="execute_fetchone")
+
+    def test_fetchall_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_fetchall(sa.text("SELECT * FROM missing_table WHERE value = :value").bindparams(value=self.SENTINEL))
+
+        self._assert_safe_message(exc_info.value, operation="execute_fetchall")
+
+    def test_insert_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_insert(
+                sa.text("INSERT INTO missing_table (value) VALUES (:value)").bindparams(value=self.SENTINEL),
+                context="insert sensitive audit row",
+            )
+
+        self._assert_safe_message(exc_info.value, operation="execute_insert", context="insert sensitive audit row")
+
+    def test_update_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_update(
+                sa.text("UPDATE missing_table SET value = :value").bindparams(value=self.SENTINEL),
+                context="update sensitive audit row",
+            )
+
+        self._assert_safe_message(exc_info.value, operation="execute_update", context="update sensitive audit row")
+
+
 class TestExecuteInsert:
     """execute_insert succeeds normally; raises AuditIntegrityError on rowcount==0."""
 

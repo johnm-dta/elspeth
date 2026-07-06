@@ -18,6 +18,7 @@ Properties tested:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -64,10 +65,11 @@ class RecordedCompletion:
 class FakeRecorder:
     """Minimal ExecutionRepository that records operations in memory."""
 
-    def __init__(self, *, fail_on_complete: bool = False) -> None:
+    def __init__(self, *, fail_on_complete: bool = False, complete_error_message: str = "DB write failed") -> None:
         self._op_counter = 0
         self.completions: list[RecordedCompletion] = []
         self._fail_on_complete = fail_on_complete
+        self._complete_error_message = complete_error_message
 
     def begin_operation(
         self,
@@ -95,7 +97,7 @@ class FakeRecorder:
         duration_ms: float = 0.0,
     ) -> None:
         if self._fail_on_complete:
-            raise RuntimeError("DB write failed")
+            raise RuntimeError(self._complete_error_message)
         self.completions.append(
             RecordedCompletion(
                 operation_id=operation_id,
@@ -359,6 +361,38 @@ class TestExceptionRenderingProperties:
 
         assert len(recorder.completions) == 1
         assert recorder.completions[0].error == "EmptyStrException"
+
+    def test_db_failure_log_scrubs_db_error_message(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Property: audit completion failure logs do not expose DB exception secrets."""
+        raw_secret = "sk-" + ("a" * 40)
+        raw_db_error = f"database write failed api_key={raw_secret}"
+        recorder = FakeRecorder(fail_on_complete=True, complete_error_message=raw_db_error)
+        ctx = FakePluginContext()
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="elspeth.core.operations"),
+            pytest.raises(RuntimeError, match="database write failed"),
+            track_operation(
+                _as_execution_repo(recorder),
+                "run-1",
+                "node-1",
+                "sink_write",
+                _as_ctx(ctx),
+            ),
+        ):
+            pass
+
+        completion_failure_records = [
+            record
+            for record in caplog.records
+            if record.name == "elspeth.core.operations" and record.message == "Failed to complete operation - audit trail incomplete"
+        ]
+        assert len(completion_failure_records) == 1
+        logged_db_error = str(completion_failure_records[0].db_error)
+        assert logged_db_error == "<redacted-secret>"
+        assert raw_db_error not in logged_db_error
+        assert raw_secret not in logged_db_error
+        assert completion_failure_records[0].db_error_type == "RuntimeError"
 
 
 # =============================================================================

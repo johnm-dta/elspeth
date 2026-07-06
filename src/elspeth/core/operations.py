@@ -196,7 +196,7 @@ def track_operation(
                 "Failed to complete operation - audit trail incomplete",
                 extra={
                     "operation_id": operation.operation_id,
-                    "db_error": str(db_error),
+                    "db_error": _render_exception(db_error),
                     "db_error_type": type(db_error).__name__,
                     "original_status": status,
                     "original_error": error_msg,

@@ -131,8 +131,9 @@ def merge_union_fields(
 
     Returns:
         Merged SchemaConfig. If all branches are observed-mode or no branches
-        contribute fields, returns an observed-mode schema. Otherwise returns
-        a flexible-mode schema with merged field definitions.
+        contribute fields, returns an observed-mode schema. Mixed observed and
+        typed explicit branches are rejected to match graph validation policy.
+        Otherwise returns a flexible-mode schema with merged field definitions.
 
     Raises:
         GraphValidationError: If branches have incompatible types for the same
@@ -152,12 +153,27 @@ def merge_union_fields(
             audit_fields=audit_fields,
         )
 
+    observed_branch_names = [branch_name for branch_name, schema_cfg in branch_schemas.items() if schema_cfg.is_observed]
+    explicit_branch_names = [
+        branch_name for branch_name, schema_cfg in branch_schemas.items() if not schema_cfg.is_observed and schema_cfg.fields is not None
+    ]
+    if observed_branch_names and explicit_branch_names:
+        node_desc = f"'{coalesce_id}'" if coalesce_id else "coalesce node"
+        raise GraphValidationError(
+            f"Coalesce {node_desc} has mixed observed/explicit schemas - "
+            "this is not allowed because observed branches may produce rows missing fields "
+            "expected by downstream consumers. "
+            f"Observed branches: {observed_branch_names}, explicit branches: {explicit_branch_names}. "
+            "Fix: ensure all branches produce explicit schemas with compatible fields, "
+            "or all branches produce observed schemas.",
+            component_id=coalesce_id,
+            component_type="coalesce",
+        )
+
     # Build the core algorithm's input, EXCLUDING non-contributing branches:
-    # observed branches contribute no typed fields (mixed observed/explicit is
-    # handled by processing only the explicit branches; upstream validation may
-    # reject mixed schemas at a higher level), and fields=None branches have
-    # nothing to contribute. A typed branch with fields=() still counts as
-    # contributing (it can force siblings' exclusive fields optional).
+    # fields=None branches have nothing to contribute. A typed branch with
+    # fields=() still counts as contributing (it can force siblings' exclusive
+    # fields optional).
     #
     # Iteration order: branch_order if provided (declaration order from config),
     # otherwise dict iteration order. This is critical for first_wins/last_wins

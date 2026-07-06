@@ -2262,47 +2262,22 @@ class TestBuildCoalesceSchemaHandlesNullable:
 
 
 class TestMixedObservedExplicitBranches:
-    """Tests for D1 fix: mixed observed/explicit branches must not silently discard fields.
+    """Mixed observed/explicit union branches are rejected at the merge boundary."""
 
-    Bug: The loop in merge_union_fields() used `all_observed = True; break` on the
-    FIRST observed branch, silently discarding typed fields from subsequent branches.
-
-    Fix: Check `all(schema_cfg.is_observed for ...)` BEFORE the loop, then `continue`
-    (not break) for observed branches during processing.
-    """
-
-    def test_mixed_observed_explicit_preserves_explicit_fields(self) -> None:
-        """When one branch is observed and another has fields, fields must be preserved.
-
-        Prior bug: breaks on first observed branch, returns observed schema, silently
-        discarding branch B's typed fields.
-        """
-        # Branch A: observed (no fields)
+    def test_mixed_observed_explicit_rejected(self) -> None:
+        """When one branch is observed and another has fields, reject the split policy."""
         branch_a = SchemaConfig(mode="observed", fields=None)
-
-        # Branch B: flexible with typed fields
         branch_b = SchemaConfig(
             mode="flexible",
             fields=(FieldDefinition(name="x", field_type="int", required=True),),
         )
 
-        result = merge_union_fields(
-            {"a": branch_a, "b": branch_b},
-            require_all=True,
-        )
-
-        # Per docstring: "If all branches are observed-mode or no branches contribute
-        # fields, returns an observed-mode schema."
-        # Since NOT all branches are observed (branch_b is flexible), result should
-        # preserve branch_b's fields.
-        assert not result.is_observed, (
-            f"Only branch_a is observed, branch_b has fields. "
-            f"Result should preserve branch_b's fields, not return observed. "
-            f"Got mode={result.mode}"
-        )
-        assert result.fields is not None, "Should have fields from branch_b"
-        field_names = {fd.name for fd in result.fields}
-        assert "x" in field_names, "Field 'x' from branch_b should be preserved"
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            merge_union_fields(
+                {"a": branch_a, "b": branch_b},
+                require_all=True,
+                coalesce_id="mixed_coalesce",
+            )
 
     def test_all_observed_returns_observed(self) -> None:
         """When ALL branches are observed, result should be observed."""
@@ -2316,10 +2291,8 @@ class TestMixedObservedExplicitBranches:
 
         assert result.is_observed, "All branches observed -> result should be observed"
 
-    def test_observed_first_explicit_second_preserves_fields(self) -> None:
+    def test_observed_first_explicit_second_rejected(self) -> None:
         """Order independence: observed branch first, explicit branch second."""
-        # Explicitly test dict ordering to ensure the fix works regardless of
-        # iteration order (which caused the original bug when observed was first)
         from collections import OrderedDict
 
         branches: dict[str, SchemaConfig] = OrderedDict()
@@ -2329,14 +2302,10 @@ class TestMixedObservedExplicitBranches:
             fields=(FieldDefinition(name="y", field_type="str", required=False),),
         )
 
-        result = merge_union_fields(branches, require_all=True)
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            merge_union_fields(branches, require_all=True, coalesce_id="mixed_coalesce")
 
-        assert not result.is_observed, "Mixed branches should not return observed"
-        assert result.fields is not None
-        field_names = {fd.name for fd in result.fields}
-        assert "y" in field_names, "Field 'y' from explicit branch should be preserved"
-
-    def test_explicit_first_observed_second_preserves_fields(self) -> None:
+    def test_explicit_first_observed_second_rejected(self) -> None:
         """Order independence: explicit branch first, observed branch second."""
         from collections import OrderedDict
 
@@ -2347,12 +2316,8 @@ class TestMixedObservedExplicitBranches:
         )
         branches["observed_second"] = SchemaConfig(mode="observed", fields=None)
 
-        result = merge_union_fields(branches, require_all=True)
-
-        assert not result.is_observed, "Mixed branches should not return observed"
-        assert result.fields is not None
-        field_names = {fd.name for fd in result.fields}
-        assert "z" in field_names, "Field 'z' from explicit branch should be preserved"
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            merge_union_fields(branches, require_all=True, coalesce_id="mixed_coalesce")
 
 
 class TestPartialArrivalNullableSoundness:

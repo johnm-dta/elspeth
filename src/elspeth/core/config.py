@@ -27,6 +27,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts.enums import OutputMode, RunMode
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
 from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT
 from elspeth.core import dynaconf_normalization, template_materialization
@@ -2190,6 +2191,38 @@ def _sanitize_dsn_option_for_audit(
     elif had_password and not fail_if_no_key:
         # Dev mode: password was removed but not fingerprinted.
         options[redacted_name] = True
+
+
+def sanitize_node_config_for_audit(
+    config: Mapping[str, object],
+    *,
+    plugin_name: str | None,
+) -> Mapping[str, object]:
+    """Return an audit-safe node config for graph persistence.
+
+    Node registration stores a flat plugin config, unlike the full resolved
+    settings tree handled by ``_fingerprint_config_for_audit``. Keep the
+    placement-specific database DSN rule here with the rest of the audit
+    sanitization policy so repositories only persist the resulting payload.
+    """
+    import os
+
+    thawed = deep_thaw(config)
+    if type(thawed) is not dict:
+        raise TypeError(f"Node config must thaw to dict[str, object], got {type(thawed).__name__}: {thawed!r}")
+
+    allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+    sanitized = _fingerprint_secrets(thawed, fail_if_no_key=not allow_raw)
+    if plugin_name == "database":
+        # Node config is flat: the DSN sits at top-level `url`.
+        _sanitize_dsn_option_for_audit(
+            sanitized,
+            option_name="url",
+            fingerprint_name="url_password_fingerprint",
+            redacted_name="url_password_redacted",
+            fail_if_no_key=not allow_raw,
+        )
+    return sanitized
 
 
 def _fingerprint_config_for_audit(

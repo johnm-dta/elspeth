@@ -442,7 +442,9 @@ class DataFlowRepository:
 
     def _sanitize_node_config_for_audit(self, config: Mapping[str, object], *, plugin_name: str | None) -> Mapping[str, object]:
         """Return an audit-safe node config with secrets fingerprinted."""
-        return self.graph._sanitize_node_config_for_audit(config, plugin_name=plugin_name)
+        from elspeth.core.config import sanitize_node_config_for_audit
+
+        return sanitize_node_config_for_audit(config, plugin_name=plugin_name)
 
     def register_node(
         self,

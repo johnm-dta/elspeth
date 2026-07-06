@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings
     from elspeth.core.landscape.data_flow_repository import DataFlowRepository
     from elspeth.core.landscape.execution_repository import ExecutionRepository
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
     from elspeth.engine.clock import Clock
     from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
@@ -638,7 +639,7 @@ class BarrierRecoveryCoordinator:
         *,
         run_id: str,
         scheduler: TokenSchedulerRepository,
-        data_flow: DataFlowRepository,
+        barrier_restore_reads: BarrierRestoreReadModel,
         execution: ExecutionRepository,
         aggregation_executor: AggregationExecutor,
         coalesce_executor: CoalesceExecutor | None,
@@ -650,7 +651,7 @@ class BarrierRecoveryCoordinator:
     ) -> None:
         self._run_id = run_id
         self._scheduler = scheduler
-        self._data_flow = data_flow
+        self._barrier_restore_reads = barrier_restore_reads
         self._execution = execution
         self._aggregation_executor = aggregation_executor
         self._coalesce_executor = coalesce_executor
@@ -690,7 +691,7 @@ class BarrierRecoveryCoordinator:
         # entry. token_outcomes has NO non-terminal uniqueness — the adoption
         # CAS is the structural guard; >1 live BUFFERED rows for a token means
         # a deposed leader's unfenced intake wrote a second acceptance.
-        duplicate_acceptances = self._data_flow.find_duplicate_live_buffered_outcomes(self._run_id)
+        duplicate_acceptances = self._barrier_restore_reads.find_duplicate_live_buffered_acceptances(self._run_id)
         if duplicate_acceptances:
             details = ", ".join(f"{token_id} ({count} live BUFFERED)" for token_id, count in duplicate_acceptances)
             raise AuditIntegrityError(
@@ -828,7 +829,7 @@ class BarrierRecoveryCoordinator:
                 # crash residual (elspeth-3977d8ab60) still owes a sink output
                 # and is NOT swept here — it keeps hitting the loud refusal.
                 if node_items:
-                    failed_terminal_ids = self._data_flow.get_failed_unrouted_terminal_token_ids(
+                    failed_terminal_ids = self._barrier_restore_reads.find_failed_unrouted_terminal_token_ids(
                         self._run_id, [item.token_id for item in node_items]
                     )
                     if failed_terminal_ids:
@@ -1092,7 +1093,9 @@ class BarrierRecoveryCoordinator:
         batch_id: str | None = None
         first_token_id: str | None = None
         for item in node_items:
-            live_buffered = self._data_flow.get_live_buffered_outcomes(TokenRef(token_id=item.token_id, run_id=self._run_id))
+            live_buffered = self._barrier_restore_reads.list_live_buffered_outcomes(
+                TokenRef(token_id=item.token_id, run_id=self._run_id)
+            )
             if len(live_buffered) > 1:
                 # ADR-030 §C.4 row 6a / §E.4: token_outcomes has no non-terminal
                 # uniqueness; >1 live BUFFERED rows means a deposed leader's

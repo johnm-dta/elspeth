@@ -348,7 +348,7 @@ class TestFailedFlushReconcile:
         then a crash strikes before ``_mark_buffered_scheduler_work_terminal``
         releases the durable BLOCKED scheduler rows. On resume the orphaned
         BLOCKED rows partition to the aggregation node, but
-        ``get_live_buffered_outcomes`` excludes completed-witness tokens, so
+        ``list_live_buffered_outcomes`` excludes completed-witness tokens, so
         ``_derive_restored_batch_id`` historically raised
         ``AuditIntegrityError('...no matching BUFFERED token_outcome...')`` on
         EVERY attempt — the run was permanently unresumable.

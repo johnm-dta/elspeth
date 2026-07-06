@@ -428,6 +428,7 @@ def _make_processor(
         branch_to_sink={BranchName(k): SinkName(v) for k, v in (branch_to_sink or {}).items()},
         coalesce_on_success_map=coalesce_on_success_map,
         barrier_restore=barrier_restore,
+        barrier_restore_reads=factory.barrier_restore,
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
         scheduler=factory.scheduler if scheduler is _DEFAULT_SCHEDULER else scheduler,

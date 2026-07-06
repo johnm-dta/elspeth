@@ -50,6 +50,7 @@ from elspeth.core.landscape.model_loaders import (
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
 if TYPE_CHECKING:
@@ -327,6 +328,10 @@ class RecorderFactory:
             transform_error_loader=transform_error_loader,
             payload_store=payload_store,
         )
+        self._barrier_restore = BarrierRestoreReadModel(
+            ops,
+            token_outcome_loader=token_outcome_loader,
+        )
 
         # Composed repository for read-only queries
         self._query = QueryRepository(
@@ -369,6 +374,10 @@ class RecorderFactory:
     @property
     def data_flow(self) -> DataFlowRepository:
         return self._data_flow
+
+    @property
+    def barrier_restore(self) -> BarrierRestoreReadModel:
+        return self._barrier_restore
 
     @property
     def query(self) -> QueryRepository:

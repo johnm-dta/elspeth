@@ -422,18 +422,6 @@ class DataFlowRepository:
         """Get the terminal outcome for a token."""
         return self.outcomes.get_token_outcome(token_id)
 
-    def get_live_buffered_outcomes(self, ref: TokenRef) -> list[TokenOutcome]:
-        """All LIVE BUFFERED outcomes for a token (ADR-030 §E.4 restore read)."""
-        return self.outcomes.get_live_buffered_outcomes(ref)
-
-    def get_failed_unrouted_terminal_token_ids(self, run_id: str, token_ids: Sequence[str]) -> frozenset[str]:
-        """Token ids (from ``token_ids``) holding a terminal FAILURE/UNROUTED outcome."""
-        return self.outcomes.get_failed_unrouted_terminal_token_ids(run_id, token_ids)
-
-    def find_duplicate_live_buffered_outcomes(self, run_id: str) -> list[tuple[str, int]]:
-        """Run-wide sweep: token_ids holding >1 live BUFFERED outcome."""
-        return self.outcomes.find_duplicate_live_buffered_outcomes(run_id)
-
     def get_token_outcomes_for_row(self, run_id: str, row_id: str) -> list[TokenOutcome]:
         """Get all token outcomes for a row in a single query."""
         return self.outcomes.get_token_outcomes_for_row(run_id, row_id)

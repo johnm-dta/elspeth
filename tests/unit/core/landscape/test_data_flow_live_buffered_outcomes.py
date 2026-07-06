@@ -4,9 +4,9 @@
 partial on ``completed=1``), so a deposed leader's unfenced intake could
 historically write a SECOND BUFFERED acceptance which
 ``get_token_outcome``'s ``ORDER BY ... LIMIT 1`` silently swallowed.
-``get_live_buffered_outcomes`` surfaces every live acceptance so the restore
+``list_live_buffered_outcomes`` surfaces every live acceptance so the restore
 path (``_derive_restored_batch_id``) can refuse loudly with Tier-1 instead of
-silent latest-wins; ``find_duplicate_live_buffered_outcomes`` is the run-wide
+silent latest-wins; ``find_duplicate_live_buffered_acceptances`` is the run-wide
 belt for restore entry.
 """
 
@@ -14,15 +14,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import Batch, NodeType, Token
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+from tests.fixtures.landscape import RecorderSetup, make_recorder_with_run, register_test_node
 
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=UTC)
 
 
-def _setup_buffered_token():  # type: ignore[no-untyped-def]
+def _setup_buffered_token() -> tuple[RecorderSetup, str, Batch, Token]:
     """Run + agg node + batch + one token; returns (setup, agg_node_id, batch, token)."""
     setup = make_recorder_with_run(run_id="run-buf-1")
     agg_node_id = register_test_node(
@@ -46,7 +46,7 @@ def test_single_live_buffered_outcome_is_returned() -> None:
     ref = TokenRef(token_id=token.token_id, run_id=setup.run_id)
     outcome_id = setup.factory.data_flow.record_token_outcome(ref, None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
 
-    live = setup.factory.data_flow.get_live_buffered_outcomes(ref)
+    live = setup.factory.barrier_restore.list_live_buffered_outcomes(ref)
 
     assert [outcome.outcome_id for outcome in live] == [outcome_id]
     assert live[0].completed is False
@@ -62,7 +62,7 @@ def test_duplicate_live_buffered_outcomes_are_all_returned_in_order() -> None:
     first = setup.factory.data_flow.record_token_outcome(ref, None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
     second = setup.factory.data_flow.record_token_outcome(ref, None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
 
-    live = setup.factory.data_flow.get_live_buffered_outcomes(ref)
+    live = setup.factory.barrier_restore.list_live_buffered_outcomes(ref)
 
     assert len(live) == 2
     assert {outcome.outcome_id for outcome in live} == {first, second}
@@ -85,14 +85,14 @@ def test_flushed_token_buffered_history_is_exempt() -> None:
     setup.factory.data_flow.record_token_outcome(ref, None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
     setup.factory.data_flow.record_token_outcome(ref, TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED, batch_id=batch.batch_id)
 
-    assert setup.factory.data_flow.get_live_buffered_outcomes(ref) == []
-    assert setup.factory.data_flow.find_duplicate_live_buffered_outcomes(setup.run_id) == []
+    assert setup.factory.barrier_restore.list_live_buffered_outcomes(ref) == []
+    assert setup.factory.barrier_restore.find_duplicate_live_buffered_acceptances(setup.run_id) == []
 
 
 def test_no_outcomes_is_empty() -> None:
     setup, _node_id, _batch, token = _setup_buffered_token()
     ref = TokenRef(token_id=token.token_id, run_id=setup.run_id)
-    assert setup.factory.data_flow.get_live_buffered_outcomes(ref) == []
+    assert setup.factory.barrier_restore.list_live_buffered_outcomes(ref) == []
 
 
 def test_run_wide_duplicate_sweep_names_only_duplicated_tokens() -> None:
@@ -115,7 +115,7 @@ def test_run_wide_duplicate_sweep_names_only_duplicated_tokens() -> None:
         TokenRef(token_id=token2.token_id, run_id=setup.run_id), None, TerminalPath.BUFFERED, batch_id=batch.batch_id
     )
 
-    assert setup.factory.data_flow.find_duplicate_live_buffered_outcomes(setup.run_id) == [(token.token_id, 2)]
+    assert setup.factory.barrier_restore.find_duplicate_live_buffered_acceptances(setup.run_id) == [(token.token_id, 2)]
 
 
 def test_failed_unrouted_reconcile_read_scopes_to_failure_unrouted() -> None:
@@ -146,11 +146,11 @@ def test_failed_unrouted_reconcile_read_scopes_to_failure_unrouted() -> None:
     token_c = df.create_token(row_id=row_c.row_id)
     df.record_token_outcome(TokenRef(token_id=token_c.token_id, run_id=run_id), None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
 
-    result = df.get_failed_unrouted_terminal_token_ids(run_id, [failed_token.token_id, token_b.token_id, token_c.token_id])
+    result = setup.factory.barrier_restore.find_failed_unrouted_terminal_token_ids(run_id, [failed_token.token_id, token_b.token_id, token_c.token_id])
 
     assert result == frozenset({failed_token.token_id})
 
 
 def test_failed_unrouted_reconcile_read_empty_input_short_circuits() -> None:
     setup, _node_id, _batch, _token = _setup_buffered_token()
-    assert setup.factory.data_flow.get_failed_unrouted_terminal_token_ids(setup.run_id, []) == frozenset()
+    assert setup.factory.barrier_restore.find_failed_unrouted_terminal_token_ids(setup.run_id, []) == frozenset()

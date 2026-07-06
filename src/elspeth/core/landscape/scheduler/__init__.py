@@ -26,10 +26,12 @@ from elspeth.core.landscape.scheduler.payload_codec import (
 )
 from elspeth.core.landscape.scheduler.queue import SchedulerQueueRepository
 from elspeth.core.landscape.scheduler.read_model import SchedulerReadModel
+from elspeth.core.landscape.scheduler.restore_read_model import BarrierRestoreReadModel
 
 __all__ = [
     "BarrierAdoptionResult",
     "BarrierJournalRepository",
+    "BarrierRestoreReadModel",
     "CoalesceBranchLoss",
     "CoalesceBranchLossRepository",
     "SchedulerDispositionRepository",

@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.engine.clock import Clock
     from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.executors import GateOutcome
@@ -353,6 +354,7 @@ class RowProcessor:
         sink_names: frozenset[str] | None = None,
         coalesce_on_success_map: dict[CoalesceName, str] | None = None,
         barrier_restore: BarrierJournalRestoreContext | None = None,
+        barrier_restore_reads: BarrierRestoreReadModel | None = None,
         payload_store: PayloadStore | None = None,
         clock: Clock | None = None,
         max_workers: int | None = None,
@@ -393,6 +395,9 @@ class RowProcessor:
                 restore (F1). Non-None means this processor is being built on
                 the resume path: barrier buffers are rebuilt from journal
                 BLOCKED rows + audit tables before the first row is processed.
+            barrier_restore_reads: Restore-owned token-outcome read model for
+                ADR-030 duplicate-acceptance and crash-window reconciliation.
+                Required when ``barrier_restore`` is supplied.
             payload_store: Optional PayloadStore for persisting source row payloads
             clock: Optional clock for time access. Defaults to system clock.
                    Inject MockClock for deterministic testing.
@@ -671,10 +676,12 @@ class RowProcessor:
         # still intercept traversal.
         self._token_traversal = TokenTraversalEngine(self)
         if barrier_restore is not None:
+            if barrier_restore_reads is None:
+                raise OrchestrationInvariantError("barrier_restore_reads is required when barrier_restore is supplied")
             BarrierRecoveryCoordinator(
                 run_id=run_id,
                 scheduler=scheduler,
-                data_flow=data_flow,
+                barrier_restore_reads=barrier_restore_reads,
                 execution=execution,
                 aggregation_executor=self._aggregation_executor,
                 coalesce_executor=self._coalesce_executor,

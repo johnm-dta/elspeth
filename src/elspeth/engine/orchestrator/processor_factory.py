@@ -337,6 +337,7 @@ def build_row_processor(
         sink_names=frozenset(config.sinks),
         coalesce_on_success_map=coalesce_on_success_map,
         barrier_restore=barrier_restore,
+        barrier_restore_reads=factory.barrier_restore,
         payload_store=payload_store,
         clock=clock,
         max_workers=max_workers,

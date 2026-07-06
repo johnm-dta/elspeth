@@ -17,9 +17,11 @@ from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.url import SENSITIVE_PARAMS, _scrub_odbc_connect_value
 from elspeth.core.landscape.journal import LandscapeJournal
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
 
@@ -129,6 +131,33 @@ class SchemaCompatibilityError(Exception):
 
 
 ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+
+
+def _query_base_param_name(key: str) -> str:
+    """Return the base query parameter name for diagnostic scrubbing."""
+    return key.split("[", 1)[0].split(".", 1)[0]
+
+
+def _safe_database_descriptor(connection_string: str) -> str:
+    """Return a diagnostic database URL with credentials removed."""
+    try:
+        parsed = make_url(connection_string)
+    except (ArgumentError, TypeError, ValueError):
+        return "<unparseable database URL redacted>"
+
+    safe_query: dict[str, str | tuple[str, ...]] = {}
+    for key, value in parsed.query.items():
+        base_key = _query_base_param_name(key).lower()
+        if base_key in SENSITIVE_PARAMS:
+            continue
+        if base_key == "odbc_connect":
+            values = value if isinstance(value, tuple) else (value,)
+            scrubbed_values = tuple(_scrub_odbc_connect_value(connect_value)[0] for connect_value in values)
+            safe_query[key] = scrubbed_values if isinstance(value, tuple) else scrubbed_values[0]
+            continue
+        safe_query[key] = value
+
+    return parsed.set(query=safe_query).render_as_string(hide_password=True)
 
 
 # StaticPool engines (``LandscapeDB.in_memory()``, tests only) share ONE DBAPI
@@ -919,7 +948,7 @@ class LandscapeDB:
                 f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
                 "This database was created or stamped by a newer ELSPETH version. "
                 "Upgrade ELSPETH to open this database.\n\n"
-                f"Database: {self.connection_string}"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
         if current_epoch < SQLITE_SCHEMA_EPOCH:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
@@ -952,7 +981,7 @@ class LandscapeDB:
                     "  1. The correct passphrase is set in the configured environment variable\n"
                     "     (landscape.encryption_key_env in settings.yaml, default: ELSPETH_AUDIT_KEY)\n"
                     "  2. backend: sqlcipher is set in settings.yaml\n\n"
-                    f"Database: {self.connection_string}"
+                    f"Database: {_safe_database_descriptor(self.connection_string)}"
                 ) from e
             raise
         expected_tables = set(metadata.tables.keys())
@@ -970,7 +999,7 @@ class LandscapeDB:
                 "Database does not contain any Landscape tables.\n\n"
                 "This does not appear to be an ELSPETH audit database. "
                 "Verify the database path is correct.\n\n"
-                f"Database: {self.connection_string}"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
         missing_tables = sorted((expected_tables - existing_tables) - _ADDITIVE_TABLE_NAMES) if present_landscape_tables else []
 
@@ -1132,7 +1161,7 @@ class LandscapeDB:
                 f"To fix this, either:\n"
                 f"  1. Delete the database file and let ELSPETH recreate it, or\n"
                 f"  2. Run: elspeth landscape migrate (when available)\n\n"
-                f"Database: {self.connection_string}"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
 
     @property

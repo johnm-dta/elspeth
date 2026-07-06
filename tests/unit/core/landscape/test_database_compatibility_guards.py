@@ -845,6 +845,80 @@ class TestSchemaCompatibilityGuards:
         assert f"Database: sqlite:///{db_path}" in msg
         instance.close()
 
+    def test_validate_schema_error_scrubs_database_url_credentials(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Compatibility errors must not echo credential-bearing database URLs."""
+        import sqlalchemy
+
+        instance = _make_instance(f"sqlite:///{tmp_path / 'safe_descriptor_shape.db'}")
+        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"
+
+        inspector = _InspectorFake(
+            table_names=["runs"],
+            columns={"runs": [{"name": "run_id"}]},
+            foreign_keys=[],
+            check_constraints=[],
+            indexes=[],
+        )
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: inspector)
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"runs": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", (("runs", "source_schema_json"),))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "Database: postgresql://user:***@db.internal/audit?sslmode=require" in msg
+        assert "rawsecret" not in msg
+        assert "querysecret" not in msg
+        assert "password=" not in msg
+        instance.close()
+
+    def test_validate_schema_passphrase_error_scrubs_database_url_query_credentials(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQLCipher compatibility errors must not echo DSN query credentials."""
+        import sqlalchemy
+        from sqlalchemy.exc import OperationalError
+
+        instance = _make_instance(f"sqlite:///{tmp_path / 'encrypted.db'}?password=querysecret&timeout=5")
+        inspector = _InspectorFake(
+            get_table_names_error=OperationalError(
+                "SELECT name FROM sqlite_master",
+                {},
+                Exception("file is not a database"),
+            )
+        )
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: inspector)
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "encrypted or passphrase is incorrect" in msg
+        assert "querysecret" not in msg
+        assert "password=" not in msg
+        assert "timeout=5" in msg
+        instance.close()
+
+    def test_safe_database_descriptor_scrubs_repeated_odbc_password_values(self) -> None:
+        """The shared compatibility-error descriptor also scrubs ODBC DSN secrets."""
+        descriptor = database_module._safe_database_descriptor(
+            "mssql+pyodbc:///?"
+            "odbc_connect=PWD%3Dfirst-secret%3BUID%3Dsa"
+            "&odbc_connect=DRIVER%3D%7BSQL+Server%7D%3BPassword%3Dsecond-secret%3BServer%3Dhost"
+        )
+
+        assert "first-secret" not in descriptor
+        assert "second-secret" not in descriptor
+        assert "PWD" not in descriptor
+        assert "Password" not in descriptor
+        assert "UID%3Dsa" in descriptor
+        assert "Server%3Dhost" in descriptor
+
     def test_validate_schema_reports_missing_required_columns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing required columns must be listed deterministically in the error."""
         db_path = tmp_path / "missing_columns.db"

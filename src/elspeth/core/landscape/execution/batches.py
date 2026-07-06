@@ -143,8 +143,11 @@ class BatchRepository:
             state_id: Node state for the flush operation
 
         Raises:
-            AuditIntegrityError: If batch not found or current status is terminal
+            AuditIntegrityError: If status is terminal, batch not found, or current status is terminal
         """
+        if status in _TERMINAL_BATCH_STATUSES:
+            raise AuditIntegrityError(f"update_batch_status() cannot write terminal status {status.value!r}; use complete_batch().")
+
         updates: dict[str, Any] = {"status": status}
 
         if trigger_type is not None:
@@ -153,8 +156,6 @@ class BatchRepository:
             updates["trigger_reason"] = trigger_reason
         if state_id is not None:
             updates["aggregation_state_id"] = state_id
-        if status in (BatchStatus.COMPLETED, BatchStatus.FAILED):
-            updates["completed_at"] = now()
 
         # Atomic conditional UPDATE: constrain current status to non-terminal in the
         # WHERE clause so the check-and-set is a single statement, eliminating the

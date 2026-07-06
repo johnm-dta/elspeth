@@ -569,7 +569,7 @@ class TestAggregationRecoveryIntegration:
         assert incomplete[0].status == BatchStatus.EXECUTING
 
         # Mark executing as failed (crash interrupted)
-        factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(batch.batch_id, BatchStatus.FAILED)
 
         # Retry the batch
         retry_batch = factory.execution.retry_batch(batch.batch_id)
@@ -637,7 +637,7 @@ class TestAggregationRecoveryIntegration:
         )
         for i, token in enumerate(tokens[:2]):
             factory.execution.add_batch_member(sum_batch.batch_id, token.token_id, ordinal=i)
-        factory.execution.update_batch_status(sum_batch.batch_id, BatchStatus.COMPLETED)
+        factory.execution.complete_batch(sum_batch.batch_id, BatchStatus.COMPLETED)
 
         # Create batch for count_aggregator (crashed during execution)
         count_batch = factory.execution.create_batch(
@@ -706,7 +706,7 @@ class TestAggregationRecoveryIntegration:
             factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
 
         # Mark as failed for retry
-        factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(batch.batch_id, BatchStatus.FAILED)
 
         # Checkpoint (journal era: scalar-only row)
         create_checkpoint(
@@ -767,7 +767,7 @@ class TestAggregationRecoveryIntegration:
             factory.execution.retry_batch(batch.batch_id)
 
         # Test with completed status
-        factory.execution.update_batch_status(batch.batch_id, BatchStatus.COMPLETED)
+        factory.execution.complete_batch(batch.batch_id, BatchStatus.COMPLETED)
         with pytest.raises(AuditIntegrityError, match="can only retry failed batches"):
             factory.execution.retry_batch(batch.batch_id)
 

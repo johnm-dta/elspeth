@@ -1331,7 +1331,13 @@ def handle_incomplete_batches(
     for batch in incomplete:
         if batch.status == BatchStatus.EXECUTING:
             # Crash interrupted mid-execution, mark failed then retry
-            execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+            execution.complete_batch(
+                batch.batch_id,
+                BatchStatus.FAILED,
+                trigger_type=batch.trigger_type,
+                trigger_reason=batch.trigger_reason,
+                state_id=batch.aggregation_state_id,
+            )
             retry = execution.retry_batch(batch.batch_id)
             batch_id_mapping[batch.batch_id] = retry.batch_id
         elif batch.status == BatchStatus.FAILED:

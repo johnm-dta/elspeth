@@ -125,7 +125,14 @@ def _make_pending() -> dict[str, list[tuple[TokenInfo, PendingOutcome | None]]]:
     return {"output": []}
 
 
-def _make_batch(batch_id: str, status: BatchStatus) -> Batch:
+def _make_batch(
+    batch_id: str,
+    status: BatchStatus,
+    *,
+    trigger_type: TriggerType | None = None,
+    trigger_reason: str | None = None,
+    aggregation_state_id: str | None = None,
+) -> Batch:
     return Batch(
         batch_id=batch_id,
         run_id="run-1",
@@ -133,6 +140,9 @@ def _make_batch(batch_id: str, status: BatchStatus) -> Batch:
         attempt=0,
         status=status,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        trigger_type=trigger_type,
+        trigger_reason=trigger_reason,
+        aggregation_state_id=aggregation_state_id,
     )
 
 
@@ -226,7 +236,13 @@ class TestHandleIncompleteBatches:
 
     def test_executing_batch_marked_failed_then_retried(self) -> None:
         """EXECUTING batch (crash interrupted) -> failed -> retried."""
-        batch = _make_batch("batch-123", BatchStatus.EXECUTING)
+        batch = _make_batch(
+            "batch-123",
+            BatchStatus.EXECUTING,
+            trigger_type=TriggerType.COUNT,
+            trigger_reason="count=2",
+            aggregation_state_id="state-123",
+        )
 
         retry_batch = _make_batch("batch-123-retry", BatchStatus.DRAFT)
 
@@ -236,7 +252,14 @@ class TestHandleIncompleteBatches:
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
-        recorder.update_batch_status.assert_called_once_with("batch-123", BatchStatus.FAILED)
+        recorder.complete_batch.assert_called_once_with(
+            "batch-123",
+            BatchStatus.FAILED,
+            trigger_type=TriggerType.COUNT,
+            trigger_reason="count=2",
+            state_id="state-123",
+        )
+        recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_called_once_with("batch-123")
         assert mapping == {"batch-123": "batch-123-retry"}
 
@@ -252,6 +275,7 @@ class TestHandleIncompleteBatches:
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
+        recorder.complete_batch.assert_not_called()
         recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_called_once_with("batch-456")
         assert mapping == {"batch-456": "batch-456-retry"}
@@ -265,6 +289,7 @@ class TestHandleIncompleteBatches:
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
+        recorder.complete_batch.assert_not_called()
         recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_not_called()
         assert mapping == {}
@@ -276,6 +301,7 @@ class TestHandleIncompleteBatches:
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
+        recorder.complete_batch.assert_not_called()
         recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_not_called()
         assert mapping == {}
@@ -295,7 +321,14 @@ class TestHandleIncompleteBatches:
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
-        assert recorder.update_batch_status.call_count == 1
+        recorder.complete_batch.assert_called_once_with(
+            "b1",
+            BatchStatus.FAILED,
+            trigger_type=None,
+            trigger_reason=None,
+            state_id=None,
+        )
+        recorder.update_batch_status.assert_not_called()
         assert recorder.retry_batch.call_count == 2
         assert mapping == {"b1": "b1-retry", "b2": "b2-retry"}
 

@@ -943,7 +943,7 @@ class TestConstructorErrorEdgeMap:
             self._seed_buffered_member(factory, token_id=token_id, ordinal=ordinal, agg_node=agg_node, batch_id=old_batch.batch_id)
         # Crash shape: flush died -> batch FAILED; resume's
         # handle_incomplete_batches creates the retry batch (members COPIED).
-        factory.execution.update_batch_status(old_batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(old_batch.batch_id, BatchStatus.FAILED)
         retry_batch = factory.execution.retry_batch(old_batch.batch_id)
         assert retry_batch.batch_id != old_batch.batch_id
 
@@ -980,7 +980,7 @@ class TestConstructorErrorEdgeMap:
             token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
             _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
             factory.execution.add_batch_member(batch_id=failed_batch.batch_id, token_id=token_id, ordinal=ordinal)
-        factory.execution.update_batch_status(failed_batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(failed_batch.batch_id, BatchStatus.FAILED)
 
         processor = _make_processor(
             factory,

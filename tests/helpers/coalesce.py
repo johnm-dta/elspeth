@@ -11,7 +11,8 @@ from typing import Any
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.core.dag import ExecutionGraph, merge_guaranteed_fields
+from elspeth.core.dag import ExecutionGraph
+from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 
 
 def _compute_coalesce_schema(

@@ -24,9 +24,8 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.dag import (
     ExecutionGraph,
     GraphValidationError,
-    merge_guaranteed_fields,
-    merge_union_fields,
 )
+from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields, merge_union_fields
 from tests.helpers.coalesce import _add_coalesce_with_computed_schema
 
 # Type alias matching FieldDefinition.field_type

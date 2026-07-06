@@ -1,0 +1,70 @@
+sources:
+  primary:
+    plugin: csv
+    on_success: tutorial_urls
+    options:
+      path: examples/blob_transforms/input/tutorial_html_urls.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'manifest_index: int'
+        - 'url: str'
+        - 'label: str'
+      on_validation_failure: discard
+
+transforms:
+- name: fetch_tutorial_html
+  plugin: blob_fetch
+  input: tutorial_urls
+  on_success: output
+  on_error: fetch_failures
+  options:
+    url_field: url
+    allowed_content_types:
+    - text/html
+    http:
+      abuse_contact: examples@example.com
+      fetch_reason: Blob transform example using public tutorial demo pages
+      timeout: 15
+    schema:
+      mode: fixed
+      fields:
+      - 'manifest_index: int'
+      - 'url: str'
+      - 'label: str'
+
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/blob_transforms/output/tutorial_html_blobs.jsonl
+      format: jsonl
+      schema:
+        mode: fixed
+        fields:
+        - 'manifest_index: int'
+        - 'url: str'
+        - 'label: str'
+        - 'blob_ref: str'
+        - 'blob_content_type: str'
+        - 'blob_size_bytes: int'
+        - 'blob_sha256: str'
+        - 'fetch_status: int'
+        - 'fetch_url_final: str'
+        - 'fetch_url_final_ip: str'
+  fetch_failures:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/blob_transforms/output/tutorial_html_fetch_failures.jsonl
+      format: jsonl
+      schema:
+        mode: observed
+
+landscape:
+  url: sqlite:///examples/blob_transforms/runs/audit.db
+
+payload_store:
+  backend: filesystem
+  base_path: examples/blob_transforms/payloads

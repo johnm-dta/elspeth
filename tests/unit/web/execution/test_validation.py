@@ -590,8 +590,8 @@ class TestSkippedCheckDeduplication:
         assert "skipped" in skipped.detail.lower()
 
 
-class TestValidatePipelineWebScrapeNetworkPolicy:
-    """Web-authored web_scrape configs must not widen SSRF allowlists."""
+class TestValidatePipelineWebFetchNetworkPolicy:
+    """Web-authored fetch transforms must not widen SSRF allowlists."""
 
     @staticmethod
     def _web_scrape_options(allowed_hosts: object = "public_only") -> dict[str, object]:
@@ -603,6 +603,18 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
             "http": {
                 "abuse_contact": "ops@somecompany.gov.au",
                 "scraping_reason": "User-authorised public web fetch",
+                "allowed_hosts": allowed_hosts,
+            },
+        }
+
+    @staticmethod
+    def _blob_fetch_options(allowed_hosts: object = "public_only") -> dict[str, object]:
+        return {
+            "schema": {"mode": "fixed", "fields": ["url: str"]},
+            "url_field": "url",
+            "http": {
+                "abuse_contact": "ops@somecompany.gov.au",
+                "fetch_reason": "User-authorised public file fetch",
                 "allowed_hosts": allowed_hosts,
             },
         }
@@ -629,6 +641,32 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
         assert _check(result, "web_scrape_network_policy").passed is False
         assert result.errors[0].component_id == "test_node"
         assert result.errors[0].error_code == "web_scrape_private_network_not_allowed"
+        assert "allow_private" in result.errors[0].message
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_blob_fetch_allow_private_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="blob_fetch",
+                    options=self._blob_fetch_options("allow_private"),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        assert result.errors[0].component_id == "test_node"
+        assert result.errors[0].error_code == "web_fetch_private_network_not_allowed"
+        assert "blob_fetch.http.allowed_hosts" in result.errors[0].message
         assert "allow_private" in result.errors[0].message
         mock_yaml_gen.generate_yaml.assert_not_called()
 

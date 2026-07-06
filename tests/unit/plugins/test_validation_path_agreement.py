@@ -290,6 +290,31 @@ _TRANSFORM_REJECTION_CASES = [
         "content_field and fingerprint_field must differ",
         id="web_scrape-field-collision",
     ),
+    # ── blob_fetch ───────────────────────────────────────────────────────
+    pytest.param(
+        "blob_fetch",
+        {
+            "schema": _make_observed_schema(),
+            "url_field": "blob_ref",  # collides with default blob_ref output field
+            "http": {
+                "abuse_contact": "admin@example.com",
+                "fetch_reason": "testing",
+            },
+        },
+        "url_field.*collides",
+        id="blob_fetch-url-field-output-collision",
+    ),
+    # ── blob_csv_expand ──────────────────────────────────────────────────
+    pytest.param(
+        "blob_csv_expand",
+        {
+            "schema": _make_observed_schema(),
+            "blob_ref_field": "blob_ref",
+            "row_index_field": "blob_ref",  # collides with input blob reference
+        },
+        "row_index_field.*collides",
+        id="blob_csv_expand-row-index-blob-ref-collision",
+    ),
     # ── report_assemble ───────────────────────────────────────────────────
     pytest.param(
         "report_assemble",

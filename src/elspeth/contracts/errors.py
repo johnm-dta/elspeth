@@ -196,6 +196,7 @@ TransformActionCategory = Literal[
     "split",  # One input row emitted multiple output rows
     "aggregated",  # Multiple input rows emitted aggregate output
     # Plugin-specific actions
+    "expanded_blob",  # Blob parser emitted rows from stored payload bytes
     "query_completed",  # LLM single-query completion
     "multi_query_enriched",  # LLM multi-query execution completed
     "rag_retrieval",  # RAG retrieval pipeline completed
@@ -340,6 +341,16 @@ TransformErrorCategory = Literal[
     "validation_failed",
     "invalid_input",
     "too_many_lines",  # Line-expanding transform input exceeds configured max_lines
+    "blob_not_found",
+    "blob_too_large",
+    "decode_failed",
+    "empty_csv",
+    "csv_exhausted_during_skip_rows",
+    "csv_parse_error",
+    "csv_header_error",
+    "csv_config_error",
+    "csv_column_count_mismatch",
+    "too_many_rows",
     # Template errors
     "template_rendering_failed",
     "template_context_failed",  # Multi-query template context build failed (missing field)
@@ -373,6 +384,7 @@ TransformErrorCategory = Literal[
     # Content extraction errors (Tier 3 boundary - external HTML/text parsing)
     "content_extraction_failed",
     "non_text_content_type",  # Response content-type is not text/* -- refused before extraction
+    "unsupported_content_type",
     "body_too_large",  # Response body exceeds configured max_body_bytes limit
     # Retrieval errors (RAG retrieval transform)
     "retrieval_failed",
@@ -526,9 +538,12 @@ class TransformErrorReason(TypedDict):
     error_type: NotRequired[str]
     message: NotRequired[str]
     url: NotRequired[str]
+    blob_ref: NotRequired[str]
+    encoding: NotRequired[str]
 
     # Field collision context
     collisions: NotRequired[list[str]]  # Field names that would be overwritten
+    fields: NotRequired[list[str]]
 
     # Multi-query/template context
     query: NotRequired[str]
@@ -561,6 +576,14 @@ class TransformErrorReason(TypedDict):
     content_type: NotRequired[str]
     body_size: NotRequired[int]  # Actual response body size in bytes (body_too_large errors)
     max_body_bytes: NotRequired[int]  # Configured limit in bytes (body_too_large errors)
+    max_blob_bytes: NotRequired[int]  # Configured blob parser limit in bytes
+    phase: NotRequired[str]  # Parser phase: skip_rows, header, data, etc.
+    line_number: NotRequired[int]  # Source text line number for parser errors
+    row_number: NotRequired[int]  # Data row number for parser errors
+    row_count: NotRequired[int]  # Observed rows before rejecting expansion
+    max_output_rows: NotRequired[int]  # Configured row-expansion limit
+    skip_rows: NotRequired[int]  # Configured leading rows to skip
+    rows_skipped: NotRequired[int]  # Actual rows skipped before exhaustion
 
     # Type validation context
     expected: NotRequired[str]

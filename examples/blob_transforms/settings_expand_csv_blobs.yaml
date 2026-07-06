@@ -1,0 +1,68 @@
+sources:
+  primary:
+    plugin: csv
+    on_success: blob_manifest
+    options:
+      path: examples/blob_transforms/input/csv_blob_manifest.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'manifest_index: int'
+        - 'source_name: str'
+        - 'source_url: str'
+        - 'blob_ref: str'
+      on_validation_failure: discard
+
+transforms:
+- name: expand_csv_blob
+  plugin: blob_csv_expand
+  input: blob_manifest
+  on_success: output
+  on_error: expansion_failures
+  options:
+    blob_ref_field: blob_ref
+    skip_rows: 1
+    columns:
+    - id
+    - text
+    include_row_index: true
+    row_index_field: csv_row_index
+    schema:
+      mode: fixed
+      fields:
+      - 'manifest_index: int'
+      - 'source_name: str'
+      - 'source_url: str'
+      - 'blob_ref: str'
+
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: examples/blob_transforms/output/expanded_csv_rows.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'manifest_index: int'
+        - 'source_name: str'
+        - 'source_url: str'
+        - 'blob_ref: str'
+        - 'id: str'
+        - 'text: str'
+        - 'csv_row_index: int'
+  expansion_failures:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/blob_transforms/output/expansion_failures.jsonl
+      format: jsonl
+      schema:
+        mode: observed
+
+landscape:
+  url: sqlite:///examples/blob_transforms/runs/audit.db
+
+payload_store:
+  backend: filesystem
+  base_path: examples/blob_transforms/payloads

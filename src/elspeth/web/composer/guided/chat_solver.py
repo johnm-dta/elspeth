@@ -396,17 +396,22 @@ def _build_step_1_source_dynamic_block(
         "later transform that reads one of them wires cleanly at the wiring step. "
         "Keep `mode` `observed` so any other columns still pass through. "
         "For CSV data, include a header row in `content` and set "
-        "`mime_type` to `text/csv`. When the user wants to FETCH or SCRAPE one or more "
-        "URLs, the source is an INLINE `json` (or `csv`) dataset whose rows carry each "
+        "`mime_type` to `text/csv`. When the user wants to FETCH one or more remote "
+        "document files from URL(s), make the source an INLINE `json` or `csv` manifest "
+        "whose rows carry each URL, then add downstream transform nodes: `blob_fetch` "
+        "to create blob refs and a parser transform such as `blob_csv_expand` to expand "
+        "the blob into rows. Do not choose a fetcher as the source plugin. When the user "
+        "wants to SCRAPE one or more webpages into row content, the source is an INLINE "
+        "`json` (or `csv`) dataset whose rows carry each "
         "URL in a `url` column — e.g. json `content` of "
         '`[{"url": "https://example/a"}, {"url": "https://example/b"}]`. Declare that '
         "`url` column as guaranteed on the source `schema` "
         '(`{"mode": "observed", "guaranteed_fields": ["url"]}`) so the downstream '
         "web_scrape transform's required `url` input is satisfied at the wiring step "
         "(an observed-mode source that guarantees nothing fails that contract). You "
-        "must NOT choose a `web_scraper`/`web_scrape` source: fetching pages is a "
-        "downstream TRANSFORM applied later, never a source plugin. The only valid "
-        "source plugins are `azure_blob`, `csv`, `dataverse`, `json`, `null`, `text`. "
+        "must NOT choose a `web_scraper`/`web_scrape` source: scraping pages is a "
+        "downstream TRANSFORM applied later, never a source plugin. The valid "
+        "source plugins are `azure_blob`, `csv`, `dataverse`, `json`, `null`, and `text`. "
         "Preserve user-supplied values exactly in the file "
         "content; do not invent hidden pipeline transforms. Also set `on_validation_failure` "
         "when you resolve a source: use `discard` for a demo source that is valid by "
@@ -726,9 +731,7 @@ async def maybe_resolve_step_1_source_chat(
                     continue
                 arguments = function.arguments
                 if not isinstance(arguments, str):
-                    raise ValueError(
-                        f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}"
-                    )
+                    raise ValueError(f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}")
                 result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
                 status = ComposerLLMCallStatus.SUCCESS
                 return Step1SourceChatOutcome(resolution=result, prose_reply=None)

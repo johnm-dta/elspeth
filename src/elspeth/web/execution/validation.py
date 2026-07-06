@@ -139,6 +139,8 @@ _CHECK_ROUTE_TARGETS = CHECK_ROUTE_TARGETS
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
+_WEB_FETCH_TRANSFORMS = frozenset({"blob_fetch", "web_scrape"})
+
 
 def _execution_ready() -> ValidationReadiness:
     return ValidationReadiness(
@@ -1016,9 +1018,9 @@ def validate_pipeline(
             )
         )
 
-    web_scrape_network_errors: list[ValidationError] = []
+    web_fetch_network_errors: list[ValidationError] = []
     for node in state.nodes:
-        if node.plugin != "web_scrape":
+        if node.plugin not in _WEB_FETCH_TRANSFORMS:
             continue
         http_options = node.options["http"] if "http" in node.options else None
         if not isinstance(http_options, Mapping):
@@ -1028,35 +1030,36 @@ def validate_pipeline(
         allowed_hosts = http_options["allowed_hosts"]
         if allowed_hosts == "allow_private":
             message = (
-                "web_scrape.http.allowed_hosts='allow_private' is not permitted in web execution. "
+                f"{node.plugin}.http.allowed_hosts='allow_private' is not permitted in web execution. "
                 "Web-authored pipelines may only use public SSRF policy; private-network fetching requires "
                 "an operator-owned runtime outside the web composer."
             )
         elif isinstance(allowed_hosts, Sequence) and not isinstance(allowed_hosts, str):
             message = (
-                "web_scrape.http.allowed_hosts CIDR allowlists are not permitted in web execution. "
+                f"{node.plugin}.http.allowed_hosts CIDR allowlists are not permitted in web execution. "
                 "Web-authored pipelines may only use allowed_hosts='public_only'; private-network fetching "
                 "requires an operator-owned runtime outside the web composer."
             )
         else:
             continue
-        web_scrape_network_errors.append(
+        error_code = "web_scrape_private_network_not_allowed" if node.plugin == "web_scrape" else "web_fetch_private_network_not_allowed"
+        web_fetch_network_errors.append(
             ValidationError(
                 component_id=node.id,
                 component_type="transform",
                 message=message,
-                suggestion="Set web_scrape.http.allowed_hosts to 'public_only' or remove the option.",
-                error_code="web_scrape_private_network_not_allowed",
+                suggestion=f"Set {node.plugin}.http.allowed_hosts to 'public_only' or remove the option.",
+                error_code=error_code,
             )
         )
 
-    if web_scrape_network_errors:
-        affected_nodes = tuple(error.component_id for error in web_scrape_network_errors if error.component_id is not None)
+    if web_fetch_network_errors:
+        affected_nodes = tuple(error.component_id for error in web_fetch_network_errors if error.component_id is not None)
         checks.append(
             ValidationCheck(
                 name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
                 passed=False,
-                detail="web_scrape private-network allowlists are not permitted in web execution",
+                detail="web fetch transform private-network allowlists are not permitted in web execution",
                 affected_nodes=affected_nodes,
                 outcome_code=None,
             )
@@ -1065,11 +1068,11 @@ def validate_pipeline(
         return ValidationResult(
             is_valid=False,
             checks=checks,
-            errors=web_scrape_network_errors,
+            errors=web_fetch_network_errors,
             readiness=_blocked_readiness(
                 code="web_scrape_network_policy",
-                detail="web_scrape private-network allowlists are not permitted in web execution.",
-                component_id=web_scrape_network_errors[0].component_id,
+                detail="web fetch transform private-network allowlists are not permitted in web execution.",
+                component_id=web_fetch_network_errors[0].component_id,
                 component_type="transform",
             ),
         )
@@ -1078,7 +1081,7 @@ def validate_pipeline(
         ValidationCheck(
             name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
             passed=True,
-            detail="No web_scrape private-network allowlists found",
+            detail="No web fetch transform private-network allowlists found",
             affected_nodes=(),
             outcome_code=None,
         )

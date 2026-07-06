@@ -15,8 +15,9 @@ predicate:
 
 i.e. every Source and every Sink is uniformly boundary, and a Transform
 is boundary iff its declared ``Determinism`` is one of the audit-flagged
-classes (currently ``EXTERNAL_CALL`` and ``NON_DETERMINISTIC``). This
-module does NOT participate in that classification.
+classes (currently ``IO_READ``, ``EXTERNAL_CALL``, and
+``NON_DETERMINISTIC``). This module does NOT participate in that
+classification.
 
 WHY THIS MODULE EXISTS — AUDIT DISCOVERABILITY
 ==============================================
@@ -43,13 +44,17 @@ decoupled: a misclassified plugin fails one test, an undeclared catalog
 addition fails this test, and adding a Tier-3 crossing is impossible
 without a production-code diff that audit reviewers will see.
 
-TWO-TIER RATIONALE FOR BOUNDARY TRANSFORMS
+TRANSFORM BOUNDARY RATIONALE
 ==========================================
 
 (Preserved verbatim from the deleted ``trust.py`` so the historical
 distinction does not have to be rediscovered.)
 
-  - EXTERNAL_CALL determinism (automated): ``web_scrape``,
+  - IO_READ determinism (automated): payload/file parser transforms such
+    as ``blob_csv_expand``. These do not call the network themselves, but
+    they read blob-backed external bytes and cross the parser trust
+    boundary into row data.
+  - EXTERNAL_CALL determinism (automated): ``blob_fetch``, ``web_scrape``,
     ``rag_retrieval``, ``azure_content_safety``, ``azure_prompt_shield``.
     These plugins declare ``Determinism.EXTERNAL_CALL`` and the runtime
     predicate picks them up automatically.
@@ -138,6 +143,8 @@ EXPECTED_TRANSFORM_DETERMINISMS: dict[str, Determinism] = {
     "azure_content_safety": Determinism.EXTERNAL_CALL,
     "azure_document_intelligence": Determinism.EXTERNAL_CALL,
     "azure_prompt_shield": Determinism.EXTERNAL_CALL,
+    "blob_csv_expand": Determinism.IO_READ,
+    "blob_fetch": Determinism.EXTERNAL_CALL,
     "batch_classifier_metrics": Determinism.DETERMINISTIC,
     "batch_data_quality_report": Determinism.DETERMINISTIC,
     "batch_distribution_profile": Determinism.DETERMINISTIC,
@@ -170,5 +177,9 @@ EXPECTED_TRANSFORM_DETERMINISMS: dict[str, Determinism] = {
 EXPECTED_BOUNDARY_SOURCES: frozenset[str] = frozenset(EXPECTED_SOURCE_DETERMINISMS)
 EXPECTED_BOUNDARY_SINKS: frozenset[str] = frozenset(EXPECTED_SINK_DETERMINISMS)
 EXPECTED_BOUNDARY_TRANSFORMS: frozenset[str] = frozenset(
-    {name for name, det in EXPECTED_TRANSFORM_DETERMINISMS.items() if det in {Determinism.EXTERNAL_CALL, Determinism.NON_DETERMINISTIC}},
+    {
+        name
+        for name, det in EXPECTED_TRANSFORM_DETERMINISMS.items()
+        if det in {Determinism.IO_READ, Determinism.EXTERNAL_CALL, Determinism.NON_DETERMINISTIC}
+    },
 )

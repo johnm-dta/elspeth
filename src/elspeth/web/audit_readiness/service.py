@@ -345,20 +345,21 @@ def _build_validation_row(result: ValidationResult) -> ReadinessRow:
 # ``Determinism``; if a future rename drops a value from the enum the
 # test surfaces immediately.
 #
-# Current internal classifications (every other Determinism value
-# automatically classifies as audit-flagged for Transforms):
+# Current internal classifications:
 #
 #   DETERMINISTIC — pure functions: replay reproduces output from input.
 #   SEEDED         — pseudo-random, seed captured: replay reproducible.
-#   IO_READ        — Transforms only; reads from filesystem/env. Sources
-#                    short-circuit boundary via the kind check, so a
-#                    rare IO_READ Transform is internal here.
 #   IO_WRITE       — Transforms only; writes to filesystem/env. Sinks
 #                    short-circuit boundary via the kind check, so a
 #                    rare IO_WRITE Transform is internal here.
 #
-# The complement (currently {EXTERNAL_CALL, NON_DETERMINISTIC}) carries
-# two audit semantics that happen to share a signal:
+# The complement (currently {IO_READ, EXTERNAL_CALL, NON_DETERMINISTIC})
+# carries audit semantics that happen to share a signal:
+#
+#   IO_READ — transform reads non-row bytes or filesystem/payload-store
+#             content and turns it into row data. This is a trust-boundary
+#             parser surface for blob-backed document ingestion, even when
+#             the read target is an internal run payload store.
 #
 #   EXTERNAL_CALL — crosses an external trust boundary via network
 #                   request (web_scrape, RAG, Azure moderation). The
@@ -376,7 +377,6 @@ _INTERNAL_TRANSFORM_DETERMINISMS: frozenset[Determinism] = frozenset(
     {
         Determinism.DETERMINISTIC,
         Determinism.SEEDED,
-        Determinism.IO_READ,
         Determinism.IO_WRITE,
     },
 )
@@ -409,7 +409,7 @@ assert frozenset(Determinism) >= _INTERNAL_TRANSFORM_DETERMINISMS, (
 # ``_AUDIT_FLAGGED_DETERMINISMS`` set (membership, name, or wire-format
 # meaning). The pin is opaque to consumers — they record it verbatim and
 # never parse the version string.
-_BOUNDARY_RULE_VERSION = "phase-7a-v1"
+_BOUNDARY_RULE_VERSION = "phase-7a-v2"
 
 
 def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
@@ -420,7 +420,8 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
       - it is a Sink — by definition emits pipeline data to an external
         destination (file, database, blob store, downstream service)
       - it is a Transform whose declared determinism is in
-        ``_AUDIT_FLAGGED_DETERMINISMS`` (EXTERNAL_CALL or NON_DETERMINISTIC)
+        ``_AUDIT_FLAGGED_DETERMINISMS`` (IO_READ, EXTERNAL_CALL, or
+        NON_DETERMINISTIC)
 
     The predicate is derived from (kind, determinism) so any future plugin
     is classified correctly at registration time without a separate
@@ -428,7 +429,7 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
 
     The rule version encoded by this predicate and
     ``_AUDIT_FLAGGED_DETERMINISMS`` is ``_BOUNDARY_RULE_VERSION``
-    (currently ``"phase-7a-v1"``). Bump that constant on any semantic
+    (currently ``"phase-7a-v2"``). Bump that constant on any semantic
     change here. See its module-level docstring for the
     persistence-vs-UX rationale.
 

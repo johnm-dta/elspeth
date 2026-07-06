@@ -117,12 +117,13 @@ def test_every_sink_classifies_as_boundary() -> None:
         )
 
 
-def test_external_call_transforms_classify_as_boundary() -> None:
-    """Transforms declaring Determinism.EXTERNAL_CALL are boundary;
+def test_audit_flagged_transforms_classify_as_boundary() -> None:
+    """Transforms declaring an audit-flagged determinism are boundary;
     every other Transform is internal-only. The per-plugin determinism
     map pins each transform's declared value so any drift (an internal
-    transform mistakenly flagged EXTERNAL_CALL or vice versa, or any
-    silent value change) fails here with a per-name diff."""
+    transform mistakenly flagged IO_READ, EXTERNAL_CALL, or
+    NON_DETERMINISTIC, or any silent value change) fails here with a
+    per-name diff."""
     manager = _make_manager()
     actual = _registered_determinisms(list(manager.get_transforms()))
     _assert_per_plugin_parity(actual, EXPECTED_TRANSFORM_DETERMINISMS, "Transform")

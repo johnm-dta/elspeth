@@ -1,0 +1,7 @@
+input/csv_blob_manifest.csv
+output/*
+!output/.gitkeep
+runs/*
+!runs/.gitkeep
+payloads/*
+!payloads/.gitkeep

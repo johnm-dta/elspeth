@@ -197,6 +197,7 @@ class TestDiscoverAllPlugins:
         assert "null" in source_names
         # Azure blob source lives in plugins/azure/
         assert "azure_blob" in source_names
+        assert "web_source" not in source_names
 
     def test_discover_all_transforms(self) -> None:
         """Verify all transforms are discovered including llm/ and transforms/azure/."""
@@ -205,6 +206,8 @@ class TestDiscoverAllPlugins:
         discovered = discover_all_plugins()
 
         transform_names = [cls.name for cls in discovered["transforms"]]  # type: ignore[attr-defined]
+        assert "blob_csv_expand" in transform_names
+        assert "blob_fetch" in transform_names
         assert "passthrough" in transform_names
         assert "field_mapper" in transform_names
         # LLM transforms live in plugins/llm/ - verify unified is discovered
@@ -247,7 +250,9 @@ class TestDiscoverAllPlugins:
 
         # Expected counts verified during migration from hookimpl files
         EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
-        EXPECTED_TRANSFORM_COUNT = 27  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval
+        EXPECTED_TRANSFORM_COUNT = (
+            29  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval + blob_fetch + blob_csv_expand
+        )
         EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()

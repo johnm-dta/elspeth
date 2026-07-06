@@ -29,6 +29,7 @@ import pytest
 # For node registration
 from elspeth.contracts import NodeType, RouteDestination, RowResult, SourceRow, TokenInfo, TransformProtocol, TransformResult
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.data import PluginSchema as _PermissiveSchema
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.enums import (
     BatchStatus,
@@ -458,6 +459,11 @@ def _make_mock_transform(
     # set it explicitly after construction.
     transform.passes_through_input = False
     transform.can_drop_rows = False
+    # The aggregation executor validates batch rows against
+    # transform.input_schema before flush; the base PluginSchema accepts any
+    # row, so validation is a no-op (same pattern as test_executors.py).
+    transform.input_schema = _PermissiveSchema
+    transform.output_schema = _PermissiveSchema
     transform._output_schema_config = None
     transform.effective_static_contract.return_value = frozenset()
     if result is not None:

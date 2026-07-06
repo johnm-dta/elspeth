@@ -47,6 +47,27 @@ _REPLAY_ONLY_DETERMINISM = (
 )
 
 
+def _validate_node_determinism_values(raw_values: Sequence[object], *, run_id: str) -> list[Determinism]:
+    """Validate raw node determinism values loaded from the audit database."""
+    determinism_values: list[Determinism] = []
+    for det_value in raw_values:
+        if det_value is None:
+            raise AuditIntegrityError(f"NULL determinism value in nodes table for run {run_id} — audit data corruption")
+        if not isinstance(det_value, str):
+            raise AuditIntegrityError(
+                f"Invalid determinism value {det_value!r} in nodes table for run {run_id} — "
+                f"expected one of {[d.value for d in Determinism]}"
+            )
+        try:
+            determinism_values.append(Determinism(det_value))
+        except ValueError as exc:
+            raise AuditIntegrityError(
+                f"Invalid determinism value '{det_value}' in nodes table for run {run_id} — "
+                f"expected one of {[d.value for d in Determinism]}"
+            ) from exc
+    return determinism_values
+
+
 def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
     """Compute reproducibility grade from node determinism values.
 
@@ -83,18 +104,7 @@ def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
         result = conn.execute(query_all)
         raw_values = [row[0] for row in result.fetchall()]
 
-    # Validate all determinism values and convert to enum members
-    determinism_values: list[Determinism] = []
-    for det_value in raw_values:
-        if det_value is None:
-            raise AuditIntegrityError(f"NULL determinism value in nodes table for run {run_id} — audit data corruption")
-        try:
-            determinism_values.append(Determinism(det_value))
-        except ValueError as exc:
-            raise AuditIntegrityError(
-                f"Invalid determinism value '{det_value}' in nodes table for run {run_id} — "
-                f"expected one of {[d.value for d in Determinism]}"
-            ) from exc
+    determinism_values = _validate_node_determinism_values(raw_values, run_id=run_id)
 
     # Check if any non-reproducible determinism values exist — both sides
     # are now Determinism enum members, no implicit StrEnum comparison.
@@ -278,6 +288,10 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Seque
                 f"Invalid reproducibility_grade '{current_grade}' for run {run_id} — "
                 f"expected one of {[g.value for g in ReproducibilityGrade]}"
             ) from exc
+
+        query_all_determinism = select(nodes_table.c.determinism).where(nodes_table.c.run_id == run_id).distinct()
+        raw_determinism_values = [determinism_row[0] for determinism_row in conn.execute(query_all_determinism).fetchall()]
+        _validate_node_determinism_values(raw_determinism_values, run_id=run_id)
 
         # Only REPLAY_REPRODUCIBLE can be downgraded (other grades are unaffected)
         if grade != ReproducibilityGrade.REPLAY_REPRODUCIBLE:

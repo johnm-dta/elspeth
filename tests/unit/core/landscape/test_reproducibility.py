@@ -29,6 +29,7 @@ from elspeth.core.landscape.reproducibility import (
 from elspeth.core.landscape.schema import (
     calls_table,
     node_states_table,
+    nodes_table,
     operations_table,
     rows_table,
     runs_table,
@@ -462,4 +463,50 @@ class TestUpdateGradeAfterPurge:
         db, _factory = _setup()
         # begin_run doesn't set a grade by default, so it's NULL
         with pytest.raises(AuditIntegrityError, match="NULL reproducibility_grade"):
+            update_grade_after_purge(db, "run-1")
+
+    def test_invalid_node_determinism_raises_before_purge_downgrade(self) -> None:
+        """Invalid node determinism is Tier 1 corruption, not a non-critical payload."""
+        db, factory = _setup()
+        _create_nondeterministic_call(
+            db,
+            factory,
+            response_ref=None,
+            response_hash="resp_hash",
+            node_id="corrupt-node",
+        )
+        _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
+
+        with db.connection() as conn:
+            conn.execute(
+                nodes_table.update()
+                .where(nodes_table.c.run_id == "run-1")
+                .where(nodes_table.c.node_id == "corrupt-node")
+                .values(determinism="tampered")
+            )
+
+        with pytest.raises(AuditIntegrityError, match="Invalid determinism value 'tampered'"):
+            update_grade_after_purge(db, "run-1")
+
+    def test_invalid_node_determinism_raises_before_non_replay_grade_return(self) -> None:
+        """Non-replay grades still validate node determinism before returning."""
+        db, factory = _setup()
+        _create_nondeterministic_call(
+            db,
+            factory,
+            response_ref=None,
+            response_hash="resp_hash",
+            node_id="corrupt-node",
+        )
+        _set_grade(db, "run-1", ReproducibilityGrade.FULL_REPRODUCIBLE)
+
+        with db.connection() as conn:
+            conn.execute(
+                nodes_table.update()
+                .where(nodes_table.c.run_id == "run-1")
+                .where(nodes_table.c.node_id == "corrupt-node")
+                .values(determinism="tampered")
+            )
+
+        with pytest.raises(AuditIntegrityError, match="Invalid determinism value 'tampered'"):
             update_grade_after_purge(db, "run-1")

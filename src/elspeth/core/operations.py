@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import elspeth.contracts.errors as contract_errors
-from elspeth.contracts.secret_scrub import scrub_text_for_audit
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 
 if TYPE_CHECKING:
     from elspeth.contracts import Operation
@@ -143,11 +143,12 @@ def track_operation(
     Yields:
         OperationHandle with the Operation object and mutable output_data field
     """
+    scrubbed_input_data = scrub_payload_for_audit(input_data) if input_data is not None else None
     operation = recorder.begin_operation(
         run_id=run_id,
         node_id=node_id,
         operation_type=operation_type,
-        input_data=input_data,
+        input_data=scrubbed_input_data,
     )
 
     handle = OperationHandle(operation=operation)
@@ -180,10 +181,11 @@ def track_operation(
     finally:
         duration_ms = (time.perf_counter() - start_time) * 1000
         try:
+            scrubbed_output_data = scrub_payload_for_audit(handle.output_data) if handle.output_data is not None else None
             recorder.complete_operation(
                 operation_id=operation.operation_id,
                 status=status,
-                output_data=handle.output_data,
+                output_data=scrubbed_output_data,
                 error=error_msg,
                 duration_ms=duration_ms,
             )

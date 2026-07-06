@@ -11,6 +11,8 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
 from tests.fixtures.factories import make_context
 
+_REDACTED = "<redacted-secret>"
+
 
 @dataclass
 class _Operation:
@@ -83,6 +85,60 @@ def test_track_operation_records_completed_status_and_output_data() -> None:
     assert factory.begin_calls[0]["input_data"] == {"source": "csv"}
     assert factory.complete_calls[0]["status"] == "completed"
     assert factory.complete_calls[0]["output_data"] == {"rows_loaded": 3}
+
+
+def test_track_operation_scrubs_structured_input_metadata_before_persisting() -> None:
+    factory = _FakeFactory()
+    ctx = make_context()
+    secret = "sk-or-v1-" + ("B" * 24)
+
+    with track_operation(
+        recorder=cast(ExecutionRepository, factory),
+        run_id="run-001",
+        node_id="node-001",
+        operation_type="source_load",
+        ctx=ctx,
+        input_data={
+            "source": "api",
+            "headers": {"Authorization": f"Bearer {secret}"},
+            "nested": [{"password": "operator-password"}],
+        },
+    ):
+        pass
+
+    persisted_input = factory.begin_calls[0]["input_data"]
+    assert secret not in repr(persisted_input)
+    assert "operator-password" not in repr(persisted_input)
+    assert persisted_input == {
+        "source": "api",
+        "headers": {"Authorization": _REDACTED},
+        "nested": [{"password": _REDACTED}],
+    }
+
+
+def test_track_operation_scrubs_structured_output_metadata_before_persisting() -> None:
+    factory = _FakeFactory()
+    ctx = make_context()
+    token = "sk-" + ("C" * 24)
+
+    with track_operation(
+        recorder=cast(ExecutionRepository, factory),
+        run_id="run-001",
+        node_id="node-001",
+        operation_type="sink_write",
+        ctx=ctx,
+    ) as handle:
+        handle.output_data = {
+            "artifact_uri": f"https://user:{token}@storage.example.com/out.csv",
+            "rows_written": 3,
+        }
+
+    persisted_output = factory.complete_calls[0]["output_data"]
+    assert token not in repr(persisted_output)
+    assert persisted_output == {
+        "artifact_uri": _REDACTED,
+        "rows_written": 3,
+    }
 
 
 def test_track_operation_marks_failed_for_exception() -> None:

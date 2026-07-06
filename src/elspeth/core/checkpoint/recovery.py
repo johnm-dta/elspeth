@@ -41,13 +41,12 @@ from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+from elspeth.core.landscape.scheduler import BarrierJournalRepository, SchedulerEventStore
 from elspeth.core.landscape.schema import (
-    blocked_barrier_hold_clause,
     node_states_table,
     rows_table,
     runs_table,
     token_outcomes_table,
-    token_work_items_table,
     tokens_table,
 )
 
@@ -66,9 +65,7 @@ _CheckpointStateCacheKey = tuple[str, str | None]
 
 
 def _reject_source_row_json_constant(constant: str) -> Any:
-    raise AuditIntegrityError(
-        f"non-finite JSON constant {constant!r} - NaN/Infinity are not valid audit values"
-    )
+    raise AuditIntegrityError(f"non-finite JSON constant {constant!r} - NaN/Infinity are not valid audit values")
 
 
 __all__ = [
@@ -863,26 +860,11 @@ class RecoveryManager:
     def _get_buffered_journal_token_ids(self, run_id: str) -> set[str]:
         """Collect token IDs held at barriers in the scheduler journal.
 
-        F1: journal BLOCKED rows (token_work_items) own buffered token
-        payloads; resume restores them into executor buffers at processor
-        construction, so they are excluded from the re-drive work set.
-
-        The shared ``blocked_barrier_hold_clause`` predicate keeps ADR-028
-        queue-holds IN the re-drive work set — a queue-held token is
-        throttled, not waiting at a barrier, and nothing restores it if
-        resume skips it.
+        F1: scheduler-journal BLOCKED barrier rows own buffered token payloads;
+        resume restores them into executor buffers at processor construction,
+        so they are excluded from the re-drive work set.
         """
-        with self._db.engine.connect() as conn:
-            rows = (
-                conn.execute(
-                    select(token_work_items_table.c.token_id)
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(blocked_barrier_hold_clause())
-                )
-                .scalars()
-                .all()
-            )
-        return set(rows)
+        return set(BarrierJournalRepository(self._db.engine, events=SchedulerEventStore()).blocked_barrier_token_ids(run_id=run_id))
 
     def count_blocked_barrier_items(self, run_id: str) -> int:
         """Count journal BLOCKED barrier holds for a run.
@@ -893,14 +875,7 @@ class RecoveryManager:
         (a run with zero unprocessed rows but blocked barrier work must NOT
         early-complete) and by the CLI resume preflight display.
         """
-        with self._db.engine.connect() as conn:
-            result = conn.execute(
-                select(func.count())
-                .select_from(token_work_items_table)
-                .where(token_work_items_table.c.run_id == run_id)
-                .where(blocked_barrier_hold_clause())
-            ).scalar_one()
-        return int(result)
+        return BarrierJournalRepository(self._db.engine, events=SchedulerEventStore()).count_blocked_barrier_items(run_id=run_id)
 
     def _restore_barrier_scalars(self, checkpoint: Checkpoint) -> BarrierScalars | None:
         """Deserialize barrier scalar metadata once per observed checkpoint payload."""

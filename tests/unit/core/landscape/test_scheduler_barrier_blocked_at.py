@@ -14,6 +14,7 @@ NULL``.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import insert, select
 
@@ -144,12 +145,15 @@ def _enqueue_and_block(
     claimed = repo.claim_ready(run_id=run_id, lease_owner="w1", lease_seconds=30, now=now + timedelta(seconds=1))
     assert claimed is not None
     assert claimed.work_item_id == item.work_item_id
-    return repo.mark_blocked(
-        work_item_id=item.work_item_id,
-        queue_key=queue_key,
-        barrier_key=barrier_key,
-        now=now + timedelta(seconds=2),
-        expected_lease_owner="w1",
+    return cast(
+        TokenWorkItem,
+        repo.mark_blocked(
+            work_item_id=item.work_item_id,
+            queue_key=queue_key,
+            barrier_key=barrier_key,
+            now=now + timedelta(seconds=2),
+            expected_lease_owner="w1",
+        ),
     )
 
 
@@ -283,6 +287,10 @@ def test_list_blocked_barrier_items_returns_only_barrier_blocked_for_run() -> No
     assert items[0].token_id == "token-a1"
     assert items[0].barrier_key is not None  # queue-hold NOT swept in
     assert items[0].barrier_blocked_at is not None
+    assert repo.blocked_barrier_token_ids(run_id="run-A") == frozenset({"token-a1"})
+    assert repo.count_blocked_barrier_items(run_id="run-A") == 1
+    assert repo.count_blocked_barrier_items(run_id="run-B") == 1
+    assert repo.count_blocked_barrier_items(run_id="missing-run") == 0
 
 
 def test_list_blocked_barrier_items_orders_by_barrier_key_ingest_sequence_work_item_id() -> None:

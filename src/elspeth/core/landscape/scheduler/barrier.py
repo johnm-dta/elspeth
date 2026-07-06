@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Connection, RowMapping
 
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
@@ -1045,6 +1045,31 @@ class BarrierJournalRepository:
                 .all()
             )
         return [item_from_mapping(row) for row in rows]
+
+    def blocked_barrier_token_ids(self, *, run_id: str) -> frozenset[str]:
+        """Return token IDs currently held by journal BLOCKED barrier rows."""
+        with self._engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(token_work_items_table.c.token_id)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(blocked_barrier_hold_clause())
+                )
+                .scalars()
+                .all()
+            )
+        return frozenset(rows)
+
+    def count_blocked_barrier_items(self, *, run_id: str) -> int:
+        """Count journal BLOCKED barrier holds for a run."""
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                select(func.count())
+                .select_from(token_work_items_table)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(blocked_barrier_hold_clause())
+            ).scalar_one()
+        return int(result)
 
     def list_pending_blocked_barrier_items(self, *, run_id: str) -> list[TokenWorkItem]:
         """Return intake-pending BLOCKED barrier holds (``barrier_adopted_epoch IS NULL``).

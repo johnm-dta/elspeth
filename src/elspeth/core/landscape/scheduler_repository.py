@@ -634,6 +634,14 @@ class TokenSchedulerRepository:
         """Return BLOCKED barrier holds for a run in deterministic order."""
         return self.barriers.list_blocked_barrier_items(run_id=run_id)
 
+    def blocked_barrier_token_ids(self, *, run_id: str) -> frozenset[str]:
+        """Return token IDs currently held by journal BLOCKED barrier rows."""
+        return self.barriers.blocked_barrier_token_ids(run_id=run_id)
+
+    def count_blocked_barrier_items(self, *, run_id: str) -> int:
+        """Count journal BLOCKED barrier holds for a run."""
+        return self.barriers.count_blocked_barrier_items(run_id=run_id)
+
     def list_pending_blocked_barrier_items(self, *, run_id: str) -> list[TokenWorkItem]:
         """Return intake-pending BLOCKED barrier holds (``barrier_adopted_epoch IS NULL``)."""
         return self.barriers.list_pending_blocked_barrier_items(run_id=run_id)

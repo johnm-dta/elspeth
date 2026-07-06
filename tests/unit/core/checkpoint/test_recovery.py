@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,6 +28,7 @@ from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
+from elspeth.core.checkpoint import recovery as recovery_module
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
 from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS, IncompleteTokenSpec
 from elspeth.core.dag import ExecutionGraph
@@ -1040,6 +1042,58 @@ def test_count_blocked_barrier_items_counts_only_barrier_holds(
     assert recovery_manager.count_blocked_barrier_items("other-run") == 0
 
 
+def test_recovery_uses_scheduler_barrier_resume_boundary(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeBarrierJournalRepository:
+        def __init__(self, engine: Any, *, events: Any) -> None:
+            assert engine is db.engine
+
+        def blocked_barrier_token_ids(self, *, run_id: str) -> frozenset[str]:
+            calls.append(("ids", run_id))
+            return frozenset({"tok-held"})
+
+        def count_blocked_barrier_items(self, *, run_id: str) -> int:
+            calls.append(("count", run_id))
+            return 7
+
+    monkeypatch.setattr(recovery_module, "BarrierJournalRepository", FakeBarrierJournalRepository)
+
+    assert recovery_manager._get_buffered_journal_token_ids("run-boundary") == {"tok-held"}
+    assert recovery_manager.count_blocked_barrier_items("run-boundary") == 7
+    assert calls == [("ids", "run-boundary"), ("count", "run-boundary")]
+
+
+def test_recovery_barrier_resume_boundary_supports_read_only_handles(tmp_path: Path) -> None:
+    db_path = tmp_path / "landscape.db"
+    writable = LandscapeDB.from_url(f"sqlite:///{db_path}")
+    try:
+        run_id = "run-read-only-boundary"
+        with writable.connection() as conn:
+            _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+            _insert_row(conn, run_id, "row-1", row_index=0, source_data_ref=None)
+            _insert_token(conn, run_id, "tok-barrier", "row-1")
+            _insert_token(conn, run_id, "tok-queue", "row-1")
+            _insert_blocked_work_item(conn, run_id, "tok-barrier", "row-1", barrier_key="agg-node")
+            _insert_blocked_work_item(conn, run_id, "tok-queue", "row-1", barrier_key=None, queue_key="llm-rate-limit")
+    finally:
+        writable.close()
+
+    read_only = LandscapeDB.from_url(f"sqlite:///{db_path}", read_only=True, create_tables=False)
+    try:
+        assert read_only.is_read_only is True
+        recovery = RecoveryManager(read_only, CheckpointManager(read_only))
+
+        assert recovery._get_buffered_journal_token_ids(run_id) == {"tok-barrier"}
+        assert recovery.count_blocked_barrier_items(run_id) == 1
+    finally:
+        read_only.close()
+
+
 class _SimpleSchema(PluginSchema):
     model_config = ConfigDict(strict=False)
     id: int
@@ -1178,9 +1232,7 @@ def test_unprocessed_row_data_paths_share_payload_restoration_helper(
         source_schema_classes={NodeID("source-node"): _SimpleSchema},
     )
 
-    assert single_source_rows == [
-        ResumedRow(row_id="row-1", row_index=3, source_node_id=NodeID("source-node"), row_data={"id": 99})
-    ]
+    assert single_source_rows == [ResumedRow(row_id="row-1", row_index=3, source_node_id=NodeID("source-node"), row_data={"id": 99})]
     assert multi_source_rows == single_source_rows
     assert calls == [
         ("row-1", "payload-ref", payload_store, _SimpleSchema),

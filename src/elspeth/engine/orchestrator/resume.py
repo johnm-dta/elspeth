@@ -463,21 +463,31 @@ class _ResumeAuditSnapshot:
 
     ``reconstruct_resume_state`` used to interleave read-only reconstruction
     (manifest drift, source-lifecycle completeness, per-source schema/contract
-    maps, incomplete-token index) with durable mutation (the leadership CAS and
-    incomplete-batch rewrite) in one method, so a reader could not tell read
-    from write at the boundary (elspeth-e4f1eb6038). This snapshot is the
-    output of the read-only stage: every field is derived from read-only
-    audit/recovery queries and NOTHING here has mutated durable state. The
-    caller composes the durable stages (``_acquire_resume_leadership``,
+    maps) with durable mutation (the leadership CAS and incomplete-batch
+    rewrite) in one method, so a reader could not tell read from write at the
+    boundary (elspeth-e4f1eb6038). This snapshot is the output of the read-only
+    stage: every field is derived from read-only audit/recovery queries and
+    NOTHING here has mutated durable state. The caller composes the durable
+    stages (``_acquire_resume_leadership``, the post-CAS work-set computation,
     unprocessed-row restore, ``_repair_resume_batches``) on top of it, in order.
+
+    The resume WORK SET (row-replay IDs + incomplete-token continuations) is
+    deliberately NOT a field here. Every field this snapshot DOES carry is
+    topology-stable — fixed at run start and never mutated by row-level
+    processing (the runtime-VAL manifest, per-source schema/contract/lifecycle
+    maps) — so reading it before the seat CAS is sound. The work set is the
+    opposite: it is derived from ``token_outcomes`` / ``tokens`` /
+    ``node_states`` / the scheduler journal, all of which a competing resume
+    leader mutates. A pre-CAS work-set read is a check whose act (row replay)
+    is only serialized by the leadership CAS, so it must be recomputed AFTER
+    the seat is won, under leadership exclusivity — see
+    ``reconstruct_resume_state``.
     """
 
     factory: RecorderFactory
     recovery: RecoveryManager
     run_id: str
     worker_id: str
-    unprocessed_row_ids: Sequence[str]
-    incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
     schema_contracts_by_source: Mapping[NodeID, SchemaContract]
     source_names_by_source: Mapping[NodeID, str]
     source_lifecycle_by_source: Mapping[NodeID, str]
@@ -486,8 +496,6 @@ class _ResumeAuditSnapshot:
     def __post_init__(self) -> None:
         freeze_fields(
             self,
-            "unprocessed_row_ids",
-            "incomplete_by_row",
             "schema_contracts_by_source",
             "source_names_by_source",
             "source_lifecycle_by_source",
@@ -576,21 +584,35 @@ class ResumeCoordinator:
         # with zero mutation. See _acquire_resume_leadership.
         coordination_token = self._acquire_resume_leadership(snapshot)
 
+        # Stage 2.5 — compute the resume WORK SET, AFTER the seat CAS. The work
+        # set (row-replay IDs + incomplete-token continuations) is derived from
+        # token_outcomes / tokens / node_states / the scheduler journal — all
+        # row-level state a competing resume leader mutates. Reading it BEFORE
+        # the CAS is a stale check-then-act: a contender that won leadership
+        # first, wrote terminal outcomes / new incomplete tokens, then
+        # died or relinquished (returning the run to FAILED), would leave this
+        # attempt to win the CAS and replay a work set read before those writes
+        # — duplicating already-completed rows and missing newly-incomplete
+        # tokens. Recomputing here, under the leadership exclusivity the CAS
+        # just established, makes the read authoritative: no other resume can be
+        # concurrently mutating this run's row-level state once we hold the seat.
+        # The topology-stable reads (manifest drift, source-lifecycle
+        # completeness, schema/contract maps) legitimately stay pre-CAS in
+        # _load_resume_audit_snapshot; only the work set moves here.
+        workset = snapshot.recovery.get_resume_workset(snapshot.run_id)
+
         # Unprocessed-row payload restore, AFTER the seat CAS (elspeth-e3d1310b93).
         # get_unprocessed_row_data_by_source retrieves + json-decodes +
         # Pydantic-validates every unprocessed payload blob from the payload
-        # store, so running it after acquire_run_leadership means a LOSING resume
-        # contender is refused (NonResumableRunError, zero mutation) BEFORE paying
-        # that read cost — the CAS now guards the expensive input boundary, not
-        # just durable mutation. The cheap read-only refusals (manifest drift,
-        # source-lifecycle completeness) stay pre-CAS in _load_resume_audit_snapshot;
-        # nothing between the CAS and this restore consumes unprocessed_rows, and
-        # ResumeState is still assembled with it below.
+        # store, driven by the post-CAS work-set row_ids. Running it after
+        # acquire_run_leadership means a LOSING resume contender is refused
+        # (NonResumableRunError, zero mutation) BEFORE paying that read cost —
+        # the CAS guards the expensive input boundary, not just durable mutation.
         unprocessed_rows = snapshot.recovery.get_unprocessed_row_data_by_source(
             snapshot.run_id,
             payload_store,
             source_schema_classes=snapshot.source_schema_classes,
-            row_ids=snapshot.unprocessed_row_ids,
+            row_ids=workset.row_ids,
         )
 
         # Stage 3 — durable post-CAS repair (only the seat winner may run it):
@@ -601,7 +623,7 @@ class ResumeCoordinator:
             factory=snapshot.factory,
             run_id=snapshot.run_id,
             unprocessed_rows=unprocessed_rows,
-            incomplete_by_row=snapshot.incomplete_by_row,
+            incomplete_by_row=workset.incomplete_by_row,
             recovery_manager=snapshot.recovery,
             schema_contracts_by_source=snapshot.schema_contracts_by_source,
             source_names_by_source=snapshot.source_names_by_source,
@@ -618,13 +640,13 @@ class ResumeCoordinator:
 
         Create a fresh factory, verify resumability (runtime-VAL manifest drift
         + source-lifecycle completeness), and reconstruct the per-source
-        schema/contract maps and the incomplete-token index. Performs NO durable
-        mutation — the seat CAS (``_acquire_resume_leadership``), the
+        schema/contract maps. Performs NO durable mutation — the seat CAS
+        (``_acquire_resume_leadership``), the post-CAS work-set computation,
         unprocessed-row restore, and batch repair (``_repair_resume_batches``)
-        all run in the caller AFTER this returns. Incomplete-source refusal is an
-        operator-facing "start fresh or use a source-aware resume path" outcome;
-        it must not strand the run as RUNNING or rewrite retry batches merely
-        because the operator probed resume.
+        all run in the caller AFTER this returns. Incomplete-source refusal is
+        an operator-facing "start fresh or use a source-aware resume path"
+        outcome; it must not strand the run as RUNNING or rewrite retry batches
+        merely because the operator probed resume.
         """
         run_id = resume_point.checkpoint.run_id
         worker_id = worker_id or mint_worker_id(run_id)
@@ -675,13 +697,11 @@ class ResumeCoordinator:
         if incomplete_sources:
             raise IncompleteSourceResumeError(run_id, incomplete_sources)
 
-        # F1 fix: pre-compute resume work so the resume loop can dispatch
-        # partial-fork/expand/coalesce rows via mid-DAG continuation rather
-        # than whole-row restart (which would re-emit completed branches).
-        # The same query boundary also yields unprocessed row IDs that are
-        # reused by post-CAS row hydration instead of re-running the predicates.
-        resume_workset = recovery.get_resume_workset(run_id)
-
+        # NOTE: the resume WORK SET (row-replay IDs + incomplete-token
+        # continuations) is NOT computed here. It reads row-level state a
+        # competing resume leader mutates, so it must be read AFTER the seat CAS
+        # — see reconstruct_resume_state Stage 2.5. Only topology-stable
+        # reconstruction (schema/contract/lifecycle maps below) stays pre-CAS.
         source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         source_schema_classes: dict[NodeID, type[Any]] = {}
         schema_contracts_by_source: dict[NodeID, SchemaContract] = {}
@@ -700,8 +720,6 @@ class ResumeCoordinator:
             recovery=recovery,
             run_id=run_id,
             worker_id=worker_id,
-            unprocessed_row_ids=resume_workset.row_ids,
-            incomplete_by_row=resume_workset.incomplete_by_row,
             schema_contracts_by_source=schema_contracts_by_source,
             source_names_by_source=source_names_by_source,
             source_lifecycle_by_source=source_lifecycle_by_source,

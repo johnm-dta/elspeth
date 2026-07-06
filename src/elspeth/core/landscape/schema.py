@@ -29,6 +29,8 @@ from sqlalchemy import (
     text,
 )
 
+from elspeth.contracts.types import NODE_ID_MAX_LENGTH
+
 # Shared metadata for all tables
 metadata = MetaData()
 
@@ -113,9 +115,9 @@ metadata = MetaData()
 #        so state/edge route decisions cannot cross audit-run boundaries.
 SQLITE_SCHEMA_EPOCH = 22
 
-# Column width for node_id across all tables. Referenced by dag.py
-# for validation — changing this value requires an Alembic migration.
-NODE_ID_COLUMN_LENGTH = 64
+# Column width for node_id across all tables. The cross-layer identifier limit
+# lives in contracts.types; changing this value requires an Alembic migration.
+NODE_ID_COLUMN_LENGTH = NODE_ID_MAX_LENGTH
 
 
 class RunSourceLifecycleState(StrEnum):
@@ -205,7 +207,7 @@ run_sources_table = Table(
     "run_sources",
     metadata,
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("source_node_id", String(64), nullable=False),
+    Column("source_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("source_name", String(64), nullable=False),
     Column("plugin_name", String(128), nullable=False),
     Column("lifecycle_state", String(32), nullable=False),
@@ -231,7 +233,7 @@ Index("ix_run_sources_source_name", run_sources_table.c.run_id, run_sources_tabl
 nodes_table = Table(
     "nodes",
     metadata,
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("plugin_name", String(128), nullable=False),
     Column("node_type", String(32), nullable=False),
@@ -263,8 +265,8 @@ edges_table = Table(
     metadata,
     Column("edge_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("from_node_id", String(64), nullable=False),
-    Column("to_node_id", String(64), nullable=False),
+    Column("from_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
+    Column("to_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("label", String(64), nullable=False),
     Column("default_mode", String(16), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -328,7 +330,7 @@ rows_table = Table(
     metadata,
     Column("row_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("source_node_id", String(64), nullable=False),
+    Column("source_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("row_index", Integer),
     Column("source_row_index", Integer, nullable=False),
     Column("ingest_sequence", Integer, nullable=False),
@@ -420,7 +422,7 @@ token_work_items_table = Table(
     Column("run_id", String(64), nullable=False, index=True),
     Column("token_id", String(64), nullable=False),
     Column("row_id", String(64), nullable=False),
-    Column("node_id", String(64)),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH)),
     Column("step_index", Integer, nullable=False),
     Column("ingest_sequence", Integer, nullable=False),
     Column("row_payload_json", Text, nullable=False),
@@ -805,7 +807,7 @@ node_states_table = Table(
     Column("state_id", String(64), primary_key=True),
     Column("token_id", String(64), nullable=False),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("step_index", Integer, nullable=False),
     Column("attempt", Integer, nullable=False, default=0),
     Column("status", String(32), nullable=False),
@@ -854,7 +856,7 @@ operations_table = Table(
     metadata,
     Column("operation_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False, index=True),
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("operation_type", String(32), nullable=False),  # 'source_load' | 'sink_write' | 'runtime_preflight'
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
@@ -951,7 +953,7 @@ artifacts_table = Table(
         String(64),
         nullable=False,
     ),
-    Column("sink_node_id", String(64), nullable=False),
+    Column("sink_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("artifact_type", String(64), nullable=False),
     Column("path_or_uri", String(512), nullable=False),
     Column("content_hash", String(64), nullable=False),
@@ -992,7 +994,7 @@ batches_table = Table(
     metadata,
     Column("batch_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("aggregation_node_id", String(64), nullable=False),
+    Column("aggregation_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("aggregation_state_id", String(64)),
     Column("retry_of_batch_id", String(64)),
     Column("trigger_reason", String(128)),
@@ -1080,7 +1082,7 @@ validation_errors_table = Table(
     metadata,
     Column("error_id", String(32), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("node_id", String(64)),  # Source node where validation failed (nullable)
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH)),  # Source node where validation failed (nullable)
     Column("row_id", String(64), ForeignKey("rows.row_id")),  # Persisted quarantine row when one exists
     Column("row_hash", String(64), nullable=False),
     Column("row_data_json", Text),  # Store the row for debugging
@@ -1115,7 +1117,7 @@ transform_errors_table = Table(
     Column("error_id", String(32), primary_key=True),
     Column("run_id", String(64), nullable=False),
     Column("token_id", String(64), nullable=False),
-    Column("transform_id", String(64), nullable=False),  # Part of composite FK to nodes
+    Column("transform_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),  # Part of composite FK to nodes
     Column("row_hash", String(64), nullable=False),
     Column("row_data_json", Text),
     Column("error_details_json", Text),  # From TransformResult.error()

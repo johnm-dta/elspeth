@@ -7,6 +7,9 @@ the minimal graph state needed to trigger the specific error path.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from elspeth.contracts import EdgeInfo
@@ -178,6 +181,73 @@ class TestNodeInfoNodeIdLengthValidation:
 
 class TestNodeInfoIdentifierValidation:
     """NodeInfo must reject blank identifiers before they reach the graph/audit path."""
+
+    def test_node_id_length_contract_is_owned_by_contracts_not_landscape_schema(self) -> None:
+        import elspeth.core.dag.models as dag_models
+        from elspeth.contracts import types as contract_types
+        from elspeth.core.landscape import schema as landscape_schema
+
+        assert hasattr(contract_types, "NODE_ID_MAX_LENGTH")
+        assert dag_models._NODE_ID_MAX_LENGTH == contract_types.NODE_ID_MAX_LENGTH
+        assert landscape_schema.NODE_ID_COLUMN_LENGTH == contract_types.NODE_ID_MAX_LENGTH
+        assert landscape_schema.nodes_table.c.node_id.type.length == contract_types.NODE_ID_MAX_LENGTH
+        node_id_storage_columns = {("nodes", "node_id")}
+        for table in landscape_schema.metadata.tables.values():
+            for constraint in table.foreign_key_constraints:
+                for element in constraint.elements:
+                    if element.column.table.name == "nodes" and element.column.name == "node_id":
+                        node_id_storage_columns.add((table.name, element.parent.name))
+                        assert element.parent.type.length == contract_types.NODE_ID_MAX_LENGTH
+
+        dag_models_source = Path(dag_models.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(dag_models_source)
+        forbidden_landscape_schema_imports: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                forbidden_landscape_schema_imports.extend(
+                    alias.name for alias in node.names if alias.name == "elspeth.core.landscape.schema"
+                )
+            if isinstance(node, ast.ImportFrom):
+                if node.module == "elspeth.core.landscape.schema":
+                    forbidden_landscape_schema_imports.append(node.module)
+                if node.module == "elspeth.core.landscape":
+                    forbidden_landscape_schema_imports.extend(alias.name for alias in node.names if alias.name == "schema")
+        assert forbidden_landscape_schema_imports == []
+
+        schema_source = Path(landscape_schema.__file__).read_text(encoding="utf-8")
+        schema_tree = ast.parse(schema_source)
+        active_table: str | None = None
+        hardcoded_node_width_columns: list[str] = []
+        for node in ast.walk(schema_tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+                continue
+            if not isinstance(node.value.func, ast.Name) or node.value.func.id != "Table":
+                continue
+            if not node.value.args or not isinstance(node.value.args[0], ast.Constant):
+                continue
+            table_name = node.value.args[0].value
+            if not isinstance(table_name, str):
+                continue
+            active_table = table_name
+            for arg in node.value.args[2:]:
+                if not isinstance(arg, ast.Call) or not isinstance(arg.func, ast.Name) or arg.func.id != "Column":
+                    continue
+                if len(arg.args) < 2 or not isinstance(arg.args[0], ast.Constant):
+                    continue
+                column_name = arg.args[0].value
+                if (active_table, column_name) not in node_id_storage_columns:
+                    continue
+                type_arg = arg.args[1]
+                if (
+                    isinstance(type_arg, ast.Call)
+                    and isinstance(type_arg.func, ast.Name)
+                    and type_arg.func.id == "String"
+                    and type_arg.args
+                    and isinstance(type_arg.args[0], ast.Constant)
+                    and type_arg.args[0].value == 64
+                ):
+                    hardcoded_node_width_columns.append(f"{active_table}.{column_name}")
+        assert hardcoded_node_width_columns == []
 
     def test_node_info_rejects_empty_node_id(self) -> None:
         with pytest.raises(GraphValidationError, match="node_id must not be empty"):

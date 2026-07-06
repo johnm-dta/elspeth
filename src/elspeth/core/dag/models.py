@@ -14,8 +14,7 @@ from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.core.landscape.schema import NODE_ID_COLUMN_LENGTH
+from elspeth.contracts.types import NODE_ID_MAX_LENGTH, CoalesceName, NodeID
 
 if TYPE_CHECKING:
     from elspeth.contracts import PluginSchema, TransformProtocol
@@ -150,7 +149,7 @@ class BranchInfo:
             raise ValueError("BranchInfo.gate_node_id must not be empty")
 
 
-_NODE_ID_MAX_LENGTH = NODE_ID_COLUMN_LENGTH
+_NODE_ID_MAX_LENGTH = NODE_ID_MAX_LENGTH
 
 
 # Config stored on graph nodes varies by node type:

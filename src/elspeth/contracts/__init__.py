@@ -285,6 +285,7 @@ from elspeth.contracts.type_normalization import (
     require_supported_contract_type,
 )
 from elspeth.contracts.types import (
+    NODE_ID_MAX_LENGTH,
     AggregationName,
     BranchName,
     CoalesceName,
@@ -445,6 +446,7 @@ __all__ = [  # Grouped by category for readability
     "BranchName",
     "CoalesceName",
     "GateName",
+    "NODE_ID_MAX_LENGTH",
     "NodeID",
     "SinkName",
     "StepResolver",

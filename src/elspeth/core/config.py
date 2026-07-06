@@ -47,8 +47,8 @@ _expand_template_files = template_materialization._expand_template_files
 # leading to routing events recorded against wrong edges (audit corruption).
 _RESERVED_EDGE_LABELS = frozenset({"continue", "fork", "on_success"})
 
-# Names used in node_id generation must stay short enough to fit
-# landscape.schema nodes_table.c.node_id (String(64)).
+# Names used in node_id generation must stay short enough to fit the
+# contracts.types.NODE_ID_MAX_LENGTH audit/storage contract.
 # Worst-case generated format overhead is ~25 chars:
 #   "{prefix}_{name}_{hash12}"
 # so keep {name} <= 38.

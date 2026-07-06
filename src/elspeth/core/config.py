@@ -29,12 +29,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from elspeth.contracts.enums import OutputMode, RunMode
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
 from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT
-from elspeth.core import template_materialization
+from elspeth.core import dynaconf_normalization, template_materialization
 from elspeth.core.dependency_config import CollectionProbeConfig, CommencementGateConfig, DependencyConfig
 from elspeth.core.secrets import is_secret_field
 
+DynaconfKeyNormalizer = dynaconf_normalization.DynaconfKeyNormalizer
 TemplateFileError = template_materialization.TemplateFileError
 TemplateOptionMaterializer = template_materialization.TemplateOptionMaterializer
+_lowercase_schema_keys = dynaconf_normalization.lowercase_schema_keys
+_merge_dicts_preserving_env_override = dynaconf_normalization.merge_dicts_preserving_env_override
 _expand_template_files = template_materialization._expand_template_files
 
 # Reserved edge labels that cannot be used as user-defined routing names.
@@ -92,7 +95,6 @@ _DYNACONF_INTERNAL_KEYS = frozenset(
         "secrets",
     }
 )
-_STRUCTURAL_OPTION_KEYS = frozenset({"schema", "schema_config"})
 # The web execution path may substitute up to 1 MiB of inline blob content
 # before this in-memory loader parses resolved YAML. Keep the document cap
 # bounded but above that aggregate payload plus ordinary YAML overhead.
@@ -2286,124 +2288,6 @@ def _fingerprint_config_for_audit(
                     exporter["options"] = _fingerprint_secrets(exporter["options"], fail_if_no_key=fail_if_no_key)
 
     return config
-
-
-def _merge_dicts_preserving_env_override(base: dict[Any, Any], override: dict[Any, Any]) -> dict[Any, Any]:
-    """Merge normalized duplicate dict keys, with override values winning."""
-    merged = dict(base)
-    for key, value in override.items():
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merged[key] = _merge_dicts_preserving_env_override(existing, value)
-        else:
-            merged[key] = value
-    return merged
-
-
-def _lowercase_schema_keys(
-    obj: Any,
-    *,
-    _preserve_nested: bool = False,
-    _in_sinks: bool = False,
-    _in_options: bool = False,
-) -> Any:
-    """Lowercase dictionary keys for Pydantic schema matching, preserving user data.
-
-    Dynaconf returns keys in UPPERCASE when they come from environment variables,
-    but Pydantic expects lowercase field names. User data inside 'options' and
-    'routes' dicts must be preserved exactly as written - these contain
-    case-sensitive keys that must match runtime values:
-    - options: {"Score": "score"} where "Score" must match the LLM's JSON field name
-    - routes: {"High": "quality_ok"} where "High" must match the gate condition result
-
-    Sink name handling:
-    - FULLY UPPERCASE names (e.g., 'OUTPUT') are lowercased - these come from
-      env vars like ELSPETH_SINKS__OUTPUT__PLUGIN where Dynaconf uppercases
-    - Mixed-case names (e.g., 'MySink') are PRESERVED so the validator can
-      catch them and give a helpful "use lowercase" error
-
-    Args:
-        obj: Any value - dicts are processed recursively, lists have their
-             elements processed, other types pass through unchanged.
-        _preserve_nested: Internal flag - when True, stop lowercasing keys
-             (we're inside an 'options' or 'routes' dict).
-        _in_sinks: Internal flag - when True, we're processing sink name keys.
-        _in_options: Internal flag - when True, we're processing the immediate
-             plugin options dict, where known structural option keys may be
-             supplied by uppercase environment variable segments.
-
-    Returns:
-        The input with schema-level dict keys lowercased, but user data preserved.
-    """
-    if isinstance(obj, dict):
-        result: dict[Any, Any] = {}
-        env_structural_option_keys: set[str] = set()
-        for k, v in obj.items():
-            is_env_structural_option_key = _in_options and isinstance(k, str) and k.isupper() and k.lower() in _STRUCTURAL_OPTION_KEYS
-            # Determine the new key
-            if is_env_structural_option_key:
-                new_key = k.lower()
-            elif _preserve_nested:
-                # Inside options: preserve all keys exactly
-                new_key = k
-            elif _in_sinks:
-                # Sink names: lowercase only if FULLY UPPERCASE (env var origin)
-                # Preserve mixed-case so validator can catch and give helpful error
-                new_key = k.lower() if k.isupper() else k
-            else:
-                # Normal schema keys: always lowercase
-                new_key = k.lower()
-
-            # Determine how to process children
-            if is_env_structural_option_key:
-                # Env vars spell nested segments in uppercase. Within known
-                # structural option blocks such as schema, treat those segments
-                # as schema keys rather than case-sensitive user data.
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=False, _in_options=False)
-            elif _preserve_nested:
-                # Already inside options/routes: stay in preserve mode, ignore special keys
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=False)
-            elif new_key == "options":
-                # Options: preserve everything inside (user data)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=True)
-            elif new_key == "routes":
-                # Routes: preserve everything inside (user-defined route labels)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=False)
-            elif new_key == "branches":
-                # Branches: preserve everything inside (user-defined coalesce branch names)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=False)
-            elif new_key == "sinks":
-                # Entering sinks dict: next level has sink name keys
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=True, _in_options=False)
-            elif _in_sinks:
-                # At sink name level: value is SinkSettings, resume normal lowercasing
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=False, _in_options=False)
-            else:
-                # Normal recursion
-                child = _lowercase_schema_keys(v, _preserve_nested=_preserve_nested, _in_sinks=False, _in_options=False)
-
-            if new_key in result:
-                if is_env_structural_option_key:
-                    if isinstance(result[new_key], dict) and isinstance(child, dict):
-                        result[new_key] = _merge_dicts_preserving_env_override(result[new_key], child)
-                    else:
-                        result[new_key] = child
-                    env_structural_option_keys.add(new_key)
-                elif isinstance(new_key, str) and new_key in env_structural_option_keys:
-                    if isinstance(child, dict) and isinstance(result[new_key], dict):
-                        result[new_key] = _merge_dicts_preserving_env_override(child, result[new_key])
-                else:
-                    result[new_key] = child
-            else:
-                result[new_key] = child
-                if is_env_structural_option_key:
-                    env_structural_option_keys.add(new_key)
-        return result
-    if isinstance(obj, list):
-        return [
-            _lowercase_schema_keys(item, _preserve_nested=_preserve_nested, _in_sinks=_in_sinks, _in_options=_in_options) for item in obj
-        ]
-    return obj
 
 
 def load_settings(config_path: Path) -> ElspethSettings:

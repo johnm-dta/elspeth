@@ -4784,6 +4784,51 @@ class TestLowercaseSchemaKeysBranchPreservation:
     coalesce execution.
     """
 
+    def test_dynaconf_key_normalizer_preserves_declarative_user_data_paths(self) -> None:
+        from elspeth.core.dynaconf_normalization import USER_DATA_KEYS, DynaconfKeyNormalizer
+
+        normalizer = DynaconfKeyNormalizer()
+        result = normalizer.normalize(
+            {
+                "TRANSFORMS": [
+                    {
+                        "NAME": "classify",
+                        "OPTIONS": {
+                            "PromptKey": "preserved",
+                            "SCHEMA": {
+                                "MODE": "fixed",
+                                "FIELDS": ["Label: str"],
+                            },
+                        },
+                    }
+                ],
+                "GATES": [
+                    {
+                        "NAME": "router",
+                        "ROUTES": {
+                            "High": "urgent",
+                            "SCHEMA": "schema_sink",
+                        },
+                    }
+                ],
+                "COALESCE": [
+                    {
+                        "NAME": "merge",
+                        "BRANCHES": {
+                            "SentimentPath": "sentiment_out",
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert frozenset({"options", "routes", "branches"}) == USER_DATA_KEYS
+        assert result["transforms"][0]["name"] == "classify"
+        assert result["transforms"][0]["options"]["PromptKey"] == "preserved"
+        assert result["transforms"][0]["options"]["schema"] == {"mode": "fixed", "fields": ["Label: str"]}
+        assert result["gates"][0]["routes"] == {"High": "urgent", "SCHEMA": "schema_sink"}
+        assert result["coalesce"][0]["branches"] == {"SentimentPath": "sentiment_out"}
+
     def test_branches_keys_are_preserved(self) -> None:
         from elspeth.core.config import _lowercase_schema_keys
 

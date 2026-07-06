@@ -42,6 +42,7 @@ class _FakeQuery:
     token_parents: list[TokenParent] = field(default_factory=list)
     token_side_effect: Callable[[str], Token | None] | None = None
     get_token_calls: list[str] = field(default_factory=list)
+    explain_row_calls: list[tuple[str, str]] = field(default_factory=list)
 
     def get_token(self, token_id: str) -> Token | None:
         self.get_token_calls.append(token_id)
@@ -49,7 +50,18 @@ class _FakeQuery:
             return self.token_side_effect(token_id)
         return self.token
 
+    def get_token_for_run(self, run_id: str, token_id: str) -> Token | None:
+        self.get_token_calls.append(token_id)
+        if self.token_side_effect is not None:
+            token = self.token_side_effect(token_id)
+        else:
+            token = self.token
+        if token is None or token.run_id != run_id:
+            return None
+        return token
+
     def explain_row(self, _run_id: str, _row_id: str) -> RowLineage | None:
+        self.explain_row_calls.append((_run_id, _row_id))
         return self.row_lineage
 
     def get_node_states_for_token(self, _token_id: str) -> list[object]:
@@ -364,14 +376,16 @@ class TestExplainTier1Corruption:
                 parent_tokens=(),
             )
 
-    def test_explain_direct_token_run_mismatch_raises_audit_integrity(self) -> None:
-        """explain() must fail closed when token belongs to a different run."""
+    def test_explain_direct_token_run_mismatch_returns_none(self) -> None:
+        """Caller-provided token IDs are scoped to the requested run."""
         token = _make_token(token_id="tok-cross-run", row_id="row-1", run_id="run-2")
         row_lineage = _make_row_lineage()  # same row_id, requested/source run is run-1
         factory = _make_factory(token=token, row_lineage=row_lineage)
 
-        with pytest.raises(AuditIntegrityError, match="run_id mismatch"):
-            explain(factory.query, factory.data_flow, "run-1", token_id="tok-cross-run")
+        result = explain(factory.query, factory.data_flow, "run-1", token_id="tok-cross-run")
+
+        assert result is None
+        assert factory.query.explain_row_calls == []
 
 
 # ===========================================================================

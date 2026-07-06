@@ -165,8 +165,10 @@ def explain(
     # The token_id is guaranteed non-None at this point by control flow
     token_id = cast(str, token_id)
 
-    # Get the token
-    token = query.get_token(token_id)
+    # Caller-provided tokens are external lookup keys, so scope them to the
+    # requested run before loading row lineage. Tokens resolved from run-scoped
+    # token_outcomes remain Tier 1 data and keep fail-closed corruption checks.
+    token = query.get_token_for_run(run_id, token_id) if caller_provided_token_id else query.get_token(token_id)
     if token is None:
         if not caller_provided_token_id:
             # Token was resolved from our own token_outcomes table — it MUST exist

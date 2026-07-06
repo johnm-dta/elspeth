@@ -270,6 +270,14 @@ class QueryRepository:
             return None
         return self._token_loader.load(r)
 
+    def get_token_for_run(self, run_id: str, token_id: str) -> Token | None:
+        """Get a token by ID, scoped to a run."""
+        query = select(tokens_table).where(tokens_table.c.run_id == run_id, tokens_table.c.token_id == token_id)
+        r = self._ops.execute_fetchone(query)
+        if r is None:
+            return None
+        return self._token_loader.load(r)
+
     def get_token_parents(self, token_id: str) -> list[TokenParent]:
         """Get parent relationships for a token (backward lineage).
 

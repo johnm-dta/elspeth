@@ -106,13 +106,13 @@ class TestExplainInputValidationProperties:
         """Property: Providing only token_id is valid input."""
         query = create_autospec(QueryRepository, instance=True)
         data_flow = create_autospec(DataFlowRepository, instance=True)
-        query.get_token.return_value = None  # Token not found
+        query.get_token_for_run.return_value = None  # Token not found
 
         # Should not raise - returns None for not found
         result = explain(query, data_flow, run_id, token_id=token_id)
 
         assert result is None
-        query.get_token.assert_called_once_with(token_id)
+        query.get_token_for_run.assert_called_once_with(run_id, token_id)
 
     @given(run_id=id_strings, row_id=id_strings)
     @settings(max_examples=50)
@@ -136,14 +136,14 @@ class TestExplainInputValidationProperties:
         """
         query = create_autospec(QueryRepository, instance=True)
         data_flow = create_autospec(DataFlowRepository, instance=True)
-        query.get_token.return_value = None  # Token not found
+        query.get_token_for_run.return_value = None  # Token not found
 
         # Should use token_id path
         result = explain(query, data_flow, run_id, token_id=token_id, row_id=row_id)
 
         assert result is None
         # Should have queried by token_id, not row_id
-        query.get_token.assert_called_once_with(token_id)
+        query.get_token_for_run.assert_called_once_with(run_id, token_id)
         data_flow.get_token_outcomes_for_row.assert_not_called()
 
 
@@ -334,7 +334,7 @@ class TestExplainTierOneTrustProperties:
             run_id=run_id,
             fork_group_id="some-fork-group",
         )
-        query.get_token.return_value = token
+        query.get_token_for_run.return_value = token
 
         # Source row exists
         source_row = _SourceRowRecord(row_id="row_123", run_id=run_id)
@@ -370,7 +370,7 @@ class TestExplainReturnValueProperties:
         """Property: Non-existent token returns None (not exception)."""
         query = create_autospec(QueryRepository, instance=True)
         data_flow = create_autospec(DataFlowRepository, instance=True)
-        query.get_token.return_value = None
+        query.get_token_for_run.return_value = None
 
         result = explain(query, data_flow, run_id, token_id=token_id)
 
@@ -384,7 +384,7 @@ class TestExplainReturnValueProperties:
         data_flow = create_autospec(DataFlowRepository, instance=True)
 
         token = _TokenRecord(token_id=token_id, row_id="row_123", run_id=run_id)
-        query.get_token.return_value = token
+        query.get_token_for_run.return_value = token
         query.explain_row.return_value = None
 
         with pytest.raises(AuditIntegrityError, match="does not exist in rows table"):

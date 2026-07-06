@@ -534,6 +534,31 @@ class TestGetToken:
 
         assert token is None
 
+    def test_get_token_for_run_hides_foreign_run_token(self):
+        _, factory = _setup(run_id="run-a")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-b")
+        factory.data_flow.register_node(
+            run_id="run-b",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="src-b",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-b1", token_id="tok-b1")
+
+        unscoped_token = factory.query.get_token("tok-b1")
+        scoped_miss = factory.query.get_token_for_run("run-a", "tok-b1")
+        scoped_hit = factory.query.get_token_for_run("run-b", "tok-b1")
+
+        assert unscoped_token is not None
+        assert unscoped_token.run_id == "run-b"
+        assert scoped_miss is None
+        assert scoped_hit is not None
+        assert scoped_hit.token_id == "tok-b1"
+
 
 class TestGetTokenParents:
     """Tests for RecorderFactory query — parent relationships ordered by ordinal."""

@@ -11,7 +11,7 @@ from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.schema import token_parents_table, tokens_table
+from elspeth.core.landscape.schema import token_parents_table
 
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
@@ -232,20 +232,19 @@ def test_explain_rejects_cross_run_parent_relationship_from_corruption() -> None
         explain(setup.query, setup.data_flow, setup.run_id, token_id=child.token_id)
 
 
-def test_explain_rejects_token_run_id_mismatch_from_corruption() -> None:
-    setup = make_recorder_with_run(run_id="run-lineage-token-mismatch", source_node_id="source-lineage-token-mismatch")
-    _register_source_run(setup, run_id="run-lineage-token-mismatch-other", source_node_id="source-lineage-token-mismatch-other")
-    row, token = _create_row_token(setup, row_index=0, token_id="token-run-mismatch")
+def test_explain_direct_token_hides_foreign_run_token() -> None:
+    setup = make_recorder_with_run(run_id="run-lineage-token-scope", source_node_id="source-lineage-token-scope")
+    other_source_id = _register_source_run(
+        setup,
+        run_id="run-lineage-token-scope-other",
+        source_node_id="source-lineage-token-scope-other",
+    )
+    _foreign_row, foreign_token = _create_row_token(
+        setup,
+        row_index=0,
+        token_id="token-foreign-run",
+        run_id="run-lineage-token-scope-other",
+        source_node_id=other_source_id,
+    )
 
-    # Corruption boundary: create_token derives run_id from rows. Direct mutation is
-    # required to create a persisted token whose row belongs to one run while the
-    # token claims another.
-    with setup.db.connection() as conn:
-        conn.execute(
-            tokens_table.update().where(tokens_table.c.token_id == token.token_id).values(run_id="run-lineage-token-mismatch-other")
-        )
-
-    with pytest.raises(AuditIntegrityError, match=f"token '{token.token_id}' belongs to run"):
-        explain(setup.query, setup.data_flow, setup.run_id, token_id=token.token_id)
-
-    assert row.run_id == setup.run_id
+    assert explain(setup.query, setup.data_flow, setup.run_id, token_id=foreign_token.token_id) is None

@@ -8,8 +8,9 @@ from typing import Literal
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.canonical import canonical_json
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
-from elspeth.core.landscape._helpers import generate_id, now
+from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.schema import auth_events_table
 
 AuthAuditEventType = Literal["login", "token_issued", "auth_failure"]

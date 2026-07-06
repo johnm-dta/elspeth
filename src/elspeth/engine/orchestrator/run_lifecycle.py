@@ -49,7 +49,7 @@ from elspeth.contracts.events import (
     PipelinePhase,
     RunStarted,
 )
-from elspeth.core.landscape._helpers import generate_id
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.bootstrap import prepare_for_run

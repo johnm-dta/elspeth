@@ -31,8 +31,9 @@ from elspeth.contracts import (
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
 from elspeth.contracts.hashing import repr_hash
 from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
-from elspeth.core.landscape._helpers import generate_id, now
+from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.model_loaders import NodeStateLoader, RoutingEventLoader

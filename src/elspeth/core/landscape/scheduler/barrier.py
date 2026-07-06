@@ -30,7 +30,7 @@ from elspeth.contracts.scheduler import (
     TokenWorkStatus,
 )
 from elspeth.core.canonical import canonical_json
-from elspeth.core.landscape._helpers import generate_id
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape.database import Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss

@@ -19,7 +19,7 @@ from sqlalchemy.engine import Connection, RowMapping
 
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape._helpers import generate_id
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape.database import Tier1Engine
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import coalesce_branch_losses_table

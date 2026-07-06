@@ -25,8 +25,9 @@ from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, DISCARD_SI
 from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.canonical import canonical_json
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
-from elspeth.core.landscape._helpers import generate_id, now
+from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.data_flow.ownership import RowTokenOwnership
 from elspeth.core.landscape.model_loaders import TokenOutcomeLoader
 from elspeth.core.landscape.schema import (

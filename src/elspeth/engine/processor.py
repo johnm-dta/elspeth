@@ -128,7 +128,7 @@ from elspeth.contracts.scheduler import (
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
-from elspeth.core.landscape._helpers import generate_id
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository

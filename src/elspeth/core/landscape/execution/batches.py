@@ -14,8 +14,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import Batch, BatchMember, BatchStatus, TriggerType
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
-from elspeth.core.landscape._helpers import generate_id, now
+from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import BatchLoader, BatchMemberLoader

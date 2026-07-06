@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from elspeth.contracts import Determinism, NodeType, RunStatus
 from elspeth.contracts.synthesised_audit import SynthesisedNodeSpec
 from elspeth.core.canonical import canonical_json, stable_hash
-from elspeth.core.landscape._helpers import generate_id
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex, validate_run_attribution

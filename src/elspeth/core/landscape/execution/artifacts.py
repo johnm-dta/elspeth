@@ -10,8 +10,9 @@ from sqlalchemy import select
 
 from elspeth.contracts import Artifact
 from elspeth.contracts.results import require_no_artifact_uri_credentials
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
-from elspeth.core.landscape._helpers import generate_id, now
+from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.model_loaders import ArtifactLoader
 from elspeth.core.landscape.schema import artifacts_table
 

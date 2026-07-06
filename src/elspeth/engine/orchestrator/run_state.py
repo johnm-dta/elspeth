@@ -216,6 +216,10 @@ class ResumeState:
         # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
         # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
         # recovery_manager is a live service object (not a container) - NOT frozen here.
+        # unprocessed_rows arrives as a list (recovery) or tuple (tests) of
+        # ResumedRow instances, each already deep-frozen in its own
+        # __post_init__; deep_freeze tuple-ifies the outer container and leaves
+        # the frozen rows untouched (identity-preserving idempotency).
         freeze_fields(
             self,
             "incomplete_by_row",
@@ -223,13 +227,8 @@ class ResumeState:
             "source_names_by_source",
             "source_lifecycle_by_source",
             "batch_id_remap",
+            "unprocessed_rows",
         )
-        # unprocessed_rows is a Sequence of ResumedRow instances. Each
-        # ResumedRow is fully deep-frozen in its own __post_init__ (row_data
-        # is MappingProxyType via freeze_fields, not a plain dict). Tuple-
-        # ifying the outer Sequence is sufficient.
-        if not isinstance(self.unprocessed_rows, tuple):
-            object.__setattr__(self, "unprocessed_rows", tuple(self.unprocessed_rows))
         # ADR-025 section 3: schema_contracts_by_source is non-empty by invariant.
         # The empty case (no rows committed, no run_sources records) is
         # handled upstream by ``_reconstruct_resume_state`` via

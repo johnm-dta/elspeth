@@ -12,6 +12,7 @@ the ``with`` block automatically completes the state as FAILED before propagatin
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Mapping
@@ -37,6 +38,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _GUARD_TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateStatus.FAILED})
+
+# Attribute name for the node-state id stamped onto exceptions that cross a
+# NodeStateGuard. Executors scope ctx.state_id per operation (it is restored
+# on exceptional exit), so the exception itself is the only channel that can
+# carry the failed state's id to callers that convert the exception into
+# row-scoped audit records (e.g. the DIVERT routing_event for on_error sinks).
+_EXCEPTION_NODE_STATE_ID_ATTR = "_elspeth_node_state_id"
+
+
+def stamp_node_state_id(exc: BaseException, state_id: str) -> None:
+    """Stamp ``state_id`` onto ``exc`` as the node state it escaped.
+
+    Called by ``NodeStateGuard.__exit__`` for every exception crossing the
+    guard. When an exception crosses nested guards, the outermost stamp wins —
+    that is the state closest to the caller reading the stamp. Best-effort:
+    an exception type that rejects attribute assignment (``__slots__``) is
+    left unstamped; the consumer's state_id-required invariant then fails
+    loudly rather than mis-attributing the audit record.
+    """
+    with contextlib.suppress(AttributeError, TypeError):
+        setattr(exc, _EXCEPTION_NODE_STATE_ID_ATTR, state_id)
+
+
+def stamped_node_state_id(exc: BaseException) -> str | None:
+    """Return the node-state id stamped on ``exc``, or None if unstamped."""
+    stamped = getattr(exc, _EXCEPTION_NODE_STATE_ID_ATTR, None)
+    return stamped if isinstance(stamped, str) else None
 
 
 def _render_exception_message(exc_type: type[BaseException], exc_val: BaseException | None) -> str:
@@ -143,6 +171,12 @@ class NodeStateGuard:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        if exc_val is not None:
+            # Stamp before the terminal-state early returns: the explicit
+            # complete(FAILED)-then-reraise path must stamp too, since the
+            # caller's ctx.state_id is scope-restored during unwind.
+            stamp_node_state_id(exc_val, self.state_id)
+
         if self._completed:
             return
 
@@ -281,16 +315,37 @@ class NodeStateGuard:
                 "Use ExecutionRepository.complete_node_state() directly for non-terminal state transitions."
             )
 
+        # The repository signature takes Mapping-typed rows; rebuilding the
+        # list widens the invariant element type (dict[str, Any] stays the
+        # runtime type either way).
+        normalized_output: Mapping[str, object] | list[Mapping[str, object]] | None = (
+            list(output_data) if isinstance(output_data, list) else output_data
+        )
+
         try:
-            self._execution.complete_node_state(
-                state_id=self.state_id,
-                status=status,
-                output_data=output_data,
-                duration_ms=duration_ms,
-                error=error,
-                success_reason=success_reason,
-                context_after=context_after,
-            )
+            if status is NodeStateStatus.COMPLETED:
+                self._execution.complete_node_state(
+                    state_id=self.state_id,
+                    status=NodeStateStatus.COMPLETED,
+                    output_data=normalized_output,
+                    duration_ms=duration_ms,
+                    error=error,
+                    success_reason=success_reason,
+                    context_after=context_after,
+                )
+            else:
+                # The FAILED completion contract has no success_reason;
+                # reject rather than silently drop a caller's value.
+                if success_reason is not None:
+                    raise OrchestrationInvariantError("NodeStateGuard.complete(FAILED) does not accept success_reason.")
+                self._execution.complete_node_state(
+                    state_id=self.state_id,
+                    status=NodeStateStatus.FAILED,
+                    output_data=normalized_output,
+                    duration_ms=duration_ms,
+                    error=error,
+                    context_after=context_after,
+                )
         except LandscapePostCommitError:
             self._terminal_persisted = True
             raise

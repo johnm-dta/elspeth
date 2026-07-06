@@ -97,8 +97,10 @@ def record_transform_error_with_routing(
     if on_error != "discard":
         if state_id is None:
             # The executor passes guard.state_id (never None); the processor
-            # passes ctx.state_id, set by TransformExecutor before the
-            # exception propagated — a missing id here is an invariant bug.
+            # passes the id NodeStateGuard stamped on the propagating
+            # exception (ctx.state_id is scope-restored during unwind) — a
+            # missing id here means no attempt ever opened a node state, and
+            # there is no state to attach the DIVERT to.
             raise OrchestrationInvariantError(
                 f"state_id is required to record the DIVERT routing_event for transform '{node_id}' (on_error={on_error!r})"
             )

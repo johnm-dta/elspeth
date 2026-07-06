@@ -28,6 +28,7 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
     PluginContractViolation,
 )
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.node_state_context import AggregationBatchContext, AggregationFlushContext
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.scheduler import TokenWorkItem
@@ -96,6 +97,12 @@ class _FlushInputSnapshot:
     buffered_rows: tuple[Mapping[str, Any], ...]
     pipeline_rows: tuple[PipelineRow, ...]
     representative_token: TokenInfo
+
+    def __post_init__(self) -> None:
+        # The row dicts arrive as fresh to_dict() copies; the PipelineRows in
+        # pipeline_rows were built from the originals before this snapshot is
+        # constructed, so deep-freezing here detaches without aliasing them.
+        freeze_fields(self, "buffered_rows")
 
 
 @dataclass(frozen=True, slots=True)

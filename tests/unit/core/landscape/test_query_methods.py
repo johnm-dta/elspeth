@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -24,7 +25,7 @@ from elspeth.contracts.payload_store import (
     PayloadStore,
 )
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape import LandscapeDB, QueryRepository
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.factory import RecorderFactory
@@ -2073,3 +2074,326 @@ class TestCountFailedCoalesceBarrierRows:
         _db, factory = self._setup_coalesce()
 
         assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+
+
+# =============================================================================
+# Chunked export read APIs (elspeth-3ae79a4775)
+#
+# These methods let the exporter stream a run in bounded row batches instead
+# of preloading every child collection. The contract under test: grouping a
+# set-scoped getter's result by parent id yields exactly the same per-parent
+# sequences as grouping the corresponding full-run getter's result.
+# =============================================================================
+
+
+def _grouped_by(items: list, key: str) -> dict[str, list]:
+    grouped: dict[str, list] = {}
+    for item in items:
+        grouped.setdefault(getattr(item, key), []).append(item)
+    return grouped
+
+
+class TestIterRowsForRun:
+    """Keyset-paginated row batches must partition get_rows() exactly."""
+
+    def _setup_rows(self, count: int = 5):
+        _db, factory = _setup()
+        # Insert out of ingest order to prove ordering comes from the query.
+        for i in reversed(range(count)):
+            factory.data_flow.create_row("run-1", "source-0", i, {"v": i}, row_id=f"row-{i}", source_row_index=i, ingest_sequence=i)
+        return factory
+
+    def test_batches_partition_get_rows_order(self):
+        factory = self._setup_rows(5)
+
+        batches = list(factory.query.iter_rows_for_run("run-1", batch_size=2))
+
+        assert [len(b) for b in batches] == [2, 2, 1]
+        flat = [r.row_id for batch in batches for r in batch]
+        assert flat == [r.row_id for r in factory.query.get_rows("run-1")]
+        assert flat == ["row-0", "row-1", "row-2", "row-3", "row-4"]
+
+    def test_single_batch_when_batch_size_exceeds_row_count(self):
+        factory = self._setup_rows(3)
+
+        batches = list(factory.query.iter_rows_for_run("run-1", batch_size=100))
+
+        assert [len(b) for b in batches] == [3]
+
+    def test_exact_multiple_of_batch_size(self):
+        factory = self._setup_rows(4)
+
+        batches = list(factory.query.iter_rows_for_run("run-1", batch_size=2))
+
+        assert [len(b) for b in batches] == [2, 2]
+
+    def test_empty_run_yields_no_batches(self):
+        _db, factory = _setup()
+
+        assert list(factory.query.iter_rows_for_run("run-1", batch_size=2)) == []
+
+    def test_rejects_non_positive_batch_size(self):
+        _db, factory = _setup()
+
+        with pytest.raises(ValueError, match="batch_size"):
+            list(factory.query.iter_rows_for_run("run-1", batch_size=0))
+
+    def test_scoped_to_run(self):
+        db = make_landscape_db()
+        factory = make_factory(db)
+        for run_id, src in (("run-a", "src-a"), ("run-b", "src-b")):
+            factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+            factory.data_flow.register_node(
+                run_id=run_id,
+                plugin_name="csv",
+                node_type=NodeType.SOURCE,
+                plugin_version="1.0",
+                config={},
+                node_id=src,
+                schema_config=_DYNAMIC_SCHEMA,
+            )
+        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
+
+        batches = list(factory.query.iter_rows_for_run("run-a", batch_size=10))
+
+        assert [[r.row_id for r in batch] for batch in batches] == [["row-a1"]]
+
+
+class TestGetTokensForRows:
+    """Set-scoped token reads must match per-row order of get_tokens()."""
+
+    def _setup_tokens(self):
+        _db, factory = _setup()
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-a", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-b", source_row_index=1, ingest_sequence=1)
+        # Interleave creation across rows so per-row order is not insert order.
+        factory.data_flow.create_token("row-b", token_id="tok-b2")
+        factory.data_flow.create_token("row-a", token_id="tok-a2")
+        factory.data_flow.create_token("row-b", token_id="tok-b1")
+        factory.data_flow.create_token("row-a", token_id="tok-a1")
+        return factory
+
+    def test_per_row_grouping_matches_per_row_getter(self):
+        factory = self._setup_tokens()
+
+        tokens = factory.query.get_tokens_for_rows("run-1", ["row-a", "row-b"])
+
+        grouped = _grouped_by(tokens, "row_id")
+        for row_id in ("row-a", "row-b"):
+            assert [t.token_id for t in grouped[row_id]] == [t.token_id for t in factory.query.get_tokens(row_id)]
+
+    def test_only_requested_rows_returned(self):
+        factory = self._setup_tokens()
+
+        tokens = factory.query.get_tokens_for_rows("run-1", ["row-a"])
+
+        assert {t.row_id for t in tokens} == {"row-a"}
+        assert {t.token_id for t in tokens} == {"tok-a1", "tok-a2"}
+
+    def test_empty_input_returns_empty(self):
+        factory = self._setup_tokens()
+
+        assert factory.query.get_tokens_for_rows("run-1", []) == []
+
+    def test_run_mismatch_returns_empty(self):
+        factory = self._setup_tokens()
+
+        assert factory.query.get_tokens_for_rows("other-run", ["row-a", "row-b"]) == []
+
+    def test_chunked_input_equals_unchunked(self):
+        factory = self._setup_tokens()
+        unchunked = factory.query.get_tokens_for_rows("run-1", ["row-a", "row-b"])
+
+        factory.query._QUERY_CHUNK_SIZE = 1  # force one IN-chunk per row
+
+        chunked = factory.query.get_tokens_for_rows("run-1", ["row-a", "row-b"])
+        assert _grouped_by(chunked, "row_id").keys() == _grouped_by(unchunked, "row_id").keys()
+        for row_id, group in _grouped_by(unchunked, "row_id").items():
+            assert [t.token_id for t in _grouped_by(chunked, "row_id")[row_id]] == [t.token_id for t in group]
+
+
+class TestGetTokenParentsForTokens:
+    """Set-scoped parent reads must match per-token order of get_token_parents()."""
+
+    def _setup_fork(self):
+        _db, factory = _setup()
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        parent = factory.data_flow.create_token("row-1", token_id="tok-parent")
+        children, _ = factory.data_flow.fork_token(
+            TokenRef(token_id=parent.token_id, run_id="run-1"),
+            "row-1",
+            ["left", "right"],
+            step_in_pipeline=1,
+        )
+        return factory, [child.token_id for child in children]
+
+    def test_parents_grouped_match_per_token_getter(self):
+        factory, child_ids = self._setup_fork()
+
+        parents = factory.query.get_token_parents_for_tokens(child_ids)
+
+        grouped = _grouped_by(parents, "token_id")
+        assert set(grouped.keys()) == set(child_ids)
+        for child_id in child_ids:
+            assert [(p.parent_token_id, p.ordinal) for p in grouped[child_id]] == [
+                (p.parent_token_id, p.ordinal) for p in factory.query.get_token_parents(child_id)
+            ]
+
+    def test_only_requested_tokens_returned(self):
+        factory, child_ids = self._setup_fork()
+
+        parents = factory.query.get_token_parents_for_tokens(child_ids[:1])
+
+        assert {p.token_id for p in parents} == {child_ids[0]}
+
+    def test_empty_input_returns_empty(self):
+        factory, _child_ids = self._setup_fork()
+
+        assert factory.query.get_token_parents_for_tokens([]) == []
+
+
+class TestGetNodeStatesForTokens:
+    """Set-scoped state reads must match per-token order of get_node_states_for_token()."""
+
+    def _setup_states(self):
+        _db, factory = _setup()
+        # node_states is UNIQUE on (token_id, node_id, attempt), so a token's
+        # two states must sit on different nodes.
+        register_test_node(factory.data_flow, "run-1", "transform-2", plugin_name="transform")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        factory.data_flow.create_token("row-1", token_id="tok-2")
+        # Insert out of step order to prove ordering comes from the query.
+        factory.execution.begin_node_state("tok-1", "transform-2", "run-1", 2, {"a": 1}, state_id="st-1-late")
+        factory.execution.begin_node_state("tok-2", "transform-1", "run-1", 0, {"a": 1}, state_id="st-2")
+        factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"a": 1}, state_id="st-1-early")
+        return factory
+
+    def test_states_grouped_match_per_token_getter(self):
+        factory = self._setup_states()
+
+        states = factory.query.get_node_states_for_tokens("run-1", ["tok-1", "tok-2"])
+
+        grouped = _grouped_by(states, "token_id")
+        for token_id in ("tok-1", "tok-2"):
+            assert [s.state_id for s in grouped[token_id]] == [s.state_id for s in factory.query.get_node_states_for_token(token_id)]
+        assert [s.state_id for s in grouped["tok-1"]] == ["st-1-early", "st-1-late"]
+
+    def test_only_requested_tokens_returned(self):
+        factory = self._setup_states()
+
+        states = factory.query.get_node_states_for_tokens("run-1", ["tok-2"])
+
+        assert [s.state_id for s in states] == ["st-2"]
+
+    def test_run_mismatch_returns_empty(self):
+        factory = self._setup_states()
+
+        assert factory.query.get_node_states_for_tokens("other-run", ["tok-1", "tok-2"]) == []
+
+    def test_empty_input_returns_empty(self):
+        factory = self._setup_states()
+
+        assert factory.query.get_node_states_for_tokens("run-1", []) == []
+
+
+class TestGetTokenOutcomesForTokens:
+    """Set-scoped outcome reads must group identically to the full-run getter."""
+
+    def _setup_outcomes(self):
+        _db, factory = _setup()
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        factory.data_flow.create_token("row-1", token_id="tok-2")
+        factory.data_flow.record_token_outcome(
+            TokenRef(token_id="tok-1", run_id="run-1"), TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="out"
+        )
+        factory.data_flow.record_token_outcome(
+            TokenRef(token_id="tok-2", run_id="run-1"),
+            TerminalOutcome.FAILURE,
+            TerminalPath.UNROUTED,
+            error_hash="0" * 64,
+        )
+        return factory
+
+    def test_outcomes_grouped_match_full_run_getter(self):
+        factory = self._setup_outcomes()
+
+        outcomes = factory.query.get_token_outcomes_for_tokens("run-1", ["tok-1", "tok-2"])
+
+        grouped = _grouped_by(outcomes, "token_id")
+        full = _grouped_by(factory.query.get_all_token_outcomes_for_run("run-1"), "token_id")
+        assert grouped.keys() == full.keys()
+        for token_id, group in full.items():
+            assert [o.outcome_id for o in grouped[token_id]] == [o.outcome_id for o in group]
+
+    def test_only_requested_tokens_returned(self):
+        factory = self._setup_outcomes()
+
+        outcomes = factory.query.get_token_outcomes_for_tokens("run-1", ["tok-2"])
+
+        assert {o.token_id for o in outcomes} == {"tok-2"}
+
+    def test_run_mismatch_returns_empty(self):
+        factory = self._setup_outcomes()
+
+        assert factory.query.get_token_outcomes_for_tokens("other-run", ["tok-1", "tok-2"]) == []
+
+    def test_empty_input_returns_empty(self):
+        factory = self._setup_outcomes()
+
+        assert factory.query.get_token_outcomes_for_tokens("run-1", []) == []
+
+
+class TestGetSchedulerEventsForTokens:
+    """Set-scoped scheduler-event reads must group identically to get_scheduler_events()."""
+
+    def _setup_events(self):
+        _db, factory = _setup()
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        factory.data_flow.create_token("row-2", token_id="tok-2")
+        payload = factory.scheduler.serialize_row_payload(PipelineRow({"id": 1}, _MINIMAL_CONTRACT))
+        now = datetime.now(UTC)
+        for token_id, row_id, ingest in (("tok-1", "row-1", 0), ("tok-2", "row-2", 1)):
+            factory.scheduler.enqueue_ready(
+                run_id="run-1",
+                token_id=token_id,
+                row_id=row_id,
+                node_id="transform-1",
+                step_index=1,
+                ingest_sequence=ingest,
+                available_at=now,
+                row_payload_json=payload,
+            )
+        return factory
+
+    def test_events_grouped_match_full_run_getter(self):
+        factory = self._setup_events()
+
+        events = factory.query.get_scheduler_events_for_tokens("run-1", ["tok-1", "tok-2"])
+
+        grouped = _grouped_by(events, "token_id")
+        full = _grouped_by(factory.query.get_scheduler_events(run_id="run-1"), "token_id")
+        assert grouped.keys() == full.keys()
+        for token_id, group in full.items():
+            assert [e.event_id for e in grouped[token_id]] == [e.event_id for e in group]
+
+    def test_only_requested_tokens_returned(self):
+        factory = self._setup_events()
+
+        events = factory.query.get_scheduler_events_for_tokens("run-1", ["tok-2"])
+
+        assert {e.token_id for e in events} == {"tok-2"}
+
+    def test_run_mismatch_returns_empty(self):
+        factory = self._setup_events()
+
+        assert factory.query.get_scheduler_events_for_tokens("other-run", ["tok-1", "tok-2"]) == []
+
+    def test_empty_input_returns_empty(self):
+        factory = self._setup_events()
+
+        assert factory.query.get_scheduler_events_for_tokens("run-1", []) == []

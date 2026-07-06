@@ -111,6 +111,7 @@ from elspeth.engine.executors import (
     SinkExecutor,
     TransformExecutor,
 )
+from elspeth.engine.executors.state_guard import stamped_node_state_id
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
 from tests.fixtures.audit_hashing import assert_stable_hash
@@ -1508,6 +1509,30 @@ class TestTransformExecutor:
         assert ctx.node_id == "previous_node"
         assert ctx.contract is previous_contract
         assert ctx.token is previous_token
+
+    def test_exception_carries_failed_node_state_id(self) -> None:
+        """A transform crash must carry the failed node-state id on the exception.
+
+        ctx.state_id is scope-restored before the exception reaches the
+        processor's retryable-error conversion, so the exception itself is the
+        only channel that can attribute the DIVERT routing_event to the state
+        that actually failed.
+        """
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        token = _make_token(contract=_make_contract())
+
+        def crash(row_data: Any, call_ctx: Any) -> TransformResult:
+            raise ConnectionError("connection reset")
+
+        transform = _make_transform()
+        transform.process = crash
+        ctx = make_context()
+
+        with pytest.raises(ConnectionError) as exc_info:
+            executor.execute_transform(transform, token, ctx)
+
+        assert stamped_node_state_id(exc_info.value) == "state_001"
 
     def test_creates_pipeline_row_from_result(self) -> None:
         """Updated token should have PipelineRow with output contract."""

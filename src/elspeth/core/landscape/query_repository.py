@@ -7,6 +7,7 @@ and TUI. Does NOT need LandscapeDB — only read-only database ops for queries.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import structlog
@@ -581,6 +582,215 @@ class QueryRepository:
         )
         db_rows = self._ops.execute_fetchall(query)
         return [self._token_outcome_loader.load(r) for r in db_rows]
+
+    # === Chunked Export Read APIs (elspeth-3ae79a4775: bounded-memory export) ===
+    #
+    # These methods let the exporter stream a run's row family in bounded
+    # batches instead of preloading every child collection for the run.
+    # Contract: grouping a set-scoped result by parent id yields exactly the
+    # same per-parent sequences as grouping the corresponding full-run getter.
+    # Each parent's children always land in a single IN-chunk (chunks partition
+    # the parent ids) ordered by the same ORDER BY, so per-parent order is
+    # exact. The flat cross-parent order follows input-chunk order — callers
+    # must group by parent id, not rely on the flat sequence.
+    #
+    # Note: Each chunk/page is a separate query. For completed runs this is
+    # safe. For in-progress runs, concurrent writes between queries could
+    # produce inconsistent results. Query only completed runs.
+
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int = _QUERY_CHUNK_SIZE) -> Iterator[list[Row]]:
+        """Iterate rows for a run in bounded batches (keyset pagination).
+
+        Yields lists of Row models in the same global order as
+        :meth:`get_rows` (``ingest_sequence`` ascending), loading at most
+        ``batch_size`` rows per query. ``ingest_sequence`` is ``NOT NULL``
+        and unique per run (``UniqueConstraint("run_id", "ingest_sequence")``),
+        so it is an exact keyset cursor: no row can be skipped or duplicated
+        between pages.
+
+        Args:
+            run_id: Run ID
+            batch_size: Maximum rows per yielded batch (must be >= 1)
+
+        Yields:
+            Non-empty lists of Row models, ordered by ingest_sequence
+
+        Raises:
+            ValueError: If batch_size < 1
+            AuditIntegrityError: If a row has NULL ingest_sequence — the
+                schema declares the column NOT NULL, so this is Tier-1
+                audit-database corruption
+        """
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        last_ingest_sequence: int | None = None
+        while True:
+            query = select(rows_table).where(rows_table.c.run_id == run_id)
+            if last_ingest_sequence is not None:
+                query = query.where(rows_table.c.ingest_sequence > last_ingest_sequence)
+            query = query.order_by(rows_table.c.ingest_sequence).limit(batch_size)
+            db_rows = self._ops.execute_fetchall(query)
+            if not db_rows:
+                return
+            last_ingest_sequence = db_rows[-1].ingest_sequence
+            if last_ingest_sequence is None:
+                raise AuditIntegrityError(
+                    f"Row '{db_rows[-1].row_id}' in run {run_id!r} has NULL ingest_sequence — the schema "
+                    f"declares it NOT NULL, so this is a Tier-1 audit-database integrity violation."
+                )
+            yield [self._row_loader.load(r) for r in db_rows]
+            if len(db_rows) < batch_size:
+                return
+
+    def get_tokens_for_rows(self, run_id: str, row_ids: Sequence[str]) -> list[Token]:
+        """Get tokens for a set of rows (chunked batch query).
+
+        Within each row, tokens are ordered by (created_at, token_id) — the
+        same per-row ordering as :meth:`get_tokens` and
+        :meth:`get_all_tokens_for_run`. Chunks row_ids to stay within
+        SQLite's SQLITE_MAX_VARIABLE_NUMBER limit (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            row_ids: Row IDs to fetch tokens for
+
+        Returns:
+            List of Token models; group by row_id for per-row sequences
+        """
+        if not row_ids:
+            return []
+        tokens: list[Token] = []
+        for offset in range(0, len(row_ids), self._QUERY_CHUNK_SIZE):
+            chunk = row_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(tokens_table)
+                .where(tokens_table.c.run_id == run_id)
+                .where(tokens_table.c.row_id.in_(chunk))
+                .order_by(tokens_table.c.row_id, tokens_table.c.created_at, tokens_table.c.token_id)
+            )
+            tokens.extend(self._token_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return tokens
+
+    def get_token_parents_for_tokens(self, token_ids: Sequence[str]) -> list[TokenParent]:
+        """Get parent relationships for a set of tokens (chunked batch query).
+
+        Within each token, parents are ordered by ordinal — the same
+        per-token ordering as :meth:`get_token_parents` and
+        :meth:`get_all_token_parents_for_run`. Chunks token_ids to stay
+        within SQLite's SQLITE_MAX_VARIABLE_NUMBER limit (default 999).
+
+        Args:
+            token_ids: Child token IDs to fetch parent links for
+
+        Returns:
+            List of TokenParent models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        parents: list[TokenParent] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(token_parents_table)
+                .where(token_parents_table.c.token_id.in_(chunk))
+                .order_by(token_parents_table.c.token_id, token_parents_table.c.ordinal)
+            )
+            parents.extend(self._token_parent_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return parents
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[NodeState]:
+        """Get node states for a set of tokens (chunked batch query).
+
+        Within each token, states are ordered by (step_index, attempt) — the
+        same per-token ordering as :meth:`get_node_states_for_token` and
+        :meth:`get_all_node_states_for_run`. Chunks token_ids to stay within
+        SQLite's SQLITE_MAX_VARIABLE_NUMBER limit (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            token_ids: Token IDs to fetch states for
+
+        Returns:
+            List of NodeState models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        states: list[NodeState] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(node_states_table)
+                .where(node_states_table.c.run_id == run_id)
+                .where(node_states_table.c.token_id.in_(chunk))
+                .order_by(
+                    node_states_table.c.token_id,
+                    node_states_table.c.step_index,
+                    node_states_table.c.attempt,
+                )
+            )
+            states.extend(self._node_state_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return states
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[TokenOutcome]:
+        """Get token outcomes for a set of tokens (chunked batch query).
+
+        Within each token, outcomes are ordered by recorded_at — the same
+        per-token ordering as :meth:`get_all_token_outcomes_for_run`. Chunks
+        token_ids to stay within SQLite's SQLITE_MAX_VARIABLE_NUMBER limit
+        (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            token_ids: Token IDs to fetch outcomes for
+
+        Returns:
+            List of TokenOutcome models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        outcomes: list[TokenOutcome] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(token_outcomes_table)
+                .where(token_outcomes_table.c.run_id == run_id)
+                .where(token_outcomes_table.c.token_id.in_(chunk))
+                .order_by(token_outcomes_table.c.token_id, token_outcomes_table.c.recorded_at)
+            )
+            outcomes.extend(self._token_outcome_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return outcomes
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[SchedulerEvent]:
+        """Get scheduler transition events for a set of tokens (chunked batch query).
+
+        Within each token, events are ordered by (recorded_at, event_id) —
+        the same per-token ordering as :meth:`get_scheduler_events`. Chunks
+        token_ids to stay within SQLite's SQLITE_MAX_VARIABLE_NUMBER limit
+        (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            token_ids: Token IDs to fetch scheduler events for
+
+        Returns:
+            List of SchedulerEvent models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        events: list[SchedulerEvent] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(scheduler_events_table)
+                .where(scheduler_events_table.c.run_id == run_id)
+                .where(scheduler_events_table.c.token_id.in_(chunk))
+                .order_by(
+                    scheduler_events_table.c.recorded_at,
+                    scheduler_events_table.c.event_id,
+                )
+            )
+            events.extend(self._scheduler_event_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return events
 
     def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
         """Count the distinct source rows that reached a terminal outcome.

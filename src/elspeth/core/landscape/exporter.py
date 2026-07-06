@@ -25,6 +25,7 @@ from elspeth.contracts import (
     NodeStateOpen,
     NodeStatePending,
     RoutingEvent,
+    Row,
     Token,
     TokenOutcome,
     TokenParent,
@@ -83,6 +84,16 @@ class LandscapeExporter:
     - batch_member: Batch membership
     - artifact: Sink outputs
 
+    Memory envelope: the row family (rows, tokens, token_parents,
+    token_outcomes, scheduler_events, node_states, routing_events, and
+    state-parented calls) streams in bounded row batches, so its memory
+    cost is O(row_batch_size), not O(run). The run-structure families
+    (nodes, edges, operations + their calls, validation/transform errors,
+    batches + members, artifacts) are each materialized as one full list;
+    they scale with pipeline structure and error/batch counts rather than
+    row volume. export_run_grouped() is the exception: it deliberately
+    materializes the entire export into one dict.
+
     Example:
         db = LandscapeDB.from_url("sqlite:///audit.db")
         exporter = LandscapeExporter(db)
@@ -102,6 +113,7 @@ class LandscapeExporter:
         signing_key: bytes | None = None,
         *,
         include_raw_error_rows: bool = False,
+        row_batch_size: int = 500,
     ) -> None:
         """Initialize exporter with database connection.
 
@@ -116,11 +128,22 @@ class LandscapeExporter:
                 exports hashes/refs instead of raw payloads; error records
                 default to ``row_hash``-only correlation, with the raw row
                 remaining in the audit database.
+            row_batch_size: Rows per streamed batch for the row-family
+                sections of the export (elspeth-3ae79a4775). Bounds export
+                memory: at most this many rows — plus their tokens, node
+                states, and related child records — are resident at once.
+                The exported record sequence is identical for every value.
+
+        Raises:
+            ValueError: If row_batch_size < 1
         """
+        if row_batch_size < 1:
+            raise ValueError(f"row_batch_size must be >= 1, got {row_batch_size}")
         self._db = db
         self._factory = RecorderFactory(db)
         self._signing_key = signing_key
         self._include_raw_error_rows = include_raw_error_rows
+        self._row_batch_size = row_batch_size
 
     @staticmethod
     def _parse_tier1_json(raw_json: str, field_name: str, context: str) -> Any:
@@ -226,9 +249,13 @@ class LandscapeExporter:
     def _iter_records(self, run_id: str) -> Iterator[ExportRecord]:
         """Internal: iterate over raw records (no signing).
 
-        Bug 76r fix: Uses batch queries to pre-load all data, avoiding N+1 pattern.
-        Previous implementation did ~25,000 queries for 1000 rows with 5 states each.
-        New implementation does ~10 queries regardless of data size.
+        Query strategy: run-structure collections (nodes, edges, operations,
+        errors, batches, artifacts) load with one batch query per family —
+        the Bug 76r N+1 fix. The row family (rows, tokens, and their child
+        records) streams in bounded row batches (elspeth-3ae79a4775): rows
+        page via keyset pagination and each batch loads its children with
+        set-scoped queries, so memory is bounded by row_batch_size instead
+        of run size, at O(row_count / row_batch_size) queries.
 
         Args:
             run_id: The run ID to export
@@ -412,58 +439,69 @@ class LandscapeExporter:
             }
             yield transform_error_record
 
-        # === Bug 76r fix: Pre-load all row-related data with batch queries ===
-        # This replaces the N+1 pattern where nested loops issued per-entity queries.
-        # Now we do 5 batch queries and build lookup dicts in memory.
+        # === Row family: streamed in bounded row batches (elspeth-3ae79a4775) ===
+        # Bug 76r replaced per-entity N+1 queries with full-run preloads; that
+        # fixed the query count but left export memory proportional to the
+        # entire run. The row family now streams: rows page through keyset
+        # pagination and child collections are batch-loaded per row batch, so
+        # memory scales with row_batch_size while the query count stays
+        # O(row_count / row_batch_size).
+        for row_batch in self._factory.query.iter_rows_for_run(run_id, batch_size=self._row_batch_size):
+            yield from self._iter_row_batch_records(run_id, row_batch)
 
-        # Batch query 1: All tokens for this run
-        all_tokens = self._factory.query.get_all_tokens_for_run(run_id)
+        yield from self._iter_batch_and_artifact_records(run_id)
+
+    def _iter_row_batch_records(self, run_id: str, row_batch: list[Row]) -> Iterator[ExportRecord]:
+        """Yield row-family records for one bounded batch of rows.
+
+        Loads the batch's child collections (tokens, token parents, token
+        outcomes, scheduler events, node states, routing events, state calls)
+        with set-scoped batch queries and groups them into per-parent lookup
+        dicts, then emits records nested as row -> token -> (parents,
+        outcomes, scheduler events, states -> (routing events, calls)). Every
+        set-scoped query preserves the per-parent ordering of its full-run
+        counterpart, so the emitted record sequence — and therefore every
+        record signature and the manifest hash chain — is independent of
+        row_batch_size.
+        """
+        row_ids = [row.row_id for row in row_batch]
+        batch_tokens = self._factory.query.get_tokens_for_rows(run_id, row_ids)
         tokens_by_row: defaultdict[str, list[Token]] = defaultdict(list)
-        for token in all_tokens:
+        for token in batch_tokens:
             tokens_by_row[token.row_id].append(token)
 
-        # Batch query 2: All token parents for this run
-        all_parents = self._factory.query.get_all_token_parents_for_run(run_id)
+        token_ids = [token.token_id for token in batch_tokens]
         parents_by_token: defaultdict[str, list[TokenParent]] = defaultdict(list)
-        for parent in all_parents:
+        for parent in self._factory.query.get_token_parents_for_tokens(token_ids):
             parents_by_token[parent.token_id].append(parent)
 
-        # Batch query 3: All node states for this run
-        all_states = self._factory.query.get_all_node_states_for_run(run_id)
+        outcomes_by_token: defaultdict[str, list[TokenOutcome]] = defaultdict(list)
+        for outcome in self._factory.query.get_token_outcomes_for_tokens(run_id, token_ids):
+            outcomes_by_token[outcome.token_id].append(outcome)
+
+        scheduler_events_by_token: defaultdict[str, list[Any]] = defaultdict(list)
+        for scheduler_event in self._factory.query.get_scheduler_events_for_tokens(run_id, token_ids):
+            scheduler_events_by_token[scheduler_event.token_id].append(scheduler_event)
+
+        batch_states = self._factory.query.get_node_states_for_tokens(run_id, token_ids)
         states_by_token: defaultdict[str, list[NodeState]] = defaultdict(list)
-        for state in all_states:
+        for state in batch_states:
             states_by_token[state.token_id].append(state)
 
-        # Batch query 4: All routing events for this run
-        all_routing_events = self._factory.query.get_all_routing_events_for_run(run_id)
+        state_ids = [state.state_id for state in batch_states]
         events_by_state: defaultdict[str, list[RoutingEvent]] = defaultdict(list)
-        for event in all_routing_events:
+        for event in self._factory.query.get_routing_events_for_states(state_ids):
             events_by_state[event.state_id].append(event)
 
-        # Batch query 5: All state-parented calls for this run
-        all_calls = self._factory.query.get_all_calls_for_run(run_id)
         calls_by_state: defaultdict[str, list[Call]] = defaultdict(list)
-        for call in all_calls:
+        for call in self._factory.query.get_calls_for_states(state_ids):
             if not call.state_id:
                 raise AuditIntegrityError(
                     f"State-parented call '{call.call_id}' has no state_id. Run: {run_id}. This violates the Call XOR constraint."
                 )
             calls_by_state[call.state_id].append(call)
 
-        # Batch query 6: All token outcomes for this run
-        all_token_outcomes = self._factory.query.get_all_token_outcomes_for_run(run_id)
-        outcomes_by_token: defaultdict[str, list[TokenOutcome]] = defaultdict(list)
-        for outcome in all_token_outcomes:
-            outcomes_by_token[outcome.token_id].append(outcome)
-
-        # Batch query 7: All durable scheduler transition events for this run
-        all_scheduler_events = self._factory.query.get_scheduler_events(run_id=run_id)
-        scheduler_events_by_token: defaultdict[str, list[Any]] = defaultdict(list)
-        for scheduler_event in all_scheduler_events:
-            scheduler_events_by_token[scheduler_event.token_id].append(scheduler_event)
-
-        # Now iterate through rows using pre-loaded data (no more per-entity queries)
-        for row in self._factory.query.get_rows(run_id):
+        for row in row_batch:
             if row.source_row_index is None:
                 raise AuditIntegrityError(
                     f"Row '{row.row_id}' has no source_row_index. Run: {run_id}. This violates the multi-source row identity contract."
@@ -708,6 +746,8 @@ class LandscapeExporter:
                         }
                         yield state_call_record
 
+    def _iter_batch_and_artifact_records(self, run_id: str) -> Iterator[ExportRecord]:
+        """Yield batch, batch_member, and artifact records for the run."""
         # Batches
         all_batches = self._factory.execution.get_batches(run_id)
 

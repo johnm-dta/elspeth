@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -60,6 +61,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
 from elspeth.engine.executors import GateOutcome
+from elspeth.engine.executors.state_guard import stamp_node_state_id
 from elspeth.engine.executors.transform import TransformExecutor
 from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
 from elspeth.engine.processor import (
@@ -6254,6 +6256,9 @@ class TestExecuteTransformNoRetry:
         ctx = make_context(state_id="state-123")
 
         llm_error = LLMClientError("rate limited", retryable=True)
+        # The real executor stamps the failed state id on the exception via
+        # NodeStateGuard; simulate that for the patched executor.
+        stamp_node_state_id(llm_error, "state-123")
         # Mock record_routing_event since we don't have a real state_id in DB
         with (
             patch.object(processor._transform_executor, "execute_transform", side_effect=llm_error),
@@ -6319,10 +6324,14 @@ class TestExecuteTransformNoRetry:
         )
         raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
 
+        # The real executor stamps the failed state id on the exception via
+        # NodeStateGuard; simulate that for the patched executor.
+        retryable_error = ConnectionError(f"provider retry failed: {raw_secret}")
+        stamp_node_state_id(retryable_error, "state-retryable-secret")
         with patch.object(
             processor._transform_executor,
             "execute_transform",
-            side_effect=ConnectionError(f"provider retry failed: {raw_secret}"),
+            side_effect=retryable_error,
         ):
             result, _out_token, error_sink = processor._execute_transform_with_retry(
                 transform=transform,
@@ -6373,6 +6382,9 @@ class TestExecuteTransformNoRetry:
         ctx = make_context(state_id="state-123")
 
         llm_error = LLMClientError("rate limited", retryable=True)
+        # Stamp the failed state id (as the real executor's guard would) so
+        # the conversion reaches the missing-edge invariant under test.
+        stamp_node_state_id(llm_error, "state-123")
         with (
             patch.object(
                 processor._transform_executor,
@@ -6386,6 +6398,38 @@ class TestExecuteTransformNoRetry:
                 token=token,
                 ctx=ctx,
             )
+
+    def test_named_sink_divert_attributes_to_failed_state_not_ctx(self) -> None:
+        """The DIVERT routing_event must use the failed attempt's node-state id.
+
+        ctx.state_id is scope-restored by the executor before the exception
+        reaches the retryable-error conversion, so it holds a stale previous
+        value (or None) here — the id must be read from the exception stamp.
+        """
+        _, factory, processor = self._setup()
+        processor._error_edge_ids = {NodeID("t1"): "error-edge-1"}
+
+        transform = _make_mock_transform(node_id="t1", on_error="error-sink")
+        token = make_token_info(data={"value": 42})
+        ctx = make_context(state_id="stale-previous-state")
+
+        error = ConnectionError("connection reset")
+        stamp_node_state_id(error, "state-attempt-0")
+
+        with (
+            patch.object(processor._transform_executor, "execute_transform", side_effect=error),
+            patch.object(factory.execution, "record_routing_event") as record_event,
+        ):
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        assert result.status == "error"
+        assert error_sink == "error-sink"
+        record_event.assert_called_once()
+        assert record_event.call_args.kwargs["state_id"] == "state-attempt-0"
 
 
 # =============================================================================
@@ -6462,6 +6506,47 @@ class TestExecuteTransformWithRetry:
         assert is_retryable(CapacityError(429, "rate limited")) is True
         assert is_retryable(AttributeError("bug")) is False
         assert is_retryable(TypeError("bug")) is False
+
+    def test_shutdown_during_backoff_diverts_with_last_attempt_state_id(self) -> None:
+        """InterruptedError born in RetryManager backoff carries no stamp; the
+        shutdown conversion must attribute the DIVERT routing_event to the
+        last failed attempt's node state, not ctx.state_id (which is
+        scope-restored and stale by then)."""
+        from elspeth.contracts.config import RuntimeRetryConfig
+
+        _, factory = _make_factory()
+        retry_manager = RetryManager(RuntimeRetryConfig(max_attempts=3, base_delay=0.01, max_delay=0.1, jitter=0.0, exponential_base=2.0))
+        processor = _make_processor(factory, retry_manager=retry_manager)
+        processor._error_edge_ids = {NodeID("t1"): "error-edge-1"}
+
+        transform = _make_mock_transform(node_id="t1", on_error="error-sink")
+        token = make_token_info(data={"value": 42})
+        shutdown_event = threading.Event()
+        ctx = make_context(state_id="stale-previous-state")
+        ctx.shutdown_event = shutdown_event
+
+        def fail_and_request_shutdown(**kwargs: Any) -> tuple[TransformResult, TokenInfo, str | None]:
+            shutdown_event.set()
+            error = ConnectionError("connection reset")
+            stamp_node_state_id(error, "state-attempt-0")
+            raise error
+
+        with (
+            patch.object(processor._transform_executor, "execute_transform", side_effect=fail_and_request_shutdown),
+            patch.object(factory.execution, "record_routing_event") as record_event,
+        ):
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "shutdown_requested"
+        assert error_sink == "error-sink"
+        record_event.assert_called_once()
+        assert record_event.call_args.kwargs["state_id"] == "state-attempt-0"
 
 
 # =============================================================================

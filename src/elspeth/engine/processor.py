@@ -143,6 +143,7 @@ from elspeth.engine.executors import (
     TransformExecutor,
 )
 from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
+from elspeth.engine.executors.state_guard import stamped_node_state_id
 from elspeth.engine.executors.transform import record_transform_error_with_routing
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
@@ -1746,6 +1747,7 @@ class RowProcessor:
         ctx: Any,
         reason: TransformErrorCategory,
         *,
+        state_id: str | None,
         retryable: bool = True,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Convert a retryable exception to a TransformResult.error when no retry manager is configured.
@@ -1754,6 +1756,13 @@ class RowProcessor:
         (ConnectionError, TimeoutError, OSError, CapacityError). Records the
         error in the audit trail and emits a DIVERT routing event if on_error
         routes to a sink.
+
+        ``state_id`` is the failed attempt's node-state id, carried out of the
+        executor on the exception via NodeStateGuard's stamp (ctx.state_id is
+        scope-restored during unwind and must not be read here). None is only
+        possible when no attempt ever opened a node state (e.g. shutdown
+        before the first retry attempt); record_transform_error_with_routing
+        rejects None for named sinks.
         """
         on_error = transform.on_error
         # on_error is always set (required by TransformSettings) — Tier 1 invariant
@@ -1767,13 +1776,12 @@ class RowProcessor:
         # transform_error + DIVERT routing_event recording as the executor's
         # error-result branch. Here the guard already auto-failed the state on
         # exception exit, so recording happens after completion by design —
-        # the helper is sequencing-agnostic. ctx.state_id was set by
-        # TransformExecutor.execute_transform before the exception propagated.
+        # the helper is sequencing-agnostic.
         record_transform_error_with_routing(
             ctx=ctx,
             execution=self._execution,
             error_edge_ids=self._error_edge_ids,
-            state_id=ctx.state_id,
+            state_id=state_id,
             token=token,
             transform=transform,
             row=token.row_data,
@@ -1837,6 +1845,7 @@ class RowProcessor:
                     token,
                     ctx,
                     reason="shutdown_requested",
+                    state_id=stamped_node_state_id(e),
                     retryable=False,
                 )
             except PluginRetryableError as e:
@@ -1846,6 +1855,7 @@ class RowProcessor:
                     token,
                     ctx,
                     reason="transient_error_no_retry" if e.retryable else "permanent_error",
+                    state_id=stamped_node_state_id(e),
                 )
             except (ConnectionError, TimeoutError, OSError, CapacityError) as e:
                 return self._convert_retryable_to_error_result(
@@ -1854,20 +1864,32 @@ class RowProcessor:
                     token,
                     ctx,
                     reason="transient_error_no_retry",
+                    state_id=stamped_node_state_id(e),
                 )
 
-        # Track attempt number for audit
+        # Track attempt number for audit; track the last failed attempt's
+        # node-state id so a shutdown InterruptedError raised INSIDE the
+        # RetryManager (pre-attempt check or backoff wait — never crosses a
+        # NodeStateGuard, so it carries no stamp) can still attribute its
+        # DIVERT routing_event to the state that actually failed.
         attempt_tracker = {"current": attempt_offset}
+        state_tracker: dict[str, str | None] = {"last_failed_state_id": None}
 
         def execute_attempt() -> tuple[TransformResult, TokenInfo, str | None]:
             attempt = attempt_tracker["current"]
             attempt_tracker["current"] += 1
-            return self._transform_executor.execute_transform(
-                transform=transform,
-                token=token,
-                ctx=ctx,
-                attempt=attempt,
-            )
+            try:
+                return self._transform_executor.execute_transform(
+                    transform=transform,
+                    token=token,
+                    ctx=ctx,
+                    attempt=attempt,
+                )
+            except BaseException as e:
+                stamped = stamped_node_state_id(e)
+                if stamped is not None:
+                    state_tracker["last_failed_state_id"] = stamped
+                raise
 
         def is_retryable(e: BaseException) -> bool:
             if isinstance(e, InterruptedError):
@@ -1889,6 +1911,10 @@ class RowProcessor:
                 token,
                 ctx,
                 reason="shutdown_requested",
+                # Stamped when the shutdown fired inside execute_transform
+                # (batch waiter); otherwise the RetryManager raised it and the
+                # last failed attempt's state is the divert attribution point.
+                state_id=stamped_node_state_id(e) or state_tracker["last_failed_state_id"],
                 retryable=False,
             )
 

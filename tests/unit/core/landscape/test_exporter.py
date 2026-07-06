@@ -12,6 +12,7 @@ Tests cover:
 from __future__ import annotations
 
 from collections import defaultdict as collections_defaultdict
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -422,6 +423,13 @@ class _ExecutionRecorder:
 
 @dataclass(slots=True)
 class _QueryRecorder:
+    """Fake for the chunked export read surface (elspeth-3ae79a4775).
+
+    Mirrors the real QueryRepository contract the exporter relies on:
+    set-scoped getters return only records belonging to the requested
+    parent ids, preserving list order (the fixtures are pre-ordered).
+    """
+
     rows: list[Any]
     tokens: list[Any]
     token_parents: list[Any]
@@ -431,29 +439,37 @@ class _QueryRecorder:
     routing_events: list[Any]
     state_calls: list[Any]
 
-    def get_rows(self, run_id: str) -> list[Any]:
-        return self.rows
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int) -> Iterator[list[Any]]:
+        for offset in range(0, len(self.rows), batch_size):
+            yield self.rows[offset : offset + batch_size]
 
-    def get_all_tokens_for_run(self, run_id: str) -> list[Any]:
-        return self.tokens
+    def get_tokens_for_rows(self, run_id: str, row_ids: Sequence[str]) -> list[Any]:
+        wanted = set(row_ids)
+        return [token for token in self.tokens if token.row_id in wanted]
 
-    def get_all_token_parents_for_run(self, run_id: str) -> list[Any]:
-        return self.token_parents
+    def get_token_parents_for_tokens(self, token_ids: Sequence[str]) -> list[Any]:
+        wanted = set(token_ids)
+        return [parent for parent in self.token_parents if parent.token_id in wanted]
 
-    def get_all_token_outcomes_for_run(self, run_id: str) -> list[Any]:
-        return self.token_outcomes
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[Any]:
+        wanted = set(token_ids)
+        return [outcome for outcome in self.token_outcomes if outcome.token_id in wanted]
 
-    def get_scheduler_events(self, *, run_id: str) -> list[Any]:
-        return self.scheduler_events
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[Any]:
+        wanted = set(token_ids)
+        return [event for event in self.scheduler_events if event.token_id in wanted]
 
-    def get_all_node_states_for_run(self, run_id: str) -> list[Any]:
-        return self.node_states
+    def get_node_states_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[Any]:
+        wanted = set(token_ids)
+        return [state for state in self.node_states if state.token_id in wanted]
 
-    def get_all_routing_events_for_run(self, run_id: str) -> list[Any]:
-        return self.routing_events
+    def get_routing_events_for_states(self, state_ids: Sequence[str]) -> list[Any]:
+        wanted = set(state_ids)
+        return [event for event in self.routing_events if event.state_id in wanted]
 
-    def get_all_calls_for_run(self, run_id: str) -> list[Any]:
-        return self.state_calls
+    def get_calls_for_states(self, state_ids: Sequence[str]) -> list[Any]:
+        wanted = set(state_ids)
+        return [call for call in self.state_calls if call.state_id in wanted]
 
 
 @dataclass(slots=True)
@@ -488,6 +504,7 @@ def _make_exporter(
     batch_members: list[Any] | None = None,
     artifacts: list[Any] | None = None,
     include_raw_error_rows: bool = False,
+    row_batch_size: int = 500,
 ) -> LandscapeExporter:
     """Create an exporter with in-memory recorder fakes."""
     exporter = LandscapeExporter.__new__(LandscapeExporter)
@@ -524,6 +541,7 @@ def _make_exporter(
     )
     exporter._signing_key = signing_key
     exporter._include_raw_error_rows = include_raw_error_rows
+    exporter._row_batch_size = row_batch_size
 
     return exporter
 
@@ -554,6 +572,11 @@ class TestConstructor:
             exporter = LandscapeExporter(db, signing_key=key)
         assert exporter._factory is factory
         assert exporter._signing_key == key
+
+    def test_rejects_non_positive_row_batch_size(self) -> None:
+        db = object()
+        with pytest.raises(ValueError, match="row_batch_size"):
+            LandscapeExporter(db, row_batch_size=0)
 
 
 # ===========================================================================
@@ -1615,3 +1638,43 @@ class TestFullPipelineExport:
             "batch_member": 1,
             "artifact": 1,
         }
+
+    def test_export_stream_identical_across_row_batch_sizes(self) -> None:
+        """elspeth-3ae79a4775: row batching must not change the record stream."""
+        row_2 = Row(
+            row_id="row-2",
+            run_id="run-1",
+            source_node_id="node-1",
+            row_index=1,
+            source_row_index=1,
+            ingest_sequence=1,
+            source_data_hash="data-hash-2",
+            created_at=_DT2,
+        )
+        token_2 = Token(
+            token_id="tok-2",
+            row_id="row-2",
+            created_at=_DT2,
+            run_id="run-1",
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id=None,
+            branch_name=None,
+            step_in_pipeline=0,
+        )
+        kwargs: dict[str, Any] = {
+            "rows": [_ROW, row_2],
+            "tokens": [_TOKEN, token_2],
+            "token_parents": [_TOKEN_PARENT],
+            "token_outcomes": [_TOKEN_OUTCOME],
+            "scheduler_events": [_SCHEDULER_EVENT],
+            "node_states": [_NODE_STATE_COMPLETED],
+            "routing_events": [_ROUTING_EVENT],
+            "state_calls": [_STATE_CALL],
+        }
+        baseline = list(_make_exporter(**kwargs).export_run("run-1"))
+        assert [r["record_type"] for r in baseline].count("row") == 2
+
+        for batch_size in (1, 2, 3):
+            records = list(_make_exporter(**kwargs, row_batch_size=batch_size).export_run("run-1"))
+            assert records == baseline, f"row_batch_size={batch_size} changed the export stream"

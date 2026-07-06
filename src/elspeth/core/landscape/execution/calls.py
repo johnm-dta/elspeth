@@ -13,6 +13,7 @@ import json
 from threading import Lock
 from typing import TYPE_CHECKING, NamedTuple
 
+import structlog
 from sqlalchemy import func, select
 
 from elspeth.contracts import Call, CallStatus, CallType, FrameworkBugError
@@ -32,6 +33,9 @@ from elspeth.core.landscape.schema import calls_table, node_states_table, operat
 
 if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
+
+
+logger = structlog.get_logger(__name__)
 
 
 class _PreparedCallData(NamedTuple):
@@ -554,9 +558,14 @@ class CallAuditRepository:
         except PayloadIntegrityError as e:
             raise AuditIntegrityError(f"Payload integrity check failed for call_id={call_id} (ref={row.response_ref}): {e}") from e
         except OSError as e:
-            raise AuditIntegrityError(
-                f"Payload retrieval failed for call_id={call_id} (ref={row.response_ref}): {type(e).__name__}: {e}"
-            ) from e
+            logger.warning(
+                "call_response_payload_retrieval_failed",
+                call_id=call_id,
+                response_ref=row.response_ref,
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+            raise AuditIntegrityError(f"Payload retrieval failed for call_id={call_id}: reason=payload_store_os_error") from e
 
         # Everything below is Tier 1: our data, crash on anomaly
         try:

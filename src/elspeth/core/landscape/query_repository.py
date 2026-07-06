@@ -177,7 +177,14 @@ class QueryRepository:
         except PayloadIntegrityError as e:
             raise AuditIntegrityError(f"Payload integrity check failed for row {row_id} (ref={source_data_ref}): {e}") from e
         except OSError as e:
-            raise AuditIntegrityError(f"Payload retrieval failed for row {row_id} (ref={source_data_ref}): {type(e).__name__}: {e}") from e
+            logger.warning(
+                "payload_retrieval_failed",
+                row_id=row_id,
+                source_data_ref=source_data_ref,
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+            raise AuditIntegrityError(f"Payload retrieval failed for row {row_id}: reason=payload_store_os_error") from e
 
         try:
             decoded_data = json.loads(payload_bytes.decode("utf-8"))

@@ -1750,6 +1750,21 @@ class TestGetRowDataErrorHandling:
         with pytest.raises(AuditIntegrityError, match="Payload retrieval failed for row row-1"):
             repo.get_row_data("row-1")
 
+    def test_os_error_message_does_not_expose_backend_details(self):
+        payload_store = _PayloadStoreStub(retrieve_result=OSError(13, "Permission denied", "/srv/private/payloads/ref-hash"))
+        repo = self._make_repo_with_row(payload_store)
+
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            repo.get_row_data("row-1")
+
+        message = str(exc_info.value)
+        assert message == "Payload retrieval failed for row row-1: reason=payload_store_os_error"
+        assert "ref=ref-hash" not in message
+        assert "reason=payload_store_os_error" in message
+        assert "Permission denied" not in message
+        assert "/srv/private/payloads" not in message
+        assert "Errno 13" not in message
+
     def test_non_dict_json_raises_audit_integrity(self):
         payload_store = _PayloadStoreStub(retrieve_result=json.dumps([1, 2, 3]).encode("utf-8"))
         repo = self._make_repo_with_row(payload_store)

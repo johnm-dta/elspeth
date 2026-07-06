@@ -15,7 +15,7 @@ from tests.fixtures.landscape import make_factory, make_landscape_db, make_recor
 
 
 class _IntegrityFailingPayloadStore:
-    def __init__(self, content_ref: str, retrieve_error: PayloadIntegrityError) -> None:
+    def __init__(self, content_ref: str, retrieve_error: Exception) -> None:
         self.content_ref = content_ref
         self.retrieve_error = retrieve_error
         self.stored_payloads: list[bytes] = []
@@ -1168,6 +1168,41 @@ class TestGetCallResponseData:
 
         with pytest.raises(AuditIntegrityError, match="Payload integrity check failed for call_id="):
             factory.execution.get_call_response_data(call.call_id)
+
+    def test_payload_os_error_message_does_not_expose_backend_details(self):
+        db = make_landscape_db()
+        payload_store = _IntegrityFailingPayloadStore(
+            "sha256-abc123",
+            OSError(13, "Permission denied", "/srv/private/payloads/sha256-abc123"),
+        )
+        factory = RecorderFactory(db, payload_store=payload_store)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
+        register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
+
+        idx = factory.execution.allocate_call_index(state.state_id)
+        call = factory.execution.record_call(
+            state.state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"prompt": "hello"}),
+            response_data=RawCallPayload({"text": "world"}),
+        )
+
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            factory.execution.get_call_response_data(call.call_id)
+
+        message = str(exc_info.value)
+        assert message == f"Payload retrieval failed for call_id={call.call_id}: reason=payload_store_os_error"
+        assert "ref=sha256-abc123" not in message
+        assert "reason=payload_store_os_error" in message
+        assert "Permission denied" not in message
+        assert "/srv/private/payloads" not in message
+        assert "Errno 13" not in message
 
     def test_call_not_found_for_unknown_id(self):
         """Querying a nonexistent call_id returns CALL_NOT_FOUND."""

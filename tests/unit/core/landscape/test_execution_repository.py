@@ -1387,6 +1387,35 @@ class TestRegisterArtifact:
         )
         assert artifact.idempotency_key == "sink-0:row-1:attempt-0"
 
+    @pytest.mark.parametrize(
+        ("path_or_uri", "match"),
+        [
+            ("db://audit@postgresql://user:secret@db.example.test/audit", "raw URL credentials"),
+            ("https://api.example.test/hook?token=raw-secret", "sensitive query parameters"),
+            (
+                "https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value",
+                "known webhook path secrets",
+            ),
+        ],
+    )
+    def test_register_artifact_rejects_raw_credential_bearing_uris(self, path_or_uri: str, match: str) -> None:
+        """Artifact registration must enforce the ArtifactDescriptor URI secret guard."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"x": 1})
+
+        with pytest.raises(ValueError, match=match):
+            repo.register_artifact(
+                run_id="run-1",
+                state_id=state.state_id,
+                sink_node_id="sink-0",
+                artifact_type="webhook",
+                path=path_or_uri,
+                content_hash="abc123def456",
+                size_bytes=1024,
+            )
+
+        assert repo.get_artifacts("run-1") == []
+
     def test_get_artifacts_filtered_by_sink(self) -> None:
         """get_artifacts with sink_node_id filter returns only matching artifacts."""
         _db, repo, fac, tok = _make_repo_with_token()

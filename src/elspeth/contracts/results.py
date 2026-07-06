@@ -143,6 +143,11 @@ def _require_no_artifact_uri_credentials(path_or_uri: str) -> None:
             raise ValueError("path_or_uri must not contain known webhook path secrets")
 
 
+def require_no_artifact_uri_credentials(path_or_uri: str) -> None:
+    """Reject artifact paths/URIs that would persist raw credential material."""
+    _require_no_artifact_uri_credentials(path_or_uri)
+
+
 def _require_artifact_hash(content_hash: object) -> None:
     value = _require_non_empty_str(content_hash, "content_hash")
     if _ARTIFACT_HASH_RE.fullmatch(value) is None:

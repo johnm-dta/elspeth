@@ -167,6 +167,7 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/transforms/blob_fetch.py:BlobFetch.probe_config:return"
   - "src/elspeth/plugins/transforms/blob_csv_expand.py:BlobCSVExpand.probe_config:return"
   - "src/elspeth/plugins/transforms/azure/content_safety.py:AzureContentSafety.probe_config:return"
+  - "src/elspeth/plugins/transforms/azure/document_intelligence.py:AzureDocumentIntelligence.probe_config:return"
   - "src/elspeth/plugins/transforms/azure/prompt_shield.py:AzurePromptShield.probe_config:return"
   - "src/elspeth/plugins/transforms/llm/transform.py:LLMTransform.probe_config:return"
   - "src/elspeth/plugins/transforms/rag/transform.py:RAGRetrievalTransform.probe_config:return"
@@ -201,6 +202,7 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/transforms/web_scrape.py:WebScrapeTransform.__init__:options"
   - "src/elspeth/plugins/transforms/blob_fetch.py:BlobFetch.__init__:options"
   - "src/elspeth/plugins/transforms/blob_csv_expand.py:BlobCSVExpand.__init__:options"
+  - "src/elspeth/plugins/transforms/azure/document_intelligence.py:AzureDocumentIntelligence.__init__:config"
   - "src/elspeth/plugins/sources/json_source.py:JSONSource.__init__:config"
   - "src/elspeth/plugins/sources/csv_source.py:CSVSource.__init__:config"
   - "src/elspeth/plugins/sources/null_source.py:NullSource.__init__:config"
@@ -225,6 +227,8 @@ allowed_dict_patterns:
 
   # Secret refs resolver - walks arbitrary pipeline config trees to replace secret refs
   - "src/elspeth/core/secrets.py:resolve_secret_refs:config"
+  - "src/elspeth/core/secrets.py:redact_secret_refs_for_validation:config"
+  - "src/elspeth/core/secrets.py:redact_secret_refs_for_validation:return"
 
   # Blob inline resolver - walks arbitrary pipeline YAML trees to discover,
   # validate, and substitute widened blob_ref markers inside plugin options.
@@ -262,10 +266,15 @@ allowed_dict_patterns:
   - "src/elspeth/core/config.py:_fingerprint_config_for_audit:return"
   # In-place DSN-password sanitiser for audit copy (placement-based, e.g. database sink url).
   - "src/elspeth/core/config.py:_sanitize_dsn_option_for_audit:options"
-  - "src/elspeth/core/config.py:_expand_template_files:options"
-  - "src/elspeth/core/config.py:_expand_template_files:return"
   - "src/elspeth/core/config.py:_recurse:d"
   - "src/elspeth/core/config.py:_recurse:return"
+
+  # Config template materialization - walks arbitrary plugin option dicts while
+  # expanding file-backed template/lookup/system-prompt options.
+  - "src/elspeth/core/template_materialization.py:TemplateOptionMaterializer.materialize_config:return"
+  - "src/elspeth/core/template_materialization.py:TemplateOptionMaterializer.materialize_options:return"
+  - "src/elspeth/core/template_materialization.py:_expand_template_files:options"
+  - "src/elspeth/core/template_materialization.py:_expand_template_files:return"
 
   # Canonical representation - deterministic JSON for hashing
   - "src/elspeth/core/canonical.py:_edge_to_canonical_dict:return"
@@ -284,6 +293,10 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/infrastructure/base.py:BaseSink.get_config_schema:return"
   - "src/elspeth/plugins/infrastructure/base.py:BaseSource.get_config_schema:return"
   - "src/elspeth/plugins/transforms/llm/transform.py:LLMTransform.get_config_schema:return"
+  # MCP tool registration mutates and freezes JSON Schema property dicts before
+  # exposing them through mcp.types.Tool.inputSchema.
+  - "src/elspeth/mcp/server.py:_schema_properties_with_int_bounds:return"
+  - "src/elspeth/mcp/server.py:_freeze_schema_properties:return"
 
   # Catalog service - JSON Schema traversal (helpers receive raw Pydantic-
   # generated schema dicts and walk them; there is no stable TypedDict for
@@ -300,6 +313,18 @@ allowed_dict_patterns:
   # AGGREGATION STATE — Now typed via AggregationCheckpointState (elspeth-rapid-095ec6)
   # Only row_data inside tokens remains dict[str, Any] (pipeline data, Tier 2)
   # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/engine/executors/aggregation.py:_AggregationNodeState.snapshot_rows:return (list)"
+
+  # Transform executor row-data handoff points. These are PipelineRow.to_dict()
+  # projections used for schema validation and node-state audit persistence; the
+  # row payload shape is determined by upstream plugin contracts at runtime.
+  - "src/elspeth/engine/executors/transform.py:TransformExecutor._run_preflight:input_dict"
+  - "src/elspeth/engine/executors/transform.py:TransformExecutor._prepare_success_completion:return"
+
+  # Audit CSV export records are heterogeneous formatter output; individual
+  # record-type contracts live in formatter/export-record types.
+  - "src/elspeth/engine/orchestrator/export.py:_neutralize_csv_formula_record:return"
+  - "src/elspeth/engine/orchestrator/export.py:_CsvRecordTypeSpool.append:record"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # PLUGIN CONTEXT - Recording and routing
@@ -684,6 +709,11 @@ allowed_dict_patterns:
   - "src/elspeth/web/interpretation_state.py:strip_authoring_options:return"
   - "src/elspeth/web/sessions/service.py:_patch_structured_interpretation_prompt:return"
 
+  # WEB GUIDED COMPOSER — Step-specific option patching (Tier 3 sink options dict)
+  # Sink options are open-ended plugin configuration; this helper only overlays
+  # the Step-2 schema contract before passing the dict back to composer state.
+  - "src/elspeth/web/composer/guided/steps.py:_sink_options_with_step_2_schema_contract:return"
+
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Compose-loop helpers (Tier 3 LiteLLM API shapes)
   # The compose-loop decomposition (P1-P4 + Steps 6-7, RC5.2 commits
@@ -706,6 +736,12 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._try_terminate_no_tools:llm_messages (list)"
+  - "src/elspeth/web/composer/guided/chat_solver.py:_bounded_acompletion:kwargs"
+
+  # Azure Document Intelligence forward-invariant probe fake response payload.
+  # Mirrors an HTTP JSON body emitted by the local fake client, not an internal
+  # durable contract.
+  - "src/elspeth/plugins/transforms/azure/document_intelligence.py:_ProbeResponse.__init__:payload"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Tool executor (Tier 3 LLM tool call arguments)

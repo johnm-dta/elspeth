@@ -276,7 +276,7 @@ class RecoveryManager:
         source_data_ref: str,
         payload_store: PayloadStore,
         source_schema_class: type[PluginSchema],
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         try:
             payload_bytes = payload_store.retrieve(source_data_ref)
         except PayloadNotFoundError as exc:

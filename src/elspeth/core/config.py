@@ -2360,7 +2360,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def load_settings_from_config_dict(config_dict: dict[str, Any], *, expand_env_vars: bool = False) -> ElspethSettings:
+def load_settings_from_config_dict(config_dict: Mapping[str, object], *, expand_env_vars: bool = False) -> ElspethSettings:
     """Load settings from an already parsed in-memory config dict.
 
     This is the common post-parse path for web execution and validation.
@@ -2384,7 +2384,7 @@ def load_settings_from_config_dict(config_dict: dict[str, Any], *, expand_env_va
     Returns:
         Validated ElspethSettings instance.
     """
-    raw_config = _lowercase_schema_keys(config_dict)
+    raw_config = _lowercase_schema_keys(dict(config_dict))
     known_fields = set(ElspethSettings.model_fields.keys())
 
     unknown_keys = sorted(k for k in raw_config if k not in known_fields)

@@ -1091,8 +1091,8 @@ def build_execution_graph(
         graph.set_validation_warnings(graph.warn_divert_coalesce_interactions(coalesce_id_to_config))
 
     # Deep-freeze all NodeInfo configs now that schema resolution is complete.
-    # NodeInfo.__post_init__ cannot freeze config because the builder mutates
-    # it during multi-step schema propagation (gate/coalesce schema assignment).
+    # NodeInfo.__post_init__ cannot freeze config because graph construction
+    # replaces NodeInfo payloads during multi-step schema propagation.
     # deep_freeze converts nested dicts/lists to MappingProxyType/tuple recursively.
     graph.finalize_node_configs()
 

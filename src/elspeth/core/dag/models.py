@@ -247,10 +247,9 @@ class NodeInfo:
                 component_id=self.node_id,
                 component_type=component_type,
             )
-        # NOTE: config is NOT frozen here because the builder mutates
-        # output_schema_config on pass-through nodes (gates, coalesce) via
-        # object.__setattr__ during schema propagation. Deep freeze is
-        # applied by build_execution_graph() after all mutations are complete.
+        # NOTE: config is NOT frozen here because graph construction replaces
+        # NodeInfo payloads during schema propagation and final config freezing.
+        # Deep freeze is applied by build_execution_graph() after construction.
 
 
 @dataclass(frozen=True, slots=True)

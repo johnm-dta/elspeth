@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 import networkx as nx
@@ -190,13 +191,14 @@ class ExecutionGraph:
         """Set a node's output schema during graph construction."""
         self._assert_build_metadata_mutable()
         info = self.get_node_info(node_id)
-        object.__setattr__(info, "output_schema_config", schema)
+        self._graph.nodes[node_id]["info"] = replace(info, output_schema_config=schema)
 
     def finalize_node_configs(self) -> None:
         """Deep-freeze mutable node configs after construction is complete."""
-        for info in self.get_nodes():
+        for node_id, attrs in self._graph.nodes(data=True):
+            info = cast(NodeInfo, attrs["info"])
             if isinstance(info.config, dict):
-                object.__setattr__(info, "config", deep_freeze(info.config))
+                self._graph.nodes[node_id]["info"] = replace(info, config=deep_freeze(info.config))
 
     def add_edge(
         self,

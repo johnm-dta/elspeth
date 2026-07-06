@@ -12,6 +12,8 @@ _trace_branch_endpoints propagates up to the caller.
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
 from elspeth.contracts.enums import NodeType, RoutingMode
@@ -130,6 +132,32 @@ class TestSelectMergeCoalesceRaisesOnBrokenBranch:
 
 
 class TestExecutionGraphConstructionApi:
+    def test_set_node_output_schema_replaces_node_info_without_mutating_existing_instance(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="csv")
+        original_info = graph.get_node_info("source")
+
+        schema = SchemaConfig(mode="observed", fields=None)
+
+        graph.set_node_output_schema("source", schema)
+
+        updated_info = graph.get_node_info("source")
+        assert updated_info is not original_info
+        assert original_info.output_schema_config is None
+        assert updated_info.output_schema_config is schema
+
+    def test_finalize_node_configs_replaces_node_info_without_mutating_existing_instance(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="csv", config={"schema": {"mode": "observed"}})
+        original_info = graph.get_node_info("source")
+
+        graph.finalize_node_configs()
+
+        updated_info = graph.get_node_info("source")
+        assert updated_info is not original_info
+        assert isinstance(updated_info.config, MappingProxyType)
+        assert isinstance(original_info.config, dict)
+
     def test_set_node_output_schema_updates_node_info_through_graph_api(self) -> None:
         graph = ExecutionGraph()
         graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="csv")

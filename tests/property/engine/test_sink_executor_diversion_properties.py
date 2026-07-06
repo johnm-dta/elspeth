@@ -99,7 +99,14 @@ def _make_token(token_id: str, row_data: dict[str, object] | None = None) -> Tok
 
 
 def _make_context() -> SimpleNamespace:
-    return SimpleNamespace(run_id="run-1", operation_id=None)
+    def _for_contract(contract: SchemaContract | None) -> SimpleNamespace:
+        scoped = SimpleNamespace(run_id="run-1", operation_id=None, contract=contract)
+        scoped.for_contract = _for_contract
+        return scoped
+
+    ctx = SimpleNamespace(run_id="run-1", operation_id=None)
+    ctx.for_contract = _for_contract
+    return ctx
 
 
 def _make_executor() -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:

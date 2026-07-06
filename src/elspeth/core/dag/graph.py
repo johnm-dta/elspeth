@@ -3,31 +3,29 @@
 Construction logic lives in builder.py; this module contains the graph
 class with all runtime methods. The from_plugin_instances() classmethod
 is a thin facade that delegates to builder.build_execution_graph().
+Schema/contract validation policy lives in schema_validation.py,
+coalesce_warnings.py, guarantees.py and schema_factory.py; the
+corresponding ExecutionGraph methods are thin delegating facades
+(elspeth-b2c6ab6db8).
 """
 
 from __future__ import annotations
 
-import itertools
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 import networkx as nx
 from networkx import MultiDiGraph
-from pydantic import ConfigDict, create_model
 
 from elspeth.contracts import (
     EdgeInfo,
     PluginSchema,
     RouteDestination,
     RoutingMode,
-    check_compatibility,
 )
 from elspeth.contracts.enums import NodeType
-from elspeth.contracts.errors import FrameworkBugError
-from elspeth.contracts.guarantee_propagation import compose_propagation
-from elspeth.contracts.schema import FIELD_TYPE_MAP, SchemaConfig, get_raw_node_required_fields, get_raw_schema_config
+from elspeth.contracts.schema import SchemaConfig, get_raw_schema_config
 from elspeth.contracts.types import (
     AggregationName,
     BranchName,
@@ -36,14 +34,18 @@ from elspeth.contracts.types import (
     NodeID,
     SinkName,
 )
+from elspeth.core.dag import coalesce_warnings, guarantees, schema_validation
+from elspeth.core.dag.guarantees import EffectiveGuaranteeVote as _EffectiveGuaranteeVote
 from elspeth.core.dag.models import (
     BranchInfo,
-    EdgeContractError,
     GraphValidationError,
     GraphValidationWarning,
     NodeConfig,
     NodeInfo,
     _suggest_similar,
+)
+from elspeth.core.dag.schema_factory import (
+    build_coalesce_schema as _build_coalesce_schema,  # noqa: F401 — compat re-export; tests import _build_coalesce_schema from graph
 )
 
 if TYPE_CHECKING:
@@ -58,86 +60,11 @@ if TYPE_CHECKING:
     from elspeth.core.dag.models import WiredTransform
 
 
-_coalesce_schema_counter = itertools.count(1)
-
 # Sentinel for the empty declared_required_fields default. Sharing a single
 # frozenset instance is safe (frozensets are immutable) and avoids the bare
 # `frozenset()` literal default-argument anti-pattern, which would be unsafe
 # if the type were ever changed to a mutable container.
 _EMPTY_DECLARED_REQUIRED_FIELDS: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
-class _EffectiveGuaranteeVote:
-    """Propagation result that preserves fields AND participation state.
-
-    ``fields`` alone is not enough for sink validation, because an empty
-    effective guarantee set can mean either:
-
-    - no node participated in the guarantee vote (abstain), or
-    - one or more nodes participated and the result collapsed to empty
-
-    Carrying ``participated`` through the recursive walk keeps that contract
-    mechanical for downstream validators.
-    """
-
-    fields: frozenset[str]
-    participated: bool
-
-
-def _build_coalesce_schema(
-    schema_config: SchemaConfig,
-    *,
-    coalesce_id: str | None = None,
-) -> type[PluginSchema]:
-    """Build a PluginSchema class from a coalesce SchemaConfig.
-
-    Used by get_effective_producer_schema() to enable PHASE 2 type validation
-    on union-merge coalesce edges.  The SchemaConfig is set by the builder's
-    ``_assign_schema()`` on the coalesce node.
-
-    Args:
-        schema_config: The schema configuration for the coalesce node.
-        coalesce_id: The node ID of the coalesce node, for error attribution.
-
-    Raises:
-        GraphValidationError: If the schema config has no fields (indicates
-            a builder bug — observed schemas should not reach this path).
-    """
-    counter = next(_coalesce_schema_counter)
-
-    if schema_config.fields is None:
-        raise GraphValidationError(
-            f"Coalesce union schema has no fields (mode={schema_config.mode!r}). "
-            "Observed schemas should be filtered before calling _build_coalesce_schema.",
-            component_id=coalesce_id,
-            component_type="coalesce",
-        )
-
-    field_definitions: dict[str, Any] = {}
-    for fd in schema_config.fields:
-        python_type = FIELD_TYPE_MAP[fd.field_type]
-        # Pydantic type must include None if the field can ever be None at runtime.
-        # This happens when:
-        #   - fd.nullable=True: field explicitly allows None values (e.g., from
-        #     coalesce where a nullable branch can win via last_wins collision)
-        #   - fd.required=False: field may be absent (Pydantic defaults absent to None)
-        can_be_none = fd.nullable or not fd.required
-        field_type = python_type | None if can_be_none else python_type
-        if fd.required:
-            field_definitions[fd.name] = (field_type, ...)
-        else:
-            field_definitions[fd.name] = (field_type, None)
-
-    extra_mode: Literal["allow", "ignore", "forbid"] = "allow" if schema_config.mode == "flexible" else "forbid"
-
-    return create_model(
-        f"_CoalesceUnionSchema_{counter}",
-        __base__=PluginSchema,
-        __module__=__name__,
-        __config__=ConfigDict(extra=extra_mode, strict=True),
-        **field_definitions,
-    )
 
 
 class ExecutionGraph:
@@ -1071,89 +998,19 @@ class ExecutionGraph:
         """
         return dict(self._route_resolution_map)
 
+    # ===== SCHEMA/CONTRACT VALIDATION (delegating facade) =====
+    # Implementations extracted to dag.schema_validation, dag.coalesce_warnings,
+    # dag.guarantees and dag.schema_factory (elspeth-b2c6ab6db8). The delegators
+    # below preserve the historical ExecutionGraph surface for callers and tests.
+
     def validate_edge_compatibility(self) -> None:
         """Validate schema compatibility for all edges in the graph.
 
-        Called AFTER graph construction is complete. Validates that each edge
-        connects compatible schemas.
-
-        Raises:
-            ValueError: If any edge has incompatible schemas
-
-        Note:
-            This is PHASE 2 validation (cross-plugin compatibility). Plugin
-            SELF-validation happens in PHASE 1 during plugin construction.
+        Delegates to ``dag.schema_validation.validate_edge_compatibility``
+        (PHASE 2 cross-plugin validation: edges, coalesce branches, sink
+        required fields).
         """
-        # Schema resolution cache shared across all edge validations.
-        # Eliminates redundant recursion through long gate chains (O(N^2) → O(N)).
-        schema_cache: dict[str, type[PluginSchema] | None] = {}
-
-        # Validate each edge (skip divert edges — quarantine/error data doesn't
-        # conform to producer schemas because it failed validation or errored)
-        for from_id, to_id, edge_data in self._graph.edges(data=True):
-            if edge_data["mode"] == RoutingMode.DIVERT:
-                continue
-            self._validate_single_edge(from_id, to_id, _schema_cache=schema_cache)
-
-        # Validate all coalesce nodes (must have compatible schemas from all branches)
-        coalesce_nodes = [node_id for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.COALESCE]
-        for coalesce_id in coalesce_nodes:
-            self._validate_coalesce_compatibility(coalesce_id, _schema_cache=schema_cache)
-
-        # Validate sink required-field satisfaction against direct predecessors.
-        # Catches mismatches between sink.declared_required_fields and upstream
-        # output optionality at build time, rather than at runtime with a
-        # generic PluginContractViolation. Walking sinks backward (rather than
-        # coalesces forward) handles COALESCE → TRANSFORM → SINK topologies
-        # and any future multi-hop shape.
-        self._validate_sink_required_fields()
-
-    def _find_divert_transforms_in_chain(
-        self,
-        start_node: NodeID,
-        divert_transforms: set[NodeID],
-    ) -> set[NodeID]:
-        """Find DIVERT transforms by walking backwards from a node.
-
-        Walks backwards through MOVE edges from the start node, collecting
-        any transforms that have DIVERT edges. Intermediate routing gates are
-        part of supported branch topology, so the walk crosses GATE nodes and
-        stops only when the chain leaves the branch-processing path.
-
-        Args:
-            start_node: The node to start walking backwards from
-            divert_transforms: Pre-computed set of transforms with DIVERT edges
-
-        Returns:
-            Set of transform node IDs in the chain that have DIVERT edges.
-        """
-        found: set[NodeID] = set()
-        current = start_node
-        visited: set[NodeID] = set()
-
-        while current not in visited:
-            visited.add(current)
-            current_info = self.get_node_info(current)
-            if current_info.node_type == NodeType.TRANSFORM:
-                if current in divert_transforms:
-                    found.add(current)
-            elif current_info.node_type != NodeType.GATE:
-                break
-
-            # Walk backwards via MOVE edge (skip DIVERT edges to stay on main chain)
-            predecessor: NodeID | None = None
-            for pred_from, _pred_to, _pred_key, pred_data in self._graph.in_edges(current, keys=True, data=True):
-                if pred_data["mode"] == RoutingMode.DIVERT:
-                    continue
-                if pred_data["mode"] == RoutingMode.MOVE:
-                    predecessor = NodeID(pred_from)
-                    break
-
-            if predecessor is None:
-                break
-            current = predecessor
-
-        return found
+        schema_validation.validate_edge_compatibility(self)
 
     def warn_divert_coalesce_interactions(
         self,
@@ -1161,182 +1018,9 @@ class ExecutionGraph:
     ) -> list[GraphValidationWarning]:
         """Detect DIVERT edges that feed coalesces with audit/data implications.
 
-        Emits two types of warnings:
-
-        1. ``DIVERT_COALESCE_REQUIRE_ALL``: A transform with on_error routing
-           feeds a ``require_all`` coalesce. Diverted rows cause other branches
-           to wait indefinitely until end-of-source flush.
-
-        2. ``DIVERT_COALESCE_EXCLUSIVE_FIELDS``: A transform with on_error routing
-           is in a branch that carries fields not guaranteed by any other branch.
-           If a row is diverted, those fields are silently lost from the merged
-           output — the audit trail won't record what fields were expected but
-           absent. This warning applies to ALL policies, not just ``require_all``.
-
-        This is a build-time warning, not an error — the configuration is valid
-        but likely to cause operational or audit surprises.
-
-        Algorithm:
-          1. Pre-compute set of transform node IDs that have outgoing DIVERT edges.
-          2. For each ``require_all`` coalesce, warn about DIVERT timing issues.
-          3. For ALL coalesces with DIVERT-bearing branches, check for exclusive
-             fields that would be lost if the branch is diverted.
-
-        Args:
-            coalesce_configs: Mapping of coalesce node IDs to their settings.
-
-        Returns:
-            List of warnings (also logged via structlog).
+        Delegates to ``dag.coalesce_warnings.warn_divert_coalesce_interactions``.
         """
-        import structlog
-
-        log = structlog.get_logger()
-
-        # Step 1: pre-compute transforms with DIVERT edges (exit early if none)
-        divert_transforms: set[NodeID] = set()
-        for edge in self.get_edges():
-            if edge.mode == RoutingMode.DIVERT:
-                from_info = self.get_node_info(edge.from_node)
-                if from_info.node_type == NodeType.TRANSFORM:
-                    divert_transforms.add(edge.from_node)
-
-        if not divert_transforms:
-            return []
-
-        warnings: list[GraphValidationWarning] = []
-
-        # Step 2: check each coalesce for DIVERT interactions
-        for coalesce_nid, coal_config in coalesce_configs.items():
-            # Track incoming edges and whether their chains have DIVERT transforms
-            # Maps: from_node → (edge_label, edge_mode, divert_transforms_in_chain)
-            incoming_divert_map: dict[NodeID, tuple[str, RoutingMode, set[NodeID]]] = {}
-
-            for from_id, _to_id, _key, data in self._graph.in_edges(coalesce_nid, keys=True, data=True):
-                edge_mode = data["mode"]
-                edge_label = data["label"]
-                from_nid = NodeID(from_id)
-
-                # Identity branches (COPY from gate) have no transforms — skip
-                if edge_mode == RoutingMode.COPY:
-                    continue
-
-                # Transform branch: walk backwards to find DIVERT transforms
-                if edge_mode == RoutingMode.MOVE:
-                    chain_diverts = self._find_divert_transforms_in_chain(from_nid, divert_transforms)
-                    if chain_diverts:
-                        incoming_divert_map[from_nid] = (edge_label, edge_mode, chain_diverts)
-
-            if not incoming_divert_map:
-                continue  # No DIVERT risk for this coalesce
-
-            # Step 2a: DIVERT_COALESCE_REQUIRE_ALL for require_all policy
-            if coal_config.policy == "require_all":
-                for _from_nid, (_edge_label, _mode, chain_diverts) in incoming_divert_map.items():
-                    for transform_nid in chain_diverts:
-                        warning = GraphValidationWarning(
-                            code="DIVERT_COALESCE_REQUIRE_ALL",
-                            message=(
-                                f"Transform '{transform_nid}' has on_error routing (DIVERT edge) "
-                                f"and feeds require_all coalesce '{coalesce_nid}'. "
-                                f"Rows diverted on error will never reach the coalesce, "
-                                f"causing other branches to wait until end-of-source flush."
-                            ),
-                            node_ids=(str(transform_nid), str(coalesce_nid)),
-                        )
-                        warnings.append(warning)
-                        log.warning(
-                            "divert_coalesce_interaction",
-                            code=warning.code,
-                            transform=str(transform_nid),
-                            coalesce=str(coalesce_nid),
-                            message=warning.message,
-                        )
-                        break  # One warning per branch is enough
-
-            # Step 2b: DIVERT_COALESCE_EXCLUSIVE_FIELDS for exclusive field loss
-            # Only relevant for union merge (nested/select don't lose fields the same way)
-            if coal_config.merge != "union":
-                continue
-
-            # Use authoritative branch schemas from _branch_info (populated by builder)
-            # rather than re-deriving with weaker heuristics.
-            branch_schemas = self.get_coalesce_branch_schemas(CoalesceName(coal_config.name))
-
-            # Match incoming edges with DIVERT to branch names
-            for from_nid, (edge_label, _mode, chain_diverts) in incoming_divert_map.items():
-                # Try to find which branch this edge belongs to
-                matched_branch: str | None = None
-
-                # First, check if edge_label matches a branch name directly
-                if edge_label in coal_config.branches:
-                    matched_branch = edge_label
-                else:
-                    # For transform branches with "continue" edges, match via producer node
-                    for branch_name, _input_conn in coal_config.branches.items():
-                        if branch_name in branch_schemas:
-                            # branch_name ∈ branch_schemas guarantees it is also a key
-                            # in self._branch_info (branch_schemas is derived from it in
-                            # get_coalesce_branch_schemas), so the trace cannot KeyError
-                            # here. A GraphValidationError from the trace is an explicit
-                            # graph-construction-bug signal on first-party state (see
-                            # _trace_branch_endpoints docstring) and must surface — not be
-                            # swallowed, which would silently skip a branch match and
-                            # suppress a real audit-loss warning. This mirrors the
-                            # un-guarded trace call in get_branch_first_nodes.
-                            _first, last = self._trace_branch_endpoints(coalesce_nid, branch_name)
-                            if from_nid == last:
-                                matched_branch = branch_name
-                                break
-
-                if matched_branch is None or matched_branch not in branch_schemas:
-                    continue
-
-                branch_schema = branch_schemas[matched_branch]
-
-                # Get guaranteed fields from this branch
-                branch_fields = branch_schema.get_effective_guaranteed_fields()
-                if not branch_fields:
-                    continue  # No guaranteed fields — nothing to lose
-
-                # Get union of guaranteed fields from ALL OTHER branches
-                other_fields: set[str] = set()
-                for other_name, other_schema in branch_schemas.items():
-                    if other_name == matched_branch:
-                        continue
-                    other_fields.update(other_schema.get_effective_guaranteed_fields())
-
-                # Fields exclusive to this branch (not in any other branch)
-                exclusive_fields = branch_fields - other_fields
-
-                if not exclusive_fields:
-                    continue  # No exclusive fields — loss is covered by other branches
-
-                # Emit warning for exclusive field loss
-                transform_str = ", ".join(str(t) for t in sorted(chain_diverts))
-                fields_str = ", ".join(sorted(exclusive_fields))
-                warning = GraphValidationWarning(
-                    code="DIVERT_COALESCE_EXCLUSIVE_FIELDS",
-                    message=(
-                        f"Branch '{matched_branch}' has transforms with on_error routing "
-                        f"({transform_str}) and carries fields exclusive to this branch: "
-                        f"[{fields_str}]. If a row is diverted, these fields will be "
-                        f"silently absent from the coalesce '{coalesce_nid}' merged output. "
-                        f"The audit trail won't record which fields were expected but missing."
-                    ),
-                    node_ids=(str(coalesce_nid), matched_branch),
-                )
-                warnings.append(warning)
-                log.warning(
-                    "divert_coalesce_exclusive_fields",
-                    code=warning.code,
-                    branch=matched_branch,
-                    coalesce=str(coalesce_nid),
-                    exclusive_fields=sorted(exclusive_fields),
-                    divert_transforms=[str(t) for t in chain_diverts],
-                    message=warning.message,
-                )
-
-        return warnings
+        return coalesce_warnings.warn_divert_coalesce_interactions(self, coalesce_configs)
 
     def _validate_single_edge(
         self,
@@ -1347,323 +1031,20 @@ class ExecutionGraph:
     ) -> None:
         """Validate schema compatibility for a single edge.
 
-        Validation is performed in two phases:
-        1. CONTRACT VALIDATION: Check required/guaranteed field names
-        2. TYPE VALIDATION: Check field type compatibility
-
-        Contract validation catches missing fields even for dynamic schemas,
-        which is critical for template-based transforms (e.g., LLM) that
-        reference specific row fields.
-
-        Args:
-            from_node_id: Source node ID
-            to_node_id: Destination node ID
-            _schema_cache: Shared memoization dict for schema resolution.
-
-        Raises:
-            GraphValidationError: If schemas are incompatible or contracts violated
+        Delegates to ``dag.schema_validation.validate_single_edge``.
         """
-        to_info = self.get_node_info(to_node_id)
-
-        # Skip edge validation for coalesce nodes - they have special validation
-        # that checks all incoming branches together
-        if to_info.node_type == NodeType.COALESCE:
-            return
-
-        # Rule 0: Gates must preserve schema (input == output)
-        if (
-            to_info.node_type == NodeType.GATE
-            and to_info.input_schema is not None
-            and to_info.output_schema is not None
-            and to_info.input_schema != to_info.output_schema
-        ):
-            raise GraphValidationError(
-                f"Gate '{to_node_id}' must preserve schema: "
-                f"input_schema={to_info.input_schema.__name__}, "
-                f"output_schema={to_info.output_schema.__name__}",
-                component_id=str(to_node_id),
-                component_type="gate",
-            )
-
-        # ===== PHASE 1: CONTRACT VALIDATION (field name requirements) =====
-        # This catches missing fields even for dynamic schemas
-        consumer_required = self.get_required_fields(to_node_id)
-
-        if consumer_required:
-            # Get effective guaranteed fields (walks through pass-through nodes)
-            producer_guaranteed = self.get_effective_guaranteed_fields(from_node_id)
-
-            missing = consumer_required - producer_guaranteed
-            if missing:
-                # Build actionable error message
-                from_info = self.get_node_info(from_node_id)
-                raise GraphValidationError(
-                    f"Schema contract violation: edge '{from_node_id}' → '{to_node_id}'\n"
-                    f"  Consumer ({to_info.plugin_name}) requires fields: {sorted(consumer_required)}\n"
-                    f"  Producer ({from_info.plugin_name}) guarantees: "
-                    f"{sorted(producer_guaranteed) if producer_guaranteed else '(none - dynamic schema)'}\n"
-                    f"  Missing fields: {sorted(missing)}\n"
-                    f"\n"
-                    f"Fix: Either:\n"
-                    f"  1. Add missing fields to producer's schema or guaranteed_fields, or\n"
-                    f"  2. Remove from consumer's required_input_fields if truly optional",
-                    component_id=str(to_node_id),
-                    component_type=to_info.node_type.value,
-                )
-
-        # ===== PHASE 2: TYPE VALIDATION (schema compatibility) =====
-        # Get EFFECTIVE producer schema (walks through gates if needed)
-        producer_schema = self.get_effective_producer_schema(from_node_id, _cache=_schema_cache)
-        consumer_schema = to_info.input_schema
-
-        # Rule 1: Dynamic schemas (None) bypass type validation
-        if producer_schema is None or consumer_schema is None:
-            return  # Observed schema - compatible with anything
-
-        # Handle observed schemas (no explicit fields + extra='allow')
-        # These are created by _create_dynamic_schema and accept anything
-        # NOTE: We control all schemas via PluginSchema base class which sets model_config["extra"].
-        # Direct access is correct per Tier 1 trust model - missing key would be our bug.
-        producer_is_observed = len(producer_schema.model_fields) == 0 and producer_schema.model_config["extra"] == "allow"
-        consumer_is_observed = len(consumer_schema.model_fields) == 0 and consumer_schema.model_config["extra"] == "allow"
-        if producer_is_observed or consumer_is_observed:
-            return  # Observed schemas bypass static type validation
-
-        # Rule 2: Full compatibility check (missing fields, type mismatches, extra fields)
-        result = check_compatibility(producer_schema, consumer_schema)
-        if not result.compatible:
-            # Raise the structured subclass so downstream layers (composer
-            # runtime preflight error formatter at
-            # web/execution/validation.py) can build LLM-actionable
-            # suggestions without re-parsing the prose form. The prose
-            # message remains backwards-compatible for legacy str(exc)
-            # consumers.
-            raise EdgeContractError(
-                f"Edge from '{from_node_id}' to '{to_node_id}' invalid: "
-                f"producer schema '{producer_schema.__name__}' incompatible with "
-                f"consumer schema '{consumer_schema.__name__}': {result.error_message}",
-                from_node_id=str(from_node_id),
-                to_node_id=str(to_node_id),
-                producer_schema_name=producer_schema.__name__,
-                consumer_schema_name=consumer_schema.__name__,
-                compatibility_result=result,
-                component_type=to_info.node_type.value,
-            )
+        schema_validation.validate_single_edge(self, from_node_id, to_node_id, _schema_cache=_schema_cache)
 
     def get_effective_producer_schema(
         self,
         node_id: str,
         _cache: dict[str, type[PluginSchema] | None] | None = None,
     ) -> type[PluginSchema] | None:
-        """Get effective output schema, walking through pass-through nodes (gates, coalesce).
+        """Get effective output schema, walking through pass-through nodes.
 
-        Gates and coalesce nodes don't transform data - they inherit schema from their
-        upstream producers. This method walks backwards through the graph to find the
-        nearest schema-carrying producer.
-
-        Results are memoized in ``_cache`` to avoid redundant recursion through
-        long gate chains (O(N) depth per gate → O(1) with cache).
-
-        Args:
-            node_id: Node to get effective schema for
-            _cache: Internal memoization dict, created on first call.
-
-        Returns:
-            Output schema type, or None if dynamic
-
-        Raises:
-            GraphValidationError: If pass-through node has no incoming edges (graph construction bug)
+        Delegates to ``dag.schema_validation.get_effective_producer_schema``.
         """
-        if _cache is None:
-            _cache = {}
-
-        if node_id in _cache:
-            return _cache[node_id]
-
-        node_info = self.get_node_info(node_id)
-
-        # If node has output_schema, return it directly
-        if node_info.output_schema is not None:
-            _cache[node_id] = node_info.output_schema
-            return node_info.output_schema
-
-        # Coalesce nodes are NOT pass-throughs — they transform data via merge
-        # strategy (nested wraps in {branch: data}, union merges fields, select
-        # picks a branch).  Strategy-aware handling:
-        #   - select: passes through one branch unchanged → trace that branch's schema
-        #   - union:  builder synthesizes typed field schema → build PluginSchema class
-        #   - nested: all fields are "any" type → return None (nothing useful to validate)
-        if node_info.node_type == NodeType.COALESCE:
-            merge_strategy = node_info.config["merge"]
-            if merge_strategy == "select":
-                # Select merge passes through the selected branch's data unchanged.
-                # Trace back to that branch's producer schema for type validation.
-                if "select_branch" not in node_info.config:
-                    raise GraphValidationError(
-                        f"Coalesce node '{node_id}' has merge strategy 'select' but "
-                        "no 'select_branch' in config. This indicates a graph construction bug.",
-                        component_id=str(node_id),
-                        component_type="coalesce",
-                    )
-                select_branch = node_info.config["select_branch"]
-                # Identity branch: COPY edge from gate to coalesce with label == select_branch
-                for from_id, _, _key, edge_data in self._graph.in_edges(node_id, keys=True, data=True):
-                    if edge_data["mode"] == RoutingMode.COPY and edge_data["label"] == select_branch:
-                        result = self.get_effective_producer_schema(from_id, _cache)
-                        _cache[node_id] = result
-                        return result
-                # Transform branch: last transform's edge has label "continue", not
-                # the branch name. Trace backward to find the last transform node.
-                _first, last = self._trace_branch_endpoints(NodeID(node_id), select_branch)
-                result = self.get_effective_producer_schema(last, _cache)
-                _cache[node_id] = result
-                return result
-            if merge_strategy == "union" and node_info.output_schema_config is not None and not node_info.output_schema_config.is_observed:
-                # Union merge: the builder sets output_schema_config with concrete
-                # field types.  Build a PluginSchema class from it so PHASE 2 edge
-                # validation can type-check downstream.
-                result = _build_coalesce_schema(node_info.output_schema_config, coalesce_id=str(node_id))
-                _cache[node_id] = result
-                return result
-            # nested merge, observed union, or no synthesized schema: return None (dynamic)
-            _cache[node_id] = None
-            return None
-
-        # Gates are true pass-throughs — inherit schema from upstream producers
-        if node_info.node_type == NodeType.GATE:
-            incoming = list(self._graph.in_edges(node_id, keys=True, data=True))
-
-            if not incoming:
-                # Pass-through node with no inputs is a graph construction bug - CRASH
-                raise GraphValidationError(
-                    f"{node_info.node_type.capitalize()} node '{node_id}' has no incoming edges - "
-                    f"this indicates a bug in graph construction",
-                    component_id=str(node_id),
-                    component_type=node_info.node_type.value,
-                )
-
-            # Gather all input schemas for validation
-            all_schemas: list[tuple[str, type[PluginSchema] | None]] = []
-            for from_id, _, _key, _ in incoming:
-                schema = self.get_effective_producer_schema(from_id, _cache)
-                all_schemas.append((from_id, schema))
-
-            # For multi-input nodes, check for mixed observed/explicit schemas first
-            # Mixed observed/explicit branches create semantic mismatches that cause runtime failures
-            if len(all_schemas) > 1:
-                observed_branches = [(nid, s) for nid, s in all_schemas if self._is_observed_schema(s)]
-                explicit_branches = [(nid, s) for nid, s in all_schemas if not self._is_observed_schema(s)]
-
-                if observed_branches and explicit_branches:
-                    # Mixed observed/explicit - reject with clear error
-                    observed_names = [nid for nid, _ in observed_branches]
-                    # Schema is guaranteed non-None here (explicit_branches filtered out observed/None)
-                    explicit_names = [f"{nid} ({s.__name__})" for nid, s in explicit_branches if s is not None]
-                    raise GraphValidationError(
-                        f"{node_info.node_type.capitalize()} '{node_id}' has mixed observed/explicit schemas - "
-                        f"this is not allowed because observed branches may produce rows missing fields "
-                        f"expected by downstream consumers. "
-                        f"Observed branches: {observed_names}, explicit branches: {explicit_names}. "
-                        f"Fix: ensure all branches produce explicit schemas with compatible fields, "
-                        f"or all branches produce observed schemas.",
-                        component_id=str(node_id),
-                        component_type=node_info.node_type.value,
-                    )
-
-                # All explicit - verify structural compatibility
-                if len(explicit_branches) > 1:
-                    _first_id, first_schema = explicit_branches[0]
-                    for _other_id, other_schema in explicit_branches[1:]:
-                        compatible, error_msg = self._schemas_structurally_compatible(first_schema, other_schema)
-                        if not compatible:
-                            # Schemas are guaranteed non-None here (explicit_branches filtered out observed/None)
-                            first_name = first_schema.__name__ if first_schema is not None else "observed"
-                            other_name = other_schema.__name__ if other_schema is not None else "observed"
-                            raise GraphValidationError(
-                                f"{node_info.node_type.capitalize()} '{node_id}' receives incompatible schemas from "
-                                f"multiple inputs - this is a graph construction bug. "
-                                f"First input: {first_name}, other input: {other_name}. {error_msg}",
-                                component_id=str(node_id),
-                                component_type=node_info.node_type.value,
-                            )
-
-            # Return first schema (all are now either all-observed or all-explicit-compatible)
-            result = all_schemas[0][1]
-            _cache[node_id] = result
-            return result
-
-        # Not a pass-through node and no schema - return None (observed)
-        _cache[node_id] = None
-        return None
-
-    def _is_observed_schema(self, schema: type[PluginSchema] | None) -> bool:
-        """Check if a schema is observed (accepts any fields, types inferred from data).
-
-        A schema is observed if:
-        - It is None (unspecified output_schema)
-        - It has no fields and allows extra fields (structural observed)
-
-        Args:
-            schema: Schema class or None
-
-        Returns:
-            True if schema is observed, False if explicit (fixed/flexible)
-        """
-        if schema is None:
-            return True
-
-        # Structural observed: no fields + extra="allow"
-        # NOTE: We control all schemas via PluginSchema base class which sets model_config["extra"].
-        # Direct access is correct per Tier 1 trust model - missing key would be our bug.
-        return len(schema.model_fields) == 0 and schema.model_config["extra"] == "allow"
-
-    def _schemas_structurally_compatible(
-        self, schema_a: type[PluginSchema] | None, schema_b: type[PluginSchema] | None
-    ) -> tuple[bool, str]:
-        """Check if two schemas are structurally compatible (not by class identity).
-
-        Uses check_compatibility() for structural comparison. Handles observed schemas
-        which are compatible with anything.
-
-        Args:
-            schema_a: First schema (or None for observed)
-            schema_b: Second schema (or None for observed)
-
-        Returns:
-            Tuple of (is_compatible, error_message). If compatible, error_message is empty.
-        """
-        # Both observed - compatible
-        if self._is_observed_schema(schema_a) and self._is_observed_schema(schema_b):
-            return True, ""
-
-        # One observed, one explicit - for general compatibility, allow this
-        # (Pass-through nodes use stricter checking via _check_passthrough_schema_homogeneity)
-        if self._is_observed_schema(schema_a) or self._is_observed_schema(schema_b):
-            return True, ""
-
-        # Both explicit schemas - same class is trivially compatible
-        if schema_a is schema_b:
-            return True, ""
-
-        # At this point both schemas are explicit (not None, not dynamic)
-        # Type narrowing for mypy: we've already returned if either is dynamic/None
-        assert schema_a is not None and schema_b is not None
-
-        # Both explicit schemas - use bidirectional structural comparison
-        # For coalesce/pass-through nodes, schemas must be mutually compatible
-        result_ab = check_compatibility(schema_a, schema_b)
-        result_ba = check_compatibility(schema_b, schema_a)
-
-        if result_ab.compatible and result_ba.compatible:
-            return True, ""
-
-        # Build error message showing what's incompatible
-        errors = []
-        if not result_ab.compatible:
-            errors.append(f"{schema_a.__name__} -> {schema_b.__name__}: {result_ab.error_message}")
-        if not result_ba.compatible:
-            errors.append(f"{schema_b.__name__} -> {schema_a.__name__}: {result_ba.error_message}")
-        return False, "; ".join(errors)
+        return schema_validation.get_effective_producer_schema(self, node_id, _cache)
 
     def _validate_coalesce_compatibility(
         self,
@@ -1673,250 +1054,48 @@ class ExecutionGraph:
     ) -> None:
         """Validate all inputs to coalesce node have compatible schemas.
 
-        Strategy-aware: only ``union`` requires cross-branch schema compatibility.
-        ``nested`` and ``select`` strategies have no cross-branch constraint because
-        branches are keyed separately (nested) or only one branch is used (select).
-
-        Args:
-            coalesce_id: Coalesce node ID
-            _schema_cache: Shared memoization dict for schema resolution.
-
-        Raises:
-            GraphValidationError: If branches have incompatible schemas
+        Delegates to ``dag.schema_validation.validate_coalesce_compatibility``.
         """
-        incoming = list(self._graph.in_edges(coalesce_id, keys=True, data=True))
-
-        if not incoming:
-            raise GraphValidationError(
-                f"Coalesce '{coalesce_id}' has no incoming edges — this is a graph construction bug",
-                component_id=str(coalesce_id),
-                component_type="coalesce",
-            )
-        if len(incoming) < 2:
-            return  # Degenerate case (1 branch) - always compatible
-
-        # Determine merge strategy from node config.
-        # Config is populated by the builder — direct access is correct (Tier 1).
-        node_info = self.get_node_info(coalesce_id)
-        merge_strategy = node_info.config["merge"]
-
-        # nested/select strategies have no cross-branch schema constraint
-        if merge_strategy in ("nested", "select"):
-            return
-
-        # union strategy: gather all branch schemas and validate
-        all_schemas: list[tuple[str, type[PluginSchema] | None]] = []
-        for from_id, _, _key, _ in incoming:
-            schema = self.get_effective_producer_schema(from_id, _cache=_schema_cache)
-            all_schemas.append((from_id, schema))
-
-        # Reject mixed observed/explicit schemas
-        observed_branches = [(nid, s) for nid, s in all_schemas if self._is_observed_schema(s)]
-        explicit_branches = [(nid, s) for nid, s in all_schemas if not self._is_observed_schema(s)]
-
-        if observed_branches and explicit_branches:
-            observed_names = [nid for nid, _ in observed_branches]
-            explicit_names = [f"{nid} ({s.__name__})" for nid, s in explicit_branches if s is not None]
-            raise GraphValidationError(
-                f"Coalesce '{coalesce_id}' has mixed observed/explicit schemas - "
-                f"this is not allowed because observed branches may produce rows missing fields "
-                f"expected by downstream consumers. "
-                f"Observed branches: {observed_names}, explicit branches: {explicit_names}. "
-                f"Fix: ensure all branches produce explicit schemas with compatible fields, "
-                f"or all branches produce observed schemas.",
-                component_id=str(coalesce_id),
-                component_type="coalesce",
-            )
-
-        # All explicit: verify structural compatibility across branches
-        if len(explicit_branches) > 1:
-            _first_id, first_schema = explicit_branches[0]
-            for other_id, other_schema in explicit_branches[1:]:
-                compatible, error_msg = self._schemas_structurally_compatible(first_schema, other_schema)
-                if not compatible:
-                    first_name = first_schema.__name__ if first_schema else "observed"
-                    other_name = other_schema.__name__ if other_schema else "observed"
-                    raise GraphValidationError(
-                        f"Coalesce '{coalesce_id}' receives incompatible schemas from "
-                        f"multiple branches: first branch has {first_name}, "
-                        f"branch from '{other_id}' has {other_name}. {error_msg}",
-                        component_id=str(coalesce_id),
-                        component_type="coalesce",
-                    )
+        schema_validation.validate_coalesce_compatibility(self, coalesce_id, _schema_cache=_schema_cache)
 
     def _validate_sink_required_fields(self) -> None:
         """Validate each sink's declared_required_fields against upstream guarantees.
 
-        For every SINK node with a non-empty declared_required_fields, check
-        every direct predecessor's effective guaranteed fields (via the existing
-        get_effective_guaranteed_fields() API). A sink's required fields must
-        be a subset of its upstream guaranteed fields.
-
-        This catches cases where:
-        - A coalesce marks a field optional (branch-exclusive or AND-downgraded)
-          and feeds a sink that requires it (direct or through a transform)
-        - A transform's declared_output_fields don't include a field the sink requires
-        - A source doesn't guarantee a field the sink requires
-
-        Uses get_effective_guaranteed_fields() rather than reading
-        output_schema_config.fields directly. The fields tuple is unreliable
-        for shape-changing transforms that use the base _build_output_schema_config()
-        — that base method copies INPUT fields into the output config, with
-        only guaranteed_fields recomputed correctly. The effective-guarantees
-        API is the single source of truth: it handles aggregations (dynamic
-        output → no guarantees), coalesce strategies (union intersection,
-        nested branch keys, select pass-through), and the base-class
-        guaranteed_fields recomputation in one place.
-
-        Sink predecessors are visited via .predecessors() which yields each
-        unique source node once, even when the underlying MultiDiGraph has
-        parallel edges (e.g., a gate routing two labels to the same sink).
-
-        Runs at build time rather than failing at runtime with a generic
-        PluginContractViolation.
-
-        Raises:
-            GraphValidationError: if a sink's direct predecessor does not
-                guarantee a field the sink requires.
+        Delegates to ``dag.schema_validation.validate_sink_required_fields``.
         """
-        # Shared cache across all sinks' predecessor walks. Mirrors the
-        # schema_cache pattern at validate_edge_compatibility — avoids
-        # re-walking common upstream nodes in fan-in topologies.
-        effective_fields_cache: dict[str, _EffectiveGuaranteeVote] = {}
-
-        for node_id, data in self._graph.nodes(data=True):
-            info = data["info"]
-            if info.node_type != NodeType.SINK:
-                continue
-
-            sink_required = info.declared_required_fields
-            if not sink_required:
-                continue
-
-            for predecessor_id in self._graph.predecessors(node_id):
-                vote = self._walk_effective_guarantee_vote(predecessor_id, effective_fields_cache)
-                guaranteed = vote.fields
-                if not guaranteed and not vote.participated:
-                    continue
-
-                missing = sink_required - guaranteed
-                if not missing:
-                    continue
-
-                raise GraphValidationError(
-                    f"Sink '{info.plugin_name}' requires fields {sorted(missing)} "
-                    f"but its upstream '{predecessor_id}' does not guarantee them. "
-                    f"Likely causes: a coalesce union marked these fields optional "
-                    f"(branch-exclusive or AND-downgraded), or an upstream transform "
-                    f"did not declare them as guaranteed output. "
-                    f"Fix: ensure the upstream node guarantees these fields, "
-                    f"or remove them from the sink's declared_required_fields.",
-                    component_id=str(node_id),
-                    component_type="sink",
-                )
+        schema_validation.validate_sink_required_fields(self)
 
     # ===== CONTRACT VALIDATION HELPERS =====
 
     def get_schema_config_from_node(self, node_id: str) -> SchemaConfig | None:
         """Extract SchemaConfig from node.
 
-        Returns output_schema_config directly — all nodes with schemas have
-        this populated at construction time by the builder.
-
-        Args:
-            node_id: Node ID to get schema config from
-
-        Returns:
-            SchemaConfig if available, None if node has no schema
+        Delegates to ``dag.guarantees.get_schema_config_from_node``.
         """
-        node_info = self.get_node_info(node_id)
-        return node_info.output_schema_config
+        return guarantees.get_schema_config_from_node(self, node_id)
 
     def get_guaranteed_fields(self, node_id: str) -> frozenset[str]:
         """Get fields that a node guarantees in its output.
 
-        Priority:
-        1. Explicit guaranteed_fields in schema config
-        2. Declared fields in flexible/fixed mode schemas
-        3. Empty set for observed schemas
-
-        Args:
-            node_id: Node ID to get guarantees from
-
-        Returns:
-            Frozenset of field names the node guarantees to output
+        Delegates to ``dag.guarantees.get_guaranteed_fields``.
         """
-        schema_config = self.get_schema_config_from_node(node_id)
-
-        if schema_config is None:
-            return frozenset()
-
-        return schema_config.get_effective_guaranteed_fields()
+        return guarantees.get_guaranteed_fields(self, node_id)
 
     def get_required_fields(self, node_id: str) -> frozenset[str]:
         """Get fields that a node EXPLICITLY requires in its input.
 
-        This returns only explicit contract declarations, not implicit
-        requirements from typed schemas. The existing type validation
-        handles typed schema compatibility separately.
-
-        Priority:
-        1. Explicit required_input_fields from plugin config (TransformDataConfig)
-        2. Explicit required_fields in schema config
-
-        Note: This deliberately does NOT include implicit requirements from
-        strict/free mode schemas. Those are handled by type validation, which
-        correctly skips validation when either side is dynamic.
-
-        Args:
-            node_id: Node ID to get requirements from
-
-        Returns:
-            Frozenset of field names explicitly required
+        Delegates to ``dag.guarantees.get_required_fields``.
         """
-        node_info = self.get_node_info(node_id)
-        try:
-            return get_raw_node_required_fields(
-                node_info.config,
-                owner=f"node:{node_id}",
-                node_type=node_info.node_type.value,
-            )
-        except ValueError as exc:
-            raise GraphValidationError(
-                f"Invalid contract config: {exc}",
-                component_id=str(node_id),
-                component_type=node_info.node_type.value,
-            ) from exc
+        return guarantees.get_required_fields(self, node_id)
 
     def get_effective_guaranteed_fields(self, node_id: str) -> frozenset[str]:
-        """Get effective output guarantees for a node (propagation-aware).
+        """Get effective output guarantees for a node (propagation-aware, ADR-007).
 
-        Per ADR-007, this method is the propagation-aware implementation.
-        For a TRANSFORM node whose plugin declared ``passes_through_input=True``,
-        the effective guarantees are the intersection of its participating
-        predecessors' guarantees unioned with the node's own declared fields.
-        For all other nodes, returns the node's own declarations (same as
-        ``get_guaranteed_fields``).
-
+        Delegates to ``dag.guarantees.get_effective_guaranteed_fields``.
         Callers that want the raw per-node declarations (without propagation)
         must call ``get_guaranteed_fields`` instead.
-
-        For coalesce nodes, builder.py pre-computes strategy-aware guarantees:
-        - **union** with require_all: union of branch guarantees (all branches arrive)
-        - **union** with other policies: intersection (only fields in ALL branches)
-        - **nested**: the node's own guarantees (branch names, not inner fields)
-        - **select**: the node's own guarantees (selected branch's schema)
-
-        Tests that construct graphs directly must set output_schema_config
-        on nodes to match what the builder would compute.
-
-        Args:
-            node_id: Node to get effective guarantees for
-
-        Returns:
-            Frozenset of field names effectively guaranteed at this point
         """
-        return self._walk_effective_guaranteed_fields(node_id, {})
+        return guarantees.get_effective_guaranteed_fields(self, node_id)
 
     def _walk_effective_guarantee_vote(
         self,
@@ -1924,46 +1103,11 @@ class ExecutionGraph:
         cache: dict[str, _EffectiveGuaranteeVote],
         field_cache: dict[str, frozenset[str]] | None = None,
     ) -> _EffectiveGuaranteeVote:
-        """Recursive implementation that preserves participation state.
+        """Recursive guarantee walk that preserves participation state.
 
-        Pass-through propagation needs more than the final field set. A sink
-        validator must be able to distinguish "nobody voted" from "the vote
-        participated and collapsed to empty", so this helper carries both.
+        Delegates to ``dag.guarantees.walk_effective_guarantee_vote``.
         """
-        if node_id in cache:
-            return cache[node_id]
-
-        node_info = self.get_node_info(node_id)
-        own_participates = node_info.output_schema_config is not None and node_info.output_schema_config.participates_in_propagation
-        own_fields = (
-            node_info.output_schema_config.get_effective_guaranteed_fields() if node_info.output_schema_config is not None else frozenset()
-        )
-
-        if node_info.passes_through_input:
-            predecessors = list(self._graph.predecessors(node_id))
-            if not predecessors:
-                raise FrameworkBugError(
-                    f"Pass-through transform {node_id!r} has no predecessors. Builder must wire transforms with at least one upstream edge."
-                )
-            predecessor_votes = [self._walk_effective_guarantee_vote(pred_id, cache, field_cache) for pred_id in predecessors]
-            result_fields = compose_propagation(
-                own_fields,
-                [vote.fields if vote.participated else None for vote in predecessor_votes],
-            )
-            result = _EffectiveGuaranteeVote(
-                fields=result_fields,
-                participated=own_participates or any(vote.participated for vote in predecessor_votes),
-            )
-        else:
-            result = _EffectiveGuaranteeVote(
-                fields=own_fields,
-                participated=own_participates,
-            )
-
-        cache[node_id] = result
-        if field_cache is not None:
-            field_cache[node_id] = result.fields
-        return result
+        return guarantees.walk_effective_guarantee_vote(self, node_id, cache, field_cache)
 
     def _walk_effective_guaranteed_fields(
         self,
@@ -1972,39 +1116,6 @@ class ExecutionGraph:
     ) -> frozenset[str]:
         """Recursive implementation of get_effective_guaranteed_fields.
 
-        Explicit (non-optional) cache parameter — internal callers with
-        bulk-validation scope (e.g., ``_validate_sink_required_fields``)
-        pass a shared cache across their loop to avoid per-node re-allocation
-        and re-walking. Public callers go through ``get_effective_guaranteed_fields``
-        which allocates a fresh per-call cache.
-
-        For pass-through transforms, delegates the aggregation step to
-        ``compose_propagation`` (ADR-009 §Clause 1). Predecessor
-        participation is checked via ``SchemaConfig.participates_in_propagation``
-        — the canonical predicate that both this walker and the composer's
-        preview walker consult.
-
-        Raises ``FrameworkBugError`` if a pass-through transform has no
-        predecessors — per the NodeInfo guard, pass-through nodes are
-        transforms, and transforms in a built DAG always have at least one
-        upstream edge.
+        Delegates to ``dag.guarantees.walk_effective_guaranteed_fields``.
         """
-        if node_id in cache:
-            return cache[node_id]
-
-        result = self._walk_effective_guarantee_vote(node_id, {}, cache)
-        cache[node_id] = result.fields
-        return result.fields
-
-    def _predecessor_participates(self, node_id: str) -> bool:
-        """Whether a predecessor participates in pass-through intersection.
-
-        Delegates to ``SchemaConfig.participates_in_propagation`` (ADR-009
-        §Clause 1). A schema-less predecessor is treated as abstaining — the
-        None case is distinct from "declared empty guarantees," since the
-        None-vs-empty-tuple semantic on ``guaranteed_fields`` is preserved at
-        the SchemaConfig layer and reaches this predicate via
-        ``has_effective_guarantees``.
-        """
-        schema = self.get_node_info(node_id).output_schema_config
-        return schema is not None and schema.participates_in_propagation
+        return guarantees.walk_effective_guaranteed_fields(self, node_id, cache)

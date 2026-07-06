@@ -249,10 +249,12 @@ class CanDropRowsContract(DeclarationContract):
     @classmethod
     def positive_example_does_not_apply(cls) -> ExampleBundle:
         class _OutOfScopeTransform:
+            # Declared filter (both flags True) is the only shape outside this
+            # contract's scope now that it also owns the success_empty() path.
             name = "NonApplyingCanDropRowsExample"
             node_id = "can-drop-rows-non-fire-1"
-            passes_through_input = False
-            can_drop_rows = False
+            passes_through_input = True
+            can_drop_rows = True
             declared_output_fields: frozenset[str] = frozenset()
             declared_input_fields: frozenset[str] = frozenset()
             is_batch_aware = False
@@ -300,10 +302,11 @@ class CanDropRowsContract(DeclarationContract):
     @classmethod
     def positive_example_does_not_apply_batch_flush(cls) -> ExampleBundle:
         class _OutOfScopeBatchTransform:
+            # Declared filter — see positive_example_does_not_apply above.
             name = "NonApplyingCanDropRowsBatchExample"
             node_id = "can-drop-rows-batch-non-fire-1"
-            passes_through_input = False
-            can_drop_rows = False
+            passes_through_input = True
+            can_drop_rows = True
             declared_output_fields: frozenset[str] = frozenset()
             declared_input_fields: frozenset[str] = frozenset()
             is_batch_aware = True

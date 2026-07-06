@@ -800,6 +800,7 @@ class TestCoalesceSinkRequiredFieldValidation:
         from unittest.mock import patch
 
         from elspeth.contracts import RoutingMode
+        from elspeth.core.dag import schema_validation
         from elspeth.core.dag.graph import ExecutionGraph
 
         gate_output_schema = SchemaConfig(
@@ -836,16 +837,20 @@ class TestCoalesceSinkRequiredFieldValidation:
         # state, so it goes through the vote helper rather than the older
         # fields-only helper. Patching the vote helper covers both the
         # deduplication test and the cache-sharing behavior.
+        # The sink validator lives in dag.schema_validation and calls the
+        # module-level walk helper directly (elspeth-b2c6ab6db8), so the
+        # interception seam is the schema_validation module attribute, not
+        # the ExecutionGraph delegator method.
         call_counts: dict[str, int] = {}
-        original = ExecutionGraph._walk_effective_guarantee_vote
+        original = schema_validation.walk_effective_guarantee_vote
 
         def counting_walk(
-            self_inner: ExecutionGraph, node_id: str, cache: dict[str, object], field_cache: dict[str, frozenset[str]] | None = None
+            graph_inner: ExecutionGraph, node_id: str, cache: dict[str, object], field_cache: dict[str, frozenset[str]] | None = None
         ) -> object:
             call_counts[node_id] = call_counts.get(node_id, 0) + 1
-            return original(self_inner, node_id, cache, field_cache)
+            return original(graph_inner, node_id, cache, field_cache)
 
-        with patch.object(ExecutionGraph, "_walk_effective_guarantee_vote", new=counting_walk):
+        with patch.object(schema_validation, "walk_effective_guarantee_vote", new=counting_walk):
             graph._validate_sink_required_fields()  # Should not raise
 
         assert call_counts.get("gate", 0) == 1, (

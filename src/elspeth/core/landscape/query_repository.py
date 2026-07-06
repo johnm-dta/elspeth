@@ -11,7 +11,7 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 
 from elspeth.contracts import (
     Call,
@@ -396,7 +396,13 @@ class QueryRepository:
                     node_states_table.c.step_index,
                     node_states_table.c.attempt,
                 )
-                .join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
+                .join(
+                    node_states_table,
+                    and_(
+                        routing_events_table.c.state_id == node_states_table.c.state_id,
+                        routing_events_table.c.run_id == node_states_table.c.run_id,
+                    ),
+                )
                 .where(routing_events_table.c.state_id.in_(chunk))
             )
             all_db_rows.extend(self._ops.execute_fetchall(query))
@@ -504,8 +510,14 @@ class QueryRepository:
         # JOIN through node_states to filter by run_id
         query = (
             select(routing_events_table)
-            .join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
-            .where(node_states_table.c.run_id == run_id)
+            .join(
+                node_states_table,
+                and_(
+                    routing_events_table.c.state_id == node_states_table.c.state_id,
+                    routing_events_table.c.run_id == node_states_table.c.run_id,
+                ),
+            )
+            .where(routing_events_table.c.run_id == run_id)
             .order_by(
                 node_states_table.c.step_index,
                 node_states_table.c.attempt,

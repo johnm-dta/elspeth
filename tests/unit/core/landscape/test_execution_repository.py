@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts import (
     BatchStatus,
@@ -53,7 +53,7 @@ from elspeth.core.landscape.model_loaders import (
     OperationLoader,
     RoutingEventLoader,
 )
-from elspeth.core.landscape.schema import node_states_table
+from elspeth.core.landscape.schema import node_states_table, routing_events_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
@@ -1225,6 +1225,97 @@ class TestCompleteNodeStateSuccessFailure:
 class TestRecordRoutingEvent:
     """Tests for single routing event recording."""
 
+    def test_record_routing_event_rejects_edge_from_different_run(self) -> None:
+        """A routing event must not connect a node state to another run's edge."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id="transform-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        edge = fac.data_flow.register_edge(
+            run_id="run-2",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="wrong-run",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-run-2",
+        )
+
+        with pytest.raises(LandscapeRecordError, match="same run"):
+            repo.record_routing_event(state.state_id, edge.edge_id, RoutingMode.MOVE)
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table.c.event_id)).all()
+
+        assert rows == []
+
+    def test_routing_events_schema_rejects_cross_run_direct_insert(self) -> None:
+        """The routing_events table must enforce same-run state/edge ownership."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id="transform-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        edge = fac.data_flow.register_edge(
+            run_id="run-2",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="wrong-run",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-run-2",
+        )
+
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
+            conn.execute(
+                routing_events_table.insert().values(
+                    event_id="event-cross-run",
+                    state_id=state.state_id,
+                    edge_id=edge.edge_id,
+                    run_id="run-1",
+                    routing_group_id="group-cross-run",
+                    ordinal=0,
+                    mode=RoutingMode.MOVE,
+                    created_at=state.started_at,
+                )
+            )
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table.c.event_id)).all()
+
+        assert rows == []
+
     def test_record_routing_event_basic(self) -> None:
         """Record a single routing event and verify all fields."""
         _db, repo, fac, tok = _make_repo_with_token()
@@ -1329,6 +1420,60 @@ class TestRecordRoutingEvent:
         assert events[1].ordinal == 1
         # All events in a fork share the same routing_group_id
         assert events[0].routing_group_id == events[1].routing_group_id
+
+    def test_record_routing_events_rejects_edge_from_different_run(self) -> None:
+        """Batch routing writes must roll back when any route targets another run."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="right-run",
+            mode=RoutingMode.COPY,
+            edge_id="edge-run-1",
+        )
+        fac.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id="transform-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_edge(
+            run_id="run-2",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="wrong-run",
+            mode=RoutingMode.COPY,
+            edge_id="edge-run-2",
+        )
+
+        with pytest.raises(LandscapeRecordError, match="same run"):
+            repo.record_routing_events(
+                state.state_id,
+                [
+                    RoutingSpec(edge_id="edge-run-1", mode=RoutingMode.COPY),
+                    RoutingSpec(edge_id="edge-run-2", mode=RoutingMode.COPY),
+                ],
+            )
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table.c.event_id)).all()
+
+        assert rows == []
 
     def test_record_routing_events_empty_list_returns_empty(self) -> None:
         """record_routing_events with empty routes list returns empty list."""

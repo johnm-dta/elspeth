@@ -238,6 +238,22 @@ class TestSchemaCompatibilityGuards:
             ("node_id", "run_id"),
         ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
 
+    def test_routing_events_run_scoped_fks_are_required_schema_contract(self) -> None:
+        """Routing events must point at state and edge rows owned by the same run."""
+        assert ("routing_events", "run_id") in database_module._REQUIRED_COLUMNS
+        assert (
+            "routing_events",
+            ("state_id", "run_id"),
+            "node_states",
+            ("state_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "routing_events",
+            ("edge_id", "run_id"),
+            "edges",
+            ("edge_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+
     def test_token_work_items_resume_identity_columns_are_required_schema_contract(self) -> None:
         """Scheduler resume fields must participate in stale-DB detection."""
         required_token_work_columns = {column for table, column in database_module._REQUIRED_COLUMNS if table == "token_work_items"}

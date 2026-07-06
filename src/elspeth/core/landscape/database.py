@@ -289,6 +289,8 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Batch membership run ownership - enables composite FK enforcement to both
     # batches and tokens so cross-run batch contamination fails at the database.
     ("batch_members", "run_id"),
+    # Routing decisions must bind the chosen state and edge to the same audit run.
+    ("routing_events", "run_id"),
     # Retry lineage exactness - retry_batch() must deduplicate per failed batch.
     ("batches", "retry_of_batch_id"),
     # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
@@ -441,6 +443,8 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("transform_errors", ("transform_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("artifacts", ("produced_by_state_id", "run_id"), "node_states", ("state_id", "run_id")),
     ("artifacts", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("routing_events", ("state_id", "run_id"), "node_states", ("state_id", "run_id")),
+    ("routing_events", ("edge_id", "run_id"), "edges", ("edge_id", "run_id")),
     ("run_sources", ("source_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_state_id", "run_id"), "node_states", ("state_id", "run_id")),

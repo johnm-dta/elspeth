@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from sqlalchemy import bindparam, func, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
@@ -35,7 +36,7 @@ from elspeth.core.landscape._helpers import generate_id, now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.model_loaders import NodeStateLoader, RoutingEventLoader
-from elspeth.core.landscape.schema import node_states_table, routing_events_table, tokens_table
+from elspeth.core.landscape.schema import edges_table, node_states_table, routing_events_table, tokens_table
 
 if TYPE_CHECKING:
     from elspeth.contracts.errors import TransformSuccessReason
@@ -695,6 +696,11 @@ class NodeStateRepository:
         Returns:
             RoutingEvent model
         """
+        run_id = self._routing_event_run_id(
+            state_id=state_id,
+            edge_id=edge_id,
+            owner="record_routing_event",
+        )
         event_id = event_id or generate_id()
         routing_group_id = routing_group_id or generate_id()
         reason_hash = stable_hash(reason) if reason else None
@@ -720,6 +726,7 @@ class NodeStateRepository:
                 event_id=event.event_id,
                 state_id=event.state_id,
                 edge_id=event.edge_id,
+                run_id=run_id,
                 routing_group_id=event.routing_group_id,
                 ordinal=event.ordinal,
                 mode=event.mode,
@@ -780,6 +787,15 @@ class NodeStateRepository:
         inserted_events: list[RoutingEvent] = []
         try:
             with self._db.write_connection() as conn:
+                route_run_ids = [
+                    self._routing_event_run_id(
+                        state_id=state_id,
+                        edge_id=route.edge_id,
+                        owner="record_routing_events",
+                        conn=conn,
+                    )
+                    for route in routes
+                ]
                 for ordinal, route in enumerate(routes):
                     event_id = generate_id()
                     event = RoutingEvent(
@@ -799,6 +815,7 @@ class NodeStateRepository:
                             event_id=event.event_id,
                             state_id=event.state_id,
                             edge_id=event.edge_id,
+                            run_id=route_run_ids[ordinal],
                             routing_group_id=event.routing_group_id,
                             ordinal=event.ordinal,
                             mode=event.mode,
@@ -838,6 +855,30 @@ class NodeStateRepository:
             )
             for event in inserted_events
         ]
+
+    def _routing_event_run_id(
+        self,
+        *,
+        state_id: str,
+        edge_id: str,
+        owner: str,
+        conn: Connection | None = None,
+    ) -> str:
+        """Return the shared run_id for a routing state/edge pair or reject."""
+        query = (
+            select(
+                node_states_table.c.run_id.label("state_run_id"),
+                edges_table.c.run_id.label("edge_run_id"),
+            )
+            .select_from(node_states_table.join(edges_table, edges_table.c.edge_id == edge_id))
+            .where(node_states_table.c.state_id == state_id)
+        )
+        row = conn.execute(query).fetchone() if conn is not None else self._ops.execute_fetchone(query)
+        if row is None:
+            raise LandscapeRecordError(f"{owner} requires existing state_id={state_id!r} and edge_id={edge_id!r} in the same run")
+        if row.state_run_id != row.edge_run_id:
+            raise LandscapeRecordError(f"{owner} requires state_id={state_id!r} and edge_id={edge_id!r} to belong to the same run")
+        return str(row.state_run_id)
 
     def _materialize_routing_reason_ref_after_insert(
         self,

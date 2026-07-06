@@ -108,7 +108,10 @@ metadata = MetaData()
 #        coalesce_branch_losses tables; token_work_items gains
 #        barrier_adopted_epoch (adoption CAS marker, written only by the
 #        slice-3 fenced adoption verb; NULL = intake-pending).
-SQLITE_SCHEMA_EPOCH = 21
+#   22 → Routing events are run-scoped: routing_events carries run_id and
+#        composite FKs to node_states(state_id, run_id) and edges(edge_id, run_id)
+#        so state/edge route decisions cannot cross audit-run boundaries.
+SQLITE_SCHEMA_EPOCH = 22
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -265,6 +268,8 @@ edges_table = Table(
     Column("label", String(64), nullable=False),
     Column("default_mode", String(16), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # Composite unique target for run-scoped FKs to edges.
+    UniqueConstraint("edge_id", "run_id"),
     UniqueConstraint("run_id", "from_node_id", "label"),
     # Composite FKs to nodes (node_id, run_id)
     ForeignKeyConstraint(["from_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
@@ -965,8 +970,9 @@ routing_events_table = Table(
     "routing_events",
     metadata,
     Column("event_id", String(64), primary_key=True),
-    Column("state_id", String(64), ForeignKey("node_states.state_id"), nullable=False),
-    Column("edge_id", String(64), ForeignKey("edges.edge_id"), nullable=False),
+    Column("state_id", String(64), nullable=False),
+    Column("edge_id", String(64), nullable=False),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("routing_group_id", String(64), nullable=False),
     Column("ordinal", Integer, nullable=False),
     Column("mode", String(16), nullable=False),  # move, copy
@@ -974,6 +980,9 @@ routing_events_table = Table(
     Column("reason_ref", String(256)),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("routing_group_id", "ordinal"),
+    # Composite FKs: routed state and edge must belong to the same run.
+    ForeignKeyConstraint(["state_id", "run_id"], ["node_states.state_id", "node_states.run_id"]),
+    ForeignKeyConstraint(["edge_id", "run_id"], ["edges.edge_id", "edges.run_id"]),
 )
 
 # === Batches (Aggregation) ===
@@ -1030,6 +1039,7 @@ batch_outputs_table = Table(
 # === Indexes for Query Performance ===
 
 Index("ix_routing_events_state", routing_events_table.c.state_id)
+Index("ix_routing_events_run_state", routing_events_table.c.run_id, routing_events_table.c.state_id)
 Index("ix_routing_events_group", routing_events_table.c.routing_group_id)
 Index("ix_batches_run_status", batches_table.c.run_id, batches_table.c.status)
 Index("ix_batch_members_batch", batch_members_table.c.batch_id)

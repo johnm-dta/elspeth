@@ -93,7 +93,7 @@ class _FlushInputSnapshot:
     """Immutable view of the rows consumed by one aggregation flush."""
 
     buffered_tokens: tuple[TokenInfo, ...]
-    buffered_rows: tuple[dict[str, Any], ...]
+    buffered_rows: tuple[Mapping[str, Any], ...]
     pipeline_rows: tuple[PipelineRow, ...]
     representative_token: TokenInfo
 

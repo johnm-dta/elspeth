@@ -3353,6 +3353,73 @@ sinks:
         reparsed = make_url(sanitized).query["odbc_connect"]
         assert reparsed == "DRIVER={SQL Server};Server=host"
 
+    def test_dsn_repeated_odbc_connect_pwd_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Repeated odbc_connect params parse as a tuple and must all be scrubbed."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = (
+            "mssql+pyodbc:///?"
+            "odbc_connect=DRIVER%3D%7BODBC+Driver+17%7D%3BSERVER%3Ddb"
+            "&odbc_connect=PWD%3DTupleSecret123%3BUID%3Dsa"
+        )
+        sanitized, fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert fingerprint is not None
+        assert "TupleSecret123" not in sanitized
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == ("DRIVER={ODBC Driver 17};SERVER=db", "UID=sa")
+
+    def test_dsn_repeated_odbc_connect_password_braced_value_scrubbed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every repeated odbc_connect value uses the ODBC password parser."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = (
+            "mssql+pyodbc:///?"
+            "odbc_connect=DRIVER%3D%7BODBC+Driver+17%7D%3BSERVER%3Ddb"
+            "&odbc_connect=Password%3D%7Bsemi%3Bsecret%7D%3BAPP%3Dreporting"
+        )
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert "semi" not in sanitized
+        assert "secret" not in sanitized
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == ("DRIVER={ODBC Driver 17};SERVER=db", "APP=reporting")
+
+    def test_dsn_repeated_odbc_connect_scrubs_secret_from_each_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No repeated odbc_connect value may keep an embedded password."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = (
+            "mssql+pyodbc:///?"
+            "odbc_connect=PWD%3Dfirst-secret%3BUID%3Dsa"
+            "&odbc_connect=Password%3Dsecond-secret%3BAPP%3Dreporting"
+        )
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert "first-secret" not in sanitized
+        assert "second-secret" not in sanitized
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == ("UID=sa", "APP=reporting")
+
     def test_dsn_query_param_password_no_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Query-param password without userinfo password still detected."""
         from elspeth.core.config import _sanitize_dsn

@@ -2025,6 +2025,8 @@ def _sanitize_dsn(
     from sqlalchemy.engine.url import make_url
     from sqlalchemy.exc import ArgumentError
 
+    from elspeth.contracts.url import _scrub_odbc_connect_value
+
     try:
         parsed = make_url(url)
     except ArgumentError as parse_err:
@@ -2058,24 +2060,25 @@ def _sanitize_dsn(
             query_had_password = True
             if query_password_value is None:
                 query_password_value = value if isinstance(value, str) else value[0]
-        elif key.lower() == "odbc_connect" and isinstance(value, str):
-            import re
+        elif key.lower() == "odbc_connect":
+            # SQLAlchemy's URL parser already percent-decodes query values, so
+            # each value is a plain connection string. Operate on it directly
+            # and store the scrubbed result decoded, so URL.create() below
+            # encodes it exactly once. Repeated query params arrive as a tuple.
+            values = value if isinstance(value, tuple) else (value,)
+            scrubbed_values: list[str] = []
+            embedded_password_found = False
+            for connect_value in values:
+                scrubbed_connect, embedded_passwords = _scrub_odbc_connect_value(connect_value)
+                scrubbed_values.append(scrubbed_connect)
+                if embedded_passwords:
+                    embedded_password_found = True
+                    if query_password_value is None:
+                        query_password_value = embedded_passwords[0]
 
-            # SQLAlchemy's URL parser already percent-decodes query values, so `value`
-            # is the plain connection string. Operate on it directly (do NOT unquote
-            # again — that double-decodes any literal '%') and store the scrubbed result
-            # DECODED, so URL.create() below encodes it exactly once. Pre-encoding here
-            # would double-encode the non-secret connection material, making the audit
-            # URL unfaithful (elspeth-f9b8ed91a9).
-            if re.search(r"(?i)(PWD|Password)\s*=", value):
+            if embedded_password_found:
                 query_had_password = True
-                # Extract the password value for fingerprinting
-                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", value)
-                if match and query_password_value is None:
-                    query_password_value = match.group(1)
-                # Scrub PWD/Password from the connect string
-                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", value)
-                scrubbed_query[key] = scrubbed_connect
+                scrubbed_query[key] = tuple(scrubbed_values) if isinstance(value, tuple) else scrubbed_values[0]
             else:
                 scrubbed_query[key] = value
         else:

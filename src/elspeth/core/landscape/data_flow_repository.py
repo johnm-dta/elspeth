@@ -39,7 +39,7 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import SchemaContract
-from elspeth.core.landscape._database_ops import DatabaseOps, LandscapeConnectionProvider
+from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.data_flow import (
     ErrorAuditRepository,
     GraphAuditRepository,
@@ -60,6 +60,7 @@ from elspeth.core.landscape.model_loaders import (
     TransformErrorLoader,
     ValidationErrorLoader,
 )
+from elspeth.core.landscape.ports import LandscapeConnectionProvider
 
 if TYPE_CHECKING:
     from elspeth.contracts.errors import ContractViolation

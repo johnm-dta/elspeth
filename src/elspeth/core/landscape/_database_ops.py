@@ -1,6 +1,6 @@
-"""Database operation helpers to reduce boilerplate in recorder.
+"""Database operation helpers to reduce recorder boilerplate.
 
-Consolidates the repeated `with self._db.connection() as conn:` pattern.
+Consolidates read-only and write connection management for simple statements.
 """
 
 from contextlib import AbstractContextManager
@@ -24,18 +24,10 @@ def _safe_database_error_message(
     return f"{operation} failed{detail} — database rejected audit {action}: {type(exc).__name__}"
 
 
-class LandscapeConnectionProvider(Protocol):
+class DatabaseOpsConnectionProvider(Protocol):
     """Connection surface required by database operation helpers."""
 
-    @property
-    def engine(self) -> Any:
-        """The underlying Tier-1 engine (leader-fenced transactions need it)."""
-        ...
-
     def read_only_connection(self) -> AbstractContextManager[Connection]:
-        raise NotImplementedError
-
-    def connection(self) -> AbstractContextManager[Connection]:
         raise NotImplementedError
 
     def write_connection(self) -> AbstractContextManager[Connection]:
@@ -49,7 +41,7 @@ class ReadOnlyDatabaseOps:
     mutate the audit store, even if a caller passes a write-capable statement.
     """
 
-    def __init__(self, db: LandscapeConnectionProvider) -> None:
+    def __init__(self, db: DatabaseOpsConnectionProvider) -> None:
         self._db = db
 
     def execute_fetchone(self, query: Executable) -> Row[Any] | None:
@@ -63,9 +55,7 @@ class ReadOnlyDatabaseOps:
                 result = conn.execute(query)
                 rows = result.fetchmany(2)
         except SQLAlchemyError as exc:
-            raise LandscapeRecordError(
-                _safe_database_error_message(operation="execute_fetchone", action="query", exc=exc)
-            ) from exc
+            raise LandscapeRecordError(_safe_database_error_message(operation="execute_fetchone", action="query", exc=exc)) from exc
 
         if len(rows) > 1:
             raise LandscapeRecordError("execute_fetchone matched multiple rows — single-row audit query is ambiguous")
@@ -80,9 +70,7 @@ class ReadOnlyDatabaseOps:
                 result = conn.execute(query)
                 return list(result.fetchall())
         except SQLAlchemyError as exc:
-            raise LandscapeRecordError(
-                _safe_database_error_message(operation="execute_fetchall", action="query", exc=exc)
-            ) from exc
+            raise LandscapeRecordError(_safe_database_error_message(operation="execute_fetchall", action="query", exc=exc)) from exc
 
 
 class DatabaseOps(ReadOnlyDatabaseOps):

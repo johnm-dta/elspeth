@@ -26,13 +26,14 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
-from elspeth.core.landscape._database_ops import DatabaseOps, LandscapeConnectionProvider
+from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import generate_id, now
 from elspeth.core.landscape.data_flow.ownership import RowTokenOwnership
 from elspeth.core.landscape.data_flow.serialization import (
     canonical_or_recorded_hash,
     canonical_or_recorded_repr_payload,
 )
+from elspeth.core.landscape.ports import LandscapeConnectionProvider
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import (
     rows_table,

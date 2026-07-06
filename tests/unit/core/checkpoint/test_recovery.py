@@ -681,6 +681,56 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
     assert unprocessed == ["row-delegation-only", "row-child-pending", "row-mixed-buffering"]
 
 
+def test_get_resume_workset_shares_row_and_token_recovery_queries(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """The resume path should compute row and token continuation work together."""
+    run_id = "run-resume-workset"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "checkpoint-node")
+
+        _insert_row(conn, run_id, "row-completed", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-completed", "row-completed")
+        _insert_terminal_outcome(conn, run_id, "tok-completed", outcome=TerminalOutcome.SUCCESS)
+
+        _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-pending", "row-pending")
+
+        _insert_row(conn, run_id, "row-buffered", row_index=2, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-buffered", "row-buffered")
+        _insert_blocked_work_item(conn, run_id, "tok-buffered", "row-buffered", barrier_key="agg-node")
+
+        _insert_row(conn, run_id, "row-mixed", row_index=3, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-mixed-buffered", "row-mixed")
+        _insert_token(conn, run_id, "tok-mixed-pending", "row-mixed")
+        _insert_blocked_work_item(conn, run_id, "tok-mixed-buffered", "row-mixed", barrier_key="agg-node")
+
+        _insert_row(conn, run_id, "row-queued", row_index=4, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-queued", "row-queued")
+        _insert_blocked_work_item(conn, run_id, "tok-queued", "row-queued", barrier_key=None, queue_key="llm-rate-limit")
+
+    _create_checkpoint(
+        checkpoint_manager,
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=None,
+        graph=graph,
+    )
+
+    workset = recovery_manager.get_resume_workset(run_id)
+
+    assert workset.row_ids == ("row-pending", "row-mixed", "row-queued")
+    assert workset.buffered_token_ids == frozenset({"tok-buffered", "tok-mixed-buffered"})
+    assert {spec.token_id for spec in workset.incomplete_by_row["row-pending"]} == {"tok-pending"}
+    assert {spec.token_id for spec in workset.incomplete_by_row["row-mixed"]} == {"tok-mixed-pending"}
+    assert {spec.token_id for spec in workset.incomplete_by_row["row-queued"]} == {"tok-queued"}
+    assert "row-buffered" not in workset.incomplete_by_row
+
+
 def test_get_unprocessed_rows_chunks_buffered_token_query(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,

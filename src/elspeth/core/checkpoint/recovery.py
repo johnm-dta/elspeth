@@ -10,9 +10,10 @@ The actual resume logic (Orchestrator.resume()) is implemented separately.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
@@ -76,6 +77,7 @@ __all__ = [
     "RecoveryManager",
     "ResumeCheck",  # Re-exported from contracts for convenience
     "ResumePoint",  # Re-exported from contracts for convenience
+    "ResumeWorkSet",
     "check_run_status_resumable",
 ]
 
@@ -206,6 +208,40 @@ class IncompleteTokenSpec:
                     raise TypeError(f"IncompleteTokenSpec.{field_name} must be str or None, got {type(value).__name__}: {value!r}")
                 if not value:
                     raise ValueError(f"IncompleteTokenSpec.{field_name} must be None or non-empty string, got {value!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeWorkSet:
+    """Rows and token continuations that resume must restore for a run."""
+
+    row_ids: tuple[str, ...]
+    incomplete_by_row: Mapping[str, tuple[IncompleteTokenSpec, ...]]
+    buffered_token_ids: frozenset[str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "row_ids", tuple(self.row_ids))
+        object.__setattr__(
+            self,
+            "incomplete_by_row",
+            MappingProxyType({row_id: tuple(specs) for row_id, specs in self.incomplete_by_row.items()}),
+        )
+        object.__setattr__(self, "buffered_token_ids", frozenset(self.buffered_token_ids))
+
+
+def _resume_token_predicates(run_id: str) -> tuple[Any, Any]:
+    """Shared delegation/terminal token predicates for resume work-set queries."""
+    delegation_tokens = (
+        select(token_outcomes_table.c.token_id)
+        .where(token_outcomes_table.c.run_id == run_id)
+        .where(token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+    ).scalar_subquery()
+    terminal_tokens = (
+        select(token_outcomes_table.c.token_id)
+        .where(token_outcomes_table.c.run_id == run_id)
+        .where(token_outcomes_table.c.completed == 1)
+        .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+    ).scalar_subquery()
+    return delegation_tokens, terminal_tokens
 
 
 class RecoveryManager:
@@ -401,6 +437,7 @@ class RecoveryManager:
         payload_store: PayloadStore,
         *,
         source_schema_class: type[PluginSchema],
+        row_ids: Sequence[str] | None = None,
     ) -> list[ResumedRow]:
         """Get row data for unprocessed rows with type fidelity preservation.
 
@@ -445,8 +482,8 @@ class RecoveryManager:
             ValueError: If payload has been purged or schema validation fails
                 (operational errors that prevent resume but aren't data corruption)
         """
-        row_ids = self.get_unprocessed_rows(run_id)
-        if not row_ids:
+        resolved_row_ids = list(row_ids) if row_ids is not None else self.get_unprocessed_rows(run_id)
+        if not resolved_row_ids:
             return []
 
         result: list[ResumedRow] = []
@@ -459,8 +496,8 @@ class RecoveryManager:
         # consumers look up the per-row schema contract by source identity.
         row_metadata: dict[str, tuple[int, NodeID, str | None]] = {}
         with self._db.engine.connect() as conn:
-            for i in range(0, len(row_ids), _METADATA_CHUNK_SIZE):
-                chunk = row_ids[i : i + _METADATA_CHUNK_SIZE]
+            for i in range(0, len(resolved_row_ids), _METADATA_CHUNK_SIZE):
+                chunk = resolved_row_ids[i : i + _METADATA_CHUNK_SIZE]
                 rows_result = conn.execute(
                     select(
                         rows_table.c.row_id,
@@ -472,7 +509,7 @@ class RecoveryManager:
                 for r in rows_result:
                     row_metadata[r.row_id] = (r.row_index, NodeID(r.source_node_id), r.source_data_ref)
 
-        for row_id in row_ids:
+        for row_id in resolved_row_ids:
             if row_id not in row_metadata:
                 raise AuditIntegrityError(f"Row {row_id} not found in database — audit data corruption (Tier 1 violation)")
 
@@ -504,6 +541,7 @@ class RecoveryManager:
         payload_store: PayloadStore,
         *,
         source_schema_classes: Mapping[NodeID, type[PluginSchema]],
+        row_ids: Sequence[str] | None = None,
     ) -> list[ResumedRow]:
         """Get unprocessed row data with source-scoped type restoration.
 
@@ -513,14 +551,14 @@ class RecoveryManager:
         originally ingested the row. Returns ``ResumedRow`` instances
         ordered by ``ingest_sequence`` (ADR-025 §4).
         """
-        row_ids = self.get_unprocessed_rows(run_id)
-        if not row_ids:
+        resolved_row_ids = list(row_ids) if row_ids is not None else self.get_unprocessed_rows(run_id)
+        if not resolved_row_ids:
             return []
 
         row_metadata: dict[str, tuple[int, int, NodeID, str | None]] = {}
         with self._db.engine.connect() as conn:
-            for i in range(0, len(row_ids), _METADATA_CHUNK_SIZE):
-                chunk = row_ids[i : i + _METADATA_CHUNK_SIZE]
+            for i in range(0, len(resolved_row_ids), _METADATA_CHUNK_SIZE):
+                chunk = resolved_row_ids[i : i + _METADATA_CHUNK_SIZE]
                 rows_result = conn.execute(
                     select(
                         rows_table.c.row_id,
@@ -533,14 +571,14 @@ class RecoveryManager:
                 for r in rows_result:
                     row_metadata[r.row_id] = (r.row_index, r.ingest_sequence, NodeID(r.source_node_id), r.source_data_ref)
 
-        # Per Three-Tier Trust Model: the audit DB is Tier 1; ``row_ids`` comes
+        # Per Three-Tier Trust Model: the audit DB is Tier 1; ``resolved_row_ids`` comes
         # from ``get_unprocessed_rows()`` and ``row_metadata`` is built from the
         # same DB in the lookup above. A ``row_id`` missing from ``row_metadata``
         # is internal audit corruption. Let the KeyError raise from the sort
         # key — no defensive ``else -1`` arm that would silently mis-order
         # corrupt data before any explicit check could fire.
         ordered_row_ids = sorted(
-            row_ids,
+            resolved_row_ids,
             key=lambda row_id: row_metadata[row_id][1],
         )
         result: list[ResumedRow] = []
@@ -573,8 +611,68 @@ class RecoveryManager:
 
         return result
 
-    def get_unprocessed_rows(self, run_id: str) -> list[str]:
-        """Get row IDs that were not processed before the run failed.
+    def _get_incomplete_token_work(
+        self,
+        run_id: str,
+        buffered_token_ids: frozenset[str],
+        *,
+        delegation_tokens: Any | None = None,
+        terminal_tokens: Any | None = None,
+    ) -> tuple[dict[str, set[str]], dict[str, list[IncompleteTokenSpec]]]:
+        """Return all incomplete leaf token IDs plus unbuffered specs by row."""
+        if delegation_tokens is None or terminal_tokens is None:
+            delegation_tokens, terminal_tokens = _resume_token_predicates(run_id)
+
+        with self._db.engine.connect() as conn:
+            max_attempt_sq = (
+                select(func.max(node_states_table.c.attempt))
+                .where(node_states_table.c.token_id == tokens_table.c.token_id)
+                .where(node_states_table.c.run_id == run_id)
+                .correlate(tokens_table)
+                .scalar_subquery()
+            )
+            incomplete_query = (
+                select(
+                    tokens_table.c.token_id,
+                    tokens_table.c.row_id,
+                    tokens_table.c.branch_name,
+                    tokens_table.c.fork_group_id,
+                    tokens_table.c.join_group_id,
+                    tokens_table.c.expand_group_id,
+                    tokens_table.c.token_data_ref,
+                    tokens_table.c.step_in_pipeline,
+                    max_attempt_sq.label("max_attempt"),
+                )
+                .where(tokens_table.c.run_id == run_id)
+                .where(~tokens_table.c.token_id.in_(delegation_tokens))
+                .where(~tokens_table.c.token_id.in_(terminal_tokens))
+                .order_by(tokens_table.c.step_in_pipeline, tokens_table.c.token_id)
+            )
+            incomplete_rows = conn.execute(incomplete_query).fetchall()
+
+        row_to_incomplete_tokens: dict[str, set[str]] = {}
+        by_row: dict[str, list[IncompleteTokenSpec]] = {}
+        for row in incomplete_rows:
+            row_to_incomplete_tokens.setdefault(row.row_id, set()).add(row.token_id)
+            if row.token_id in buffered_token_ids:
+                continue
+            by_row.setdefault(row.row_id, []).append(
+                IncompleteTokenSpec(
+                    token_id=row.token_id,
+                    row_id=row.row_id,
+                    branch_name=row.branch_name,
+                    fork_group_id=row.fork_group_id,
+                    join_group_id=row.join_group_id,
+                    expand_group_id=row.expand_group_id,
+                    token_data_ref=row.token_data_ref,
+                    step_in_pipeline=row.step_in_pipeline,
+                    max_attempt=-1 if row.max_attempt is None else int(row.max_attempt),
+                )
+            )
+        return row_to_incomplete_tokens, by_row
+
+    def get_resume_workset(self, run_id: str) -> ResumeWorkSet:
+        """Compute row replay IDs and incomplete token continuations once.
 
         Uses token outcomes to determine which rows need processing:
         - Rows with non-delegation terminal outcomes are done
@@ -589,22 +687,25 @@ class RecoveryManager:
         succeeded on a different sink.
 
         Args:
-            run_id: The run to get unprocessed rows for
+            run_id: The run to get resume work for
 
         Returns:
-            List of row_id strings for rows that need processing.
-            Empty list if run cannot be resumed or all rows were processed.
+            A ``ResumeWorkSet`` carrying row IDs that need source-row replay,
+            incomplete non-delegation token continuations grouped by row_id,
+            and the barrier-buffered token IDs used to derive both.
         """
         checkpoint = self._get_latest_checkpoint_for_resume_workset(run_id)
         if checkpoint is None:
-            return []
+            return ResumeWorkSet(row_ids=(), incomplete_by_row={}, buffered_token_ids=frozenset())
 
         # Buffered-token exclusion: tokens held at barriers are RESTORED from
         # journal BLOCKED rows at processor construction (F1), not re-driven
         # from source, so they must not trigger duplicate reprocessing. Row-level
         # exclusion is unsafe when a row has mixed buffered and non-buffered
         # incomplete tokens, hence the all-incomplete-tokens-buffered filter below.
-        buffered_token_ids = self._get_buffered_journal_token_ids(run_id)
+        buffered_token_ids = frozenset(self._get_buffered_journal_token_ids(run_id))
+
+        delegation_tokens, terminal_tokens = _resume_token_predicates(run_id)
 
         with self._db.engine.connect() as conn:
             # CORRECT SEMANTICS FOR FORK/AGGREGATION/COALESCE RECOVERY:
@@ -651,15 +752,8 @@ class RecoveryManager:
             rows_with_terminal = (
                 select(tokens_table.c.row_id)
                 .distinct()
-                .select_from(
-                    tokens_table.join(
-                        token_outcomes_table,
-                        tokens_table.c.token_id == token_outcomes_table.c.token_id,
-                    )
-                )
-                .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.completed == 1)
-                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+                .where(tokens_table.c.run_id == run_id)
+                .where(tokens_table.c.token_id.in_(terminal_tokens))
             ).scalar_subquery()
 
             # Main query: Find incomplete rows
@@ -694,36 +788,34 @@ class RecoveryManager:
 
             unprocessed = [row.row_id for row in conn.execute(query).fetchall()]
 
+        row_to_incomplete_tokens, by_row = self._get_incomplete_token_work(
+            run_id,
+            buffered_token_ids,
+            delegation_tokens=delegation_tokens,
+            terminal_tokens=terminal_tokens,
+        )
+
         # Exclude rows only when ALL their incomplete leaf tokens are buffered.
         # This avoids silently dropping rows with mixed-state tokens where one
         # token is buffered and another incomplete token still needs processing.
         if buffered_token_ids and unprocessed:
-            incomplete_tokens: list[Row[Any]] = []
-            with self._db.engine.connect() as conn:
-                for i in range(0, len(unprocessed), _METADATA_CHUNK_SIZE):
-                    chunk = unprocessed[i : i + _METADATA_CHUNK_SIZE]
-                    incomplete_tokens.extend(
-                        conn.execute(
-                            select(tokens_table.c.row_id, tokens_table.c.token_id)
-                            .where(tokens_table.c.row_id.in_(chunk))
-                            .where(~tokens_table.c.token_id.in_(delegation_tokens))
-                            .where(~tokens_table.c.token_id.in_(terminal_tokens))
-                        ).fetchall()
-                    )
-
-            row_to_incomplete_tokens: dict[str, set[str]] = {row_id: set() for row_id in unprocessed}
-            for row_id, token_id in incomplete_tokens:
-                row_to_incomplete_tokens[row_id].add(token_id)
-
             filtered_rows: list[str] = []
             for row_id in unprocessed:
-                row_incomplete = row_to_incomplete_tokens[row_id]
+                row_incomplete = row_to_incomplete_tokens.get(row_id, set())
                 if row_incomplete and row_incomplete.issubset(buffered_token_ids):
                     continue
                 filtered_rows.append(row_id)
             unprocessed = filtered_rows
 
-        return unprocessed
+        return ResumeWorkSet(
+            row_ids=tuple(unprocessed),
+            incomplete_by_row={row_id: tuple(specs) for row_id, specs in by_row.items()},
+            buffered_token_ids=buffered_token_ids,
+        )
+
+    def get_unprocessed_rows(self, run_id: str) -> list[str]:
+        """Get row IDs that were not processed before the run failed."""
+        return list(self.get_resume_workset(run_id).row_ids)
 
     def get_incomplete_tokens_by_row(self, run_id: str) -> dict[str, list[IncompleteTokenSpec]]:
         """Return incomplete non-delegation child tokens, grouped by row_id.
@@ -734,63 +826,8 @@ class RecoveryManager:
         executor state restored from the journal rather than re-driven from
         source (F1).
         """
-        buffered_token_ids = self._get_buffered_journal_token_ids(run_id)
-
-        with self._db.engine.connect() as conn:
-            delegation_tokens = (
-                select(token_outcomes_table.c.token_id)
-                .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
-            ).scalar_subquery()
-            terminal_tokens = (
-                select(token_outcomes_table.c.token_id)
-                .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.completed == 1)
-                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
-            ).scalar_subquery()
-            max_attempt_sq = (
-                select(func.max(node_states_table.c.attempt))
-                .where(node_states_table.c.token_id == tokens_table.c.token_id)
-                .where(node_states_table.c.run_id == run_id)
-                .correlate(tokens_table)
-                .scalar_subquery()
-            )
-            query = (
-                select(
-                    tokens_table.c.token_id,
-                    tokens_table.c.row_id,
-                    tokens_table.c.branch_name,
-                    tokens_table.c.fork_group_id,
-                    tokens_table.c.join_group_id,
-                    tokens_table.c.expand_group_id,
-                    tokens_table.c.token_data_ref,
-                    tokens_table.c.step_in_pipeline,
-                    max_attempt_sq.label("max_attempt"),
-                )
-                .where(tokens_table.c.run_id == run_id)
-                .where(~tokens_table.c.token_id.in_(delegation_tokens))
-                .where(~tokens_table.c.token_id.in_(terminal_tokens))
-                .order_by(tokens_table.c.step_in_pipeline, tokens_table.c.token_id)
-            )
-            rows = conn.execute(query).fetchall()
-
-        by_row: dict[str, list[IncompleteTokenSpec]] = {}
-        for row in rows:
-            if row.token_id in buffered_token_ids:
-                continue
-            by_row.setdefault(row.row_id, []).append(
-                IncompleteTokenSpec(
-                    token_id=row.token_id,
-                    row_id=row.row_id,
-                    branch_name=row.branch_name,
-                    fork_group_id=row.fork_group_id,
-                    join_group_id=row.join_group_id,
-                    expand_group_id=row.expand_group_id,
-                    token_data_ref=row.token_data_ref,
-                    step_in_pipeline=row.step_in_pipeline,
-                    max_attempt=-1 if row.max_attempt is None else int(row.max_attempt),
-                )
-            )
+        buffered_token_ids = frozenset(self._get_buffered_journal_token_ids(run_id))
+        _row_to_incomplete_tokens, by_row = self._get_incomplete_token_work(run_id, buffered_token_ids)
         return by_row
 
     def reconstruct_token_row(

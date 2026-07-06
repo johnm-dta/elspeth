@@ -34,7 +34,7 @@ from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import SinkName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.checkpoint.manager import CheckpointManager
-from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager
+from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager, ResumeWorkSet
 from elspeth.core.config import AggregationSettings, ElspethSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
@@ -292,7 +292,11 @@ class TestResumeFinalizesAsFailed:
         # Mock RecoveryManager. The unprocessed row keeps the resume on the
         # processing path (non-quiescent), where the injected RuntimeError fires.
         mock_recovery = MagicMock(spec=RecoveryManager)
-        mock_recovery.get_incomplete_tokens_by_row.return_value = {}
+        mock_recovery.get_resume_workset.return_value = ResumeWorkSet(
+            row_ids=("row-1",),
+            incomplete_by_row={},
+            buffered_token_ids=frozenset(),
+        )
         mock_recovery.count_blocked_barrier_items.return_value = 0
         mock_recovery.get_unprocessed_row_data_by_source.return_value = [
             ResumedRow(
@@ -1085,6 +1089,11 @@ class TestResumeFinalizesAsFailed:
             ),
         }
         mock_recovery = MagicMock(spec=RecoveryManager)
+        mock_recovery.get_resume_workset.return_value = ResumeWorkSet(
+            row_ids=("row-orders", "row-refunds"),
+            incomplete_by_row={},
+            buffered_token_ids=frozenset(),
+        )
         mock_recovery.count_blocked_barrier_items.return_value = 0
         mock_recovery.get_unprocessed_row_data_by_source.return_value = (
             ResumedRow(
@@ -1133,6 +1142,10 @@ class TestResumeFinalizesAsFailed:
             NodeID("source-orders"): orders_schema,
             NodeID("source-refunds"): refunds_schema,
         }
+        assert mock_recovery.get_unprocessed_row_data_by_source.call_args.kwargs["row_ids"] == (
+            "row-orders",
+            "row-refunds",
+        )
 
     def test_reconstruct_resume_state_accepts_exhausted_source_lifecycle(self) -> None:
         """Exhausted sources are complete enough for engine-only EOF work resume."""
@@ -1169,6 +1182,11 @@ class TestResumeFinalizesAsFailed:
             )
         }
         mock_recovery = MagicMock(spec=RecoveryManager)
+        mock_recovery.get_resume_workset.return_value = ResumeWorkSet(
+            row_ids=(),
+            incomplete_by_row={},
+            buffered_token_ids=frozenset(),
+        )
         # F1: a non-zero journal BLOCKED barrier count must surface on the
         # ResumeState as has_restored_barrier_work=True (quiescence-gate input).
         mock_recovery.count_blocked_barrier_items.return_value = 3

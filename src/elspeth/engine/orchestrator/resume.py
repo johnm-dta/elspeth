@@ -306,10 +306,10 @@ def run_resume_processing_loop(
 
         # F1 fix: dispatch on whether this row has incomplete fork/expand/coalesce child tokens.
         #
-        # incomplete_by_row ⊆ unprocessed_rows by construction (both queries share
-        # _DELEGATION_PATHS and "incomplete non-delegation token" is Case 2 of
-        # get_unprocessed_rows), so every partial-fork/expand/coalesce row IS visited
-        # by this loop and its specs are found here.
+        # incomplete_by_row ⊆ unprocessed_rows by construction of the
+        # RecoveryManager resume work set: "incomplete non-delegation token" is
+        # Case 2 of row replay selection, so every partial-fork/expand/coalesce
+        # row IS visited by this loop and its specs are found here.
         #
         # Lineage-field filter: get_incomplete_tokens_by_row returns ALL incomplete
         # non-delegation tokens — including linear-pipeline tokens that were interrupted
@@ -476,6 +476,7 @@ class _ResumeAuditSnapshot:
     recovery: RecoveryManager
     run_id: str
     worker_id: str
+    unprocessed_row_ids: Sequence[str]
     incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
     schema_contracts_by_source: Mapping[NodeID, SchemaContract]
     source_names_by_source: Mapping[NodeID, str]
@@ -485,6 +486,7 @@ class _ResumeAuditSnapshot:
     def __post_init__(self) -> None:
         freeze_fields(
             self,
+            "unprocessed_row_ids",
             "incomplete_by_row",
             "schema_contracts_by_source",
             "source_names_by_source",
@@ -588,6 +590,7 @@ class ResumeCoordinator:
             snapshot.run_id,
             payload_store,
             source_schema_classes=snapshot.source_schema_classes,
+            row_ids=snapshot.unprocessed_row_ids,
         )
 
         # Stage 3 — durable post-CAS repair (only the seat winner may run it):
@@ -672,10 +675,12 @@ class ResumeCoordinator:
         if incomplete_sources:
             raise IncompleteSourceResumeError(run_id, incomplete_sources)
 
-        # F1 fix: pre-compute incomplete child tokens so the resume loop can
-        # dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
-        # rather than whole-row restart (which would re-emit completed branches).
-        incomplete_by_row = recovery.get_incomplete_tokens_by_row(run_id)
+        # F1 fix: pre-compute resume work so the resume loop can dispatch
+        # partial-fork/expand/coalesce rows via mid-DAG continuation rather
+        # than whole-row restart (which would re-emit completed branches).
+        # The same query boundary also yields unprocessed row IDs that are
+        # reused by post-CAS row hydration instead of re-running the predicates.
+        resume_workset = recovery.get_resume_workset(run_id)
 
         source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         source_schema_classes: dict[NodeID, type[Any]] = {}
@@ -695,7 +700,8 @@ class ResumeCoordinator:
             recovery=recovery,
             run_id=run_id,
             worker_id=worker_id,
-            incomplete_by_row=incomplete_by_row,
+            unprocessed_row_ids=resume_workset.row_ids,
+            incomplete_by_row=resume_workset.incomplete_by_row,
             schema_contracts_by_source=schema_contracts_by_source,
             source_names_by_source=source_names_by_source,
             source_lifecycle_by_source=source_lifecycle_by_source,

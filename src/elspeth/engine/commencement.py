@@ -7,11 +7,13 @@ from typing import Any
 
 from elspeth.contracts.errors import CommencementGateFailedError
 from elspeth.contracts.freeze import deep_freeze
+from elspeth.core.commencement_gate_expression import (
+    COMMENCEMENT_GATE_ALLOWED_NAMES,
+    validate_commencement_gate_condition,
+)
 from elspeth.core.dependency_config import CommencementGateConfig, CommencementGateResult
 from elspeth.core.expression_parser import ExpressionParser
 from elspeth.engine.error_boundary import reraise_if_engine_crash_through
-
-_GATE_ALLOWED_NAMES = ["collections", "dependency_runs", "env"]
 
 
 def build_preflight_context(
@@ -64,7 +66,7 @@ def validate_gate_expressions(gates: list[CommencementGateConfig]) -> None:
         ExpressionSyntaxError: If expression is not valid Python syntax
     """
     for gate in gates:
-        ExpressionParser(gate.condition, allowed_names=_GATE_ALLOWED_NAMES)
+        validate_commencement_gate_condition(gate.condition)
 
 
 def evaluate_commencement_gates(
@@ -73,7 +75,7 @@ def evaluate_commencement_gates(
 ) -> list[CommencementGateResult]:
     """Evaluate gates sequentially. Raises CommencementGateFailedError on failure.
 
-    Context should be a namespace dict with keys from _GATE_ALLOWED_NAMES
+    Context should be a namespace dict with keys from COMMENCEMENT_GATE_ALLOWED_NAMES
     (collections, dependency_runs, env). Unknown keys are not rejected here —
     the ExpressionParser restricts name access during evaluation.
     The entire context dict (including explicit Tier 3 env values) is deep-frozen before evaluation.
@@ -88,7 +90,7 @@ def evaluate_commencement_gates(
         try:
             parser = ExpressionParser(
                 gate.condition,
-                allowed_names=_GATE_ALLOWED_NAMES,
+                allowed_names=list(COMMENCEMENT_GATE_ALLOWED_NAMES),
             )
             result = parser.evaluate(frozen_context)
             if not isinstance(result, bool):

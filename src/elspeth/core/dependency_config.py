@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from elspeth.contracts.freeze import deep_freeze, deep_thaw, freeze_fields, require_int
+from elspeth.core.commencement_gate_expression import validate_commencement_gate_condition
 
 
 def _validate_non_blank(value: str, field_name: str) -> str:
@@ -60,10 +61,7 @@ class CommencementGateConfig(BaseModel):
         on invalid input — surfaced immediately instead of at gate evaluation time.
         """
         stripped = _validate_non_blank(v, "condition")
-        from elspeth.core.expression_parser import ExpressionParser
-
-        # Commencement gates evaluate against collections/dependency_runs/env context
-        ExpressionParser(stripped, allowed_names=["collections", "dependency_runs", "env"])
+        validate_commencement_gate_condition(stripped)
         return stripped
 
 

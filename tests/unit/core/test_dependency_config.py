@@ -16,6 +16,8 @@ from elspeth.core.dependency_config import (
     DependencyRunResult,
     PreflightResult,
 )
+from elspeth.core.expression_parser import ExpressionSecurityError
+from elspeth.engine.commencement import validate_gate_expressions
 
 
 def _minimal_settings_payload() -> dict[str, object]:
@@ -96,6 +98,23 @@ class TestCommencementGateConfig:
     def test_rejects_empty_condition(self) -> None:
         with pytest.raises(ValidationError):
             CommencementGateConfig(name="x", condition="")
+
+    def test_expression_contract_is_shared_by_config_and_engine(self) -> None:
+        from elspeth.core.commencement_gate_expression import (
+            COMMENCEMENT_GATE_ALLOWED_NAMES,
+            validate_commencement_gate_condition,
+        )
+
+        assert COMMENCEMENT_GATE_ALLOWED_NAMES == ("collections", "dependency_runs", "env")
+        validate_commencement_gate_condition("collections['test']['count'] > 0 and env['READY'] == '1'")
+        validate_commencement_gate_condition("dependency_runs['index']['run_id'] == 'run-1'")
+        with pytest.raises(ExpressionSecurityError, match="Forbidden name: 'row'"):
+            validate_commencement_gate_condition("row['status'] == 'ready'")
+        with pytest.raises(ExpressionSecurityError, match="Forbidden name: 'row'"):
+            CommencementGateConfig(name="bad", condition="row['status'] == 'ready'")
+        gate = CommencementGateConfig.model_construct(name="bad", condition="row['status'] == 'ready'")
+        with pytest.raises(ExpressionSecurityError, match="Forbidden name: 'row'"):
+            validate_gate_expressions([gate])
 
 
 class TestCollectionProbeConfig:

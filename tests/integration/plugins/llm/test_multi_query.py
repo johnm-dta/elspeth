@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -355,8 +355,13 @@ class TestMultiQueryIntegration:
                     }
                 )
 
-        with mock_azure_openai_multi_query(responses) as mock_client:
-            transform = LLMTransform(make_full_config())
+        with (
+            mock_azure_openai_multi_query(responses) as mock_client,
+            # closing() guarantees the batch runtime's worker threads shut down
+            # even when an assertion fails — leaked non-daemon threads block
+            # interpreter exit and hang the whole pytest run.
+            closing(LLMTransform(make_full_config())) as transform,
+        ):
             transform.node_id = node_id
             transform.on_error = "discard"
 
@@ -423,16 +428,18 @@ class TestMultiQueryIntegration:
                     assert f"{query_name}_score" in output, f"Missing {query_name}_score"
                     assert f"{query_name}_rationale" in output, f"Missing {query_name}_rationale"
 
-            # Verify audit trail - LLM calls were recorded via AuditedLLMClient
+            # Verify audit trail - LLM calls were recorded via AuditedLLMClient.
+            # execute_transform scopes ctx.state_id for the duration of the
+            # operation and restores it afterwards (plugin_context_scope), so
+            # resolve the real state from the audit trail via the token.
             from elspeth.contracts import CallStatus, CallType
 
-            assert ctx.state_id is not None
-            calls = factory.query.get_calls(ctx.state_id)
+            states = factory.query.get_node_states_for_token(token.token_id)
+            assert len(states) == 1, f"Expected one node state for token, got {len(states)}"
+            calls = factory.query.get_calls(states[0].state_id)
             llm_calls = [c for c in calls if c.call_type == CallType.LLM]
             assert len(llm_calls) == 10, f"Expected 10 LLM calls recorded, got {len(llm_calls)}"
             assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
-
-            transform.close()
 
     def test_multiple_rows_through_multi_query(
         self,
@@ -477,8 +484,12 @@ class TestMultiQueryIntegration:
             {"score": 90},
         ]
 
-        with mock_azure_openai_multi_query(responses) as mock_client:
-            transform = LLMTransform(config)
+        with (
+            mock_azure_openai_multi_query(responses) as mock_client,
+            # closing() guarantees worker-thread shutdown even on assertion
+            # failure; without it a failed run hangs pytest at exit.
+            closing(LLMTransform(config)) as transform,
+        ):
             transform.node_id = node_id
             transform.on_error = "discard"
 
@@ -526,13 +537,18 @@ class TestMultiQueryIntegration:
                 assert "case_quality_score" in result.row
                 assert "case_safety_score" in result.row
 
-            # Verify audit trail - LLM calls recorded for at least the last state
+            # Verify audit trail - every row's node state recorded its 2 LLM
+            # calls. ctx.state_id is scoped per operation and restored after
+            # execute_transform (plugin_context_scope), so resolve each row's
+            # state from the audit trail via its token.
             from elspeth.contracts import CallStatus, CallType
 
-            assert ctx.state_id is not None
-            calls = factory.query.get_calls(ctx.state_id)
-            llm_calls = [c for c in calls if c.call_type == CallType.LLM]
-            assert len(llm_calls) == 2, f"Expected 2 LLM calls for last row, got {len(llm_calls)}"
-            assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
+            for i in range(len(rows)):
+                states = factory.query.get_node_states_for_token(f"token-{i}")
+                assert len(states) == 1, f"Expected one node state for token-{i}, got {len(states)}"
+                calls = factory.query.get_calls(states[0].state_id)
+                llm_calls = [c for c in calls if c.call_type == CallType.LLM]
+                assert len(llm_calls) == 2, f"Expected 2 LLM calls for row {i}, got {len(llm_calls)}"
+                assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
 
             transform.close()

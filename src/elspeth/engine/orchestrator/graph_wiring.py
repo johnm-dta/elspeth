@@ -157,7 +157,7 @@ def build_dag_traversal_context(
     config_gate_id_map: dict[GateName, NodeID],
 ) -> DAGTraversalContext:
     """Build traversal context for RowProcessor from graph + pipeline config."""
-    node_step_map = graph.build_step_map()
+    node_step_map = graph.get_node_step_map()
     node_to_plugin: dict[NodeID, RowPlugin | GateSettings] = {}
 
     for transform in config.transforms:

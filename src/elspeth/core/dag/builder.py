@@ -1099,5 +1099,6 @@ def build_execution_graph(
     # Step maps and node sequence support node_id-based processor traversal.
     graph.set_pipeline_nodes(pipeline_nodes)
     graph.set_node_step_map(graph.build_step_map())
+    graph._freeze_build_metadata()
 
     return graph

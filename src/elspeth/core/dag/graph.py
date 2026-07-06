@@ -89,6 +89,7 @@ class ExecutionGraph:
         self._pipeline_nodes: list[NodeID] | None = None  # Ordered processing nodes (no source/sinks); None = not yet populated
         self._node_step_map: dict[NodeID, int] = {}  # node_id -> audit step (source=0)
         self._validation_warnings: tuple[GraphValidationWarning, ...] = ()
+        self._build_metadata_frozen = False
 
     @property
     def node_count(self) -> int:
@@ -152,6 +153,7 @@ class ExecutionGraph:
                 through nodes where this is True. Must be False for non-TRANSFORM
                 nodes; NodeInfo guards against misuse.
         """
+        self._assert_build_metadata_mutable()
         resolved_config = config or {}
 
         # Populate output_schema_config from the raw config when the caller
@@ -186,6 +188,7 @@ class ExecutionGraph:
 
     def set_node_output_schema(self, node_id: str, schema: SchemaConfig) -> None:
         """Set a node's output schema during graph construction."""
+        self._assert_build_metadata_mutable()
         info = self.get_node_info(node_id)
         object.__setattr__(info, "output_schema_config", schema)
 
@@ -211,6 +214,7 @@ class ExecutionGraph:
             label: Edge label (e.g., "continue", "suspicious") - also used as edge key
             mode: Routing mode (MOVE, COPY, or DIVERT)
         """
+        self._assert_build_metadata_mutable()
         # Use label as key to allow multiple edges between same nodes
         self._graph.add_edge(from_node, to_node, key=label, label=label, mode=mode)
 
@@ -578,7 +582,6 @@ class ExecutionGraph:
         for idx, node_id in enumerate(self.get_pipeline_node_sequence(), start=1):
             step_map[node_id] = idx
 
-        self._node_step_map = dict(step_map)
         return dict(step_map)
 
     def get_nodes(self) -> list[NodeInfo]:
@@ -688,55 +691,78 @@ class ExecutionGraph:
 
     def set_sink_id_map(self, mapping: dict[SinkName, NodeID]) -> None:
         """Set the sink_name -> node_id mapping."""
+        self._assert_build_metadata_mutable()
         self._sink_id_map = dict(mapping)
 
     def set_transform_id_map(self, mapping: dict[int, NodeID]) -> None:
         """Set the transform sequence -> node_id mapping."""
+        self._assert_build_metadata_mutable()
         self._transform_id_map = dict(mapping)
 
     def set_config_gate_id_map(self, mapping: dict[GateName, NodeID]) -> None:
         """Set the gate_name -> node_id mapping."""
+        self._assert_build_metadata_mutable()
         self._config_gate_id_map = dict(mapping)
 
     def set_route_resolution_map(self, mapping: dict[tuple[NodeID, str], RouteDestination]) -> None:
         """Set the (gate_node_id, route_label) -> destination mapping."""
+        self._assert_build_metadata_mutable()
         self._route_resolution_map = dict(mapping)
 
     def set_aggregation_id_map(self, mapping: dict[AggregationName, NodeID]) -> None:
         """Set the agg_name -> node_id mapping."""
+        self._assert_build_metadata_mutable()
         self._aggregation_id_map = dict(mapping)
 
     def set_coalesce_id_map(self, mapping: dict[CoalesceName, NodeID]) -> None:
         """Set the coalesce_name -> node_id mapping."""
+        self._assert_build_metadata_mutable()
         self._coalesce_id_map = dict(mapping)
 
     def set_branch_info(self, mapping: dict[BranchName, BranchInfo]) -> None:
         """Set the branch_name -> BranchInfo mapping (coalesce + gate)."""
+        self._assert_build_metadata_mutable()
         self._branch_info = dict(mapping)
 
     def set_route_label_map(self, mapping: dict[tuple[NodeID, SinkName], str]) -> None:
         """Set the (gate_node, sink_name) -> route_label mapping."""
+        self._assert_build_metadata_mutable()
         self._route_label_map = dict(mapping)
 
     def set_pipeline_nodes(self, nodes: list[NodeID]) -> None:
         """Set the ordered processing node sequence."""
+        self._assert_build_metadata_mutable()
         self._pipeline_nodes = list(nodes)
 
     def set_node_step_map(self, mapping: dict[NodeID, int]) -> None:
         """Set the node_id -> audit step mapping."""
+        self._assert_build_metadata_mutable()
         self._node_step_map = dict(mapping)
 
     def set_validation_warnings(self, warnings: Sequence[GraphValidationWarning]) -> None:
         """Set non-fatal graph construction warnings."""
+        self._assert_build_metadata_mutable()
         self._validation_warnings = tuple(warnings)
 
     def add_route_resolution_entry(self, gate_id: NodeID, label: str, dest: RouteDestination) -> None:
         """Add a single entry to the route resolution map."""
+        self._assert_build_metadata_mutable()
         self._route_resolution_map[(gate_id, label)] = dest
 
     def add_route_label_entry(self, gate_id: NodeID, sink_name: SinkName, label: str) -> None:
         """Add a single entry to the route label map."""
+        self._assert_build_metadata_mutable()
         self._route_label_map[(gate_id, sink_name)] = label
+
+    def _freeze_build_metadata(self) -> None:
+        """Reject topology and metadata mutation after builder finalization."""
+        self._build_metadata_frozen = True
+
+    def _assert_build_metadata_mutable(self) -> None:
+        if self._build_metadata_frozen:
+            raise GraphValidationError(
+                "ExecutionGraph build metadata is frozen after construction; rebuild the graph instead of mutating it."
+            )
 
     # ===== PUBLIC GETTERS =====
 
@@ -761,6 +787,10 @@ class ExecutionGraph:
             Dict mapping transform sequence position (0-indexed) to node ID.
         """
         return dict(self._transform_id_map)
+
+    def get_node_step_map(self) -> dict[NodeID, int]:
+        """Get the builder-assigned node_id -> audit step mapping."""
+        return dict(self._node_step_map)
 
     def get_config_gate_id_map(self) -> dict[GateName, NodeID]:
         """Get explicit gate_name -> node_id mapping for config-driven gates.

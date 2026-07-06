@@ -12,8 +12,9 @@ from typing import Any, ClassVar
 
 import pytest
 
+from elspeth.contracts import RouteDestination
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
-from elspeth.contracts.types import BranchName, CoalesceName
+from elspeth.contracts.types import BranchName, CoalesceName, NodeID
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings, TransformSettings
 from elspeth.core.dag import ExecutionGraph, WiredTransform
 from elspeth.core.dag.models import GraphValidationError
@@ -54,6 +55,36 @@ class _BuilderValidationTransform:
 
 class TestCoalesceBranchPlanning:
     """Builder should store one coherent plan per coalesce branch."""
+
+    def test_builder_freezes_graph_metadata_after_construction(self) -> None:
+        source = _BuilderValidationMockSource()
+
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="output", options={})},
+            transforms=[],
+            sinks={"output": _BuilderValidationMockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[],
+            coalesce_settings=[],
+        )
+
+        source_node = graph.get_sources()[0]
+        sink_node = graph.get_sinks()[0]
+        node_step_map = graph.get_node_step_map()
+
+        assert node_step_map[source_node] == 0
+        assert graph.build_step_map() == node_step_map
+        assert graph.get_node_step_map() == node_step_map
+
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.add_edge(source_node, sink_node, label="late_route")
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.set_node_output_schema(source_node, SchemaConfig(mode="observed", fields=None))
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.set_sink_id_map({})
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.add_route_resolution_entry(NodeID("gate"), "true", RouteDestination.discard())
 
     def test_branch_info_carries_identity_and_transform_branch_plan(self) -> None:
         source = _BuilderValidationMockSource()

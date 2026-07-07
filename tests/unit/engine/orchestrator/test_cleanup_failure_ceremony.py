@@ -130,6 +130,23 @@ class TestCleanupDoesNotMaskPendingException:
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
             cleanup_plugins(config, ctx, include_source=True)
 
+    def test_cleanup_failure_public_surfaces_preserve_benign_error_text(self) -> None:
+        """Benign cleanup diagnostics keep a bounded message preview for operators."""
+        config = _config_with_failing_close_sink()
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+
+        with structlog.testing.capture_logs() as captured, pytest.raises(RuntimeError) as exc_info:
+            cleanup_plugins(config, ctx, include_source=True)
+
+        public_error = str(exc_info.value)
+        assert "sink.close(default)" in public_error
+        assert "RuntimeError" in public_error
+        assert "sink close failure" in public_error
+        assert "<redacted-plugin-error>" not in public_error
+
+        hook_log = next(entry for entry in captured if entry["event"] == "Plugin cleanup hook failed")
+        assert hook_log["error"] == "sink close failure"
+
     def test_cleanup_failure_public_surfaces_scrub_plugin_error_text(self) -> None:
         """Cleanup diagnostics keep location/type metadata without leaking plugin exception text."""
         config = _config_with_sensitive_failing_close_sink()

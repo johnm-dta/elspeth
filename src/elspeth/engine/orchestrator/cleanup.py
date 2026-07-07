@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 slog = structlog.get_logger(__name__)
 
 _CLEANUP_ERROR_PREVIEW_CHARS = 160
-_UNSCRUBBED_CLEANUP_ERROR_TEXT = "<redacted-plugin-error>"
 
 
 @contextmanager
@@ -56,8 +55,7 @@ def _safe_cleanup_error_text(error: Exception) -> tuple[str, str, int]:
         raw_text = f"<unrepresentable {type(error).__name__}>"
 
     digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()[:16]
-    scrubbed = scrub_text_for_audit(raw_text)
-    public_text = scrubbed if scrubbed != raw_text else _UNSCRUBBED_CLEANUP_ERROR_TEXT
+    public_text = scrub_text_for_audit(raw_text)
     if len(public_text) > _CLEANUP_ERROR_PREVIEW_CHARS:
         public_text = public_text[:_CLEANUP_ERROR_PREVIEW_CHARS] + "..."
     return public_text, digest, len(raw_text)

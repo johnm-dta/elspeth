@@ -9,7 +9,7 @@ Error and artifact display types follow the Tier 1 trust model:
 - Display code accesses fields directly (crash on missing = bug)
 """
 
-from typing import Any, Required, TypedDict
+from typing import Any, Literal, Required, TypedDict
 
 
 class NodeInfo(TypedDict):
@@ -64,9 +64,27 @@ class TreeNodeDict(TypedDict):
     label: str
     node_id: str | None
     node_type: str
+    selection: "TreeSelection | None"
     depth: int
     has_children: bool
     expanded: bool
+
+
+class TreeSelection(TypedDict, total=False):
+    """Selection payload for lineage tree rows.
+
+    The ``kind`` discriminator prevents token, edge, outcome, and run rows from
+    being mistaken for pipeline nodes just because they have an identifier.
+    """
+
+    kind: Required[Literal["run", "node", "token", "edge", "outcome"]]
+    run_id: Required[str]
+    node_id: str
+    node_type: str
+    token_id: str
+    row_id: str
+    sink: str
+    state_id: str
 
 
 class NodeStateInfo(TypedDict, total=False):

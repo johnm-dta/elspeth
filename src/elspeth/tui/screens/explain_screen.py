@@ -13,7 +13,7 @@ from elspeth.contracts import NodeState, NodeStateCompleted, NodeStateFailed, No
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape import explain as explain_lineage
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.tui.types import LineageData, NodeStateInfo, TokenDisplayInfo
+from elspeth.tui.types import LineageData, NodeStateInfo, TokenDisplayInfo, TreeSelection
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
@@ -241,12 +241,22 @@ class ExplainScreen:
             case _:
                 return None
 
-    def on_tree_select(self, node_id: str) -> None:
-        """Handle tree node selection.
+    def on_tree_select(self, selection: TreeSelection | str | None) -> None:
+        """Handle tree row selection.
 
         Args:
-            node_id: Selected node ID
+            selection: Selected tree row payload, or a legacy node ID string.
         """
+        node_id: str | None
+        if selection is None:
+            node_id = None
+        elif isinstance(selection, str):
+            node_id = selection
+        elif selection["kind"] == "node":
+            node_id = selection["node_id"]
+        else:
+            node_id = None
+
         self._selected_node_id = node_id
 
         if not node_id:

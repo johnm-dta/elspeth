@@ -8,12 +8,14 @@ are deferred to integration tier. Uses RecorderFactory to access data_flow repos
 
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import NodeStateCompleted, NodeStateStatus, NodeType
+from elspeth.core.landscape import LandscapeDB
 from elspeth.tui.screens.explain_screen import (
     ExplainScreen,
     InvalidStateTransitionError,
@@ -21,6 +23,10 @@ from elspeth.tui.screens.explain_screen import (
     LoadingFailedState,
     UninitializedState,
 )
+
+
+def _fake_db() -> LandscapeDB:
+    return cast(LandscapeDB, object())
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,13 +41,17 @@ class FakeDataFlow:
     nodes: list[FakeNode] = field(default_factory=list)
     node_by_id: dict[str, FakeNode] = field(default_factory=dict)
     get_nodes_error: Exception | None = None
+    get_node_calls: list[tuple[object, str]] = field(default_factory=list)
 
     def get_nodes(self, run_id: str) -> list[FakeNode]:
         if self.get_nodes_error is not None:
             raise self.get_nodes_error
         return self.nodes
 
-    def get_node(self, node_id: str, run_id: str) -> FakeNode | None:
+    def get_node(self, node_id: object, run_id: str) -> FakeNode | None:
+        self.get_node_calls.append((node_id, run_id))
+        if not isinstance(node_id, str):
+            return None
         return self.node_by_id.get(node_id)
 
 
@@ -127,7 +137,7 @@ class TestExplainScreenLoading:
 
     def test_load_pipeline_structure_success(self) -> None:
         """Successful load produces LoadedState with correct lineage data."""
-        db = object()
+        db = _fake_db()
         nodes = [
             self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
             self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM),
@@ -152,7 +162,7 @@ class TestExplainScreenLoading:
 
     def test_load_pipeline_structure_honors_lineage_selectors(self) -> None:
         """TUI mode must focus the same row/token/sink selector as no-tui mode."""
-        db = object()
+        db = _fake_db()
         nodes = [
             self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
             self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM),
@@ -203,7 +213,7 @@ class TestExplainScreenLoading:
 
     def test_load_pipeline_structure_db_error(self) -> None:
         """Database error during loading produces LoadingFailedState."""
-        db = object()
+        db = _fake_db()
         factory = FakeRecorderFactory(
             data_flow=FakeDataFlow(get_nodes_error=OperationalError("connection refused", {}, Exception("connection refused")))
         )
@@ -219,7 +229,7 @@ class TestExplainScreenLoading:
 
     def test_load_classifies_processing_node_types(self) -> None:
         """Gates, aggregations, and coalesces appear in transforms list."""
-        db = object()
+        db = _fake_db()
         nodes = [
             self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
             self._make_node(node_id="tfm-1", plugin_name="mapper", node_type=NodeType.TRANSFORM),
@@ -244,7 +254,7 @@ class TestExplainScreenLoading:
 
     def test_load_empty_pipeline(self) -> None:
         """Pipeline with no nodes produces LoadedState with empty fields."""
-        db = object()
+        db = _fake_db()
         factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=[]))
 
         with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
@@ -260,7 +270,7 @@ class TestExplainScreenLoading:
 
     def test_load_transitions_from_uninitialized(self) -> None:
         """load() from UninitializedState transitions to LoadedState."""
-        db = object()
+        db = _fake_db()
         nodes = [
             self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
         ]
@@ -277,7 +287,7 @@ class TestExplainScreenLoading:
 
     def test_load_from_loaded_state_raises(self) -> None:
         """load() from LoadedState raises InvalidStateTransitionError."""
-        db = object()
+        db = _fake_db()
         nodes = [
             self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
         ]
@@ -302,7 +312,7 @@ class TestExplainScreenNodeSelection:
         """Create a node matching the RecorderFactory.data_flow return shape."""
         return FakeNode(node_id=node_id, plugin_name=plugin_name, node_type=node_type)
 
-    def _make_loaded_screen(self, db: object) -> ExplainScreen:
+    def _make_loaded_screen(self, db: LandscapeDB) -> ExplainScreen:
         """Create a screen in LoadedState with a simple pipeline."""
         nodes = [
             self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
@@ -317,7 +327,7 @@ class TestExplainScreenNodeSelection:
 
     def test_select_node_updates_detail_panel(self) -> None:
         """Selecting a node loads its state into the detail panel."""
-        db = object()
+        db = _fake_db()
         screen = self._make_loaded_screen(db)
 
         node = self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM)
@@ -333,7 +343,7 @@ class TestExplainScreenNodeSelection:
         """Selecting a node includes execution audit context in details."""
         from datetime import UTC, datetime
 
-        db = object()
+        db = _fake_db()
         screen = self._make_loaded_screen(db)
 
         node = self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM)
@@ -370,7 +380,7 @@ class TestExplainScreenNodeSelection:
 
     def test_select_nonexistent_node_clears_panel(self) -> None:
         """Selecting a node that doesn't exist in DB sets panel to None state."""
-        db = object()
+        db = _fake_db()
         screen = self._make_loaded_screen(db)
         factory = FakeRecorderFactory(data_flow=FakeDataFlow())
 
@@ -392,7 +402,7 @@ class TestExplainScreenNodeSelection:
 
     def test_select_node_in_loading_failed_state(self) -> None:
         """Selecting a node in LoadingFailedState still loads node state from DB."""
-        db = object()
+        db = _fake_db()
         failed_factory = FakeRecorderFactory(
             data_flow=FakeDataFlow(get_nodes_error=OperationalError("connection refused", {}, Exception("connection refused")))
         )
@@ -412,3 +422,31 @@ class TestExplainScreenNodeSelection:
         content = screen.detail_panel.render_content()
         assert "filter" in content
         assert "transform" in content
+
+    def test_select_token_or_run_payload_does_not_lookup_node(self) -> None:
+        """Non-node selections clear details without treating tokens/runs as nodes."""
+        from elspeth.tui.types import TreeSelection
+
+        db = _fake_db()
+        screen = self._make_loaded_screen(db)
+        data_flow = FakeDataFlow(node_by_id={})
+        factory = FakeRecorderFactory(data_flow=data_flow)
+
+        token_selection: TreeSelection = {
+            "kind": "token",
+            "run_id": "run-sel",
+            "token_id": "token-001",
+            "row_id": "row-001",
+        }
+        run_selection: TreeSelection = {
+            "kind": "run",
+            "run_id": "run-sel",
+        }
+
+        with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
+            screen.on_tree_select(token_selection)
+            screen.on_tree_select(run_selection)
+
+        assert data_flow.get_node_calls == []
+        content = screen.detail_panel.render_content()
+        assert "No node selected" in content

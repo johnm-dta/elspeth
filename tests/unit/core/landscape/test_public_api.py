@@ -16,7 +16,8 @@ def test_landscape_root_does_not_export_raw_schema_tables() -> None:
     assert schema.tokens_table is not None
     assert schema.token_outcomes_table is not None
 
-    leaked_names = [name for name in raw_schema_names if hasattr(landscape, name)]
+    missing = object()
+    leaked_names = [name for name in raw_schema_names if getattr(landscape, name, missing) is not missing]
     exported_names = [name for name in raw_schema_names if name in landscape.__all__]
     assert leaked_names == []
     assert exported_names == []

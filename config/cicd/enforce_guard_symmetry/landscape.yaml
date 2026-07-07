@@ -9,7 +9,7 @@
 # provides the same safety: adding a new unguarded loader exceeds the cap.
 #
 # Loaders with complex state validation (NodeStateLoader,
-# TokenOutcomeLoader, NodeLoader, RunLoader, CallLoader,
+# TokenOutcomeLoader, NodeLoader, CallLoader,
 # OperationLoader) correctly use explicit AuditIntegrityError
 # and are NOT counted in this allowlist.
 
@@ -17,11 +17,13 @@ per_file_rules:
   - pattern: "core/landscape/model_loaders.py"
     rules: [GS1]
     reason: >-
-      10 loaders where __post_init__ validation fires during load(),
+      11 loaders where __post_init__ validation fires during load(),
       providing read-side coverage without explicit AuditIntegrityError.
+      Lifecycle: RunLoader delegates the explicit AuditIntegrityError guard
+      to validate_run_lifecycle_row().
       Int-only: RowLoader, TokenLoader, TokenParentLoader, ArtifactLoader,
       BatchMemberLoader. Enum+int: EdgeLoader, BatchLoader, RoutingEventLoader,
       SchedulerEventLoader.
       Plugin: ValidationErrorLoader (pairs with validation.py, not audit.py).
     expires: null
-    max_hits: 10
+    max_hits: 11

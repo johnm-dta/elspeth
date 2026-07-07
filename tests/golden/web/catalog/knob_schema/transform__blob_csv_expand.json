@@ -1,0 +1,117 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "blob_ref",
+        "description": "Input field containing a payload-store content hash.",
+        "kind": "text",
+        "label": "Blob Ref Field",
+        "name": "blob_ref_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": ",",
+        "description": "Single-character delimiter used to split CSV fields.",
+        "kind": "text",
+        "label": "Delimiter",
+        "name": "delimiter",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "utf-8",
+        "description": "Encoding used to decode the CSV blob.",
+        "kind": "text",
+        "label": "Encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 0,
+        "description": "Number of leading CSV records to skip before reading headers or data.",
+        "kind": "number-int",
+        "label": "Skip Rows",
+        "name": "skip_rows",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Explicit normalized column names for headerless CSV blobs.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Columns",
+        "name": "columns",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional mapping from observed CSV headers to normalized names.",
+        "kind": "json-object",
+        "label": "Field Mapping",
+        "name": "field_mapping",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to emit the row index within the parsed CSV document.",
+        "kind": "checkbox",
+        "label": "Include Row Index",
+        "name": "include_row_index",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "csv_row_index",
+        "description": "Output field receiving the zero-based CSV data row index.",
+        "kind": "text",
+        "label": "Row Index Field",
+        "name": "row_index_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 100000,
+        "description": "Maximum rows emitted for one input blob.",
+        "kind": "number-int",
+        "label": "Max Output Rows",
+        "name": "max_output_rows",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 104857600,
+        "description": "Maximum payload size accepted from the blob store.",
+        "kind": "number-int",
+        "label": "Max Blob Bytes",
+        "name": "max_blob_bytes",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "blob_csv_expand"
+}

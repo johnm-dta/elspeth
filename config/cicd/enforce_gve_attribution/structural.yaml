@@ -7,10 +7,10 @@ per_file_rules:
   - pattern: "core/dag/graph.py"
     rules: ["GA1"]
     reason: >
-      Structural: cycle detection (2 sites), source count, sink count,
-      unreachable nodes, topo sort, connection/sink namespace overlap,
-      and dangling connections — no single node at fault.
-    max_hits: 9
+      Structural: cycle detection and topo-sort failures, source count, sink
+      count, unreachable nodes, connection/sink namespace overlap, dangling
+      connections, and frozen build-metadata mutation — no single node at fault.
+    max_hits: 11
 
   # ── builder.py: build_execution_graph() ──
   - pattern: "core/dag/builder.py"

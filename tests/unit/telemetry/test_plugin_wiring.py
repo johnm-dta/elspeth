@@ -177,6 +177,10 @@ class _HTTPClientDouble:
         self.post_calls.append((args, kwargs))
         return self.response
 
+    def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        self.post_calls.append((args, kwargs))
+        return self.response
+
     def stream(self, *args: Any, **kwargs: Any) -> Any:
         self.stream_calls.append((args, kwargs))
         return nullcontext(self.response)
@@ -396,6 +400,72 @@ class TestWebScrapeTelemetryWiring:
         transform.close()
 
 
+class TestBlobFetchTelemetryWiring:
+    """BlobFetch wires telemetry_emit through to AuditedHTTPClient.
+
+    Chain: on_start -> process -> AuditedHTTPClient -> telemetry_emit
+    """
+
+    def test_telemetry_emitted_on_blob_fetch(self) -> None:
+        """After on_start + process, telemetry_emit receives ExternalCallCompleted."""
+        from elspeth.core.security.web import SSRFSafeRequest
+        from elspeth.plugins.transforms.blob_fetch import BlobFetch
+
+        transform = BlobFetch(
+            {
+                "url_field": "url",
+                "http": {
+                    "abuse_contact": "test@example.com",
+                    "fetch_reason": "unit test",
+                    "timeout": 10,
+                    "allowed_hosts": ["93.184.216.34/32"],
+                },
+                "schema": {"mode": "observed"},
+                "required_input_fields": ["url"],
+            }
+        )
+
+        events: list[Any] = []
+        lifecycle_ctx = _make_lifecycle_ctx(events)
+        lifecycle_ctx.rate_limit_registry = _RateLimitRegistryDouble()
+        transform.on_start(lifecycle_ctx)
+
+        row = make_pipeline_row({"url": "https://example.com/data.csv"})
+        process_ctx = _make_transform_ctx(lifecycle_ctx.landscape)
+        safe_request = SSRFSafeRequest(
+            original_url="https://example.com/data.csv",
+            resolved_ip="93.184.216.34",
+            host_header="example.com",
+            port=443,
+            path="/data.csv",
+            scheme="https",
+            bare_hostname="example.com",
+        )
+        mock_response = httpx.Response(
+            200,
+            content=b"id,name\n1,alice\n",
+            headers={"content-type": "text/csv"},
+            request=httpx.Request("GET", "https://93.184.216.34:443/data.csv"),
+        )
+
+        with (
+            patch(
+                "elspeth.plugins.transforms.blob_fetch.validate_url_for_ssrf",
+                return_value=safe_request,
+            ),
+            patch("httpx.Client", return_value=_HTTPClientDouble(mock_response)),
+        ):
+            result = transform.process(row, process_ctx)
+
+        assert result.status == "success"
+        http_events = [e for e in events if isinstance(e, ExternalCallCompleted) and e.call_type == CallType.HTTP]
+        assert len(http_events) >= 1, (
+            f"Expected ExternalCallCompleted(HTTP) event from telemetry_emit, got: {[type(e).__name__ for e in events]}"
+        )
+
+        transform.close()
+
+
 # ---------------------------------------------------------------------------
 # Structural discovery: find unregistered plugins that use audited clients
 # ---------------------------------------------------------------------------
@@ -409,6 +479,7 @@ _KNOWN_AUDITED_CLIENT_USERS: set[str] = {
     "src/elspeth/plugins/transforms/azure/base.py",
     "src/elspeth/plugins/transforms/azure/document_intelligence.py",
     "src/elspeth/plugins/transforms/web_scrape.py",
+    "src/elspeth/plugins/transforms/blob_fetch.py",
     # Batch APIs — use file uploads, not per-row audited clients
     "src/elspeth/plugins/transforms/llm/azure_batch.py",
     "src/elspeth/plugins/transforms/llm/openrouter_batch.py",

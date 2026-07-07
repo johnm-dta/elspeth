@@ -16,6 +16,7 @@ from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.errors import FrameworkBugError, TransformErrorReason
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.payload_store import IntegrityError, PayloadNotFoundError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
@@ -103,6 +104,9 @@ class _ParsedCSV:
     rows: tuple[Mapping[str, object], ...]
     headers: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "rows")
+
 
 class _BlobCSVParseError(Exception):
     def __init__(self, reason: TransformErrorReason) -> None:
@@ -153,7 +157,7 @@ class BlobCSVExpand(BaseTransform):
     name = "blob_csv_expand"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d6599a611da7e1ea"
+    source_file_hash: str | None = "sha256:745cd58cecc44e28"
     config_model = BlobCSVExpandConfig
     creates_tokens = True
     passes_through_input = True

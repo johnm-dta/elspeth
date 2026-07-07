@@ -13,7 +13,6 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
@@ -34,6 +33,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
+from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator, IncompatibleCheckpointError
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager
@@ -220,7 +220,7 @@ class ResumeWorkSet:
         object.__setattr__(
             self,
             "incomplete_by_row",
-            MappingProxyType({row_id: tuple(specs) for row_id, specs in self.incomplete_by_row.items()}),
+            deep_freeze({row_id: tuple(specs) for row_id, specs in self.incomplete_by_row.items()}),
         )
         object.__setattr__(self, "buffered_token_ids", frozenset(self.buffered_token_ids))
 

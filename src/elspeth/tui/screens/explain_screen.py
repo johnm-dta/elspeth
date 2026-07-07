@@ -12,6 +12,7 @@ import structlog
 from sqlalchemy.exc import DatabaseError, OperationalError
 
 from elspeth.contracts import Artifact, NodeState, NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending, Token, TokenOutcome
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape import explain as explain_lineage
 from elspeth.core.landscape.factory import RecorderFactory
@@ -87,6 +88,9 @@ class LoadedState:
     tree: LineageTree
     focused_state_by_node_id: Mapping[str, NodeState] = field(default_factory=dict)
     latest_state_by_node_id: Mapping[str, NodeState] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "focused_state_by_node_id", "latest_state_by_node_id")
 
 
 # Discriminated union type - exhaustive pattern matching possible

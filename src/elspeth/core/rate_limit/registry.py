@@ -8,7 +8,7 @@ import threading
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from elspeth.core.rate_limit.limiter import RateLimiter
+from elspeth.core.rate_limit.limiter import RateLimiter, validate_limiter_timeout, validate_limiter_weight
 
 # Mirror of RateLimiter's accepted-name grammar (limiter.py _VALID_NAME_PATTERN).
 _VALID_LIMITER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -62,12 +62,15 @@ class NoOpLimiter:
         """No-op acquire (always succeeds instantly).
 
         Args:
-            weight: Number of tokens to acquire (ignored)
-            timeout: Maximum wait time in seconds (ignored - always instant)
+            weight: Number of tokens to acquire (validated, then ignored)
+            timeout: Maximum wait time in seconds (validated, then ignored)
         """
+        validate_limiter_weight(weight)
+        validate_limiter_timeout(timeout)
 
     def try_acquire(self, weight: int = 1) -> bool:
         """No-op try_acquire (always succeeds)."""
+        validate_limiter_weight(weight)
         return True
 
     def close(self) -> None:

@@ -1,5 +1,6 @@
 """Tests for RateLimitRegistry and NoOpLimiter."""
 
+import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -95,6 +96,59 @@ class TestRateLimitRegistryDisabled:
 
         assert limiter1 is limiter2
         assert limiter2 is limiter3
+
+    @pytest.mark.parametrize("weight", [0, -1])
+    def test_disabled_limiter_acquire_rejects_non_positive_weight(self, weight: int) -> None:
+        """Disabled registry preserves RateLimiter's positive weight contract."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(ValueError, match="weight must be positive"):
+            limiter.acquire(weight=weight)
+
+    def test_disabled_limiter_acquire_rejects_non_int_weight(self) -> None:
+        """Disabled registry rejects non-int acquire weights like RateLimiter."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(TypeError, match="weight must be int"):
+            limiter.acquire(weight="1")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("weight", [0, -1])
+    def test_disabled_limiter_try_acquire_rejects_non_positive_weight(self, weight: int) -> None:
+        """Disabled registry preserves try_acquire's positive weight contract."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(ValueError, match="weight must be positive"):
+            limiter.try_acquire(weight=weight)
+
+    def test_disabled_limiter_try_acquire_rejects_non_int_weight(self) -> None:
+        """Disabled registry rejects non-int try_acquire weights like RateLimiter."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(TypeError, match="weight must be int"):
+            limiter.try_acquire(weight="1")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("timeout", ["1.0", math.nan, math.inf, -1.0])
+    def test_disabled_limiter_acquire_rejects_invalid_timeout(self, timeout: float | str) -> None:
+        """Disabled registry preserves RateLimiter's timeout validation contract."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises((TypeError, ValueError), match="timeout must be"):
+            limiter.acquire(timeout=timeout)  # type: ignore[arg-type]
 
 
 class TestRateLimitRegistryEnabled:

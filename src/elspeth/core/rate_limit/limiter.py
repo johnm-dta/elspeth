@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has incomplete type stubs
     AbstractClock,
@@ -107,6 +107,27 @@ def _custom_excepthook(args: threading.ExceptHookArgs) -> None:
     # Not a suppressed scenario, delegate to original handler
     if original is not None:
         original(args)  # type: ignore[operator]
+
+
+def validate_limiter_weight(weight: object) -> None:
+    """Validate a limiter token weight before any acquire attempt."""
+    if type(weight) is not int:
+        raise TypeError(f"weight must be int, got {type(weight).__name__}: {weight!r}")
+    if weight <= 0:
+        raise ValueError(f"weight must be positive, got {weight!r}")
+
+
+def validate_limiter_timeout(timeout: object | None) -> None:
+    """Validate a blocking acquire timeout."""
+    if timeout is None:
+        return
+    if type(timeout) not in (int, float):
+        raise TypeError(f"timeout must be int or float, got {type(timeout).__name__}: {timeout!r} — this is a bug in the calling code")
+    timeout_number = cast(int | float, timeout)
+    if not math.isfinite(timeout_number):
+        raise ValueError(f"timeout must be finite, got {timeout!r}")
+    if timeout_number < 0:
+        raise ValueError(f"timeout must be non-negative, got {timeout!r}")
 
 
 class RateLimiter:
@@ -232,10 +253,7 @@ class RateLimiter:
 
     @staticmethod
     def _validate_weight(weight: int) -> None:
-        if type(weight) is not int:
-            raise TypeError(f"weight must be int, got {type(weight).__name__}: {weight!r}")
-        if weight <= 0:
-            raise ValueError(f"weight must be positive, got {weight!r}")
+        validate_limiter_weight(weight)
 
     def acquire(self, weight: int = 1, timeout: float | None = None) -> None:
         """Acquire rate limit tokens, blocking if necessary.
@@ -253,15 +271,7 @@ class RateLimiter:
         if self._closed:
             raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
         self._validate_weight(weight)
-        if timeout is not None:
-            if type(timeout) not in (int, float):
-                raise TypeError(
-                    f"timeout must be int or float, got {type(timeout).__name__}: {timeout!r} — this is a bug in the calling code"
-                )
-            if not math.isfinite(timeout):
-                raise ValueError(f"timeout must be finite, got {timeout!r}")
-            if timeout < 0:
-                raise ValueError(f"timeout must be non-negative, got {timeout!r}")
+        validate_limiter_timeout(timeout)
 
         deadline = None if timeout is None else (self._monotonic() + timeout)
 

@@ -219,8 +219,11 @@ elspeth explain --run latest --row 2 --database examples/threshold_gate/runs/aud
 This launches an interactive terminal UI where you can explore:
 - The source row and its content hash
 - Each processing step (transforms, gates)
-- Gate evaluation results and routing decisions
+- Branch labels, repeated DAG joins, and routing decisions
 - Final destination and artifact hash
+
+Use arrow keys to navigate the tree, Enter to update the detail panel, `r` to
+refresh, and `q` to quit.
 
 > **Tip:** Use `--no-tui` for plain text output or `--json` for machine-readable output instead of the interactive TUI.
 
@@ -493,21 +496,13 @@ cat output/high_values.csv
 
 ### Step 7: Explain a Decision
 
-For Docker environments where TUI isn't available, query the audit database directly:
+For Docker environments where TUI isn't available, use non-interactive explain output:
 
 ```bash
-# Query routing decision for row 2
 docker run --rm \
   -v $(pwd)/state:/app/state:ro \
-  --entrypoint sqlite3 \
   ghcr.io/johnm-dta/elspeth:latest \
-  /app/state/audit.db \
-  "SELECT t.token_id, ns.node_id, ns.status, ns.input_hash
-   FROM tokens t
-   JOIN rows r ON t.row_id = r.row_id
-   JOIN node_states ns ON t.token_id = ns.token_id
-   WHERE r.row_index = 2
-   ORDER BY ns.step_index;"
+  explain --run latest --row 2 --no-tui --database /app/state/audit.db
 ```
 
 > **Tip:** Use `--no-tui` for plain text output or `--json` for machine-readable output. The TUI requires an interactive terminal, so use these flags in CI/CD environments.
@@ -734,6 +729,8 @@ elspeth validate --settings path/to/settings.yaml
 elspeth run --settings path/to/settings.yaml --execute
 elspeth explain --run latest --row <row_id> --database examples/threshold_gate/runs/audit.db
 elspeth plugins list
+elspeth plugins list --format json
+elspeth plugins inspect source csv
 ```
 
 ### Web UI Commands
@@ -776,6 +773,8 @@ docker run --rm \
 | `run --settings /app/config/pipeline.yaml --execute` | Run pipeline |
 | `explain --run latest --row N --database <path>` | Explain decision (TUI) |
 | `plugins list` | List available plugins |
+| `plugins list --format json` | Emit plugin catalog JSON |
+| `plugins inspect <type> <name>` | Inspect one plugin schema |
 | `--help` | Show all commands |
 
 ---

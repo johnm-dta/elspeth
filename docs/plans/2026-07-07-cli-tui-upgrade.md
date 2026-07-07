@@ -374,9 +374,9 @@ Do not document promised behavior before it exists. Once Tasks 2-4 pass:
 - Align README explain/plugin examples with the implemented TUI and plugin CLI behavior, or explicitly remove overclaims.
 
 **Definition of Done:**
-- [ ] Docs match current CLI help/output.
-- [ ] Docker docs do not imply TUI works in non-interactive containers unless `-it` is used.
-- [ ] Roadmap references a live tracker ID.
+- [x] Docs match current CLI help/output.
+- [x] Docker docs do not imply TUI works in non-interactive containers unless `-it` is used.
+- [x] Roadmap references a live tracker ID.
 
 **Verify:**
 

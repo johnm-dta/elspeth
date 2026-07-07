@@ -11,9 +11,12 @@ from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from elspeth.contracts.errors import AuditIntegrityError
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.lineage import LineageResult
 
 
 @overload
@@ -125,7 +128,7 @@ class JSONFormatter:
 class LineageTextFormatter:
     """Format LineageResult as human-readable text for CLI output."""
 
-    def format(self, result: Any | None) -> str:
+    def format(self, result: "LineageResult | None") -> str:
         """Format lineage result as text.
 
         Args:
@@ -195,6 +198,27 @@ class LineageTextFormatter:
                 ]
                 if event.reason_hash is not None:
                     parts.append(f"reason_hash={event.reason_hash}")
+                lines.append(f"  {' '.join(parts)}")
+            lines.append("")
+
+        # Scheduler events
+        if result.scheduler_events:
+            lines.append("--- Scheduler Events ---")
+            for scheduler_event in result.scheduler_events:
+                parts = [
+                    scheduler_event.event_type.value,
+                    f"work_item={scheduler_event.work_item_id}",
+                ]
+                if scheduler_event.node_id is not None:
+                    parts.append(f"node={scheduler_event.node_id}")
+                if scheduler_event.from_status is not None:
+                    parts.append(f"from={scheduler_event.from_status.value}")
+                parts.append(f"to={scheduler_event.to_status.value}")
+                parts.append(f"attempt={scheduler_event.to_attempt}")
+                if scheduler_event.to_lease_owner is not None:
+                    parts.append(f"owner={scheduler_event.to_lease_owner}")
+                if scheduler_event.caller_owner is not None:
+                    parts.append(f"caller={scheduler_event.caller_owner}")
                 lines.append(f"  {' '.join(parts)}")
             lines.append("")
 

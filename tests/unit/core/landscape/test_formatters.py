@@ -761,6 +761,7 @@ class TestLineageTextFormatter:
             TransformErrorRecord,
             ValidationErrorRecord,
         )
+        from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
         from elspeth.core.landscape.formatters import LineageTextFormatter
         from elspeth.core.landscape.lineage import LineageResult
 
@@ -821,6 +822,23 @@ class TestLineageTextFormatter:
                     created_at=now,
                 ),
             ),
+            scheduler_events=(
+                SchedulerEvent(
+                    event_id="sched-1",
+                    run_id="run-001",
+                    token_id="tok-child",
+                    work_item_id="work-1",
+                    node_id="transform-1",
+                    event_type=SchedulerEventType.CLAIM_READY,
+                    from_status=TokenWorkStatus.READY,
+                    to_status=TokenWorkStatus.LEASED,
+                    from_attempt=0,
+                    to_attempt=1,
+                    recorded_at=now,
+                    caller_owner="leader-1",
+                    to_lease_owner="worker-1",
+                ),
+            ),
             calls=(
                 Call(
                     call_id="call-1",
@@ -870,6 +888,7 @@ class TestLineageTextFormatter:
         assert "Path: BUFFERED" in text
         assert "[2] transform-1: completed" in text
         assert "[3] copy edge=edge-1 group=group-1 reason_hash=reason-hash" in text
+        assert "claim_ready work_item=work-1 node=transform-1 from=ready to=leased attempt=1 owner=worker-1 caller=leader-1" in text
         assert "http: success (7.2ms)" in text
         assert "[fixed] missing field" in text
         assert "[transform-1] fail-sink" in text

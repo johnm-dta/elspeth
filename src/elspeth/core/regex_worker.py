@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
+
+
+class RegexMatchResult(NamedTuple):
+    matched: bool
+    full_match: str | None
+    groups: tuple[str | None, ...]
 
 
 def run_regex_worker(
     pattern: re.Pattern[str],
     text: str,
-) -> tuple[bool, str | None, str | None]:
-    """Run regex search in a worker process and return picklable match data."""
+) -> RegexMatchResult:
+    """Run regex search in a worker process and return neutral match data."""
     match = pattern.search(text)
     if match is None:
-        return (False, None, None)
-    group0 = match.group(0)
-    group1 = match.group(1) if pattern.groups else None
-    return (True, group0, group1)
+        return RegexMatchResult(False, None, ())
+    return RegexMatchResult(True, match.group(0), match.groups())

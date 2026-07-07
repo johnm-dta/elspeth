@@ -12,8 +12,10 @@ This module tests:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -66,6 +68,40 @@ class _KeyVaultSecretDouble:
 class _KeyVaultClientDouble:
     def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
         self.get_secret = _CallRecorder(return_value=return_value, side_effect=side_effect)
+
+
+def _install_fake_azure_exceptions(monkeypatch: pytest.MonkeyPatch) -> dict[str, type[Exception]]:
+    """Install minimal Azure exception classes for optional-dependency-free tests."""
+    azure_module = ModuleType("azure")
+    core_module = ModuleType("azure.core")
+    exceptions_module = ModuleType("azure.core.exceptions")
+
+    class ResourceNotFoundError(Exception):
+        pass
+
+    class ClientAuthenticationError(Exception):
+        pass
+
+    class HttpResponseError(Exception):
+        pass
+
+    class ServiceRequestError(Exception):
+        pass
+
+    exceptions_module.ResourceNotFoundError = ResourceNotFoundError  # type: ignore[attr-defined]
+    exceptions_module.ClientAuthenticationError = ClientAuthenticationError  # type: ignore[attr-defined]
+    exceptions_module.HttpResponseError = HttpResponseError  # type: ignore[attr-defined]
+    exceptions_module.ServiceRequestError = ServiceRequestError  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "azure", azure_module)
+    monkeypatch.setitem(sys.modules, "azure.core", core_module)
+    monkeypatch.setitem(sys.modules, "azure.core.exceptions", exceptions_module)
+    return {
+        "ResourceNotFoundError": ResourceNotFoundError,
+        "ClientAuthenticationError": ClientAuthenticationError,
+        "HttpResponseError": HttpResponseError,
+        "ServiceRequestError": ServiceRequestError,
+    }
 
 
 class TestEnvSource:
@@ -217,12 +253,12 @@ class TestErrorHandling:
 
     def test_keyvault_missing_secret_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SecretNotFoundError is wrapped in SecretLoadError with clear message."""
-        from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
+        azure_errors = _install_fake_azure_exceptions(monkeypatch)
 
         # P1-2026-02-05: Fingerprint key required for audit recording
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-fingerprint-key")
 
-        client = _KeyVaultClientDouble(side_effect=AzureResourceNotFoundError("Secret not found"))
+        client = _KeyVaultClientDouble(side_effect=azure_errors["ResourceNotFoundError"]("Secret not found"))
 
         config = SecretsConfig(
             source="keyvault",
@@ -246,12 +282,12 @@ class TestErrorHandling:
 
     def test_keyvault_auth_failure_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Auth errors produce clear messages with remediation guidance."""
-        from azure.core.exceptions import ClientAuthenticationError
+        azure_errors = _install_fake_azure_exceptions(monkeypatch)
 
         # P1-2026-02-05: Fingerprint key required for audit recording
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-fingerprint-key")
 
-        client = _KeyVaultClientDouble(side_effect=ClientAuthenticationError("DefaultAzureCredential failed"))
+        client = _KeyVaultClientDouble(side_effect=azure_errors["ClientAuthenticationError"]("DefaultAzureCredential failed"))
 
         config = SecretsConfig(
             source="keyvault",
@@ -276,13 +312,13 @@ class TestErrorHandling:
 
     def test_error_message_includes_vault_url_and_secret_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Error messages include vault URL and secret name for debugging."""
-        from azure.core.exceptions import HttpResponseError
+        azure_errors = _install_fake_azure_exceptions(monkeypatch)
 
         # P1-2026-02-05: Fingerprint key required for audit recording
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-fingerprint-key")
 
-        error = HttpResponseError("Service unavailable")
-        error.status_code = 503
+        error = azure_errors["HttpResponseError"]("Service unavailable")
+        cast(Any, error).status_code = 503
         client = _KeyVaultClientDouble(side_effect=error)
 
         config = SecretsConfig(
@@ -479,19 +515,13 @@ class TestErrorHandling:
             mapping={"KEY": "secret"},
         )
 
-        # Patch at the point where the import happens inside load_secrets_from_config
-        # The function does: from elspeth.core.security.secret_loader import KeyVaultSecretLoader
-        # So we need to make that import fail
-        import builtins
-
-        original_import = builtins.__import__
-
-        def mock_import(name: str, *args, **kwargs):
-            if "secret_loader" in name:
-                raise ImportError("No module named 'azure.keyvault.secrets'")
-            return original_import(name, *args, **kwargs)
-
-        with patch.object(builtins, "__import__", mock_import), pytest.raises(SecretLoadError) as exc_info:
+        with (
+            patch(
+                "elspeth.core.security.secret_loader._get_keyvault_client",
+                side_effect=ImportError("No module named 'azure.keyvault.secrets'"),
+            ),
+            pytest.raises(SecretLoadError) as exc_info,
+        ):
             load_secrets_from_config(config)
 
         error_msg = str(exc_info.value)

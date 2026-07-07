@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from elspeth.contracts import SecretResolutionInput
 
@@ -88,6 +88,23 @@ def _enforce_vault_url_allowlist(vault_url: str) -> None:
         )
 
 
+_AzureSecretErrorKind = Literal["auth", "request"]
+
+
+def _classify_azure_secret_error(exc: Exception) -> _AzureSecretErrorKind | None:
+    """Classify Azure SDK errors without making Azure an eager dependency."""
+    try:
+        from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ServiceRequestError
+    except ImportError:
+        return None
+
+    if isinstance(exc, ClientAuthenticationError):
+        return "auth"
+    if isinstance(exc, (HttpResponseError, ServiceRequestError)):
+        return "request"
+    return None
+
+
 def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInput]:
     """Load secrets from configured source and inject into environment.
 
@@ -143,15 +160,10 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
             "         # ... other secrets"
         )
 
-    try:
-        from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ServiceRequestError
-
-        from elspeth.core.security.secret_loader import (
-            KeyVaultSecretLoader,
-            SecretNotFoundError,
-        )
-    except ImportError as e:
-        raise SecretLoadError("Azure Key Vault packages not installed. Install with: uv pip install 'elspeth[azure]'") from e
+    from elspeth.core.security.secret_loader import (
+        KeyVaultSecretLoader,
+        SecretNotFoundError,
+    )
 
     # Create loader (has built-in caching).
     # Note: KeyVaultSecretLoader uses lazy client initialization — the constructor
@@ -231,19 +243,6 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
         except ImportError as e:
             # Azure SDK not installed
             raise SecretLoadError("Azure Key Vault packages not installed. Install with: uv pip install 'elspeth[azure]'") from e
-        except ClientAuthenticationError as e:
-            raise SecretLoadError(
-                f"Failed to authenticate to Key Vault ({config.vault_url})\n"
-                f"DefaultAzureCredential could not find valid credentials.\n"
-                f"Ensure Managed Identity, Azure CLI login, or service principal env vars are configured.\n"
-                f"Error: {e}"
-            ) from e
-        except (HttpResponseError, ServiceRequestError) as e:
-            raise SecretLoadError(
-                f"Failed to load secret '{keyvault_secret_name}' from Key Vault ({config.vault_url})\n"
-                f"Mapped from: {env_var_name}\n"
-                f"Error: {e}"
-            ) from e
         except ValueError as e:
             raise SecretLoadError(
                 f"Fingerprint computation failed for secret '{keyvault_secret_name}' "
@@ -251,6 +250,22 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
                 f"Check ELSPETH_FINGERPRINT_KEY is set and non-empty.\n"
                 f"Error: {e}"
             ) from e
+        except Exception as e:
+            azure_error_kind = _classify_azure_secret_error(e)
+            if azure_error_kind == "auth":
+                raise SecretLoadError(
+                    f"Failed to authenticate to Key Vault ({config.vault_url})\n"
+                    f"DefaultAzureCredential could not find valid credentials.\n"
+                    f"Ensure Managed Identity, Azure CLI login, or service principal env vars are configured.\n"
+                    f"Error: {e}"
+                ) from e
+            if azure_error_kind == "request":
+                raise SecretLoadError(
+                    f"Failed to load secret '{keyvault_secret_name}' from Key Vault ({config.vault_url})\n"
+                    f"Mapped from: {env_var_name}\n"
+                    f"Error: {e}"
+                ) from e
+            raise
 
     # Phase 2: All secrets fetched successfully — apply to os.environ atomically.
     for env_var_name, secret_value in pending_env:

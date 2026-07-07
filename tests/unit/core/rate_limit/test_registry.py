@@ -7,10 +7,27 @@ from unittest.mock import patch
 
 import pytest
 
+import elspeth.core.rate_limit as rate_limit
 from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
+from elspeth.contracts.contexts import RateLimitRegistryProtocol
 from elspeth.core.config import RateLimitSettings, ServiceRateLimit
 from elspeth.core.rate_limit.limiter import RateLimiter
 from elspeth.core.rate_limit.registry import NoOpLimiter, RateLimitRegistry
+from elspeth.plugins.infrastructure.clients.base import AuditedClientBase
+from elspeth.plugins.infrastructure.clients.dataverse import DataverseClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
+from elspeth.plugins.infrastructure.clients.retrieval.azure_search import AzureSearchProvider
+
+
+def test_limiter_protocol_is_shared_public_surface() -> None:
+    """Registry and audited clients should depend on the limiter behavior contract."""
+    assert "LimiterProtocol" in rate_limit.__all__
+    assert rate_limit.LimiterProtocol.__name__ == "LimiterProtocol"
+    assert RateLimitRegistryProtocol.get_limiter.__annotations__["return"] == "LimiterProtocol"
+    assert RateLimitRegistry.get_limiter.__annotations__["return"] == "LimiterProtocol"
+    for client_type in (AuditedClientBase, AuditedHTTPClient, AuditedLLMClient, DataverseClient, AzureSearchProvider):
+        assert client_type.__init__.__annotations__["limiter"] == "LimiterProtocol | None"
 
 
 class TestNoOpLimiter:

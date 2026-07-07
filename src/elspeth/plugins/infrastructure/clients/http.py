@@ -48,8 +48,7 @@ logger = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from elspeth.contracts import Call
     from elspeth.contracts.audit_protocols import CallRecorder
-    from elspeth.core.rate_limit import NoOpLimiter
-    from elspeth.core.rate_limit.limiter import RateLimiter
+    from elspeth.contracts.contexts import LimiterProtocol
 
 
 class HTTPResponseBodyTooLargeError(httpx.HTTPError):
@@ -108,7 +107,7 @@ class AuditedHTTPClient(AuditedClientBase):
         timeout: float = 30.0,
         base_url: str | None = None,
         headers: dict[str, str] | None = None,
-        limiter: RateLimiter | NoOpLimiter | None = None,
+        limiter: LimiterProtocol | None = None,
         token_id: str | None = None,
         operation_id: str | None = None,
         max_response_body_bytes: int | None = None,

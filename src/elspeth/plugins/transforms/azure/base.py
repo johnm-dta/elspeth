@@ -23,7 +23,7 @@ from pydantic import Field, field_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.audit_protocols import PluginAuditWriter
-from elspeth.contracts.contexts import LifecycleContext, TransformContext
+from elspeth.contracts.contexts import LifecycleContext, LimiterProtocol, TransformContext
 from elspeth.contracts.errors import CapacityError, FrameworkBugError, PluginRetryableError, is_capacity_error
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -132,7 +132,7 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         self._recorder: PluginAuditWriter | None = None
         self._run_id: str = ""
         self._telemetry_emit: Callable[[Any], None] = _warn_telemetry_before_start
-        self._limiter: Any = None  # RateLimiter | NoOpLimiter | None
+        self._limiter: LimiterProtocol | None = None
 
         self._http_clients: dict[str, Any] = {}  # state_id -> AuditedHTTPClient
         self._http_clients_lock = Lock()

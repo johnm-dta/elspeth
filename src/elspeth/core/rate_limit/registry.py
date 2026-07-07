@@ -49,6 +49,7 @@ def _sanitize_limiter_name(service_name: str) -> str:
 
 if TYPE_CHECKING:
     from elspeth.contracts.config.protocols import RuntimeRateLimitProtocol
+    from elspeth.contracts.contexts import LimiterProtocol
 
 
 class NoOpLimiter:
@@ -123,7 +124,7 @@ class RateLimitRegistry:
         self._lock = threading.Lock()
         self._noop_limiter = NoOpLimiter()
 
-    def get_limiter(self, service_name: str) -> RateLimiter | NoOpLimiter:
+    def get_limiter(self, service_name: str) -> LimiterProtocol:
         """Get or create a rate limiter for a service.
 
         Thread-safe: multiple threads can call this concurrently.

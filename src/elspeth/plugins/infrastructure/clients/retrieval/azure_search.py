@@ -23,9 +23,8 @@ from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 
 if TYPE_CHECKING:
+    from elspeth.contracts.contexts import LimiterProtocol
     from elspeth.core.landscape.execution_repository import ExecutionRepository
-    from elspeth.core.rate_limit.limiter import RateLimiter
-    from elspeth.core.rate_limit.registry import NoOpLimiter
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 
@@ -148,7 +147,7 @@ class AzureSearchProvider:
         execution: ExecutionRepository,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
-        limiter: RateLimiter | NoOpLimiter | None = None,
+        limiter: LimiterProtocol | None = None,
     ) -> None:
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 

@@ -11,9 +11,8 @@ if TYPE_CHECKING:
     from elspeth.contracts import Call, CallStatus, CallType
     from elspeth.contracts.audit_protocols import CallRecorder
     from elspeth.contracts.call_data import CallPayload
+    from elspeth.contracts.contexts import LimiterProtocol
     from elspeth.contracts.events import ExternalCallCompleted
-    from elspeth.core.rate_limit import NoOpLimiter
-    from elspeth.core.rate_limit.limiter import RateLimiter
 
 # Type alias for telemetry emit callback.
 # When telemetry is disabled, orchestrator provides a no-op function.
@@ -63,7 +62,7 @@ class AuditedClientBase:
         telemetry_emit: TelemetryEmitCallback,
         *,
         operation_id: str | None = None,
-        limiter: RateLimiter | NoOpLimiter | None = None,
+        limiter: LimiterProtocol | None = None,
         token_id: str | None = None,
     ) -> None:
         """Initialize audited client.

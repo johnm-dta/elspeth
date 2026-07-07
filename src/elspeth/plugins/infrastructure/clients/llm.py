@@ -25,8 +25,7 @@ from elspeth.plugins.infrastructure.clients.base import AuditedClientBase, Telem
 
 if TYPE_CHECKING:
     from elspeth.contracts.audit_protocols import CallRecorder
-    from elspeth.core.rate_limit import NoOpLimiter
-    from elspeth.core.rate_limit.limiter import RateLimiter
+    from elspeth.contracts.contexts import LimiterProtocol
 
 logger = structlog.get_logger(__name__)
 
@@ -268,7 +267,7 @@ class AuditedLLMClient(AuditedClientBase):
         underlying_client: Any,  # openai.OpenAI or openai.AzureOpenAI
         *,
         provider: str = "openai",
-        limiter: RateLimiter | NoOpLimiter | None = None,
+        limiter: LimiterProtocol | None = None,
         token_id: str | None = None,
         operation_id: str | None = None,
     ) -> None:

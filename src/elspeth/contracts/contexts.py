@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -35,10 +36,40 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
+class LimiterProtocol(Protocol):
+    """Behavior-level limiter surface shared by concrete and no-op limiters."""
+
+    def acquire(self, weight: int = 1, timeout: float | None = None) -> None:
+        """Acquire rate-limit capacity, blocking until available or timeout."""
+        ...
+
+    def try_acquire(self, weight: int = 1) -> bool:
+        """Try to acquire rate-limit capacity without blocking."""
+        ...
+
+    def close(self) -> None:
+        """Release limiter resources."""
+        ...
+
+    def __enter__(self) -> LimiterProtocol:
+        """Enter a limiter context manager."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit a limiter context manager."""
+        ...
+
+
+@runtime_checkable
 class RateLimitRegistryProtocol(Protocol):
     """Minimal rate-limit registry surface exposed to plugins."""
 
-    def get_limiter(self, service_name: str) -> Any:
+    def get_limiter(self, service_name: str) -> LimiterProtocol:
         """Return a limiter object for the named external service."""
         ...
 

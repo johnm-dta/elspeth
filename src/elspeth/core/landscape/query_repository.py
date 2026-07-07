@@ -423,7 +423,7 @@ class QueryRepository:
         if not state_ids:
             return []
 
-        all_db_rows = []
+        queries = []
         for offset in range(0, len(state_ids), self._QUERY_CHUNK_SIZE):
             chunk = state_ids[offset : offset + self._QUERY_CHUNK_SIZE]
             query = (
@@ -441,8 +441,9 @@ class QueryRepository:
                 )
                 .where(routing_events_table.c.state_id.in_(chunk))
             )
-            all_db_rows.extend(self._ops.execute_fetchall(query))
+            queries.append(query)
 
+        all_db_rows = [row for db_rows in self._ops.execute_fetchall_many(queries) for row in db_rows]
         # Sort with total ordering: state_id breaks ties when multiple tokens
         # share the same step_index/attempt (e.g., forked paths at the same step).
         all_db_rows.sort(key=lambda r: (r.step_index, r.attempt, r.state_id, r.ordinal, r.event_id))
@@ -468,7 +469,7 @@ class QueryRepository:
         if not state_ids:
             return []
 
-        all_db_rows = []
+        queries = []
         for offset in range(0, len(state_ids), self._QUERY_CHUNK_SIZE):
             chunk = state_ids[offset : offset + self._QUERY_CHUNK_SIZE]
             query = (
@@ -480,8 +481,9 @@ class QueryRepository:
                 .join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id)
                 .where(calls_table.c.state_id.in_(chunk))
             )
-            all_db_rows.extend(self._ops.execute_fetchall(query))
+            queries.append(query)
 
+        all_db_rows = [row for db_rows in self._ops.execute_fetchall_many(queries) for row in db_rows]
         # Sort with total ordering: state_id breaks ties when multiple tokens
         # share the same step_index/attempt (e.g., forked paths at the same step).
         all_db_rows.sort(key=lambda r: (r.step_index, r.attempt, r.state_id, r.call_index))

@@ -3,6 +3,7 @@
 Consolidates read-only and write connection management for simple statements.
 """
 
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
@@ -71,6 +72,18 @@ class ReadOnlyDatabaseOps:
                 return list(result.fetchall())
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(_safe_database_error_message(operation="execute_fetchall", action="query", exc=exc)) from exc
+
+    def execute_fetchall_many(self, queries: Sequence[Executable]) -> list[list[Row[Any]]]:
+        """Execute read-only queries through one read snapshot."""
+        try:
+            with self._db.read_only_connection() as conn:
+                if conn.dialect.name == "sqlite" and getattr(self._db, "is_read_only", False):
+                    # Read-only engines keep stock pysqlite autocommit for ordinary
+                    # inspectors; this multi-query boundary needs one stable snapshot.
+                    conn.exec_driver_sql("BEGIN")
+                return [list(conn.execute(query).fetchall()) for query in queries]
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(_safe_database_error_message(operation="execute_fetchall_many", action="query", exc=exc)) from exc
 
 
 class DatabaseOps(ReadOnlyDatabaseOps):

@@ -1577,6 +1577,29 @@ class TestChunkedQueryMethods:
         event_state_ids = [e.state_id for e in events]
         assert event_state_ids == state_ids
 
+    def test_routing_events_for_states_use_one_read_snapshot_across_chunks(self):
+        """Chunked state-set reads must not open one read snapshot per chunk."""
+        from unittest.mock import patch
+
+        db, factory = _setup_full()
+        state_ids = self._setup_many_states(factory, "run-1", 5)
+
+        for sid in state_ids:
+            factory.execution.record_routing_event(
+                state_id=sid,
+                edge_id="edge-1",
+                mode=RoutingMode.MOVE,
+            )
+
+        with (
+            patch("elspeth.core.landscape.query_repository.QueryRepository._QUERY_CHUNK_SIZE", 2),
+            patch.object(db, "read_only_connection", wraps=db.read_only_connection) as read_only_connection,
+        ):
+            events = factory.query.get_routing_events_for_states(state_ids)
+
+        assert len(events) == 5
+        assert read_only_connection.call_count == 1
+
     def test_calls_ordering_preserved_across_chunks(self):
         """Results must maintain execution order even across chunks."""
         from unittest.mock import patch
@@ -1602,6 +1625,33 @@ class TestChunkedQueryMethods:
         assert len(calls) == 5
         call_state_ids = [c.state_id for c in calls]
         assert call_state_ids == state_ids
+
+    def test_calls_for_states_use_one_read_snapshot_across_chunks(self):
+        """Chunked state-set reads must not open one read snapshot per chunk."""
+        from unittest.mock import patch
+
+        db, factory = _setup_full()
+        state_ids = self._setup_many_states(factory, "run-1", 5)
+
+        for sid in state_ids:
+            factory.execution.record_call(
+                state_id=sid,
+                call_index=0,
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
+                request_data=RawCallPayload({"prompt": f"call-{sid}"}),
+                response_data=RawCallPayload({"out": "ok"}),
+                latency_ms=50.0,
+            )
+
+        with (
+            patch("elspeth.core.landscape.query_repository.QueryRepository._QUERY_CHUNK_SIZE", 2),
+            patch.object(db, "read_only_connection", wraps=db.read_only_connection) as read_only_connection,
+        ):
+            calls = factory.query.get_calls_for_states(state_ids)
+
+        assert len(calls) == 5
+        assert read_only_connection.call_count == 1
 
 
 # === Direct QueryRepository helpers and tests (M8, C1, C2, C3, H1, H2/M1, M3) ===

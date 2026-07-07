@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import event
 
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape._database_ops import DatabaseOps
+from elspeth.core.landscape._database_ops import DatabaseOps, ReadOnlyDatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordNotFoundError
 
@@ -107,6 +108,57 @@ class TestExecuteFetchall:
         assert row is not None
         assert row.value == "before"
         db.close()
+
+    def test_fetchall_many_read_only_handle_uses_one_sqlite_snapshot(self, tmp_path: Path) -> None:
+        """Multi-query reads on file-backed read-only handles must be snapshot-consistent."""
+        db_path = tmp_path / "test.db"
+        writable = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        metadata = sa.MetaData()
+        table = sa.Table(
+            "snapshot_rows",
+            metadata,
+            sa.Column("id", sa.String, primary_key=True),
+            sa.Column("value", sa.String),
+        )
+        metadata.create_all(writable.engine)
+        with writable.write_connection() as conn:
+            conn.execute(
+                table.insert(),
+                [
+                    {"id": "first", "value": "first"},
+                    {"id": "second", "value": "before"},
+                ],
+            )
+
+        read_only = LandscapeDB.from_url(f"sqlite:///{db_path}", read_only=True, create_tables=False)
+        mutation_count = 0
+
+        @event.listens_for(read_only.engine, "after_cursor_execute")
+        def _mutate_after_first_select(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+            nonlocal mutation_count
+            if mutation_count or "snapshot_rows" not in statement:
+                return
+            mutation_count += 1
+            with writable.write_connection() as write_conn:
+                write_conn.execute(table.update().where(table.c.id == "second").values(value="after"))
+
+        try:
+            rows_by_query = ReadOnlyDatabaseOps(read_only).execute_fetchall_many(
+                [
+                    table.select().where(table.c.id == "first"),
+                    table.select().where(table.c.id == "second"),
+                ]
+            )
+        finally:
+            event.remove(read_only.engine, "after_cursor_execute", _mutate_after_first_select)
+            read_only.close()
+
+        assert mutation_count == 1
+        assert rows_by_query[0][0].value == "first"
+        assert rows_by_query[1][0].value == "before"
+        with writable.read_only_connection() as conn:
+            assert conn.execute(table.select().where(table.c.id == "second")).one().value == "after"
+        writable.close()
 
 
 class TestDatabaseOpsErrorScrubbing:

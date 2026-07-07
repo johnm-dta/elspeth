@@ -56,6 +56,10 @@ model. Comma- or whitespace-separated exact vault URLs. See
 """
 
 
+def _contains_control_character(value: str) -> bool:
+    return any(ord(char) < 0x20 or char == "\x7f" for char in value)
+
+
 def _enforce_vault_url_allowlist(vault_url: str) -> None:
     """Enforce the optional deployment-owned exact-URL Key Vault allowlist.
 
@@ -77,6 +81,9 @@ def _enforce_vault_url_allowlist(vault_url: str) -> None:
         SecretLoadError: If an allowlist is provisioned and ``vault_url`` is not
             in it. Raised before any Key Vault I/O.
     """
+    if _contains_control_character(vault_url):
+        raise SecretLoadError("vault_url must not contain control characters")
+
     raw = os.environ.get(_KEYVAULT_ALLOWLIST_ENV_VAR, "")
     allowed = {entry.rstrip("/") for entry in raw.replace(",", " ").split() if entry.strip()}
     if not allowed:

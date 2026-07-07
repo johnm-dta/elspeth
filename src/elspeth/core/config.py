@@ -238,6 +238,10 @@ already covered.
 """
 
 
+def _contains_control_character(value: str) -> bool:
+    return any(ord(char) < 0x20 or char == "\x7f" for char in value)
+
+
 class SecretsConfig(BaseModel):
     """Configuration for secret loading.
 
@@ -304,6 +308,8 @@ class SecretsConfig(BaseModel):
         # stray whitespace intact. Stripping only removes edge whitespace, so it
         # can never turn a rejected host into an accepted one (elspeth-7572facbc6).
         v = v.strip()
+        if _contains_control_character(v):
+            raise ValueError("vault_url must not contain control characters")
 
         # P0-3: Reject ${VAR} references (chicken-egg problem)
         if "${" in v:

@@ -313,3 +313,23 @@ class TestVaultUrlSSRFHardening:
                 vault_url="https://my-vault.vault.azure.net.",
                 mapping={"KEY": "key"},
             )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "https://evil.com\x00.vault.azure.net",
+            "https://my-vault.vault.az\ture.net",
+            "https://my-vault.vault.az\nure.net",
+            "https://my-vault.vault.az\rure.net",
+        ],
+    )
+    def test_vault_url_rejects_internal_control_characters(self, raw: str) -> None:
+        """Internal control chars are rejected before parsing can normalize them."""
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="control"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url=raw,
+                mapping={"KEY": "key"},
+            )

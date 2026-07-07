@@ -1026,6 +1026,13 @@ class TestVaultUrlAllowlist:
         monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net/")
         _enforce_vault_url_allowlist("https://approved.vault.azure.net")  # no raise
 
+    def test_rejects_control_characters_before_exact_match(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.security.config_secrets import _enforce_vault_url_allowlist
+
+        monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net")
+        with pytest.raises(SecretLoadError, match="control"):
+            _enforce_vault_url_allowlist("https://approved.vault.az\ture.net")
+
     def test_load_secrets_rejects_url_outside_allowlist_before_any_io(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The gate fires before the fingerprint preflight and all Key Vault I/O."""
         monkeypatch.setenv(self._ENV, "https://approved.vault.azure.net")

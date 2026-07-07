@@ -61,6 +61,36 @@ class TestLoggingConfig:
         # Should NOT be JSON
         assert not captured.out.strip().startswith("{")
 
+    def test_logger_console_output_auto_disables_color_for_non_tty(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Console output must stay plain text when stdout is redirected."""
+        from elspeth.core.logging import configure_logging, get_logger
+
+        configure_logging(json_output=False)
+        logger = get_logger("test")
+
+        logger.info("test message", key="value")
+
+        captured = capsys.readouterr()
+        assert "test message" in captured.out
+        assert "\x1b[" not in captured.out
+
+    def test_logger_console_exception_output_auto_disables_color_for_non_tty(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Console exception output must stay plain text when stdout is redirected."""
+        from elspeth.core.logging import configure_logging, get_logger
+
+        configure_logging(json_output=False)
+        logger = get_logger("test")
+
+        try:
+            raise RuntimeError("color check")
+        except RuntimeError:
+            logger.exception("exception message")
+
+        captured = capsys.readouterr()
+        assert "exception message" in captured.out
+        assert "RuntimeError" in captured.out
+        assert "\x1b[" not in captured.out
+
     def test_logger_binds_context(self) -> None:
         """Logger can bind context."""
         from elspeth.core.logging import get_logger

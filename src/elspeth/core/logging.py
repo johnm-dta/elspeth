@@ -94,6 +94,7 @@ def configure_logging(
     *,
     json_output: bool = False,
     level: str = "INFO",
+    color_output: bool | None = None,
 ) -> None:
     """Configure structlog and stdlib logging for ELSPETH.
 
@@ -104,8 +105,11 @@ def configure_logging(
     Args:
         json_output: If True, output JSON. If False, human-readable.
         level: Log level (DEBUG, INFO, WARNING, ERROR).
+        color_output: If True, force ANSI colors in console output. If False,
+            disable them. If None, auto-detect from stdout interactivity.
     """
     log_level = getattr(logging, level.upper())
+    use_colors = sys.stdout.isatty() if color_output is None else color_output
 
     # Shared processors applied to ALL log records (structlog and stdlib)
     shared_processors: list[Any] = [
@@ -126,7 +130,10 @@ def configure_logging(
     else:
         final_processors = [
             _remove_internal_fields,
-            structlog.dev.ConsoleRenderer(colors=True),
+            structlog.dev.ConsoleRenderer(
+                colors=use_colors,
+                exception_formatter=structlog.dev.default_exception_formatter if use_colors else structlog.dev.plain_traceback,
+            ),
         ]
 
     # Configure structlog to route through stdlib logging

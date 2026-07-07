@@ -448,6 +448,7 @@ class NodeStateRepository:
                 completed_at=bindparam("batch_completed_at"),
             )
         )
+
         def _complete_on(active_conn: Connection) -> list[Any]:
             before_rows: list[Any] = []
             for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):

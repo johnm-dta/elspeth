@@ -711,11 +711,7 @@ class RunLifecycleRepository:
         }
         resolution_json = canonical_json(resolution_data)
 
-        stmt = (
-            runs_table.update()
-            .where(runs_table.c.run_id == run_id)
-            .values(source_field_resolution_json=resolution_json)
-        )
+        stmt = runs_table.update().where(runs_table.c.run_id == run_id).values(source_field_resolution_json=resolution_json)
         try:
             self._ops.execute_update(stmt, context=f"record_source_field_resolution run_id={run_id}")
         except LandscapeRecordNotFoundError as exc:

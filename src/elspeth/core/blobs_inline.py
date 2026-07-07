@@ -191,7 +191,9 @@ def _metadata_evaluation_validation_violations(
     missing_by_path = dict(evaluation.missing)
     not_ready_by_path = dict(evaluation.not_ready)
     hash_mismatches_by_path = {ref.field_path: (ref, actual) for ref, actual in evaluation.hash_mismatches}
-    oversized_by_path = {field_path: (size_bytes, cap) for field_path, size_bytes, cap in evaluation.oversized if field_path != "(aggregate)"}
+    oversized_by_path = {
+        field_path: (size_bytes, cap) for field_path, size_bytes, cap in evaluation.oversized if field_path != "(aggregate)"
+    }
 
     for ref in refs:
         if ref.field_path in missing_by_path:

@@ -63,9 +63,7 @@ class TokenOutcomeRepository:
         try:
             rows = conn.execute(query).fetchmany(2)
         except SQLAlchemyError as exc:
-            raise LandscapeRecordError(
-                f"execute_fetchone failed — database rejected audit query: {type(exc).__name__}"
-            ) from exc
+            raise LandscapeRecordError(f"execute_fetchone failed — database rejected audit query: {type(exc).__name__}") from exc
         if len(rows) > 1:
             raise LandscapeRecordError("execute_fetchone matched multiple rows — single-row audit query is ambiguous")
         if not rows:
@@ -348,13 +346,10 @@ class TokenOutcomeRepository:
                 result = conn.execute(stmt)
             except SQLAlchemyError as exc:
                 raise LandscapeRecordError(
-                    f"record_token_outcome failed for token_id={ref.token_id!r} — database rejected audit write: "
-                    f"{type(exc).__name__}"
+                    f"record_token_outcome failed for token_id={ref.token_id!r} — database rejected audit write: {type(exc).__name__}"
                 ) from exc
             if result.rowcount == 0:
-                raise LandscapeRecordError(
-                    f"record_token_outcome: zero rows affected for token_id={ref.token_id!r} — audit write failed"
-                )
+                raise LandscapeRecordError(f"record_token_outcome: zero rows affected for token_id={ref.token_id!r} — audit write failed")
 
         return outcome_id
 

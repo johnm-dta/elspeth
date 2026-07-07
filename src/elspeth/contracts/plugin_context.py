@@ -614,5 +614,5 @@ def plugin_context_scope(
     try:
         yield ctx
     finally:
-        for name, value in previous.items():
-            setattr(ctx, name, value)
+        for name, previous_value in previous.items():
+            setattr(ctx, name, previous_value)

@@ -45,8 +45,7 @@ class DynaconfKeyNormalizer:
             return self._normalize_dict(obj, preserve_nested=preserve_nested, in_sink_names=in_sink_names, in_options=in_options)
         if isinstance(obj, list):
             return [
-                self._normalize(item, preserve_nested=preserve_nested, in_sink_names=in_sink_names, in_options=in_options)
-                for item in obj
+                self._normalize(item, preserve_nested=preserve_nested, in_sink_names=in_sink_names, in_options=in_options) for item in obj
             ]
         return obj
 

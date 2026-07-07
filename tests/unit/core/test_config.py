@@ -3361,11 +3361,7 @@ sinks:
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
-        url = (
-            "mssql+pyodbc:///?"
-            "odbc_connect=DRIVER%3D%7BODBC+Driver+17%7D%3BSERVER%3Ddb"
-            "&odbc_connect=PWD%3DTupleSecret123%3BUID%3Dsa"
-        )
+        url = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+17%7D%3BSERVER%3Ddb&odbc_connect=PWD%3DTupleSecret123%3BUID%3Dsa"
         sanitized, fingerprint, had_password = _sanitize_dsn(url)
 
         assert had_password is True
@@ -3374,9 +3370,7 @@ sinks:
         reparsed = make_url(sanitized).query["odbc_connect"]
         assert reparsed == ("DRIVER={ODBC Driver 17};SERVER=db", "UID=sa")
 
-    def test_dsn_repeated_odbc_connect_password_braced_value_scrubbed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dsn_repeated_odbc_connect_password_braced_value_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Every repeated odbc_connect value uses the ODBC password parser."""
         from sqlalchemy.engine import make_url
 
@@ -3397,9 +3391,7 @@ sinks:
         reparsed = make_url(sanitized).query["odbc_connect"]
         assert reparsed == ("DRIVER={ODBC Driver 17};SERVER=db", "APP=reporting")
 
-    def test_dsn_repeated_odbc_connect_scrubs_secret_from_each_value(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dsn_repeated_odbc_connect_scrubs_secret_from_each_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No repeated odbc_connect value may keep an embedded password."""
         from sqlalchemy.engine import make_url
 
@@ -3407,11 +3399,7 @@ sinks:
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
-        url = (
-            "mssql+pyodbc:///?"
-            "odbc_connect=PWD%3Dfirst-secret%3BUID%3Dsa"
-            "&odbc_connect=Password%3Dsecond-secret%3BAPP%3Dreporting"
-        )
+        url = "mssql+pyodbc:///?odbc_connect=PWD%3Dfirst-secret%3BUID%3Dsa&odbc_connect=Password%3Dsecond-secret%3BAPP%3Dreporting"
         sanitized, _fingerprint, had_password = _sanitize_dsn(url)
 
         assert had_password is True
@@ -4169,9 +4157,7 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
-    def test_load_settings_from_yaml_string_preserves_env_placeholders_by_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_load_settings_from_yaml_string_preserves_env_placeholders_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The in-memory loader treats ${VAR} as literal user data by default."""
         from elspeth.core.config import load_settings_from_yaml_string
 

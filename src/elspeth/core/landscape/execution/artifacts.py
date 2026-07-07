@@ -101,9 +101,7 @@ class ArtifactRepository:
                     f"register_artifact failed for state_id={state_id!r} — database rejected audit write: {type(exc).__name__}"
                 ) from exc
             if result.rowcount == 0:
-                raise LandscapeRecordError(
-                    f"register_artifact: zero rows affected for state_id={state_id!r} — audit write failed"
-                )
+                raise LandscapeRecordError(f"register_artifact: zero rows affected for state_id={state_id!r} — audit write failed")
 
         return artifact
 

@@ -146,7 +146,9 @@ def test_failed_unrouted_reconcile_read_scopes_to_failure_unrouted() -> None:
     token_c = df.create_token(row_id=row_c.row_id)
     df.record_token_outcome(TokenRef(token_id=token_c.token_id, run_id=run_id), None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
 
-    result = setup.factory.barrier_restore.find_failed_unrouted_terminal_token_ids(run_id, [failed_token.token_id, token_b.token_id, token_c.token_id])
+    result = setup.factory.barrier_restore.find_failed_unrouted_terminal_token_ids(
+        run_id, [failed_token.token_id, token_b.token_id, token_c.token_id]
+    )
 
     assert result == frozenset({failed_token.token_id})
 

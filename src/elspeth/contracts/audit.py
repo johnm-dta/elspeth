@@ -372,6 +372,124 @@ NodeState = NodeStateOpen | NodeStatePending | NodeStateCompleted | NodeStateFai
 
 
 @dataclass(frozen=True, slots=True)
+class NodeStateFieldConstraints:
+    """Column-level constraints for one node-state lifecycle status."""
+
+    required: tuple[str, ...] = ()
+    forbidden: tuple[str, ...] = ()
+
+
+NODE_STATE_LIFECYCLE_FIELD_CONSTRAINTS: Mapping[NodeStateStatus, NodeStateFieldConstraints] = {
+    NodeStateStatus.OPEN: NodeStateFieldConstraints(
+        forbidden=(
+            "output_hash",
+            "completed_at",
+            "duration_ms",
+            "context_after_json",
+            "error_json",
+            "success_reason_json",
+        ),
+    ),
+    NodeStateStatus.PENDING: NodeStateFieldConstraints(
+        required=("completed_at", "duration_ms"),
+        forbidden=("output_hash", "error_json", "success_reason_json"),
+    ),
+    NodeStateStatus.COMPLETED: NodeStateFieldConstraints(
+        required=("output_hash", "completed_at", "duration_ms"),
+        forbidden=("error_json",),
+    ),
+    NodeStateStatus.FAILED: NodeStateFieldConstraints(
+        required=("completed_at", "duration_ms", "error_json"),
+        forbidden=("success_reason_json",),
+    ),
+}
+
+
+def validate_node_state_persisted_fields(
+    state_id: str,
+    status: NodeStateStatus,
+    *,
+    output_hash: object | None,
+    completed_at: object | None,
+    duration_ms: object | None,
+    context_after_json: object | None,
+    error_json: object | None,
+    success_reason_json: object | None,
+) -> None:
+    """Validate status-dependent persisted node-state fields."""
+    constraints = NODE_STATE_LIFECYCLE_FIELD_CONSTRAINTS[status]
+    field_values = {
+        "output_hash": output_hash,
+        "completed_at": completed_at,
+        "duration_ms": duration_ms,
+        "context_after_json": context_after_json,
+        "error_json": error_json,
+        "success_reason_json": success_reason_json,
+    }
+    status_name = status.name
+
+    for field_name in constraints.required:
+        if field_values[field_name] is None:
+            raise ValueError(f"{status_name} state {state_id} has NULL {field_name} - audit integrity violation")
+    for field_name in constraints.forbidden:
+        if field_values[field_name] is not None:
+            raise ValueError(f"{status_name} state {state_id} has non-NULL {field_name} - audit integrity violation")
+
+
+def validate_node_state_completion_fields(
+    status: NodeStateStatus,
+    *,
+    output_data_present: bool,
+    duration_ms: float | None,
+    error_present: bool,
+    success_reason_present: bool,
+) -> None:
+    """Validate node-state completion inputs before persisting a lifecycle transition."""
+    if status == NodeStateStatus.OPEN:
+        raise ValueError("Cannot complete a node state with status OPEN")
+
+    constraints = NODE_STATE_LIFECYCLE_FIELD_CONSTRAINTS[status]
+    completion_values = {
+        "output_hash": output_data_present,
+        "completed_at": True,
+        "duration_ms": duration_ms is not None,
+        "context_after_json": False,
+        "error_json": error_present,
+        "success_reason_json": success_reason_present,
+    }
+
+    for field_name in constraints.required:
+        if completion_values[field_name]:
+            continue
+        if field_name == "duration_ms":
+            raise ValueError("duration_ms is required when completing a node state")
+        if field_name == "output_hash":
+            raise ValueError("COMPLETED node state requires output_data (output_hash would be NULL)")
+        if field_name == "error_json":
+            raise ValueError("FAILED node state requires error details")
+
+    for field_name in constraints.forbidden:
+        if not completion_values[field_name]:
+            continue
+        if field_name == "output_hash":
+            raise ValueError(f"{status.name} node state must not have output_data")
+        if field_name == "error_json":
+            message = (
+                "COMPLETED node state must not have error (contradicts success)"
+                if status == NodeStateStatus.COMPLETED
+                else f"{status.name} node state must not have error"
+            )
+            raise ValueError(message)
+        if field_name == "success_reason_json":
+            message = (
+                "FAILED node state must not have success_reason (contradicts failure)"
+                if status == NodeStateStatus.FAILED
+                else f"{status.name} node state must not have success_reason"
+            )
+            raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
 class Call:
     """An external call made during node processing or operation.
 

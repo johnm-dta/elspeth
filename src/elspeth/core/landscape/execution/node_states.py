@@ -28,6 +28,7 @@ from elspeth.contracts import (
     RoutingReason,
     RoutingSpec,
 )
+from elspeth.contracts.audit import validate_node_state_completion_fields
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
 from elspeth.contracts.hashing import repr_hash
 from elspeth.core.canonical import canonical_json, stable_hash
@@ -322,34 +323,13 @@ class NodeStateRepository:
             ValueError: If status is OPEN (not a valid terminal status)
             ValueError: If duration_ms is not provided
         """
-        if status == NodeStateStatus.OPEN:
-            raise ValueError("Cannot complete a node state with status OPEN")
-
-        if duration_ms is None:
-            raise ValueError("duration_ms is required when completing a node state")
-
-        # Required fields per status
-        if status == NodeStateStatus.COMPLETED and output_data is None:
-            raise ValueError("COMPLETED node state requires output_data (output_hash would be NULL)")
-
-        if status == NodeStateStatus.FAILED and error is None:
-            raise ValueError("FAILED node state requires error details")
-
-        # Forbidden fields per status — prevent writing impossible states to Tier 1 data.
-        # These mirror the read-side checks in NodeStateLoader.load().
-        if status == NodeStateStatus.PENDING:
-            if output_data is not None:
-                raise ValueError("PENDING node state must not have output_data")
-            if error is not None:
-                raise ValueError("PENDING node state must not have error")
-            if success_reason is not None:
-                raise ValueError("PENDING node state must not have success_reason")
-
-        if status == NodeStateStatus.COMPLETED and error is not None:
-            raise ValueError("COMPLETED node state must not have error (contradicts success)")
-
-        if status == NodeStateStatus.FAILED and success_reason is not None:
-            raise ValueError("FAILED node state must not have success_reason (contradicts failure)")
+        validate_node_state_completion_fields(
+            status,
+            output_data_present=output_data is not None,
+            duration_ms=duration_ms,
+            error_present=error is not None,
+            success_reason_present=success_reason is not None,
+        )
 
         timestamp = now()
         output_hash = stable_hash(output_data) if output_data is not None else None
@@ -434,10 +414,13 @@ class NodeStateRepository:
 
         params: list[dict[str, object]] = []
         for state_id, output_data, duration_ms in completions:
-            if duration_ms is None:
-                raise ValueError("duration_ms is required when completing a node state")
-            if output_data is None:
-                raise ValueError("COMPLETED node state requires output_data (output_hash would be NULL)")
+            validate_node_state_completion_fields(
+                NodeStateStatus.COMPLETED,
+                output_data_present=output_data is not None,
+                duration_ms=duration_ms,
+                error_present=False,
+                success_reason_present=False,
+            )
             params.append(
                 {
                     "batch_state_id": state_id,

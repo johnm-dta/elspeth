@@ -32,6 +32,7 @@ from elspeth.contracts.audit import (
     TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
+    validate_node_state_persisted_fields,
     validate_token_outcome_persisted_fields,
 )
 from elspeth.contracts.enums import (
@@ -371,24 +372,21 @@ class NodeStateLoader:
                                 (Tier 1 audit integrity violation - crash required)
         """
         status = NodeStateStatus(row.status)
+        try:
+            validate_node_state_persisted_fields(
+                row.state_id,
+                status,
+                output_hash=row.output_hash,
+                completed_at=row.completed_at,
+                duration_ms=row.duration_ms,
+                context_after_json=row.context_after_json,
+                error_json=row.error_json,
+                success_reason_json=row.success_reason_json,
+            )
+        except ValueError as exc:
+            raise AuditIntegrityError(str(exc)) from exc
 
         if status == NodeStateStatus.OPEN:
-            # OPEN states must have NULL completion and result fields.
-            # Operations haven't finished yet, so output_hash, completed_at, duration_ms,
-            # context_after_json, error_json, and success_reason_json must all be NULL.
-            if row.output_hash is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL output_hash - audit integrity violation")
-            if row.completed_at is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL completed_at - audit integrity violation")
-            if row.duration_ms is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL duration_ms - audit integrity violation")
-            if row.context_after_json is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL context_after_json - audit integrity violation")
-            if row.error_json is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL error_json - audit integrity violation")
-            if row.success_reason_json is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
-
             return NodeStateOpen(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -402,19 +400,6 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.PENDING:
-            # PENDING states must have completed_at, duration_ms (but no output_hash yet).
-            # error_json and success_reason_json must be NULL — results aren't in yet.
-            if row.duration_ms is None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has NULL duration_ms - audit integrity violation")
-            if row.completed_at is None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has NULL completed_at - audit integrity violation")
-            if row.output_hash is not None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has non-NULL output_hash - audit integrity violation")
-            if row.error_json is not None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has non-NULL error_json - audit integrity violation")
-            if row.success_reason_json is not None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
-
             return NodeStatePending(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -431,16 +416,6 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.COMPLETED:
-            # COMPLETED states must have output_hash, completed_at, duration_ms.
-            # error_json must be NULL — success and error are mutually exclusive.
-            if row.output_hash is None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has NULL output_hash - audit integrity violation")
-            if row.duration_ms is None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has NULL duration_ms - audit integrity violation")
-            if row.completed_at is None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has NULL completed_at - audit integrity violation")
-            if row.error_json is not None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has non-NULL error_json - audit integrity violation")
             return NodeStateCompleted(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -459,16 +434,6 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.FAILED:
-            # FAILED states must have completed_at, duration_ms, and error_json.
-            # success_reason_json must be NULL — success and failure are mutually exclusive.
-            if row.duration_ms is None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation")
-            if row.completed_at is None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL completed_at - audit integrity violation")
-            if row.error_json is None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL error_json - audit integrity violation")
-            if row.success_reason_json is not None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
             return NodeStateFailed(
                 state_id=row.state_id,
                 token_id=row.token_id,

@@ -57,6 +57,7 @@ from elspeth.contracts.enums import (
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.core.landscape.execution.node_states import NodeStateRepository
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
     BatchLoader,
@@ -848,6 +849,18 @@ class TestNodeStateLoader:
         }
         defaults.update(overrides)
         return _make_sa_row(**defaults)
+
+    def test_read_and_write_paths_use_shared_node_state_lifecycle_contract(self) -> None:
+        """Read/write adapters should not own separate node-state field matrices."""
+        assert hasattr(audit_contracts, "validate_node_state_persisted_fields")
+        assert hasattr(audit_contracts, "validate_node_state_completion_fields")
+
+        load_source = inspect.getsource(NodeStateLoader.load)
+        complete_source = inspect.getsource(NodeStateRepository.complete_node_state)
+
+        assert "validate_node_state_persisted_fields" in load_source
+        assert "validate_node_state_completion_fields" in complete_source
+        assert "mirror" not in complete_source.lower()
 
     # === OPEN variant ===
 

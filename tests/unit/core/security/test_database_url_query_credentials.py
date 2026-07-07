@@ -1,6 +1,6 @@
 """Regression tests for audit-safe database URL query credential handling."""
 
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import pytest
 
@@ -60,6 +60,57 @@ def test_database_url_odbc_connect_braced_password_with_semicolon_removed(monkey
     parsed_query = parse_qs(urlparse(result.sanitized_url).query)
     assert parsed_query["odbc_connect"] == ["DRIVER={SQL Server};Server=host"]
     assert result.fingerprint == secret_fingerprint("p;ass")
+
+
+def test_database_url_odbc_connect_braced_password_with_escaped_brace_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Escaped ``}}`` inside a braced ODBC password value is part of the secret."""
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+    connect = "DRIVER={SQL Server};PWD={pa}}ss;semi};Server=host"
+    url = f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}"
+
+    result = SanitizedDatabaseUrl.from_raw_url(url)
+
+    assert "pa%7D%7Dss" not in result.sanitized_url
+    assert "pa}ss" not in result.sanitized_url
+    parsed_query = parse_qs(urlparse(result.sanitized_url).query)
+    assert parsed_query["odbc_connect"] == ["DRIVER={SQL Server};Server=host"]
+    assert result.fingerprint == secret_fingerprint("pa}ss;semi")
+
+
+@pytest.mark.parametrize("password_key", ["PWD", "Password"])
+def test_database_url_odbc_connect_stray_brace_before_password_does_not_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    password_key: str,
+) -> None:
+    """A stray ``{`` inside an earlier value must not hide a later password key."""
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+    connect = f"DRIVER={{ODBC Driver 17}};SERVER=db;A{{B=c;{password_key}=SuperSecret123;UID=sa"
+    url = f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}"
+
+    result = SanitizedDatabaseUrl.from_raw_url(url)
+
+    assert "SuperSecret123" not in result.sanitized_url
+    assert f"{password_key}=" not in result.sanitized_url
+    parsed_query = parse_qs(urlparse(result.sanitized_url).query)
+    assert parsed_query["odbc_connect"] == ["DRIVER={ODBC Driver 17};SERVER=db;A{B=c;UID=sa"]
+    assert result.fingerprint == secret_fingerprint("SuperSecret123")
+
+
+def test_database_url_odbc_connect_stray_brace_after_escaped_braced_value_does_not_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Escaped ``}}`` inside a real braced value must not mask a later delimiter."""
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+    connect = "DRIVER={ODBC }} Driver; Still Driver};SERVER=db;A{B=c;PWD=SuperSecret123;UID=sa"
+    url = f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}"
+
+    result = SanitizedDatabaseUrl.from_raw_url(url)
+
+    assert "SuperSecret123" not in result.sanitized_url
+    assert "PWD=" not in result.sanitized_url
+    parsed_query = parse_qs(urlparse(result.sanitized_url).query)
+    assert parsed_query["odbc_connect"] == ["DRIVER={ODBC }} Driver; Still Driver};SERVER=db;A{B=c;UID=sa"]
+    assert result.fingerprint == secret_fingerprint("SuperSecret123")
 
 
 def test_database_url_odbc_connect_preserves_non_password_attribute_names() -> None:
@@ -177,5 +228,15 @@ def test_database_url_direct_construction_rejects_braced_odbc_connect_password()
     with pytest.raises(ValueError, match="sensitive query parameters"):
         SanitizedDatabaseUrl(
             sanitized_url="mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BSQL+Server%7D%3BPWD%3D%7Bp%3Bass%7D",
+            fingerprint=None,
+        )
+
+
+def test_database_url_direct_construction_rejects_stray_brace_odbc_connect_password() -> None:
+    """The sanitized URL invariant catches passwords hidden after stray braces."""
+    connect = "DRIVER={ODBC Driver 17};SERVER=db;A{B=c;PWD=SuperSecret123;UID=sa"
+    with pytest.raises(ValueError, match="sensitive query parameters"):
+        SanitizedDatabaseUrl(
+            sanitized_url=f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}",
             fingerprint=None,
         )

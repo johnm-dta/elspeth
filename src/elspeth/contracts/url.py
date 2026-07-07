@@ -148,6 +148,8 @@ def _iter_odbc_connect_parts(decoded_value: str) -> list[str]:
     parts: list[str] = []
     start = 0
     in_braces = False
+    seen_equals = False
+    value_has_non_space = False
     i = 0
     while i < len(decoded_value):
         char = decoded_value[i]
@@ -157,11 +159,19 @@ def _iter_odbc_connect_parts(decoded_value: str) -> list[str]:
                 continue
             if char == "}":
                 in_braces = False
-        elif char == "{":
-            in_braces = True
         elif char == ";":
             parts.append(decoded_value[start:i])
             start = i + 1
+            seen_equals = False
+            value_has_non_space = False
+        elif char == "=" and not seen_equals:
+            seen_equals = True
+            value_has_non_space = False
+        elif char == "{" and seen_equals and not value_has_non_space:
+            in_braces = True
+            value_has_non_space = True
+        elif seen_equals and not char.isspace():
+            value_has_non_space = True
         i += 1
     parts.append(decoded_value[start:])
     return parts
@@ -333,9 +343,7 @@ class SanitizedDatabaseUrl:
         fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
         sanitized_query, odbc_query_values = _strip_sensitive_database_param_parts(parsed.query)
         sanitized_fragment, odbc_fragment_values = _strip_sensitive_database_param_parts(parsed.fragment)
-        has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params) or bool(
-            odbc_query_values
-        )
+        has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params) or bool(odbc_query_values)
         has_sensitive_fragment_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in fragment_params) or bool(
             odbc_fragment_values
         )

@@ -95,7 +95,8 @@ class ExplainApp(App[None]):
                     yield Static(detail_content, id=WidgetIDs.DETAIL_PANEL)
 
                 case LoadingFailedState(error=err):
-                    yield self._build_status_tree(f"Loading failed: {err or 'Unknown error'}")
+                    message = f"Loading failed: {err or 'Unknown error'}"
+                    yield self._build_status_tree(message, {"kind": "status", "run_id": screen_state.run_id, "message": message})
                     yield Static("", id=WidgetIDs.DETAIL_PANEL)
 
                 case UninitializedState():
@@ -108,9 +109,9 @@ class ExplainApp(App[None]):
 
         yield Footer()
 
-    def _build_status_tree(self, message: str) -> Tree[TreeSelection]:
+    def _build_status_tree(self, message: str, selection: TreeSelection | None = None) -> Tree[TreeSelection]:
         """Build the stable lineage tree widget for status-only states."""
-        return Tree(message, data=None, id=WidgetIDs.LINEAGE_TREE)
+        return Tree(message, data=selection, id=WidgetIDs.LINEAGE_TREE)
 
     def _build_lineage_tree_widget(self, nodes: list[TreeNodeDict]) -> Tree[TreeSelection]:
         """Build a selectable Textual tree from flattened lineage nodes."""
@@ -152,11 +153,11 @@ class ExplainApp(App[None]):
             )
             stack.append((node["depth"], child))
 
-    def _populate_status_tree(self, tree: Tree[TreeSelection], message: str) -> None:
+    def _populate_status_tree(self, tree: Tree[TreeSelection], message: str, selection: TreeSelection | None = None) -> None:
         """Replace the lineage tree contents with a nonselectable status row."""
         tree.clear()
         tree.root.set_label(message)
-        tree.root.data = None
+        tree.root.data = selection
         tree.root.collapse()
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[TreeSelection]) -> None:
@@ -182,8 +183,13 @@ class ExplainApp(App[None]):
         match self._screen.state:
             case LoadedState(tree=screen_tree):
                 self._populate_lineage_tree_widget(tree, screen_tree.get_tree_nodes())
-            case LoadingFailedState(error=err):
-                self._populate_status_tree(tree, f"Loading failed: {err or 'Unknown error'}")
+            case LoadingFailedState(error=err, run_id=run_id):
+                message = f"Loading failed: {err or 'Unknown error'}"
+                self._populate_status_tree(
+                    tree,
+                    message,
+                    {"kind": "status", "run_id": run_id, "message": message},
+                )
             case UninitializedState():
                 self._populate_status_tree(tree, "Screen not initialized. This should not happen.")
 

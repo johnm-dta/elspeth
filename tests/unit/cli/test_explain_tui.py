@@ -34,11 +34,21 @@ class FakeNode:
     node_id: str
     plugin_name: str
     node_type: NodeType
+    sequence_in_pipeline: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeEdge:
+    edge_id: str
+    from_node_id: str
+    to_node_id: str
+    label: str
 
 
 @dataclass(slots=True)
 class FakeDataFlow:
     nodes: list[FakeNode] = field(default_factory=list)
+    edges: list[FakeEdge] = field(default_factory=list)
     node_by_id: dict[str, FakeNode] = field(default_factory=dict)
     get_nodes_error: Exception | None = None
     get_node_calls: list[tuple[object, str]] = field(default_factory=list)
@@ -54,12 +64,17 @@ class FakeDataFlow:
             return None
         return self.node_by_id.get(node_id)
 
+    def get_edges(self, run_id: str) -> list[FakeEdge]:
+        return self.edges
+
 
 @dataclass(slots=True)
 class FakeQuery:
     node_states: list[NodeStateCompleted] = field(default_factory=list)
+    get_all_node_states_calls: int = 0
 
     def get_all_node_states_for_run(self, run_id: str) -> list[NodeStateCompleted]:
+        self.get_all_node_states_calls += 1
         return self.node_states
 
 
@@ -131,9 +146,16 @@ class TestExplainScreenStateModel:
 class TestExplainScreenLoading:
     """Tests for ExplainScreen loading from mocked RecorderFactory."""
 
-    def _make_node(self, *, node_id: str, plugin_name: str, node_type: NodeType) -> FakeNode:
+    def _make_node(
+        self,
+        *,
+        node_id: str,
+        plugin_name: str,
+        node_type: NodeType,
+        sequence: int | None = None,
+    ) -> FakeNode:
         """Create a node matching the RecorderFactory.data_flow.get_nodes() return shape."""
-        return FakeNode(node_id=node_id, plugin_name=plugin_name, node_type=node_type)
+        return FakeNode(node_id=node_id, plugin_name=plugin_name, node_type=node_type, sequence_in_pipeline=sequence)
 
     def test_load_pipeline_structure_success(self) -> None:
         """Successful load produces LoadedState with correct lineage data."""
@@ -210,6 +232,33 @@ class TestExplainScreenLoading:
         ]
         labels = [node["label"] for node in screen.state.tree.get_tree_nodes()]
         assert "Token: tok-123 (row: row-456)" in labels
+
+    def test_load_pipeline_structure_tree_preserves_multi_source_graph(self) -> None:
+        """Loaded TUI tree uses graph edges instead of first-source linearization."""
+        db = _fake_db()
+        nodes = [
+            self._make_node(node_id="src-a", plugin_name="csv", node_type=NodeType.SOURCE, sequence=0),
+            self._make_node(node_id="src-b", plugin_name="json", node_type=NodeType.SOURCE, sequence=1),
+            self._make_node(node_id="merge", plugin_name="coalesce", node_type=NodeType.COALESCE, sequence=2),
+            self._make_node(node_id="sink", plugin_name="json_sink", node_type=NodeType.SINK, sequence=3),
+        ]
+        edges = [
+            FakeEdge(edge_id="edge-a", from_node_id="src-a", to_node_id="merge", label="a"),
+            FakeEdge(edge_id="edge-b", from_node_id="src-b", to_node_id="merge", label="b"),
+            FakeEdge(edge_id="edge-sink", from_node_id="merge", to_node_id="sink", label="default"),
+        ]
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, edges=edges))
+
+        with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
+            screen = ExplainScreen(db=db, run_id="run-123")
+
+        assert isinstance(screen.state, LoadedState)
+        labels = [node["label"] for node in screen.state.tree.get_tree_nodes()]
+        assert "Source: csv" in labels
+        assert "Source: json" in labels
+        assert "Branch: a" in labels
+        assert "Branch: b" in labels
+        assert "Repeated: Coalesce: coalesce (already shown)" in labels
 
     def test_load_pipeline_structure_db_error(self) -> None:
         """Database error during loading produces LoadingFailedState."""
@@ -312,6 +361,25 @@ class TestExplainScreenNodeSelection:
         """Create a node matching the RecorderFactory.data_flow return shape."""
         return FakeNode(node_id=node_id, plugin_name=plugin_name, node_type=node_type)
 
+    def _completed_state(self, *, state_id: str, token_id: str, node_id: str, offset_seconds: int) -> NodeStateCompleted:
+        """Create a completed node state with deterministic timestamps."""
+        from datetime import UTC, datetime, timedelta
+
+        started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC) + timedelta(seconds=offset_seconds)
+        return NodeStateCompleted(
+            state_id=state_id,
+            token_id=token_id,
+            node_id=node_id,
+            step_index=1,
+            attempt=0,
+            status=NodeStateStatus.COMPLETED,
+            input_hash="abc123",
+            output_hash="def456",
+            started_at=started_at,
+            completed_at=started_at + timedelta(seconds=1),
+            duration_ms=1000.0,
+        )
+
     def _make_loaded_screen(self, db: LandscapeDB) -> ExplainScreen:
         """Create a screen in LoadedState with a simple pipeline."""
         nodes = [
@@ -344,8 +412,6 @@ class TestExplainScreenNodeSelection:
         from datetime import UTC, datetime
 
         db = _fake_db()
-        screen = self._make_loaded_screen(db)
-
         node = self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM)
         state = NodeStateCompleted(
             state_id="state-success",
@@ -363,11 +429,12 @@ class TestExplainScreenNodeSelection:
             success_reason_json='{"action": "mapped", "fields_added": ["normalized_name"]}',
         )
         factory = FakeRecorderFactory(
-            data_flow=FakeDataFlow(node_by_id={"tfm-1": node}),
+            data_flow=FakeDataFlow(nodes=[node], node_by_id={"tfm-1": node}),
             query=FakeQuery(node_states=[state]),
         )
 
         with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
+            screen = ExplainScreen(db=db, run_id="run-sel")
             screen.on_tree_select("tfm-1")
 
         content = screen.detail_panel.render_content()
@@ -423,8 +490,8 @@ class TestExplainScreenNodeSelection:
         assert "filter" in content
         assert "transform" in content
 
-    def test_select_token_or_run_payload_does_not_lookup_node(self) -> None:
-        """Non-node selections clear details without treating tokens/runs as nodes."""
+    def test_select_non_node_payloads_show_details_without_node_lookup(self) -> None:
+        """Non-node selections show explicit details without node lookup."""
         from elspeth.tui.types import TreeSelection
 
         db = _fake_db()
@@ -442,11 +509,100 @@ class TestExplainScreenNodeSelection:
             "kind": "run",
             "run_id": "run-sel",
         }
+        edge_selection: TreeSelection = {
+            "kind": "edge",
+            "run_id": "run-sel",
+            "edge_id": "edge-1",
+            "from_node_id": "src-1",
+            "to_node_id": "tfm-1",
+            "edge_label": "accepted",
+        }
 
         with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
             screen.on_tree_select(token_selection)
+            token_content = screen.detail_panel.render_content()
             screen.on_tree_select(run_selection)
+            run_content = screen.detail_panel.render_content()
+            screen.on_tree_select(edge_selection)
+            edge_content = screen.detail_panel.render_content()
 
         assert data_flow.get_node_calls == []
+        assert "Token ID: token-001" in token_content
+        assert "Row ID:   row-001" in token_content
+        assert "Run ID: run-sel" in run_content
+        assert "Label: accepted" in edge_content
+        assert "From:  src-1" in edge_content
+        assert "To:    tfm-1" in edge_content
+
+    def test_select_empty_status_row_shows_status_detail(self) -> None:
+        """Empty loaded runs expose an explicit status detail row."""
+        db = _fake_db()
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=[]))
+
+        with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
+            screen = ExplainScreen(db=db, run_id="run-empty")
+
+        assert isinstance(screen.state, LoadedState)
+        status_selection = screen.state.tree.get_tree_nodes()[1]["selection"]
+        assert status_selection == {
+            "kind": "status",
+            "run_id": "run-empty",
+            "message": "No recorded nodes",
+        }
+
+        screen.on_tree_select(status_selection)
+
         content = screen.detail_panel.render_content()
-        assert "No node selected" in content
+        assert "Lineage status" in content
+        assert "Run ID: run-empty" in content
+        assert "Message: No recorded nodes" in content
+
+    def test_select_loaded_node_uses_cached_latest_state_without_per_selection_scan(self) -> None:
+        """Loaded screens cache latest states once instead of scanning on each selection."""
+        db = _fake_db()
+        nodes = [
+            self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM),
+        ]
+        state = self._completed_state(state_id="state-latest", token_id="token-001", node_id="tfm-1", offset_seconds=1)
+        query = FakeQuery(node_states=[state])
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, node_by_id={"tfm-1": nodes[0]}), query=query)
+
+        with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
+            screen = ExplainScreen(db=db, run_id="run-sel")
+            screen.on_tree_select("tfm-1")
+            screen.on_tree_select("tfm-1")
+
+        assert query.get_all_node_states_calls == 1
+        content = screen.detail_panel.render_content()
+        assert "state-latest" in content
+
+    def test_focused_token_state_wins_over_latest_state_for_same_node(self) -> None:
+        """Focused row/token detail shows that token state, not another token's latest state."""
+        db = _fake_db()
+        nodes = [
+            self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
+            self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM),
+            self._make_node(node_id="sink-1", plugin_name="csv_sink", node_type=NodeType.SINK),
+        ]
+        focused_state = self._completed_state(state_id="state-focused", token_id="token-focused", node_id="tfm-1", offset_seconds=1)
+        latest_other_state = self._completed_state(state_id="state-other", token_id="token-other", node_id="tfm-1", offset_seconds=60)
+        lineage_result = SimpleNamespace(
+            token=SimpleNamespace(token_id="token-focused", row_id="row-focused"),
+            node_states=(focused_state,),
+        )
+        query = FakeQuery(node_states=[latest_other_state])
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, node_by_id={"tfm-1": nodes[1]}), query=query)
+
+        with (
+            patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory),
+            patch("elspeth.tui.screens.explain_screen.explain_lineage", autospec=True, return_value=lineage_result),
+        ):
+            screen = ExplainScreen(db=db, run_id="run-sel", token_id="token-focused")
+            screen.on_tree_select("tfm-1")
+
+        assert query.get_all_node_states_calls == 0
+        content = screen.detail_panel.render_content()
+        assert "state-focused" in content
+        assert "token-focused" in content
+        assert "state-other" not in content
+        assert "token-other" not in content

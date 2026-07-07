@@ -1,8 +1,39 @@
 """Tests for lineage tree widget."""
 
+from datetime import UTC, datetime
+
 import pytest
 
+from elspeth.contracts import Determinism, NodeType, RoutingMode
+from elspeth.contracts.audit import Edge, Node
 from elspeth.tui.types import LineageData, NodeInfo, SourceInfo, TokenDisplayInfo
+
+
+def _node(node_id: str, plugin_name: str, node_type: NodeType, *, sequence: int) -> Node:
+    return Node(
+        node_id=node_id,
+        run_id="run-1",
+        plugin_name=plugin_name,
+        node_type=node_type,
+        plugin_version="1.0",
+        determinism=Determinism.DETERMINISTIC,
+        config_hash="cfg",
+        config_json="{}",
+        registered_at=datetime(2026, 1, 1, tzinfo=UTC),
+        sequence_in_pipeline=sequence,
+    )
+
+
+def _edge(edge_id: str, from_node_id: str, to_node_id: str, label: str) -> Edge:
+    return Edge(
+        edge_id=edge_id,
+        run_id="run-1",
+        from_node_id=from_node_id,
+        to_node_id=to_node_id,
+        label=label,
+        default_mode=RoutingMode.MOVE,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
 
 
 class TestLineageTreeWidget:
@@ -166,6 +197,85 @@ class TestLineageTreeWidget:
         assert node_types["Gate: threshold_check"] == "gate"
         assert node_types["Aggregation: batch_agg"] == "aggregation"
         assert node_types["Coalesce: merge_results"] == "coalesce"
+
+    def test_graph_view_renders_multiple_sources_without_dropping_second_source(self) -> None:
+        """Graph-backed view preserves multi-source topology and branch labels."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+        from elspeth.tui.widgets.lineage_tree import LineageTree
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src-a", "csv", NodeType.SOURCE, sequence=0),
+                _node("src-b", "json", NodeType.SOURCE, sequence=1),
+                _node("merge", "coalesce", NodeType.COALESCE, sequence=2),
+                _node("sink", "json_sink", NodeType.SINK, sequence=3),
+            ],
+            edges=[
+                _edge("edge-a", "src-a", "merge", "a"),
+                _edge("edge-b", "src-b", "merge", "b"),
+                _edge("edge-sink", "merge", "sink", "default"),
+            ],
+        )
+
+        labels = [node["label"] for node in LineageTree(view).get_tree_nodes()]
+
+        assert "Source: csv" in labels
+        assert "Source: json" in labels
+        assert "Coalesce: coalesce" in labels
+        assert "Branch: a" in labels
+        assert "Branch: b" in labels
+
+    def test_graph_view_orders_unsorted_edges_deterministically(self) -> None:
+        """Graph renderer sorts outgoing edges by label then destination."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("branch-b", "b_mapper", NodeType.TRANSFORM, sequence=2),
+                _node("branch-a", "a_mapper", NodeType.TRANSFORM, sequence=1),
+            ],
+            edges=[
+                _edge("edge-b", "src", "branch-b", "b"),
+                _edge("edge-a", "src", "branch-a", "a"),
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+
+        assert labels.index("Branch: a") < labels.index("Branch: b")
+        assert labels.index("Transform: a_mapper") < labels.index("Transform: b_mapper")
+
+    def test_graph_view_diamond_join_terminates_with_repeated_marker(self) -> None:
+        """Diamond DAG joins render once and then show a repeated-node marker."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("left", "left_map", NodeType.TRANSFORM, sequence=1),
+                _node("right", "right_map", NodeType.TRANSFORM, sequence=2),
+                _node("merge", "merge", NodeType.COALESCE, sequence=3),
+                _node("sink", "json_sink", NodeType.SINK, sequence=4),
+            ],
+            edges=[
+                _edge("edge-right", "src", "right", "right"),
+                _edge("edge-left", "src", "left", "left"),
+                _edge("edge-right-merge", "right", "merge", "continue"),
+                _edge("edge-left-merge", "left", "merge", "continue"),
+                _edge("edge-sink", "merge", "sink", "default"),
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+
+        assert labels.count("Coalesce: merge") == 1
+        assert labels.count("Sink: json_sink") == 1
+        assert "Repeated: Coalesce: merge (already shown)" in labels
+        assert len(labels) < 20
 
 
 class TestTreeNodeImmutability:

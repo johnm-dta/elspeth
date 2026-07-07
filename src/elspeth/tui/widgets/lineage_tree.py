@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.tui.lineage_view import TuiLineageView
 from elspeth.tui.types import LineageData, TreeNodeDict, TreeSelection
 
 
@@ -56,15 +57,21 @@ class LineageTree:
         or malformed fields will raise KeyError, not silently degrade.
     """
 
-    def __init__(self, lineage_data: LineageData) -> None:
+    def __init__(self, lineage_data: LineageData | TuiLineageView) -> None:
         """Initialize with lineage data.
 
         Args:
             lineage_data: LineageData containing run_id, source, transforms,
                           sinks, tokens. All fields are required.
         """
-        self._data = lineage_data
-        self._root = self._build_tree()
+        if isinstance(lineage_data, TuiLineageView):
+            self._data: LineageData | None = None
+            self._view: TuiLineageView | None = lineage_data
+            self._root: TreeNode | None = None
+        else:
+            self._data = lineage_data
+            self._view = None
+            self._root = self._build_tree()
 
     def _build_tree(self) -> TreeNode:
         """Build tree structure from lineage data.
@@ -75,6 +82,9 @@ class LineageTree:
         Returns:
             Root TreeNode
         """
+        if self._data is None:
+            raise TypeError("Legacy tree construction requires LineageData")
+
         # Label map for processing node types
         _TYPE_LABELS = {
             "transform": "Transform",
@@ -96,7 +106,14 @@ class LineageTree:
                 label=f"Run: {run_id}",
                 node_type="run",
                 selection={"kind": "run", "run_id": run_id},
-                children=(TreeNode(label="No recorded nodes", node_type="status", selection=None, expanded=False),),
+                children=(
+                    TreeNode(
+                        label="No recorded nodes",
+                        node_type="status",
+                        selection={"kind": "status", "run_id": run_id, "message": "No recorded nodes"},
+                        expanded=False,
+                    ),
+                ),
             )
 
         # Step 1: Group tokens by their terminal sink
@@ -211,6 +228,22 @@ class LineageTree:
             List of TreeNodeDict with label, node_id, node_type, depth,
             has_children, expanded.
         """
+        if self._view is not None:
+            return [
+                TreeNodeDict(
+                    label=item.label,
+                    node_id=item.node_id,
+                    node_type=item.node_type,
+                    selection=item.selection,
+                    depth=item.depth,
+                    has_children=item.has_children,
+                    expanded=item.expanded,
+                )
+                for item in self._view.items
+            ]
+
+        if self._root is None:
+            raise TypeError("LineageTree has neither graph view nor legacy root")
         nodes: list[TreeNodeDict] = []
         self._flatten_tree(self._root, 0, nodes)
         return nodes
@@ -248,6 +281,20 @@ class LineageTree:
         Returns:
             TreeNode if found, None otherwise
         """
+        if self._view is not None:
+            for item in self._view.items:
+                if item.node_id == node_id:
+                    return TreeNode(
+                        label=item.label,
+                        node_id=item.node_id,
+                        node_type=item.node_type,
+                        selection=item.selection,
+                        expanded=item.expanded,
+                    )
+            return None
+
+        if self._root is None:
+            return None
         return self._find_node(self._root, node_id)
 
     def _find_node(self, node: TreeNode, node_id: str) -> TreeNode | None:

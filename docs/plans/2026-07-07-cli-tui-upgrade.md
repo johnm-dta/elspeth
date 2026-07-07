@@ -100,11 +100,11 @@ Rules:
 Avoid changing the type of `#lineage-tree` between `Static` and `Tree` across refreshes. Use a stable content container or consistently remount/replace children so `action_refresh()` can handle loaded/failed/uninitialized transitions without stale displays.
 
 **Definition of Done:**
-- [ ] Keyboard path is covered by tests.
-- [ ] Token/run/root selection cannot be mistaken for a node lookup.
-- [ ] Refresh handles loaded/failed/uninitialized transitions.
-- [ ] Zero recorded nodes render an honest empty/status row, not a fake unknown source.
-- [ ] Existing direct selection regression still passes.
+- [x] Keyboard path is covered by tests.
+- [x] Token/run/root selection cannot be mistaken for a node lookup.
+- [x] Refresh handles loaded/failed/uninitialized transitions.
+- [x] Zero recorded nodes render an honest empty/status row, not a fake unknown source.
+- [x] Existing direct selection regression still passes.
 
 **Verify:**
 
@@ -198,12 +198,12 @@ Rules:
 `ExplainScreen._load_pipeline_structure()` should stop constructing the old singular-source `LineageData` as the primary model. It should construct the graph view once, then `LineageTree.get_tree_nodes()` should return `TreeNodeDict` derived from the view model.
 
 **Definition of Done:**
-- [ ] Multiple source nodes are preserved.
-- [ ] Fork/coalesce/branch labels are visible enough for auditors to understand the topology.
-- [ ] Unsorted edge input renders in stable order.
-- [ ] Diamond DAG joins terminate and render with a clear repeated-node marker or another explicitly tested non-duplicating representation.
-- [ ] Old linear-pipeline tests still pass.
-- [ ] New DAG tests fail before implementation and pass after implementation.
+- [x] Multiple source nodes are preserved.
+- [x] Fork/coalesce/branch labels are visible enough for auditors to understand the topology.
+- [x] Unsorted edge input renders in stable order.
+- [x] Diamond DAG joins terminate and render with a clear repeated-node marker or another explicitly tested non-duplicating representation.
+- [x] Old linear-pipeline tests still pass.
+- [x] New DAG tests fail before implementation and pass after implementation.
 
 **Verify:**
 
@@ -254,10 +254,10 @@ Rules:
 - The detail pane should be scrollable/focusable before long JSON/error context is expanded in the UI.
 
 **Definition of Done:**
-- [ ] Focused token/row detail uses the focused token state.
-- [ ] Selection no longer performs full-run state scans.
-- [ ] Token leaf selection does not produce a misleading "node not found" blank.
-- [ ] Run, edge, outcome, empty, and error selections have explicit detail behavior.
+- [x] Focused token/row detail uses the focused token state.
+- [x] Selection no longer performs full-run state scans.
+- [x] Token leaf selection does not produce a misleading "node not found" blank.
+- [x] Run, edge, outcome, empty, and error selections have explicit detail behavior.
 
 **Verify:**
 

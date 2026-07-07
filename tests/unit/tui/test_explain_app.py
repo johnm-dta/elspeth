@@ -327,7 +327,11 @@ class TestExplainApp:
                 lineage_tree = app.query_one(f"#{WidgetIDs.LINEAGE_TREE}", Tree)
                 detail_panel = app.query_one(f"#{WidgetIDs.DETAIL_PANEL}", Static)
                 assert "Loading failed: boom" in str(lineage_tree.root.label)
-                assert lineage_tree.root.data is None
+                assert lineage_tree.root.data == {
+                    "kind": "status",
+                    "run_id": "run-1",
+                    "message": "Loading failed: boom",
+                }
                 assert "No node selected" in str(detail_panel.content)
 
     @pytest.mark.asyncio
@@ -414,4 +418,8 @@ class TestExplainApp:
 
                 assert "Source: (unknown)" not in labels
                 assert any("No recorded nodes" in label for label in labels)
-                assert lineage_tree.root.children[0].data is None
+                assert lineage_tree.root.children[0].data == {
+                    "kind": "status",
+                    "run_id": "run-empty",
+                    "message": "No recorded nodes",
+                }

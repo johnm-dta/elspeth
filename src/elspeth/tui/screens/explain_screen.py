@@ -4,6 +4,7 @@ Uses discriminated union pattern to represent screen states.
 Invalid state combinations are prevented at the type level.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import structlog
@@ -13,7 +14,8 @@ from elspeth.contracts import NodeState, NodeStateCompleted, NodeStateFailed, No
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape import explain as explain_lineage
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.tui.types import LineageData, NodeStateInfo, TokenDisplayInfo, TreeSelection
+from elspeth.tui.lineage_view import build_lineage_view_model
+from elspeth.tui.types import LineageData, NodeStateInfo, SelectionDetailInfo, TokenDisplayInfo, TreeSelection
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
@@ -68,6 +70,8 @@ class LoadedState:
     run_id: str
     lineage_data: LineageData
     tree: LineageTree
+    focused_state_by_node_id: Mapping[str, NodeState] = field(default_factory=dict)
+    latest_state_by_node_id: Mapping[str, NodeState] = field(default_factory=dict)
 
 
 # Discriminated union type - exhaustive pattern matching possible
@@ -158,7 +162,9 @@ class ExplainScreen:
         try:
             factory = RecorderFactory(db)
             nodes = factory.data_flow.get_nodes(run_id)
+            edges = factory.data_flow.get_edges(run_id)
             focused_tokens: list[TokenDisplayInfo] = []
+            focused_state_by_node_id: dict[str, NodeState] = {}
             if self._token_id is not None or self._row_id is not None:
                 try:
                     lineage_result = explain_lineage(
@@ -184,6 +190,7 @@ class ExplainScreen:
                         path=[state.node_id for state in lineage_result.node_states],
                     )
                 )
+                focused_state_by_node_id = {state.node_id: state for state in lineage_result.node_states}
 
             # Organize nodes by type
             source_nodes = [n for n in nodes if n.node_type == NodeType.SOURCE]
@@ -203,12 +210,23 @@ class ExplainScreen:
                 "sinks": [{"name": n.plugin_name, "node_id": n.node_id, "node_type": n.node_type.value} for n in sink_nodes],
                 "tokens": focused_tokens,
             }
-            tree = LineageTree(lineage_data)
+            lineage_view = build_lineage_view_model(
+                run_id=run_id,
+                nodes=nodes,
+                edges=edges,
+                tokens=focused_tokens,
+            )
+            tree = LineageTree(lineage_view)
+            latest_state_by_node_id = (
+                {} if focused_state_by_node_id else self._latest_state_by_node_id(factory.query.get_all_node_states_for_run(run_id))
+            )
             return LoadedState(
                 db=db,
                 run_id=run_id,
                 lineage_data=lineage_data,
                 tree=tree,
+                focused_state_by_node_id=focused_state_by_node_id,
+                latest_state_by_node_id=latest_state_by_node_id,
             )
         except _RECOVERABLE_DB_ERRORS as e:
             # Database connection/availability errors are recoverable via retry
@@ -247,7 +265,6 @@ class ExplainScreen:
         Args:
             selection: Selected tree row payload, or a legacy node ID string.
         """
-        node_id: str | None
         if selection is None:
             node_id = None
         elif isinstance(selection, str):
@@ -255,7 +272,9 @@ class ExplainScreen:
         elif selection["kind"] == "node":
             node_id = selection["node_id"]
         else:
-            node_id = None
+            self._selected_node_id = None
+            self._detail_panel.update_state(self._selection_detail(selection))
+            return
 
         self._selected_node_id = node_id
 
@@ -263,14 +282,84 @@ class ExplainScreen:
             self._detail_panel.update_state(None)
             return
 
-        if isinstance(self._state, (LoadedState, LoadingFailedState)):
+        if isinstance(self._state, LoadedState):
+            state_for_display = self._state.focused_state_by_node_id.get(node_id) or self._state.latest_state_by_node_id.get(node_id)
+            node_state = self._load_node_state(
+                self._state.db,
+                self._state.run_id,
+                node_id,
+                state_for_display=state_for_display,
+                scan_for_state=False,
+            )
+            self._detail_panel.update_state(node_state)
+            return
+
+        if isinstance(self._state, LoadingFailedState):
             node_state = self._load_node_state(self._state.db, self._state.run_id, node_id)
             self._detail_panel.update_state(node_state)
             return
 
         self._detail_panel.update_state(None)
 
-    def _load_node_state(self, db: LandscapeDB, run_id: str, node_id: str) -> NodeStateInfo | None:
+    def _selection_detail(self, selection: TreeSelection) -> SelectionDetailInfo:
+        """Build detail panel content for non-node tree selections."""
+        kind = selection["kind"]
+        if kind == "run":
+            return {
+                "detail_kind": "run",
+                "title": "Run summary",
+                "run_id": selection["run_id"],
+            }
+        if kind == "token":
+            detail: SelectionDetailInfo = {
+                "detail_kind": "token",
+                "title": f"Token: {selection['token_id']}",
+                "run_id": selection["run_id"],
+                "token_id": selection["token_id"],
+                "row_id": selection["row_id"],
+            }
+            if "sink" in selection:
+                detail["sink"] = selection["sink"]
+            return detail
+        if kind == "edge":
+            return {
+                "detail_kind": "edge",
+                "title": f"Branch: {selection['edge_label']}",
+                "run_id": selection["run_id"],
+                "edge_id": selection["edge_id"],
+                "from_node_id": selection["from_node_id"],
+                "to_node_id": selection["to_node_id"],
+                "edge_label": selection["edge_label"],
+            }
+        if kind == "outcome":
+            detail = {
+                "detail_kind": "outcome",
+                "title": "Token outcome",
+                "run_id": selection["run_id"],
+            }
+            if "state_id" in selection:
+                detail["state_id"] = selection["state_id"]
+            if "token_id" in selection:
+                detail["token_id"] = selection["token_id"]
+            return detail
+        if kind == "status":
+            return {
+                "detail_kind": "status",
+                "title": "Lineage status",
+                "run_id": selection["run_id"],
+                "message": selection["message"],
+            }
+        raise ValueError(f"Unsupported selection kind: {kind}")
+
+    def _load_node_state(
+        self,
+        db: LandscapeDB,
+        run_id: str,
+        node_id: str,
+        *,
+        state_for_display: NodeState | None = None,
+        scan_for_state: bool = True,
+    ) -> NodeStateInfo | None:
         """Load node state from database.
 
         Returns node information with required fields always populated.
@@ -300,11 +389,23 @@ class ExplainScreen:
             "node_type": node.node_type.value,
         }
 
-        node_states = [state for state in factory.query.get_all_node_states_for_run(run_id) if state.node_id == node_id]
-        if node_states:
-            self._add_execution_state(result, self._select_node_state_for_display(node_states))
+        if state_for_display is not None:
+            self._add_execution_state(result, state_for_display)
+            return result
+
+        if scan_for_state:
+            node_states = [state for state in factory.query.get_all_node_states_for_run(run_id) if state.node_id == node_id]
+            if node_states:
+                self._add_execution_state(result, self._select_node_state_for_display(node_states))
 
         return result
+
+    def _latest_state_by_node_id(self, node_states: list[NodeState]) -> dict[str, NodeState]:
+        """Build a latest-state cache keyed by node ID."""
+        states_by_node_id: dict[str, list[NodeState]] = {}
+        for state in node_states:
+            states_by_node_id.setdefault(state.node_id, []).append(state)
+        return {node_id: self._select_node_state_for_display(states) for node_id, states in states_by_node_id.items()}
 
     def _select_node_state_for_display(self, node_states: list[NodeState]) -> NodeState:
         """Choose the most recent execution state for a selected node."""

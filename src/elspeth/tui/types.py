@@ -77,7 +77,7 @@ class TreeSelection(TypedDict, total=False):
     being mistaken for pipeline nodes just because they have an identifier.
     """
 
-    kind: Required[Literal["run", "node", "token", "edge", "outcome"]]
+    kind: Required[Literal["run", "node", "token", "edge", "outcome", "status"]]
     run_id: Required[str]
     node_id: str
     node_type: str
@@ -85,6 +85,11 @@ class TreeSelection(TypedDict, total=False):
     row_id: str
     sink: str
     state_id: str
+    edge_id: str
+    from_node_id: str
+    to_node_id: str
+    edge_label: str
+    message: str
 
 
 class NodeStateInfo(TypedDict, total=False):
@@ -131,6 +136,23 @@ class NodeStateInfo(TypedDict, total=False):
     success_reason_json: str
     context_after_json: str
     artifact: dict[str, Any]
+
+
+class SelectionDetailInfo(TypedDict, total=False):
+    """Non-node tree selection detail for the TUI detail panel."""
+
+    detail_kind: Required[Literal["run", "token", "edge", "outcome", "status"]]
+    title: Required[str]
+    run_id: str
+    token_id: str
+    row_id: str
+    sink: str
+    edge_id: str
+    from_node_id: str
+    to_node_id: str
+    edge_label: str
+    state_id: str
+    message: str
 
 
 class ExecutionErrorDisplay(TypedDict, total=False):

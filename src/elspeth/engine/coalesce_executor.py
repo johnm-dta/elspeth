@@ -497,11 +497,11 @@ class CoalesceExecutor:
         # restore_from_journal(). Branch schemas come from fresh graph data each run,
         # not from resume state — the journal stores token payloads and the checkpoint
         # row stores only lost-branch scalars.
-        self._branch_expected_fields: dict[str, dict[str, tuple[str, ...]]] = {}
+        self._branch_expected_fields: dict[str, dict[str, tuple[str, ...]] | None] = {}
         # Pre-computed output schemas: coalesce_name -> SchemaContract
         # Used to ensure runtime contracts match DAG-computed schemas (P2 fix).
         # When populated, _execute_merge() uses this instead of runtime merge().
-        self._output_schemas: dict[str, SchemaContract] = {}
+        self._output_schemas: dict[str, SchemaContract | None] = {}
         # Pending tokens: (coalesce_name, row_id) -> _PendingCoalesce
         self._pending: dict[tuple[str, str], _PendingCoalesce] = {}
         # Completed coalesces: tracks keys that have already merged/failed
@@ -538,10 +538,8 @@ class CoalesceExecutor:
         """
         self._settings[settings.name] = settings
         self._node_ids[settings.name] = node_id
-        if branch_schemas is not None:
-            self._branch_expected_fields[settings.name] = branch_schemas
-        if output_schema is not None:
-            self._output_schemas[settings.name] = output_schema
+        self._branch_expected_fields[settings.name] = branch_schemas
+        self._output_schemas[settings.name] = output_schema
 
     def get_registered_names(self) -> list[str]:
         """Get names of all registered coalesce points.
@@ -956,12 +954,12 @@ class CoalesceExecutor:
             Mapping of lost branch name to its expected fields, or None if
             field information is unavailable (see semantics above).
         """
-        if coalesce_name not in self._branch_expected_fields:
-            return None
         if not lost_branches:
             return None
 
-        branch_fields = self._branch_expected_fields[coalesce_name]
+        branch_fields = self._registered_branch_expected_fields(coalesce_name)
+        if branch_fields is None:
+            return None
         result: dict[str, tuple[str, ...]] = {}
         for branch_name in lost_branches:
             if branch_name in branch_fields:
@@ -969,6 +967,24 @@ class CoalesceExecutor:
             # If branch_name not in branch_fields, the branch used observed-mode
             # schema with no declared fields — omit from result rather than crash.
         return result if result else None
+
+    def _registered_output_schema(self, coalesce_name: str) -> SchemaContract | None:
+        try:
+            return self._output_schemas[coalesce_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Missing output schema registry entry for registered coalesce '{coalesce_name}'. "
+                "This indicates register_coalesce() state corruption."
+            ) from exc
+
+    def _registered_branch_expected_fields(self, coalesce_name: str) -> dict[str, tuple[str, ...]] | None:
+        try:
+            return self._branch_expected_fields[coalesce_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Missing branch expected fields registry entry for registered coalesce '{coalesce_name}'. "
+                "This indicates register_coalesce() state corruption."
+            ) from exc
 
     def _fail_pending(
         self,
@@ -1117,8 +1133,8 @@ class CoalesceExecutor:
                     pending=pending,
                     coalesce_name=coalesce_name,
                     now=now,
-                    output_schema=self._output_schemas.get(settings.name),
-                    branch_expected_fields=self._branch_expected_fields.get(coalesce_name),
+                    output_schema=self._registered_output_schema(settings.name),
+                    branch_expected_fields=self._registered_branch_expected_fields(coalesce_name),
                     merge_data=self._merge_data,
                     merge_with_original_names=self._merge_with_original_names,
                 )

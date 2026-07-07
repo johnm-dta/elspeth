@@ -124,7 +124,7 @@ def format_plugin_inspect_text(payload: PluginInspectPayload) -> str:
         "Config Fields:",
     ]
     config_fields = payload["config_fields"]
-    if isinstance(config_fields, list) and config_fields:
+    if config_fields:
         for field in config_fields:
             required = "required" if field["required"] else "optional"
             lines.append(f"  {field['name']} ({field['type']}, {required})")

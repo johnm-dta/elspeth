@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from elspeth.contracts import NodeType
-from elspeth.tui.types import TokenDisplayInfo, TokenParentDisplayInfo, TreeSelection
+from elspeth.tui.types import TokenDisplayInfo, TokenOutcomeDisplayInfo, TokenParentDisplayInfo, TreeSelection
 
 
 class _NodeLike(Protocol):
@@ -98,6 +98,9 @@ def build_lineage_view_model(
         path = token["path"]
         if path:
             token_path = tuple(path)
+            unknown_node_ids = tuple(node_id for node_id in token_path if node_id not in node_by_id)
+            if unknown_node_ids:
+                raise KeyError(f"Token {token['token_id']} path references unknown node id(s): {', '.join(unknown_node_ids)}")
             token_nodes_by_path[token_path].append(token)
             focused_token_paths.add(token_path)
 
@@ -343,8 +346,8 @@ def _token_comparable_path(
     token_node_ids = frozenset(token_path)
     comparable_path: list[str] = []
     for node_id in traversal_path:
-        node = node_by_id.get(node_id)
-        if node_id not in token_node_ids and node is not None and node.node_type in _FOCUSED_TOKEN_PATH_ELIDABLE_NODE_TYPES:
+        node = node_by_id[node_id]
+        if node_id not in token_node_ids and node.node_type in _FOCUSED_TOKEN_PATH_ELIDABLE_NODE_TYPES:
             continue
         comparable_path.append(node_id)
     return tuple(comparable_path)
@@ -404,9 +407,7 @@ def _outcome_item(*, run_id: str, token: TokenDisplayInfo, depth: int) -> TuiLin
     )
 
 
-def _outcome_label(outcome: object) -> str:
-    if not isinstance(outcome, dict):
-        raise TypeError(f"outcome must be dict, got {type(outcome).__name__}")
+def _outcome_label(outcome: TokenOutcomeDisplayInfo) -> str:
     label = f"Outcome: {outcome['outcome']} / {outcome['path']}"
     sink = outcome["sink"] if "sink" in outcome else None
     if sink:

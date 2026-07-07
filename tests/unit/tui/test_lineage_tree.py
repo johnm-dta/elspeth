@@ -1,8 +1,11 @@
 """Tests for lineage tree widget."""
 
+import ast
+import inspect
+import textwrap
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import cast, get_type_hints
 
 import pytest
 
@@ -425,6 +428,53 @@ class TestLineageTreeWidget:
         assert "Token: token-queued (row: row-1)" in labels
         assert "Outcome: success / default_flow -> json_sink" in labels
         assert labels.index("Queue: work_queue") < labels.index("Token: token-queued (row: row-1)")
+
+    def test_focused_token_path_with_missing_traversal_node_crashes(self) -> None:
+        """Traversal paths are built from node_by_id; a missing node is internal corruption."""
+        from elspeth.tui.lineage_view import _token_comparable_path
+
+        node_by_id = {
+            "src": _node("src", "csv", NodeType.SOURCE, sequence=0),
+            "sink": _node("sink", "json_sink", NodeType.SINK, sequence=1),
+        }
+
+        with pytest.raises(KeyError, match="missing"):
+            _token_comparable_path(("src", "missing", "sink"), ("src", "sink"), node_by_id)
+
+    def test_focused_token_path_with_unknown_node_crashes(self) -> None:
+        """Recorded token paths must only reference recorded graph nodes."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        with pytest.raises(KeyError, match="missing"):
+            build_lineage_view_model(
+                run_id="run-1",
+                nodes=[
+                    _node("src", "csv", NodeType.SOURCE, sequence=0),
+                    _node("sink", "json_sink", NodeType.SINK, sequence=1),
+                ],
+                edges=[_edge("edge-sink", "src", "sink", "default")],
+                tokens=[
+                    TokenDisplayInfo(
+                        token_id="token-1",
+                        row_id="row-1",
+                        path=["src", "missing", "sink"],
+                    )
+                ],
+            )
+
+    def test_outcome_label_uses_display_contract_not_runtime_type_guard(self) -> None:
+        """Outcome labels consume TokenOutcomeDisplayInfo without revalidating shape."""
+        from elspeth.tui.lineage_view import _outcome_label
+        from elspeth.tui.types import TokenOutcomeDisplayInfo
+
+        assert get_type_hints(_outcome_label)["outcome"] is TokenOutcomeDisplayInfo
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_outcome_label)))
+        guard_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "isinstance"
+        ]
+        assert guard_calls == []
 
     def test_focused_token_parent_tokens_are_rendered_as_ancestry(self) -> None:
         """Fork/coalesce parent token evidence remains visible in the TUI model."""

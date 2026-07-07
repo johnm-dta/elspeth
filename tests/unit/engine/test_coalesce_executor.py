@@ -695,6 +695,20 @@ class TestRequireAllPolicy:
             assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
             assert c.kwargs["path"] == TerminalPath.COALESCED
 
+    def test_registered_output_schema_slot_missing_crashes_before_merge(self):
+        """A registered coalesce must not silently downgrade a lost output-schema slot."""
+        executor, _, _, tm, _ = _make_raw_executor()
+        settings = _settings(branches=["a", "b"], policy="require_all", merge="union")
+        observed_contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        executor.register_coalesce(settings, "node_1", output_schema=observed_contract)
+        del executor._output_schemas["merge"]
+
+        executor.accept(_make_token(branch_name="a", token_id="t1", contract=observed_contract), "merge")
+        with pytest.raises(OrchestrationInvariantError, match=r"output schema.*merge"):
+            executor.accept(_make_token(branch_name="b", token_id="t2", contract=observed_contract), "merge")
+
+        assert tm.coalesce_tokens.call_count == 0
+
     def test_non_terminal_coalesce_records_absorbed_branches_without_sink_witness(self):
         """Downstream coalesce flows have no terminal sink witness at merge time."""
         executor, _, data_flow, _, _ = _make_raw_executor()
@@ -2559,6 +2573,17 @@ class TestLostBranchExpectedFields:
         assert result is not None
         assert result.merged_token is not None
         assert result.coalesce_metadata.lost_branch_expected_fields == {"b": ("field_y", "field_z")}
+
+    def test_registered_branch_expected_fields_slot_missing_crashes_before_loss_merge(self):
+        """A registered branch-schema map must not disappear into absent metadata."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="best_effort", timeout_seconds=1.0)
+        executor.register_coalesce(s, "node_1", {"a": ("field_x",), "b": ("field_y",)})
+        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
+        del executor._branch_expected_fields["merge"]
+
+        with pytest.raises(OrchestrationInvariantError, match=r"branch expected fields.*merge"):
+            executor.notify_branch_lost("merge", "row_1", "b", "diverted")
 
     def test_merge_metadata_no_lost_branches_has_none_expected_fields(self):
         """When no branches are lost, lost_branch_expected_fields is None."""

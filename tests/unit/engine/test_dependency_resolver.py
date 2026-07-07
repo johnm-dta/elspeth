@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
@@ -439,6 +442,16 @@ class TestResolveDependencies:
 
         with pytest.raises(AttributeError, match="no such attr"):
             resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
+
+    def test_runner_boundary_catches_exception_not_base_exception(self) -> None:
+        """Crash-through policy lives in the helper; this wrapper only catches Exceptions."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(resolve_dependencies)))
+        caught_names = {
+            handler.type.id for handler in ast.walk(tree) if isinstance(handler, ast.ExceptHandler) and isinstance(handler.type, ast.Name)
+        }
+
+        assert "Exception" in caught_names
+        assert "BaseException" not in caught_names
 
     def test_multiple_dependencies_sequential(self, tmp_path: Path) -> None:
         deps = [

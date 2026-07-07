@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -60,6 +61,25 @@ class TestCliPluginCatalogAdapter:
         assert isinstance(payload["json_schema"], dict)
         assert isinstance(payload["knob_schema"], dict)
         json.dumps(payload)
+
+    def test_format_plugin_inspect_text_does_not_treat_bad_config_fields_as_empty(self) -> None:
+        """The text formatter must fail loudly if the required typed field is corrupt."""
+        from elspeth.cli_plugins import PluginInspectPayload, format_plugin_inspect_text
+
+        payload = cast(
+            PluginInspectPayload,
+            {
+                "name": "broken",
+                "plugin_type": "source",
+                "description": "bad payload",
+                "json_schema": {},
+                "knob_schema": {},
+                "config_fields": cast(Any, "not-a-list"),
+            },
+        )
+
+        with pytest.raises(TypeError):
+            format_plugin_inspect_text(payload)
 
 
 class TestPluginsListCommand:

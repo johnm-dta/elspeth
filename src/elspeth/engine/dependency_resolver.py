@@ -184,10 +184,8 @@ def resolve_dependencies(
         start_ms = time.monotonic_ns() // 1_000_000
         try:
             run_result = runner(dep_path)
-        except BaseException as exc:
+        except Exception as exc:
             reraise_if_engine_crash_through(exc)
-            if not isinstance(exc, Exception):
-                raise
             raise DependencyFailedError(
                 dependency_name=dep.name,
                 run_id="pre-run",

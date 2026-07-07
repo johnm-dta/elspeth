@@ -29,10 +29,30 @@ from sqlalchemy import (
     text,
 )
 
+from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.types import NODE_ID_MAX_LENGTH
 
 # Shared metadata for all tables
 metadata = MetaData()
+
+
+def _sql_string_literal(value: str) -> str:
+    """Render one deterministic SQL string literal for generated CHECK clauses."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _enum_value_list(enum_type: type[StrEnum]) -> str:
+    return ", ".join(_sql_string_literal(member.value) for member in enum_type)
+
+
+def _enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
+    """Render a SQL IN fragment from a StrEnum's persisted values."""
+    return f"{column_name} IN ({_enum_value_list(enum_type)})"
+
+
+def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
+    return f"{column_name} IS NULL OR {_enum_in_check(column_name, enum_type)}"
+
 
 # Explicit SQLite schema epoch for pre-1.0 compatibility policy.
 # Stored in PRAGMA user_version so future releases can distinguish
@@ -220,7 +240,7 @@ run_sources_table = Table(
     PrimaryKeyConstraint("run_id", "source_node_id"),
     UniqueConstraint("run_id", "source_name"),
     CheckConstraint(
-        "lifecycle_state IN ('ready', 'loading', 'exhausted', 'loaded', 'interrupted')",
+        _enum_in_check("lifecycle_state", RunSourceLifecycleState),
         name="ck_run_sources_lifecycle_state",
     ),
     ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
@@ -466,7 +486,8 @@ token_work_items_table = Table(
     # and silently nullify the Tier-1 invariant (elspeth-36d5635402).
     # The constraint runs independently of ``PRAGMA foreign_keys`` in SQLite.
     CheckConstraint(
-        "(status = 'leased' AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != 'leased'",
+        f"(status = {_sql_string_literal(TokenWorkStatus.LEASED.value)} "
+        f"AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != {_sql_string_literal(TokenWorkStatus.LEASED.value)}",
         name="ck_token_work_items_lease_owner_required_when_leased",
     ),
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
@@ -562,18 +583,15 @@ scheduler_events_table = Table(
     Column("caller_owner", String(128)),
     Column("context_json", Text, nullable=False, server_default=text("'{}'")),
     CheckConstraint(
-        "event_type IN ('enqueue', 'claim_ready', 'claim_pending_sink', "
-        "'recover_expired_lease', 'lease_lost', 'mark_blocked', "
-        "'mark_terminal', 'mark_failed', 'mark_pending_sink', 'mark_pending_sink_terminal', "
-        "'mark_blocked_barrier_terminal')",
+        _enum_in_check("event_type", SchedulerEventType),
         name="ck_scheduler_events_event_type",
     ),
     CheckConstraint(
-        "from_status IS NULL OR from_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        _optional_enum_in_check("from_status", TokenWorkStatus),
         name="ck_scheduler_events_from_status",
     ),
     CheckConstraint(
-        "to_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        _enum_in_check("to_status", TokenWorkStatus),
         name="ck_scheduler_events_to_status",
     ),
     CheckConstraint("from_attempt IS NULL OR from_attempt >= 0", name="ck_scheduler_events_from_attempt_non_negative"),

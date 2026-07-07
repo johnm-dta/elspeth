@@ -132,9 +132,16 @@ def _write_json_export_batches(
     records: Iterable[dict[str, Any]],
     batch_size: int = _JSON_EXPORT_BATCH_SIZE,
 ) -> tuple[int, int]:
-    """Write JSON export records to a sink in bounded batches."""
+    """Write JSON export records, batching only for sinks that publish incrementally."""
     if batch_size < 1:
         raise ValueError("JSON export batch size must be at least 1")
+
+    if not _sink_supports_incremental_json_export_writes(sink):
+        all_records = list(records)
+        if not all_records:
+            return 0, 0
+        sink.write(all_records, ctx)
+        return len(all_records), 1
 
     record_count = 0
     batches_written = 0
@@ -153,6 +160,30 @@ def _write_json_export_batches(
         batches_written += 1
 
     return record_count, batches_written
+
+
+def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:
+    """Return whether a JSON export sink can publish incrementally without rewriting cumulative content."""
+    sink_format = getattr(sink, "_format", None)
+    if isinstance(sink_format, str):
+        return sink_format == "jsonl"
+    if sink_format is not None:
+        return False
+
+    config = getattr(sink, "config", {})
+    if not isinstance(config, Mapping):
+        return False
+
+    configured_format = config.get("format")
+    if isinstance(configured_format, str):
+        return configured_format == "jsonl"
+    if configured_format is not None:
+        return False
+
+    path = config.get("path")
+    if not isinstance(path, str):
+        return False
+    return Path(path).suffix == ".jsonl"
 
 
 def export_landscape(

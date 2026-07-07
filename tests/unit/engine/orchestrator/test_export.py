@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import json
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -26,8 +27,10 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
+    _write_json_export_batches,
     export_landscape,
 )
 from elspeth.engine.orchestrator.schema_reconstruction import _json_schema_to_python_type, reconstruct_schema_from_json
@@ -176,11 +179,11 @@ class TestExportLandscapeJSON:
         sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
 
-    def test_json_export_writes_records_in_bounded_batches(self) -> None:
-        """Large JSON exports write bounded batches instead of one full-run list."""
+    def test_jsonl_export_writes_records_in_bounded_batches(self) -> None:
+        """Large JSONL exports write bounded batches instead of one full-run list."""
         db = object()
         settings = self._make_settings()
-        sink, factory = _make_sink_and_factory()
+        sink, factory = _make_sink_and_factory(_format="jsonl")
         records = [{"record_type": "row", "index": i} for i in range(1001)]
 
         with (
@@ -193,6 +196,37 @@ class TestExportLandscapeJSON:
             export_landscape(db, "run-1", settings, factory)
 
         assert [len(call[0][0]) for call in sink.write.calls] == [1000, 1]
+
+    def test_json_array_export_writes_real_file_once_for_multi_batch_export(self, tmp_path: Path) -> None:
+        """JSON array audit export publishes one final file, not one cumulative rewrite per batch."""
+        from elspeth.plugins.sinks import json_sink as json_sink_module
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_path = tmp_path / "audit.json"
+        sink = JSONSink({"path": str(output_path), "format": "json", "schema": {"mode": "observed"}})
+        ctx = PluginContext(run_id="run-1", config={}, landscape=None, payload_store=None, node_id="export:json")
+        records = ({"record_type": "row", "index": i} for i in range(1001))
+        replace_calls: list[tuple[Any, Any]] = []
+        original_replace = json_sink_module.os.replace
+
+        def counting_replace(src: Any, dst: Any) -> None:
+            replace_calls.append((src, dst))
+            original_replace(src, dst)
+
+        with patch("elspeth.plugins.sinks.json_sink.os.replace", counting_replace):
+            record_count, batches_written = _write_json_export_batches(
+                sink=sink,
+                ctx=ctx,
+                records=records,
+                batch_size=1000,
+            )
+
+        sink.close()
+
+        assert record_count == 1001
+        assert batches_written == 1
+        assert len(replace_calls) == 1
+        assert len(json.loads(output_path.read_text())) == 1001
 
     def test_json_export_records_count_as_operation_output(self) -> None:
         """JSON record_count is captured after streaming, not pre-counted as input."""

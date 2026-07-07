@@ -1,11 +1,32 @@
 # tests/core/test_templates.py
 """Tests for Jinja2 template field extraction utility."""
 
+import ast
+import inspect
+import textwrap
+
 import pytest
 
 
 class TestExtractJinja2Fields:
     """Tests for extract_jinja2_fields function."""
+
+    def test_field_extraction_context_checks_api_alias_presence_explicitly(self) -> None:
+        """api_aliases is a local accumulator, so missing entries are internal state."""
+        from elspeth.core.templates import _field_extraction_context
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_field_extraction_context)))
+        hidden_absence_checks = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "api_aliases"
+        ]
+
+        assert hidden_absence_checks == []
 
     def test_simple_field_access(self) -> None:
         """Parse single field access via dot notation."""

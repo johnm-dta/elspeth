@@ -474,7 +474,7 @@ def _field_extraction_context(
                 namespaces.add(target_name)
                 changed = True
         for target_name, alias_kind in _for_api_alias_targets(ast, current_api_aliases, current_row_api_container_aliases):
-            if api_aliases.get(target_name) != alias_kind:
+            if target_name not in api_aliases or api_aliases[target_name] != alias_kind:
                 api_aliases[target_name] = alias_kind
                 changed = True
         for target, value in _macro_argument_bindings(ast, macros, macro_aliases, macro_container_aliases):
@@ -512,7 +512,7 @@ def _field_extraction_context(
             current_row_collection_aliases,
             current_row_container_aliases,
         ):
-            if api_aliases.get(target_name) != alias_kind:
+            if target_name not in api_aliases or api_aliases[target_name] != alias_kind:
                 api_aliases[target_name] = alias_kind
                 changed = True
         for target, value in _callblock_argument_bindings(ast, macros, macro_aliases, macro_container_aliases):
@@ -550,7 +550,7 @@ def _field_extraction_context(
             current_row_collection_aliases,
             current_row_container_aliases,
         ):
-            if api_aliases.get(target_name) != alias_kind:
+            if target_name not in api_aliases or api_aliases[target_name] != alias_kind:
                 api_aliases[target_name] = alias_kind
                 changed = True
     return (

@@ -15,7 +15,7 @@ import json
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from elspeth.contracts import (
     BatchMember,
@@ -53,6 +53,117 @@ from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.export_mappers import node_state_to_export_record
 from elspeth.core.landscape.factory import RecorderFactory
+
+
+class ExportReadModel(Protocol):
+    """Read-only repository surface needed by ``LandscapeExporter``."""
+
+    def get_run(self, run_id: str) -> Any | None: ...
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None: ...
+
+    def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_nodes(self, run_id: str) -> list[Any]: ...
+
+    def get_edges(self, run_id: str) -> list[Any]: ...
+
+    def get_operations_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_all_operation_calls_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[Any]: ...
+
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int) -> Iterator[list[Any]]: ...
+
+    def get_tokens_for_rows(self, run_id: str, row_ids: list[str]) -> list[Any]: ...
+
+    def get_token_parents_for_tokens(self, token_ids: list[str]) -> list[Any]: ...
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]: ...
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]: ...
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]: ...
+
+    def get_routing_events_for_states(self, state_ids: list[str]) -> list[Any]: ...
+
+    def get_calls_for_states(self, state_ids: list[str]) -> list[Any]: ...
+
+    def get_batches(self, run_id: str) -> list[Any]: ...
+
+    def get_all_batch_members_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_artifacts(self, run_id: str) -> list[Any]: ...
+
+
+class RecorderFactoryExportReadModel:
+    """Adapter from the repository factory bundle to the exporter read model."""
+
+    def __init__(self, factory: RecorderFactory) -> None:
+        self._factory = factory
+
+    def get_run(self, run_id: str) -> Any | None:
+        return self._factory.run_lifecycle.get_run(run_id)
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
+        return self._factory.run_lifecycle.get_run_attribution(run_id)
+
+    def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.run_lifecycle.get_secret_resolutions_for_run(run_id)
+
+    def get_nodes(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_nodes(run_id)
+
+    def get_edges(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_edges(run_id)
+
+    def get_operations_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_operations_for_run(run_id)
+
+    def get_all_operation_calls_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_all_operation_calls_for_run(run_id)
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_validation_errors_for_run(run_id)
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_transform_errors_for_run(run_id)
+
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int) -> Iterator[list[Any]]:
+        return self._factory.query.iter_rows_for_run(run_id, batch_size=batch_size)
+
+    def get_tokens_for_rows(self, run_id: str, row_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_tokens_for_rows(run_id, row_ids)
+
+    def get_token_parents_for_tokens(self, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_token_parents_for_tokens(token_ids)
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_token_outcomes_for_tokens(run_id, token_ids)
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_scheduler_events_for_tokens(run_id, token_ids)
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_node_states_for_tokens(run_id, token_ids)
+
+    def get_routing_events_for_states(self, state_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_routing_events_for_states(state_ids)
+
+    def get_calls_for_states(self, state_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_calls_for_states(state_ids)
+
+    def get_batches(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_batches(run_id)
+
+    def get_all_batch_members_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_all_batch_members_for_run(run_id)
+
+    def get_artifacts(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_artifacts(run_id)
 
 
 class LandscapeExporter:
@@ -111,6 +222,7 @@ class LandscapeExporter:
         *,
         include_raw_error_rows: bool = False,
         row_batch_size: int = 500,
+        read_model: ExportReadModel | None = None,
     ) -> None:
         """Initialize exporter with database connection.
 
@@ -130,6 +242,8 @@ class LandscapeExporter:
                 memory: at most this many rows — plus their tokens, node
                 states, and related child records — are resident at once.
                 The exported record sequence is identical for every value.
+            read_model: Optional narrow read surface for export queries.
+                Defaults to a read-model adapter over ``RecorderFactory(db)``.
 
         Raises:
             ValueError: If row_batch_size < 1
@@ -137,7 +251,7 @@ class LandscapeExporter:
         if row_batch_size < 1:
             raise ValueError(f"row_batch_size must be >= 1, got {row_batch_size}")
         self._db = db
-        self._factory = RecorderFactory(db)
+        self._read_model = read_model if read_model is not None else RecorderFactoryExportReadModel(RecorderFactory(db))
         self._signing_key = signing_key
         self._include_raw_error_rows = include_raw_error_rows
         self._row_batch_size = row_batch_size
@@ -264,10 +378,10 @@ class LandscapeExporter:
             ValueError: If run_id is not found
         """
         # Run metadata
-        run = self._factory.run_lifecycle.get_run(run_id)
+        run = self._read_model.get_run(run_id)
         if run is None:
             raise ValueError(f"Run not found: {run_id}")
-        attribution = self._factory.run_lifecycle.get_run_attribution(run_id)
+        attribution = self._read_model.get_run_attribution(run_id)
 
         run_record: RunExportRecord = {
             "record_type": "run",
@@ -286,7 +400,7 @@ class LandscapeExporter:
         yield run_record
 
         # Secret resolutions (run-level provenance for Key Vault secrets)
-        for resolution in self._factory.run_lifecycle.get_secret_resolutions_for_run(run_id):
+        for resolution in self._read_model.get_secret_resolutions_for_run(run_id):
             secret_record: SecretResolutionExportRecord = {
                 "record_type": "secret_resolution",
                 "run_id": run_id,
@@ -302,7 +416,7 @@ class LandscapeExporter:
             yield secret_record
 
         # Nodes
-        for node in self._factory.data_flow.get_nodes(run_id):
+        for node in self._read_model.get_nodes(run_id):
             node_record: NodeExportRecord = {
                 "record_type": "node",
                 "run_id": run_id,
@@ -324,7 +438,7 @@ class LandscapeExporter:
             yield node_record
 
         # Edges
-        for edge in self._factory.data_flow.get_edges(run_id):
+        for edge in self._read_model.get_edges(run_id):
             edge_record: EdgeExportRecord = {
                 "record_type": "edge",
                 "run_id": run_id,
@@ -338,10 +452,10 @@ class LandscapeExporter:
             yield edge_record
 
         # Operations (source loads, sink writes)
-        all_operations = self._factory.execution.get_operations_for_run(run_id)
+        all_operations = self._read_model.get_operations_for_run(run_id)
 
         # Batch query: Pre-load all operation-parented calls (N+1 fix)
-        all_op_calls = self._factory.execution.get_all_operation_calls_for_run(run_id)
+        all_op_calls = self._read_model.get_all_operation_calls_for_run(run_id)
         op_calls_by_operation: defaultdict[str, list[Call]] = defaultdict(list)
         for call in all_op_calls:
             if not call.operation_id:
@@ -400,7 +514,7 @@ class LandscapeExporter:
         # redacted to None unless the operator opted in — row_hash remains
         # for correlation back to the audit DB, matching the hash/ref
         # discipline every other exported record type already follows.
-        for validation_error in self._factory.data_flow.get_validation_errors_for_run(run_id):
+        for validation_error in self._read_model.get_validation_errors_for_run(run_id):
             validation_error_record: ValidationErrorExportRecord = {
                 "record_type": "validation_error",
                 "run_id": run_id,
@@ -421,7 +535,7 @@ class LandscapeExporter:
             }
             yield validation_error_record
 
-        for transform_error in self._factory.data_flow.get_transform_errors_for_run(run_id):
+        for transform_error in self._read_model.get_transform_errors_for_run(run_id):
             transform_error_record: TransformErrorExportRecord = {
                 "record_type": "transform_error",
                 "run_id": run_id,
@@ -443,7 +557,7 @@ class LandscapeExporter:
         # pagination and child collections are batch-loaded per row batch, so
         # memory scales with row_batch_size while the query count stays
         # O(row_count / row_batch_size).
-        for row_batch in self._factory.query.iter_rows_for_run(run_id, batch_size=self._row_batch_size):
+        for row_batch in self._read_model.iter_rows_for_run(run_id, batch_size=self._row_batch_size):
             yield from self._iter_row_batch_records(run_id, row_batch)
 
         yield from self._iter_batch_and_artifact_records(run_id)
@@ -462,36 +576,36 @@ class LandscapeExporter:
         row_batch_size.
         """
         row_ids = [row.row_id for row in row_batch]
-        batch_tokens = self._factory.query.get_tokens_for_rows(run_id, row_ids)
+        batch_tokens = self._read_model.get_tokens_for_rows(run_id, row_ids)
         tokens_by_row: defaultdict[str, list[Token]] = defaultdict(list)
         for token in batch_tokens:
             tokens_by_row[token.row_id].append(token)
 
         token_ids = [token.token_id for token in batch_tokens]
         parents_by_token: defaultdict[str, list[TokenParent]] = defaultdict(list)
-        for parent in self._factory.query.get_token_parents_for_tokens(token_ids):
+        for parent in self._read_model.get_token_parents_for_tokens(token_ids):
             parents_by_token[parent.token_id].append(parent)
 
         outcomes_by_token: defaultdict[str, list[TokenOutcome]] = defaultdict(list)
-        for outcome in self._factory.query.get_token_outcomes_for_tokens(run_id, token_ids):
+        for outcome in self._read_model.get_token_outcomes_for_tokens(run_id, token_ids):
             outcomes_by_token[outcome.token_id].append(outcome)
 
         scheduler_events_by_token: defaultdict[str, list[Any]] = defaultdict(list)
-        for scheduler_event in self._factory.query.get_scheduler_events_for_tokens(run_id, token_ids):
+        for scheduler_event in self._read_model.get_scheduler_events_for_tokens(run_id, token_ids):
             scheduler_events_by_token[scheduler_event.token_id].append(scheduler_event)
 
-        batch_states = self._factory.query.get_node_states_for_tokens(run_id, token_ids)
+        batch_states = self._read_model.get_node_states_for_tokens(run_id, token_ids)
         states_by_token: defaultdict[str, list[NodeState]] = defaultdict(list)
         for state in batch_states:
             states_by_token[state.token_id].append(state)
 
         state_ids = [state.state_id for state in batch_states]
         events_by_state: defaultdict[str, list[RoutingEvent]] = defaultdict(list)
-        for event in self._factory.query.get_routing_events_for_states(state_ids):
+        for event in self._read_model.get_routing_events_for_states(state_ids):
             events_by_state[event.state_id].append(event)
 
         calls_by_state: defaultdict[str, list[Call]] = defaultdict(list)
-        for call in self._factory.query.get_calls_for_states(state_ids):
+        for call in self._read_model.get_calls_for_states(state_ids):
             if not call.state_id:
                 raise AuditIntegrityError(
                     f"State-parented call '{call.call_id}' has no state_id. Run: {run_id}. This violates the Call XOR constraint."
@@ -664,10 +778,10 @@ class LandscapeExporter:
     def _iter_batch_and_artifact_records(self, run_id: str) -> Iterator[ExportRecord]:
         """Yield batch, batch_member, and artifact records for the run."""
         # Batches
-        all_batches = self._factory.execution.get_batches(run_id)
+        all_batches = self._read_model.get_batches(run_id)
 
         # Batch query: Pre-load all batch members (N+1 fix)
-        all_batch_members = self._factory.execution.get_all_batch_members_for_run(run_id)
+        all_batch_members = self._read_model.get_all_batch_members_for_run(run_id)
         members_by_batch: defaultdict[str, list[BatchMember]] = defaultdict(list)
         for member in all_batch_members:
             members_by_batch[member.batch_id].append(member)
@@ -702,7 +816,7 @@ class LandscapeExporter:
                 yield batch_member_record
 
         # Artifacts
-        for artifact in self._factory.execution.get_artifacts(run_id):
+        for artifact in self._read_model.get_artifacts(run_id):
             artifact_record: ArtifactExportRecord = {
                 "record_type": "artifact",
                 "run_id": run_id,

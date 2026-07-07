@@ -15,7 +15,7 @@ from collections import defaultdict as collections_defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 
 import pytest
@@ -58,7 +58,8 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
-from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.exporter import LandscapeExporter, RecorderFactoryExportReadModel
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -398,6 +399,10 @@ _TRANSFORM_ERROR = TransformErrorRecord(
 _DEFAULT_RUN = object()
 
 
+def _fake_landscape_db() -> LandscapeDB:
+    return cast(LandscapeDB, object())
+
+
 @dataclass(slots=True)
 class _RunLifecycleRecorder:
     run: Run | None
@@ -510,11 +515,71 @@ class _QueryRecorder:
 
 
 @dataclass(slots=True)
-class _RecorderFactory:
-    run_lifecycle: _RunLifecycleRecorder
-    data_flow: _DataFlowRecorder
-    execution: _ExecutionRecorder
-    query: _QueryRecorder
+class _ExportReadModelRecorder:
+    _run_lifecycle: _RunLifecycleRecorder
+    _data_flow: _DataFlowRecorder
+    _execution: _ExecutionRecorder
+    _query: _QueryRecorder
+
+    def get_run(self, run_id: str) -> Run | None:
+        return self._run_lifecycle.get_run(run_id)
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
+        return self._run_lifecycle.get_run_attribution(run_id)
+
+    def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
+        return self._run_lifecycle.get_secret_resolutions_for_run(run_id)
+
+    def get_nodes(self, run_id: str) -> list[Any]:
+        return self._data_flow.get_nodes(run_id)
+
+    def get_edges(self, run_id: str) -> list[Any]:
+        return self._data_flow.get_edges(run_id)
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[Any]:
+        return self._data_flow.get_validation_errors_for_run(run_id)
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[Any]:
+        return self._data_flow.get_transform_errors_for_run(run_id)
+
+    def get_operations_for_run(self, run_id: str) -> list[Any]:
+        return self._execution.get_operations_for_run(run_id)
+
+    def get_all_operation_calls_for_run(self, run_id: str) -> list[Any]:
+        return self._execution.get_all_operation_calls_for_run(run_id)
+
+    def get_batches(self, run_id: str) -> list[Any]:
+        return self._execution.get_batches(run_id)
+
+    def get_all_batch_members_for_run(self, run_id: str) -> list[Any]:
+        return self._execution.get_all_batch_members_for_run(run_id)
+
+    def get_artifacts(self, run_id: str) -> list[Any]:
+        return self._execution.get_artifacts(run_id)
+
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int) -> Iterator[list[Any]]:
+        return self._query.iter_rows_for_run(run_id, batch_size=batch_size)
+
+    def get_tokens_for_rows(self, run_id: str, row_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_tokens_for_rows(run_id, row_ids)
+
+    def get_token_parents_for_tokens(self, token_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_token_parents_for_tokens(token_ids)
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_token_outcomes_for_tokens(run_id, token_ids)
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_scheduler_events_for_tokens(run_id, token_ids)
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_node_states_for_tokens(run_id, token_ids)
+
+    def get_routing_events_for_states(self, state_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_routing_events_for_states(state_ids)
+
+    def get_calls_for_states(self, state_ids: Sequence[str]) -> list[Any]:
+        return self._query.get_calls_for_states(state_ids)
 
 
 def _make_exporter(
@@ -544,28 +609,80 @@ def _make_exporter(
     row_batch_size: int = 500,
 ) -> LandscapeExporter:
     """Create an exporter with in-memory recorder fakes."""
-    exporter = LandscapeExporter.__new__(LandscapeExporter)
-    exporter._db = object()
-    exporter._factory = _RecorderFactory(
-        run_lifecycle=_RunLifecycleRecorder(
-            run=_RUN if run is _DEFAULT_RUN else run,
+    return LandscapeExporter(
+        _fake_landscape_db(),
+        signing_key=signing_key,
+        include_raw_error_rows=include_raw_error_rows,
+        row_batch_size=row_batch_size,
+        read_model=_make_export_read_model(
+            run=run,
+            run_attribution=run_attribution,
+            secret_resolutions=secret_resolutions,
+            nodes=nodes,
+            edges=edges,
+            validation_errors=validation_errors,
+            transform_errors=transform_errors,
+            operations=operations,
+            operation_calls=operation_calls,
+            rows=rows,
+            tokens=tokens,
+            token_parents=token_parents,
+            token_outcomes=token_outcomes,
+            scheduler_events=scheduler_events,
+            node_states=node_states,
+            routing_events=routing_events,
+            state_calls=state_calls,
+            batches=batches,
+            batch_members=batch_members,
+            artifacts=artifacts,
+        ),
+    )
+
+
+def _make_export_read_model(
+    *,
+    run: Run | None | object = _DEFAULT_RUN,
+    run_attribution: tuple[str, str] | None = None,
+    secret_resolutions: list[Any] | None = None,
+    nodes: list[Any] | None = None,
+    edges: list[Any] | None = None,
+    validation_errors: list[Any] | None = None,
+    transform_errors: list[Any] | None = None,
+    operations: list[Any] | None = None,
+    operation_calls: list[Any] | None = None,
+    rows: list[Any] | None = None,
+    tokens: list[Any] | None = None,
+    token_parents: list[Any] | None = None,
+    token_outcomes: list[Any] | None = None,
+    scheduler_events: list[Any] | None = None,
+    node_states: list[Any] | None = None,
+    routing_events: list[Any] | None = None,
+    state_calls: list[Any] | None = None,
+    batches: list[Any] | None = None,
+    batch_members: list[Any] | None = None,
+    artifacts: list[Any] | None = None,
+) -> _ExportReadModelRecorder:
+    resolved_run = _RUN if run is _DEFAULT_RUN else cast(Run | None, run)
+    return _ExportReadModelRecorder(
+        _run_lifecycle=_RunLifecycleRecorder(
+            run=resolved_run,
             run_attribution=run_attribution,
             secret_resolutions=secret_resolutions or [],
         ),
-        data_flow=_DataFlowRecorder(
+        _data_flow=_DataFlowRecorder(
             nodes=nodes or [],
             edges=edges or [],
             validation_errors=validation_errors or [],
             transform_errors=transform_errors or [],
         ),
-        execution=_ExecutionRecorder(
+        _execution=_ExecutionRecorder(
             operations=operations or [],
             operation_calls=operation_calls or [],
             batches=batches or [],
             batch_members=batch_members or [],
             artifacts=artifacts or [],
         ),
-        query=_QueryRecorder(
+        _query=_QueryRecorder(
             rows=rows or [],
             tokens=tokens or [],
             token_parents=token_parents or [],
@@ -576,11 +693,6 @@ def _make_exporter(
             state_calls=state_calls or [],
         ),
     )
-    exporter._signing_key = signing_key
-    exporter._include_raw_error_rows = include_raw_error_rows
-    exporter._row_batch_size = row_batch_size
-
-    return exporter
 
 
 # ===========================================================================
@@ -592,26 +704,56 @@ class TestConstructor:
     """Tests for exporter initialization."""
 
     def test_creates_factory_from_db(self) -> None:
-        db = object()
+        db = _fake_landscape_db()
         factory = object()
         with patch("elspeth.core.landscape.exporter.RecorderFactory", autospec=True, return_value=factory) as recorder_factory:
             exporter = LandscapeExporter(db)
         assert exporter._db is db
-        assert exporter._factory is factory
+        assert isinstance(exporter._read_model, RecorderFactoryExportReadModel)
         recorder_factory.assert_called_once_with(db)
         assert exporter._signing_key is None
 
     def test_accepts_signing_key(self) -> None:
-        db = object()
+        db = _fake_landscape_db()
         factory = object()
         key = b"secret-key"
         with patch("elspeth.core.landscape.exporter.RecorderFactory", autospec=True, return_value=factory):
             exporter = LandscapeExporter(db, signing_key=key)
-        assert exporter._factory is factory
+        assert isinstance(exporter._read_model, RecorderFactoryExportReadModel)
         assert exporter._signing_key == key
 
+    def test_accepts_export_read_model_without_constructing_recorder_factory(self) -> None:
+        db = _fake_landscape_db()
+        read_model = _make_export_read_model()
+
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", autospec=True) as recorder_factory:
+            exporter = LandscapeExporter(db, read_model=read_model)
+
+        recorder_factory.assert_not_called()
+        assert not hasattr(read_model, "run_lifecycle")
+        assert not hasattr(read_model, "data_flow")
+        assert not hasattr(read_model, "execution")
+        assert not hasattr(read_model, "query")
+        assert exporter._read_model is read_model
+        records = list(exporter.export_run("run-1"))
+        assert records == [
+            {
+                "record_type": "run",
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": _DT.isoformat(),
+                "completed_at": _DT2.isoformat(),
+                "canonical_version": "v1",
+                "config_hash": "cfg-hash",
+                "initiated_by_user_id": None,
+                "auth_provider_type": None,
+                "settings": {"key": "value"},
+                "reproducibility_grade": "full_reproducible",
+            }
+        ]
+
     def test_rejects_non_positive_row_batch_size(self) -> None:
-        db = object()
+        db = _fake_landscape_db()
         with pytest.raises(ValueError, match="row_batch_size"):
             LandscapeExporter(db, row_batch_size=0)
 
@@ -1198,7 +1340,7 @@ class TestSparseLookupMemory:
     def test_sparse_child_lookups_do_not_store_empty_lists(self) -> None:
         """Missing optional children must not inflate the grouping maps."""
 
-        class TrackingDefaultDict(collections_defaultdict):
+        class TrackingDefaultDict(collections_defaultdict[Any, list[Any]]):
             instances: ClassVar[list[TrackingDefaultDict]] = []
 
             def __init__(self, *args: Any, **kwargs: Any) -> None:

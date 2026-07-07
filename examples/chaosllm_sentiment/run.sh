@@ -2,8 +2,8 @@
 # =============================================================================
 # ChaosLLM Sentiment Analysis Example
 #
-# Starts a ChaosLLM fake LLM server with ~20% error injection and burst
-# patterns, then runs an ELSPETH sentiment analysis pipeline against it.
+# Starts a ChaosLLM fake LLM server with ~20% steady-state error injection,
+# then runs an ELSPETH sentiment analysis pipeline against it.
 #
 # Usage:
 #   ./examples/chaosllm_sentiment/run.sh

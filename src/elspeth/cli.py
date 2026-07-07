@@ -97,6 +97,36 @@ def _load_dotenv(env_file: Path | None = None) -> bool:
     return load_dotenv(override=False)  # Don't override existing env vars
 
 
+def _emit_schema_compatibility_error(
+    error: Exception,
+    output_format: Literal["console", "json"] = "console",
+    *,
+    operation: str,
+) -> None:
+    """Emit stale/incompatible Landscape schema errors without a traceback."""
+    if output_format == "json":
+        import json as json_module
+
+        typer.echo(
+            json_module.dumps(
+                {
+                    "event": "schema_compatibility_error",
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                }
+            ),
+            err=True,
+        )
+        return
+
+    typer.secho(
+        f"Landscape database schema compatibility error during {operation}.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    typer.echo(str(error), err=True)
+
+
 @app.callback()
 def main(
     version: bool | None = typer.Option(
@@ -512,6 +542,7 @@ def run(
         raise typer.Exit(1) from None
 
     # Resolve dependencies and commencement gates before pipeline execution
+    from elspeth.core.landscape.database import SchemaCompatibilityError
     from elspeth.engine.bootstrap import resolve_preflight
     from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
 
@@ -520,6 +551,9 @@ def run(
         preflight = resolve_preflight(config, settings_path, probes=probes, runner=bootstrap_and_run)
     except (DependencyFailedError, CommencementGateFailedError, ValueError) as e:
         typer.echo(f"Pre-flight check failed: {e}", err=True)
+        raise typer.Exit(1) from None
+    except SchemaCompatibilityError as e:
+        _emit_schema_compatibility_error(e, output_format, operation="pre-flight check")
         raise typer.Exit(1) from None
     except contract_errors.TIER_1_ERRORS as e:
         import traceback
@@ -585,6 +619,9 @@ def run(
             typer.echo(f"\nWorker evicted from run {e.run_id}.", err=True)
             typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
         raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
+    except SchemaCompatibilityError as e:
+        _emit_schema_compatibility_error(e, output_format, operation="pipeline execution")
+        raise typer.Exit(1) from None
     except contract_errors.TIER_1_ERRORS as e:
         # Tier 1 violations and framework bugs MUST be clearly distinguishable
         # from config errors. These indicate database corruption, tampering,

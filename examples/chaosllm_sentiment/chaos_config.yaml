@@ -1,8 +1,9 @@
 # ChaosLLM config for the chaosllm_sentiment example.
 #
 # Returns canned sentiment analysis responses from responses.jsonl,
-# with ~20% error injection across HTTP errors, malformed responses,
-# and connection failures. Latency is kept low so the example finishes fast.
+# with ~20% steady-state error injection across HTTP errors, malformed
+# responses, and connection failures. Latency is kept low so the example
+# finishes fast.
 
 server:
   host: "127.0.0.1"
@@ -45,10 +46,7 @@ error_injection:
   empty_body_pct: 1.0
   missing_fields_pct: 1.0
 
-  # Periodic bursts: 5 seconds of heavy rate limiting every 30 seconds
+  # Bursts are disabled so runtime preflight stays stable while steady-state
+  # fault injection still exercises retries during row processing.
   burst:
-    enabled: true
-    interval_sec: 30
-    duration_sec: 5
-    rate_limit_pct: 60
-    capacity_pct: 40
+    enabled: false

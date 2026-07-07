@@ -23,7 +23,7 @@ elspeth run --settings examples/retention_purge/settings.yaml --execute
 
 ```bash
 # Payloads are stored in the configured directory
-ls examples/retention_purge/payloads/
+ls examples/retention_purge/runs/payloads/
 ```
 
 ### Step 3: Purge old payloads
@@ -32,12 +32,12 @@ ls examples/retention_purge/payloads/
 # Dry run — see what would be deleted
 elspeth purge --dry-run \
   --database examples/retention_purge/runs/audit.db \
-  --payload-dir examples/retention_purge/payloads
+  --payload-dir examples/retention_purge/runs/payloads
 
 # Execute purge (payloads older than retention_days are deleted)
 elspeth purge --yes \
   --database examples/retention_purge/runs/audit.db \
-  --payload-dir examples/retention_purge/payloads \
+  --payload-dir examples/retention_purge/runs/payloads \
   --retention-days 0    # Use 0 for demo (deletes everything)
 ```
 
@@ -53,7 +53,7 @@ elspeth explain --run latest --database examples/retention_purge/runs/audit.db
 ```yaml
 payload_store:
   backend: filesystem                           # Storage backend
-  base_path: examples/retention_purge/payloads  # Where blobs are stored
+  base_path: examples/retention_purge/runs/payloads  # Where blobs are stored
   retention_days: 7                             # Days before eligible for purge
 ```
 

@@ -930,3 +930,64 @@ class TestRunResumeEviction:
         # Must NOT emit event=error or a Python traceback.
         assert '"event": "error"' not in combined and '"event":"error"' not in combined, f"Must not emit event=error.\nOutput:\n{combined}"
         assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
+
+
+class TestRunSchemaCompatibility:
+    """Schema epoch mismatches are actionable operator errors, not framework tracebacks."""
+
+    def test_run_schema_compatibility_error_is_human_friendly(self, tmp_path: Path) -> None:
+        """``elspeth run`` reports stale audit DB guidance without a traceback."""
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.core.landscape.database import SchemaCompatibilityError
+
+        settings_path = _make_minimal_settings(tmp_path)
+        stale_schema = SchemaCompatibilityError(
+            "Landscape database schema is outdated.\n\n"
+            "schema epoch is incompatible:\n"
+            "Database epoch: 21\n"
+            "Current epoch: 22\n\n"
+            "To fix this, either:\n"
+            "  1. Delete the database file and let ELSPETH recreate it, or\n"
+            "  2. Run: elspeth landscape migrate (when available)\n\n"
+            f"Database: sqlite:///{tmp_path / 'landscape.db'}"
+        )
+
+        with patch("elspeth.cli._execute_pipeline_with_instances", side_effect=stale_schema):
+            result = runner.invoke(app, ["run", "--settings", str(settings_path), "--execute"])
+
+        assert result.exit_code == 1
+        combined = result.output
+        assert "Landscape database schema is outdated" in combined
+        assert "schema epoch is incompatible" in combined
+        assert "Delete the database file" in combined
+        assert "SchemaCompatibilityError" not in combined
+        assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
+
+    def test_run_schema_compatibility_error_json_is_agent_friendly(self, tmp_path: Path) -> None:
+        """JSON mode emits a structured stale-schema event without traceback fields."""
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.core.landscape.database import SchemaCompatibilityError
+
+        settings_path = _make_minimal_settings(tmp_path)
+        stale_schema = SchemaCompatibilityError(
+            "Landscape database schema is outdated.\n\nschema epoch is incompatible:\nDatabase epoch: 21\nCurrent epoch: 22"
+        )
+
+        with patch("elspeth.cli._execute_pipeline_with_instances", side_effect=stale_schema):
+            result = runner.invoke(app, ["run", "--settings", str(settings_path), "--execute", "--format", "json"])
+
+        assert result.exit_code == 1
+        event_lines = [line for line in result.output.splitlines() if '"event"' in line]
+        assert event_lines, f"Expected a JSON event line.\nOutput:\n{result.output}"
+        event = json.loads(event_lines[0])
+        assert event == {
+            "event": "schema_compatibility_error",
+            "error_type": "SchemaCompatibilityError",
+            "message": str(stale_schema),
+        }
+        assert "traceback" not in event
+        assert "Traceback" not in result.output, f"Must not emit a traceback.\nOutput:\n{result.output}"

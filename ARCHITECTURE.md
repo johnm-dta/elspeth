@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-06-05 (synchronized with RC-5.3 documentation line)
-**Framework Version:** 0.6.0 (package metadata aligned at 0.6.0)
+**Last Updated:** 2026-07-08 (synchronized with 0.7.0 release line)
+**Framework Version:** 0.7.0 (package metadata aligned at 0.7.0)
 **Status:** Pre-release
 
 ---
@@ -12,13 +12,13 @@ C4 model documentation for the ELSPETH auditable pipeline framework.
 
 | Question | Answer |
 |----------|--------|
-| **What is ELSPETH?** | Auditable Sense/Decide/Act pipeline framework |
+| **What is ELSPETH?** | Auditable Sense/Decide/Act pipeline framework with YAML, CLI/TUI, and Web Composer authoring surfaces |
 | **Core subsystems?** | 11 major subsystems (20+ including sub-components) across 5 architectural tiers |
 | **Data flow?** | Source → Transforms/Gates → Sinks (all recorded) |
 | **Audit storage?** | SQLite/SQLCipher (dev) / PostgreSQL (prod) |
 | **Extension model?** | pluggy-based plugin system |
-| **Production LOC** | ~173,900 Python lines across 447 files in `src/elspeth/` (frontend TSX/CSS counts not included) |
-| **Test LOC** | ~448,300 Python lines across 1,095 files (2.6:1 ratio) |
+| **Production LOC** | ~236,100 Python lines across 598 files in `src/elspeth/` (frontend TSX/CSS counts not included) |
+| **Test LOC** | ~619,900 Python lines across 1,391 files (2.6:1 ratio) |
 
 ---
 
@@ -319,7 +319,7 @@ C4Component
         Component(null_source, "NullSource", "Python", "Empty source for testing")
     }
 
-    Container_Boundary(transforms, "Transforms (26 registered)") {
+    Container_Boundary(transforms, "Transforms (registry-discovered)") {
         Component(passthrough, "PassThrough", "Python", "Identity transform")
         Component(field_mapper, "FieldMapper", "Python", "Rename/select fields")
         Component(batch_stats, "BatchStats", "Python", "Aggregation statistics")
@@ -328,6 +328,9 @@ C4Component
         Component(truncate, "Truncate", "Python", "String truncation")
         Component(keyword_filter, "KeywordFilter", "Python", "Keyword-based filtering")
         Component(web_scrape, "WebScrape", "Python", "HTML extraction")
+        Component(blob_fetch, "BlobFetch", "Python", "SSRF-safe remote document fetch to payload store")
+        Component(blob_csv, "BlobCSVExpand", "Python", "Expand stored CSV blobs into rows")
+        Component(azure_di, "AzureDocumentIntelligence", "Python", "External document layout extraction")
         Component(content_safety, "ContentSafety", "Python", "Azure Content Safety screening")
         Component(prompt_shield, "PromptShield", "Python", "Azure Prompt Shield detection")
     }
@@ -359,11 +362,16 @@ C4Component
     Rel(batch_stats, base, "Extends BaseTransform")
     Rel(json_explode, base, "Extends BaseTransform")
     Rel(web_scrape, base, "Extends BaseTransform")
+    Rel(blob_fetch, base, "Extends BaseTransform")
+    Rel(blob_csv, base, "Extends BaseTransform")
+    Rel(azure_di, base, "Extends BaseTransform")
     Rel(content_safety, base, "Extends BaseTransform")
     Rel(prompt_shield, base, "Extends BaseTransform")
     Rel(llm_transform, base, "Extends BaseTransform")
     Rel(llm_transform, llm_client, "Uses")
     Rel(web_scrape, http_client, "Uses")
+    Rel(blob_fetch, http_client, "Uses")
+    Rel(azure_di, http_client, "Uses")
     Rel(csv_sink, base, "Extends BaseSink")
     Rel(json_sink, base, "Extends BaseSink")
     Rel(db_sink, base, "Extends BaseSink")
@@ -377,13 +385,17 @@ C4Component
 | **Results** | Typed results (`TransformResult`, `SourceRow`) |
 | **PluginContext** | Runtime context passed to all plugin methods — phase-typed via `SourceContext`, `TransformContext`, `SinkContext`, `LifecycleContext` protocols (defined in `contracts/contexts.py`) |
 | **PluginManager** | pluggy-based discovery and registration |
-| **Sources** | 6 plugins (azure_blob, csv, dataverse, json, null, text) |
-| **Transforms** | 26 plugins (including LLM, RAG retrieval, web scrape, field/value/type transforms, and statistical batch transforms) |
+| **Sources** | Registry-discovered source plugins including azure_blob, csv, dataverse, json, null, and text |
+| **Transforms** | Registry-discovered transform plugins including LLM, RAG retrieval, web scrape, `blob_fetch`, `blob_csv_expand`, `azure_document_intelligence`, field/value/type transforms, and statistical batch transforms |
 | **LLM Transforms** | Unified LLMTransform (azure/openrouter providers, single/multi-query strategies) |
-| **Sinks** | 6 plugins (azure_blob, chroma_sink, csv, database, dataverse, json) |
+| **Sinks** | Registry-discovered sink plugins including azure_blob, chroma_sink, csv, database, dataverse, and json |
 | **Clients** | 4 audited clients (HTTP, LLM, Replayer, Verifier) |
 
-**Total Plugin Ecosystem:** 38 plugins across the Source/Transform/Sink categories (6 sources + 26 transforms + 6 sinks, verified against the `discover_all_plugins()` registry). The per-category table above is retained as a reader-friendly summary; refresh it from the registry before treating the exact counts as release evidence. Sub-package layout: `infrastructure/`, `sources/`, `transforms/`, `sinks/`.
+**Total Plugin Ecosystem:** registry-discovered plugins across Source,
+Transform, and Sink categories, verified with the same `discover_all_plugins()`
+code path used by `elspeth plugins list`. Treat the registry, not this
+narrative, as the exact-count authority. Sub-package layout: `infrastructure/`,
+`sources/`, `transforms/`, `sinks/`.
 
 #### Plugin Context Protocols
 
@@ -845,11 +857,16 @@ flowchart TB
         direction TB
         Sources[Sources]
         APIs[External APIs]
+        Documents[Remote Documents]
+        ComposerArgs[Composer / MCP Tool Args]
 
         note3["Coerce where possible<br/>Validate at boundary<br/>Quarantine failures"]
     end
 
     APIs --> Sources
+    APIs --> Transforms
+    Documents --> Transforms
+    ComposerArgs --> Transforms
     Sources --> Transforms
     Transforms --> Gates
     Gates --> Sinks
@@ -997,12 +1014,12 @@ ongoing CI enforcement.
 
 **Key Metrics:**
 
-- Production LOC: ~173,900 (447 Python files in `src/elspeth/`; frontend TSX/CSS not included)
-- Test LOC: ~448,300 (1,095 Python files, 2.6:1 ratio)
+- Production LOC: ~236,100 (598 Python files in `src/elspeth/`; frontend TSX/CSS not included)
+- Test LOC: ~619,900 (1,391 Python files, 2.6:1 ratio)
 - Subsystems: 11 major (20+ including sub-components)
-- Plugins: 38 (6 sources + 26 transforms + 6 sinks; verified via the registry's `discover_all_plugins()` — same code path as `elspeth plugins list`)
-- ADRs: 24 accepted records (001–024, excluding the 000 template)
-- Status: Pre-release (0.6.0)
+- Plugins: registry-discovered via `discover_all_plugins()` — the same code path as `elspeth plugins list`
+- ADRs: 30+ accepted records (excluding the 000 template)
+- Status: Pre-release (0.7.0)
 
 All diagrams use Mermaid syntax for version control compatibility.
 

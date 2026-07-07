@@ -50,6 +50,10 @@ Security reports are triaged according to the highest credible impact:
 - suspected contract violations in audit, lineage, trust-tier handling,
   redaction, or secret references are treated as security-relevant even when
   they do not resemble a conventional CVE-class vulnerability;
+- reports affecting signed judge metadata, trust-tier allowlists, audit-anchor
+  integrity, websocket ticket handling, authenticated metrics, provider endpoint
+  pinning, bounded execution budgets, or secret-inventory redaction are handled
+  as release-gate issues until triaged;
 - public disclosure timing is coordinated with the reporter where possible.
 
 ## Scope
@@ -59,6 +63,8 @@ In scope:
 - source code in this repository;
 - GitHub Actions workflows and release artifacts;
 - the web Composer, authentication, sessions, execution, and audit surfaces;
+- trust-tier signing and verification metadata, redaction gates, signed
+  allowlists, and CI/CD policy cells;
 - official container images and published release bundles;
 - documentation that makes security or assurance claims.
 

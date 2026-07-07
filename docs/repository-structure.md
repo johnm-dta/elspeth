@@ -18,7 +18,7 @@ the root README and [ARCHITECTURE.md](../ARCHITECTURE.md) for the code tree.
 | Product code | `src/` | The shipped `elspeth` package (the only thing in `pyproject` `packages`). See README/ARCHITECTURE for internals. |
 | Tests | `tests/` | The test suite (unit / integration / property / e2e / performance). |
 | Active documentation | `docs/` | Current, audience-facing docs. Index: [`docs/README.md`](README.md). |
-| Archived documentation | `docs-archive/` | Dated, point-in-time doc cleanouts (`<date>-docs-cleanout/`), each with a `MANIFEST.md`. Same public repo; de-emphasised, not deleted. |
+| Maintainer-local documentation archive | `docs-archive/` | Ignored local preservation area for implemented plans, superseded specs, generated sidecars, and historical work product. It is not part of the public repository; git history is the public provenance record. |
 | Examples | `examples/` | Runnable reference pipelines and configs for users (one folder per scenario). |
 | Developer & CI automation | `scripts/` | Runnable repo automation: CI check logic, eval drivers, git hooks, audits, deploy helpers. |
 | Deliverable-artifact build | `tools/` | Build pipelines that render *distributable artifacts* (currently `tools/pdf/`). |
@@ -42,7 +42,7 @@ the root README and [ARCHITECTURE.md](../ARCHITECTURE.md) for the code tree.
 - **`tools/`** → `pdf/` (Typst/Pandoc artifact builds).
 - **`evals/`** → dated run folders (`2026-05-03-composer/` …), `composer-harness/`, `composer-rgr/`, `lib/` (shared eval code).
 - **`data/`** → `skills/` (deployment examples of the live composer skill prompt); runtime DBs live here at deploy time (gitignored).
-- **`docs/`** → see its own [index](README.md); plans/specs that are implemented move to `docs-archive/`.
+- **`docs/`** → see its own [index](README.md); plans/specs that are implemented are removed from active docs and may be preserved by maintainers in the ignored local archive.
 
 ## Decision rules — where does a new file go?
 
@@ -54,7 +54,7 @@ the root README and [ARCHITECTURE.md](../ARCHITECTURE.md) for the code tree.
 | A general dev/repo automation script | `scripts/` (or the matching `scripts/<area>/`) |
 | A build that renders a distributable PDF/artifact | `tools/<artifact>/` (the release assurance PDF set lives in `docs/release/pdf/`) |
 | A new example pipeline | `examples/<scenario>/` |
-| A design/plan/spec doc | `docs/` while active → `docs-archive/<date>-docs-cleanout/` once implemented |
+| A design/plan/spec doc | `docs/` while active → remove from tracked active docs once implemented; maintainers may preserve it in ignored `docs-archive/` |
 | An evaluation scenario or harness change | `evals/` |
 | A deployable artifact (service unit, env template) | `deploy/` |
 | A throwaway working file | `scratch/` (gitignored) — **never** commit it |
@@ -114,13 +114,13 @@ harness" and "engineering notes" are clear, distinct purposes.
 
 | # | Issue | Resolution (2026-06-28) |
 | --- | --- | --- |
-| 1 | Root `prompts/` (1 file) overlaps the archived `docs/prompts/` | **Done** — relocated to `docs-archive/2026-06-28-docs-cleanout/prompts/` (no inbound refs) |
+| 1 | Root `prompts/` (1 file) overlaps the archived `docs/prompts/` | **Done** — removed from active tracked docs after preservation in git history / maintainer-local archive (no inbound refs) |
 | 2 | `.scratch/` vs `scratch/` looked duplicated | **No change** — `.gitignore` documents `.scratch/` as the canonical composer-MCP scratch dir and `scratch/` as the ignored duplicate; already resolved |
 | 3 | `.benchmarks/` (root) empty and **not** gitignored | **Done** — deleted and added `/.benchmarks/` to `.gitignore` |
 | 4 | `.elspeth/rotations.log` under version control | **No change** — deliberately force-tracked (`!.elspeth/rotations.log`) as a tier-model rotation audit trail |
 | 5 | `tools/pdf/` briefing/walkthrough builders tied to archived 2026-05-03 evidence | **Done** — archived the two builders + their metadata; `build-arch-pack.sh` and shared infra retained |
 | 6 | `data/` vs `state/` runtime split not self-evident | **Documented** here (`state/audit.db` path is hardcoded in `core/config.py`, so it stays put) |
 
-Not flagged (clear, distinct purpose): `src/`, `tests/`, `docs/`, `docs-archive/`,
+Not flagged (clear, distinct purpose): `src/`, `tests/`, `docs/`,
 `examples/`, `scripts/`, `tools/`, `config/`, `.github/`, `.githooks/`, `deploy/`,
 `evals/`, `notes/`, `elspeth-lints/`, `website/`.

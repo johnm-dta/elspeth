@@ -95,12 +95,12 @@ temperature, so this default is no longer coherent out of the box.
 
 ## Related Decisions
 
-- Supersedes:
-  `docs/superpowers/specs/2026-05-31-composer-model-aware-temperature-design.md`
-- Implements:
-  `docs/superpowers/specs/2026-06-03-composer-operator-set-sampling-config-design.md`
+- Supersedes historical composer model-aware temperature design material
+  preserved in git history or maintainer-local archives.
+- Implements historical composer operator-set sampling config design material
+  preserved in git history or maintainer-local archives.
 
 ## References
 
-- `docs/superpowers/plans/2026-06-03-composer-operator-set-sampling-config.md`
-- `docs/superpowers/specs/2026-06-03-composer-operator-set-sampling-config-design.md`
+- Historical operator-set sampling implementation plan and design: preserved in
+  git history or maintainer-local archives

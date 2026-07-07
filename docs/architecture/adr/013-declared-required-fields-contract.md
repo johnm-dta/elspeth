@@ -175,4 +175,5 @@ for this contract include `raw_schema_config`, `config_dict`, `options`, and
 - `src/elspeth/engine/executors/declared_required_fields.py`
 - `src/elspeth/contracts/errors.py`
 - `src/elspeth/plugins/infrastructure/base.py`
-- `docs/plans/2026-04-20-phase-2b-declaration-trust.md`
+- Historical Phase 2B declaration-trust plan: preserved in git history or
+  maintainer-local archives

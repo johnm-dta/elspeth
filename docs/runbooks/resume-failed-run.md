@@ -127,7 +127,8 @@ The useful migration rule from the old RC-2 checkpoint note is:
 2. Delete old checkpoint files for the affected run.
 3. Re-run the pipeline so new checkpoints store full token metadata.
 
-For full historical context see the [RC-2 Checkpoint Fix Post-Mortem](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-2-checkpoint-fix-postmortem.md) in the 2026-05-19 docs archive.
+Full historical context is preserved in the RC-2 checkpoint fix post-mortem in
+git history or maintainer-local archives.
 
 ### "Run not found"
 

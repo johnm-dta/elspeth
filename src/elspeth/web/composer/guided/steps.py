@@ -16,7 +16,7 @@ import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Engine
 
@@ -224,15 +224,15 @@ def _observed_columns_from_allowed_path(options: Mapping[str, Any], data_dir: st
     )
 
 
-def _source_options_with_guaranteed_fields(options: Mapping[str, Any], observed_columns: tuple[str, ...]) -> dict[str, Any]:
+def _source_options_with_guaranteed_fields(options: Mapping[str, Any], observed_columns: tuple[str, ...]) -> dict[str, object]:
     """Publish observed source fields into the committed schema contract."""
-    enriched = dict(options)
+    enriched: dict[str, object] = dict(options)
     if not observed_columns:
         return enriched
     raw_schema = enriched.get("schema")
     if not isinstance(raw_schema, Mapping):
         return enriched
-    schema = dict(raw_schema)
+    schema: dict[str, object] = dict(cast(Mapping[str, object], raw_schema))
     if not schema.get("guaranteed_fields"):
         schema["guaranteed_fields"] = list(observed_columns)
     enriched["schema"] = schema

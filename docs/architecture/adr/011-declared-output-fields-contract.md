@@ -144,4 +144,5 @@ for this contract include `raw_schema_config`, `config_dict`, `options`, and
 - [ADR-010](010-declaration-trust-framework.md)
 - `src/elspeth/engine/executors/declared_output_fields.py`
 - `src/elspeth/contracts/errors.py`
-- `docs/plans/2026-04-20-phase-2b-declaration-trust.md`
+- Historical Phase 2B declaration-trust plan: preserved in git history or
+  maintainer-local archives

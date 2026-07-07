@@ -1,7 +1,7 @@
 # ELSPETH Platform Architecture
 
-**Document date:** 5 June 2026
-**Release covered:** RC-5.3
+**Document date:** 8 July 2026
+**Release covered:** 0.7.0
 **Audience:** Evaluators, technical leaders, architects, and assurance reviewers
 **Register:** Public-facing / technical
 **Status:** Current architecture overview
@@ -22,9 +22,9 @@ output exists.
 |---|---|
 | CLI | Runs, validates, resumes, and inspects pipelines from the command line. |
 | Web app | Provides authentication, sessions, Composer, execution controls, run progress, and review surfaces. |
-| Composer | Builds pipeline configuration through guided or freeform authoring. |
+| Composer | Builds pipeline configuration through LLM-primary guided authoring or freeform authoring. |
 | Engine | Executes the directed pipeline graph and records terminal outcomes. |
-| Plugin system | Provides sources, transforms, sinks, and integrations. |
+| Plugin system | Provides sources, transforms, sinks, document-ingestion plugins, and integrations. |
 | Landscape audit store | Persists run, row, node, call, payload, secret-resolution, and lineage evidence. |
 | Telemetry | Provides operational visibility after audit writes have succeeded. |
 

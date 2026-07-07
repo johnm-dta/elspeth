@@ -4,7 +4,7 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## 0.7.0 - 2026-07-05 (LLM-primary guided pipeline creation)
+## 0.7.0 - 2026-07-08 (LLM-primary guided pipeline creation)
 
 Guided pipeline creation becomes LLM-primary. The guided composer is
 reworked so each stage of a pipeline — source, then sink, then transforms,
@@ -13,14 +13,16 @@ then the final wiring — is driven by a language model through the
 in-progress pipeline in place rather than asking the operator to author
 plugin options by hand. A revise mode reopens a committed stage and amends
 it against its current state, and the flow terminates at a new wiring stage
-whose completion is gated by an advisor sign-off. The guided-mode design
-records live under `docs/superpowers/specs/`.
+whose completion is gated by an advisor sign-off. Current user-facing guidance
+lives in `docs/release/composer-guide.md`; implemented design records were
+removed from the active public docs tree, with git history remaining the public
+provenance record and maintainers optionally preserving local ignored archives.
 
-The web session database resets on upgrade and the Landscape audit database
-does not: `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at the 0.6.0
-release) while `SQLITE_SCHEMA_EPOCH` stays 21, so per the delete-the-DB
-migration policy this is a single-DB, session-only cutover. The untagged
-0.6.1 maintenance line is folded into this release rather than tagged
+The web session database and Landscape audit database both reset on upgrade:
+`SESSION_SCHEMA_EPOCH` advances to 26 and `SQLITE_SCHEMA_EPOCH` advances to
+22. The audit schema now run-scopes `routing_events` with composite state/edge
+foreign keys so routing decisions cannot cross audit-run boundaries. The
+untagged 0.6.1 maintenance line is folded into this release rather than tagged
 separately (the same precedent as 0.5.4 into 0.6.0).
 
 ### Added
@@ -71,13 +73,11 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   always-visible verification panel: a plain-language gloss and a validation
   summary sit above the live pipeline graph so the operator can read what the
   model built as it is built, with a `ComposingIndicator` during the build.
-  Design: `docs/superpowers/specs/2026-06-30-guided-mode-reframe-design.md`.
 - **Read-only interpretation decision cards with a View→Approve gate** — each
   interpretation decision renders as a read-only summary card that leads with
   the model's own rationale, carries an `Explain` button backed by grounded
   advisory context, and gates advancement behind a two-stage View→Approve
-  acknowledgement over a card stack. Design:
-  `docs/superpowers/specs/2026-06-29-guided-decision-readonly-summary-design.md`.
+  acknowledgement over a card stack.
 
 #### Always-on prompt-shield review
 
@@ -121,8 +121,6 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   stage — including post-run — rather than restarting at the welcome bookend
   (backed by the new `user_preferences` tutorial-resume columns; see
   Operational).
-- Design: `docs/superpowers/specs/2026-06-22-tutorial-staged-recut-design.md`
-  and `docs/superpowers/specs/2026-06-25-tutorial-synthetic-scrape-page-design.md`.
 
 #### Azure Document Intelligence enrichment transform
 
@@ -132,8 +130,6 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   is registered under the `azure_document_intelligence` plugin name and
   declared as an external-call boundary in the audit-readiness expectations,
   with fail-closed page-count handling and host:port pinning on its endpoint.
-  Design:
-  `docs/superpowers/specs/2026-06-30-azure-document-intelligence-transform-design.md`.
 
 #### Blob-backed document ingestion transforms
 
@@ -168,8 +164,7 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   TypeBadge, WordMark) lands under
   `src/elspeth/web/frontend/src/components/ui/`, font weights and wordmark
   tracking are tokenized, and `LoginPage` is migrated onto the primitives as
-  an exemplar. Design:
-  `docs/superpowers/specs/2026-06-27-elspeth-design-system-implementation-design.md`.
+  an exemplar.
 - **Standalone marketing website (`website/`)** — a static, design-token-
   based marketing site is added at `website/`, separate from the application
   frontend, and hardened for public release: the example pipeline YAML uses
@@ -182,11 +177,46 @@ separately (the same precedent as 0.5.4 into 0.6.0).
   and the colour theme follows the operating-system preference and persists
   across pages.
 
+#### CLI and TUI inspection
+
+- **Machine-readable plugin catalog inspection** — `elspeth plugins list
+  --format json` and `elspeth plugins inspect <source|transform|sink> <name>
+  --format json` expose catalog descriptions, config fields, JSON Schema, and
+  Composer knob schema for automation and docs tooling.
+- **Graph-backed `elspeth explain` TUI** — the lineage explorer now renders a
+  selectable run/branch/node/token/status tree from recorded graph edges,
+  including branch labels, repeated DAG joins, focused evidence views, refresh,
+  and non-interactive `--no-tui` / `--json` fallbacks.
+
+#### Web Composer auth and local user operations
+
+- **Local Composer user-management CLI** — `elspeth composer users add` and
+  `elspeth composer users remove` manage `data/auth.db` without requiring
+  operators to run Python snippets against `LocalAuthProvider`.
+- **Email-verified local registration mode** —
+  `ELSPETH_WEB__REGISTRATION_MODE=email_verified` creates pending local users,
+  writes one-use verification links to `data/email-verifications.jsonl`, and
+  activates users through `/api/auth/verify-email` / `?verify_token=...`.
+  Non-local deployments must set `ELSPETH_WEB__PUBLIC_BASE_URL`.
+
+#### Release review tooling
+
+- **Codex panel-review foundation** — `scripts/codex_panel_review.py` adds a
+  single-file, multi-lens SME review runner with strict structured findings,
+  cache-friendly prompt layering, dry-run/cache-hit reporting, and a
+  fail-closed evidence gate for unanchored findings.
+
 ### Changed
 
 - **Composer routes decomposed into an area package** — the monolithic
   `routes/composer.py` is decomposed into a `routes/composer/` area package,
   splitting the route module without changing its HTTP surface.
+- **Release documentation cleanout completed** — the remaining implemented
+  plans and design specs under `docs/plans/`, `docs/superpowers/plans/`, and
+  `docs/superpowers/specs/` were removed from tracked active docs while
+  keeping `docs/` focused on current user, operator, architecture, and release
+  documentation. Maintainers may preserve the removed files in a local ignored
+  archive; public provenance remains available through git history.
 - **Explicit `ProcessorMode` and a public follower-drain surface** — the
   engine's leader/follower processor mode is made an explicit value and the
   follower drain is promoted to a public surface, replacing the previous
@@ -293,6 +323,11 @@ data or being forged, and tighten transport and endpoint authentication.
   judge-metadata signatures are verified in the audit gates; justify prompts
   are bound to the scan snapshot; stale v1 scope migrations are refused; and
   unverified fork-allowlist signatures are rejected.
+- **Key-separated judge-signature handoff (`elspeth_lints`)** — agents now
+  stage trust-tier review bundles through the key-free `elspeth-judge` MCP
+  server, while operators mint or rotate signed judge metadata only through
+  the key-bearing `elspeth-lints sign-bundle` / `rekey` CLI. CI is verify-only
+  and the obsolete `scripts/cicd/sign_accept_backlog.py` path is removed.
 - **Bounded budgets** — sequential LLM retry budgets and MCP Landscape query
   limits are bounded so a runaway model or query cannot exhaust the host.
 - **Key Vault `vault_url` restricted to approved Azure endpoints** — the Azure
@@ -320,32 +355,24 @@ data or being forged, and tighten transport and endpoint authentication.
 
 ### Operational
 
-- **The web session database resets on upgrade; the audit database does
-  not.** `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at the 0.6.0
-  release). `GUIDED_SESSION_SCHEMA_VERSION` reached 7 over the release (5→7),
-  and those guided fields live in the `composition_states.composer_meta` JSON
-  blob, so they add no SQL column. The guided-version bumps moved in lockstep
-  with the epoch through 25; the final 25→26 bump is session-only and is NOT
-  paired with a guided-version bump — it adds first-run-tutorial resume
-  columns (`tutorial_stage`, `tutorial_session_id`, `tutorial_run_id`,
-  `tutorial_source_data_hash`) to `user_preferences` so a mid-tutorial reload
-  resumes at the persisted stage instead of restarting at the welcome bookend.
-  The Landscape audit DB schema is unchanged — `SQLITE_SCHEMA_EPOCH` stays 21
-  — so this is a single-DB, session-only cutover. 0.7.0 boot fails closed on a
-  pre-0.7.0 session DB with `SessionSchemaError: Session DB schema version 22
-  does not match SESSION_SCHEMA_EPOCH=26. Pre-release ELSPETH does not migrate
-  session databases. Delete the session DB file and restart.` Before first start on
-  0.7.0, stop `elspeth-web.service`, archive and remove `data/sessions.db`
-  (and its `-wal`/`-shm` sidecars), and restart; the bootstrap recreates the
-  schema on first start. `data/auth.db` is a SEPARATE file — local user
-  accounts survive — and the Landscape audit / run history survives. Do NOT
-  run the two-DB (Landscape) reset: there is no matching audit-schema change
-  for 0.7.0. Procedure: the 0.7.0 single-DB cutover section of
-  `docs/runbooks/staging-session-db-recreation.md`, which also carries
-  hardened secret-archive steps — `PRAGMA wal_checkpoint(TRUNCATE)` before
-  copying the database, destroy or secure the archive at the end of the
-  deploy window, and rotate `settings.secret_key` so an archived copy of the
-  encrypted `user_secrets` rows is inert under the new key.
+- **The web session database and Landscape audit database both reset on
+  upgrade.** `SESSION_SCHEMA_EPOCH` advances to 26 and
+  `SQLITE_SCHEMA_EPOCH` advances to 22. `GUIDED_SESSION_SCHEMA_VERSION`
+  reached 7 over the release (5→7), and those guided fields live in the
+  `composition_states.composer_meta` JSON blob, so they add no SQL column. The
+  final 25→26 session epoch bump adds first-run-tutorial resume columns
+  (`tutorial_stage`, `tutorial_session_id`, `tutorial_run_id`,
+  `tutorial_source_data_hash`) to `user_preferences`; the Landscape epoch bump
+  run-scopes `routing_events` with composite state/edge foreign keys. Before
+  first start on 0.7.0, stop `elspeth-web.service`, archive and remove
+  `data/sessions.db` plus sidecars and the configured Landscape audit DB plus
+  sidecars, then restart so both schemas are recreated. `data/auth.db` is
+  separate, so local user accounts survive. Procedure:
+  `docs/runbooks/staging-session-db-recreation.md`, including the hardened
+  archive steps — `PRAGMA wal_checkpoint(TRUNCATE)` before copying each
+  database, destroy or secure the archives at the end of the deploy window,
+  and rotate `settings.secret_key` so an archived copy of encrypted
+  `user_secrets` rows is inert under the new key.
 - **Ship a frontend dist rebuilt from this release's source.** The web UI is
   served from `src/elspeth/web/frontend/dist/`, which is gitignored and built
   out of band (`cd src/elspeth/web/frontend && npm run build`); it is produced
@@ -354,7 +381,8 @@ data or being forged, and tighten transport and endpoint authentication.
   tokenized font weights, and the guided wiring-stage / tutorial-shell
   changes, so producing the 0.7.0 web deploy MUST rebuild the dist from
   `release/0.7.0` HEAD rather than reuse a prebuilt bundle; a stale bundle
-  will not render the new login, design-token, or guided wire-stage surfaces.
+  will not render the new login, email-verification, design-token, or guided
+  wire-stage surfaces.
 
 ---
 
@@ -877,8 +905,8 @@ now share one evidence story.
   pipeline authors. Source → sink → transforms in three steps; closed
   six-turn taxonomy; deterministic recipe pre-match; LLM-read-only with
   respect to pipeline state. Ships alongside the unmodified freeform
-  composer; mode transition uses progressive disclosure.
-  See `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`.
+  composer; mode transition uses progressive disclosure. Implementation design
+  detail is preserved in git history rather than active docs.
 - **ComposerLLMCall audit channel** — every `solve_chain` invocation in
   guided mode now records a `ComposerLLMCall` audit row (provider, model,
   status, latency, prompt/completion tokens). Pairs with the existing
@@ -897,8 +925,8 @@ now share one evidence story.
   and composition state atomically, with advisory-lock serialization and
   contiguous per-session `sequence_no` reservation under concurrent writers. A
   testcontainer-backed Postgres lane exercises the cross-DB semantics SQLite
-  cannot model. See
-  `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`.
+  cannot model. Implementation design detail is preserved in git history rather
+  than active docs.
 - **Redaction walker + MANIFEST** — every composer tool now has an explicit
   redaction policy (type-driven Pydantic argument models plus declarative
   entries) so LLM-supplied argument and response payloads are made Tier-1-safe;
@@ -970,10 +998,10 @@ now share one evidence story.
   runs CodeQL and dependency/license checks, makes Playwright E2E a required
   signal, and enforces cohort-attribution trailers on telemetry-backfill commits.
 - **Release docs cleanout** — RC-1/RC-2 changelog fragments, superseded release
-  snapshots, frozen architecture packs, and completed handover corpora were moved
-  to the dated `docs-archive/2026-05-19-docs-cleanout/` archive with a manifest,
-  while current release/assurance/audit documents stay linked from
-  `docs/README.md`; generated PDF output now defaults under `tools/pdf/out/`.
+  snapshots, frozen architecture packs, and completed handover corpora were
+  removed from active docs, while current release/assurance/audit documents stay
+  linked from `docs/README.md`; generated PDF output now defaults under
+  `tools/pdf/out/`.
 
 ### Changed
 
@@ -1019,7 +1047,7 @@ now share one evidence story.
 - **Optional dependency extras and active-doc clutter** — the `web` and `rag`
   extras were retired once their packages became mandatory, and superseded prompt
   files, generated review sidecars, completed handovers, and archived checklists
-  were removed or relocated into `docs-archive/2026-05-19-docs-cleanout/`.
+  were removed from active docs.
 
 ### Operational
 
@@ -1562,11 +1590,10 @@ Major feature release: Dataverse and RAG retrieval plugins, output schema contra
 
 ### Design Documentation
 
-- **Dataverse design spec**: `docs/superpowers/specs/`
-- **RAG retrieval design spec and implementation plan**: `docs/superpowers/specs/`, `docs/superpowers/plans/`
-- **Output schema contract spec and plans**: `docs/superpowers/specs/`, `docs/superpowers/plans/`
-- **Audit provenance boundary spec**: `docs/superpowers/specs/`
-- **Freeze/serialize coherence spec**: `docs/superpowers/specs/`
+- Historical design specs and implementation plans from this era are no longer
+  active docs. They are preserved in git history or the dated docs archives;
+  start from the current ADRs, contracts, and archive manifests rather than old
+  `docs/superpowers/` paths.
 
 ---
 

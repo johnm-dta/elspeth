@@ -166,7 +166,7 @@ Considered seriously in review. Rejected because: (a) the nominal `AuditEvidence
 - CLAUDE.md §Three-Tier Trust Model, §Plugin Ownership, §Frozen Dataclass Immutability, §Defensive Programming Forbidden
 - Track 2 filigree epic: `elspeth-a3ac5d88c6`; ADR-009 §Clause 3 SLA hard trigger 2026-07-18
 - H2 cluster landing (2026-04-20): `elspeth-425047a599` (H2), `elspeth-10dc0b747f` (N1), `elspeth-60890a7388` (N3), `elspeth-f52d7c5a47` (F2), `elspeth-5fc876138d` (F3), `elspeth-b513c01cff` (F4), `elspeth-121b268aec` (F5), `elspeth-5dae105959` (H1 amendment)
-- H2 design sketch: `docs/plans/2026-04-20-h2-amendment-design.md`
+- H2 design sketch: preserved in git history or maintainer-local archives
 - H2 decision anchor: comment #417 on `elspeth-425047a599` — ADR-010 §Semantics audit-complete decision record
 
 ---

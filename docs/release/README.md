@@ -1,6 +1,6 @@
 # `docs/release/` — Release Histories and Snapshots
 
-**Last reviewed:** 2026-06-22 (0.6.0)
+**Last reviewed:** 2026-07-08 (0.7.0)
 **Audience:** Anyone navigating to release-level documentation
 **Register:** Lightly technical / directory-index
 
@@ -9,11 +9,10 @@ velocity records, public-sector evaluation material, and the long-lived
 assurance narrative.
 
 The directory is intentionally small. **Current** documents reflect the latest
-release (0.6.0). Superseded point-in-time release docs and frozen historical
-snapshots were relocated to the
-[2026-05-19 docs cleanout archive](../../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md);
-that archive's MANIFEST is the relocation map. New readers should start with the
-current tier below.
+release (0.7.0). Superseded point-in-time release docs and frozen historical
+snapshots are no longer part of the active public docs tree; use git history or
+maintainer-local archives when historical provenance is needed. New readers
+should start with the current tier below.
 
 ---
 
@@ -24,10 +23,10 @@ If you only have time for one document, pick the row that matches your role.
 | If you are… | Read first | Then |
 |---|---|---|
 | **An Australian public-service executive or assurance reader** evaluating the platform for pilot adoption | [`executive-summary.md`](executive-summary.md) | [`guarantees.md`](guarantees.md) for contractual claims |
-| **Engineering leadership** scoping or sequencing work against the platform | [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (the cumulative output snapshot at the foot) | Then sample the *Velocity by Phase* table in [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) |
-| **An engineer joining the project** | [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) in full, by Period | Then [`guarantees.md`](guarantees.md) for the contracts the code must uphold |
+| **Engineering leadership** scoping or sequencing work against the platform | [`platform-architecture.md`](platform-architecture.md) | Then `/CHANGELOG.md` for release-by-release implementation detail |
+| **An engineer joining the project** | [`platform-architecture.md`](platform-architecture.md) | Then [`guarantees.md`](guarantees.md) for the contracts the code must uphold |
 | **An auditor or integrator** verifying assurance claims | [`guarantees.md`](guarantees.md) (the assurance surface) | Then `/CHANGELOG.md` (RC-3+) for the line-by-line release record |
-| **Anyone investigating a specific historical decision or release** | The relevant document in the [2026-05-19 docs archive](../../docs-archive/2026-05-19-docs-cleanout/docs/release/) | The current progress report for any subsequent context |
+| **Anyone investigating a specific historical decision or release** | The relevant commit in git history or a maintainer-local archive | The current release documents for subsequent context |
 
 ---
 
@@ -35,75 +34,63 @@ If you only have time for one document, pick the row that matches your role.
 
 Before diving into the documents below, know which sources they aggregate. **If a document in this directory contradicts a canonical source, the canonical source wins.**
 
-- **Per-release detailed changelogs:** [`/CHANGELOG.md`](../../CHANGELOG.md) (RC-3+), and the archived [`CHANGELOG-RC2.md`](../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC2.md) / [`CHANGELOG-RC1.md`](../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC1.md) — line-by-line release records.
+- **Per-release detailed changelogs:** [`/CHANGELOG.md`](../../CHANGELOG.md) (RC-3+) — line-by-line release records.
 - **Architectural decisions:** [`/docs/architecture/adr/`](../architecture/adr/) — the binding ADRs.
 - **In-code architecture analyses:** [`/docs/architecture/`](../architecture/) and the layer-import graph emitted by `elspeth-lints dump-edges`.
 
 ---
 
-## Current documents (0.6.0, June 2026)
+## Current documents (0.7.0, July 2026)
 
 | Document | What it answers | Intended reader |
 |----------|-----------------|-----------------|
 | [`executive-summary.md`](executive-summary.md) *(DRAFT — awaiting operator sign-off)* | Capability and assurance summary; what the platform does, what it does not yet guarantee, what an evaluator should consider next. | **Public-service executives, programme sponsors, assurance and risk staff.** Australian public-service / institutional register. |
 | [`composer-guide.md`](composer-guide.md) | What the Composer can do, how guided/freeform authoring works, what readiness checks mean, and how a user completes or recovers a composition. | **Evaluators, programme teams, operators, and technical reviewers.** Public-facing / lightly technical. |
 | [`platform-architecture.md`](platform-architecture.md) | Current runtime surfaces, trust boundaries, audit-first behaviour, configuration validation, external-system boundaries, and adopter responsibilities. | **Evaluators, technical leaders, architects, and assurance reviewers.** Public-facing / technical. |
-| [`assessment-mapping.md`](assessment-mapping.md) | How the RC-5.3 evidence set maps to likely public-sector evaluation questions, without claiming formal conformance. | **Assurance, risk, security, delivery governance, and agency evaluation teams.** Evidence map. |
-| [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) | What has the project shipped between RC-1 and RC-5? Period-by-period, capability-by-capability, with cumulative commit counts. | **Engineering team and engineering leadership.** Detailed engineering content; not written for non-engineering stakeholders. |
-| [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) | How much work was completed per day? Per-day commit volume across all 123 active days, with peak-day attribution. | **Engineering team and engineering leadership.** Per-commit cadence detail; commit count is a tempo signal, not a value signal. |
+| [`assessment-mapping.md`](assessment-mapping.md) | How the current evidence set maps to likely public-sector evaluation questions, without claiming formal conformance. | **Assurance, risk, security, delivery governance, and agency evaluation teams.** Evidence map. |
 
-The two engineering documents are designed as a **pair**: the progress doc covers *what*, the velocity doc covers *when*. Each opens with a cross-reference to the other. The executive summary is the single executive-tier entry point and references both engineering documents as back-stops.
+The executive summary is the single executive-tier entry point. Engineering
+readers should use the platform architecture and root changelog for current
+implementation context.
 
 ## Assurance narrative (long-lived; refreshed per release)
 
 | Document | What it answers | Status |
 |----------|-----------------|--------|
-| [`guarantees.md`](guarantees.md) | Audit, lineage, and trust-model guarantees ELSPETH makes. | **Layered assurance appendix.** §1–§10 preserve the original RC-3 contract language; §11–§14 add RC-5.2 authentication, secret-reference, multi-user-session, and composer-authoring guarantees. §7.2 has been amended to reflect that the "ELSPETH is not multi-user" disclaimer is no longer accurate. |
+| [`guarantees.md`](guarantees.md) | Audit, lineage, and trust-model guarantees ELSPETH makes. | **Layered assurance appendix.** §1–§10 preserve the original RC-3 contract language; §11–§14 add RC-5.2 authentication, secret-reference, multi-user-session, and composer-authoring guarantees; §15 adds durable token scheduling guarantees. The 0.7.0 refresh keeps this as the current assurance baseline. |
 
 ## Release PDF pack
 
-The [`pdf/`](pdf/) pipeline builds PDF/UA-1 reading copies for release
-briefing, engineering evidence, architecture, Composer, assurance, and
-data-trust material. The generated PDFs live under `pdf/out/` and are
-regeneratable build artefacts; the Typst sources and build pipeline are
-the maintained release assets.
-
-Current outputs:
-
-- `elspeth-executive-summary.pdf`
-- `elspeth-progress-rc1-to-rc5.pdf`
-- `elspeth-velocity-rc1-to-rc5.pdf`
-- `elspeth-architecture.pdf`
-- `elspeth-composer.pdf`
-- `elspeth-guarantees.pdf`
-- `elspeth-data-trust.pdf`
+The [`pdf/`](pdf/) pipeline contains the legacy RC-5.2 PDF/UA-1 release pack
+sources. It remains useful as a build/reference pipeline, but it has not been
+rebuilt as a 0.7.0 public release pack. Treat the Markdown documents in this
+directory, the root changelog, and root architecture overview as the current
+0.7.0 release sources until a new PDF pack is generated.
 
 ## Archived snapshots
 
-Older release-cut and point-in-time documents are preserved in the dated 2026-05-19 docs archive. They are no longer maintained; read for historical context, but do **not** treat their content as current.
-
-| Document | Captured at | Stale as of | Notes |
-|----------|-------------|-------------|-------|
-| [`feature-inventory.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/feature-inventory.md) | RC-3.3 — 1 March 2026 | RC-3.4 onwards | Comprehensive plugin / capability inventory; superseded by the *Cumulative Output Snapshot* in the current progress report |
-| [`rc4-executive-brief.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc4-executive-brief.md) | RC-4.0 planning — 3 March 2026 | RC-5 cut (3 April 2026) | Forward-looking work-package brief for the planned RC-4; what was scoped here ultimately shipped as the RC-5 Web UX Composer. Includes a *What actually shipped* appendix mapping each planned feature to its RC-5 outcome. |
-| [`rc-3-release-notes.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-3-release-notes.md) | RC-3 release | Superseded by `/CHANGELOG.md` | Detailed RC-3 release notes |
-| [`rc-2-checkpoint-fix-postmortem.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-2-checkpoint-fix-postmortem.md) | RC-2 hot-fix post-mortem | Superseded by `CHANGELOG-RC2.md` | Single-defect post-mortem (P1-2026-01-21) — preserved for the Lessons Learned and Prevention sections |
-| [`rc-2-checkpoint-fix.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-2-checkpoint-fix.md) | RC-2 hot-fix release note | Migration content folded into [`../runbooks/resume-failed-run.md`](../runbooks/resume-failed-run.md) | Original release-note framing kept in the archive for provenance |
-| [`rc2-checklist.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc2-checklist.md) | RC-2 release gate | Obsolete | Original release-gate checklist |
-| [`rc3-checklist.md`](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc3-checklist.md) | RC-3 release gate | Obsolete | Original release-gate checklist |
+Older release-cut and point-in-time documents are preserved through git history
+and optional maintainer-local archives. They are no longer maintained; read them
+for historical context only, not as current release guidance.
 
 ---
 
 ## When to add a new document here
 
 - **Yes:** another comprehensive release summary at the next major RC; a refresh of the assurance narrative when `guarantees.md` is restructured; a release brief if the team needs an executive-tier write-up for a particular RC.
-- **No:** detailed per-feature design docs (those belong in `/docs/superpowers/specs/`); operational runbooks (`/docs/runbooks/`); ADRs (`/docs/architecture/adr/`).
+- **No:** detailed per-feature design docs after implementation; operational
+  runbooks (`/docs/runbooks/`); ADRs (`/docs/architecture/adr/`).
 
-When a new comprehensive summary supersedes an existing one (e.g. an "RC-1 to RC-6" report supersedes the current "RC-1 to RC-5" pair), update this README's *Current documents* table and relocate the superseded docs into a new dated subdirectory under `docs-archive/` with the date they froze. Apply the archive banner template (below) on the moved document.
+When a new comprehensive summary supersedes an existing one, update this
+README's *Current documents* table and remove the superseded document from
+active docs. Maintainers may preserve it in a local ignored archive with the
+date it froze. Apply the archive banner template (below) before archival.
 
 ## Archive banner template
 
-Apply this banner verbatim at the top of any document moved to `docs-archive/`. It defends deep-link readers against picking up stale content without the framing:
+Apply this banner verbatim at the top of any document before it is moved out of
+active docs. It defends deep-link readers in git history or maintainer-local
+archives against picking up stale content without the framing:
 
 ```markdown
 > **ARCHIVED — <doc-class> captured at <date> (<release>).**

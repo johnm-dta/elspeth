@@ -155,8 +155,11 @@ in-progress pipeline in place instead of asking the operator to hand-author
 plugin options. A revise mode reopens a committed stage and amends it against
 its current state, and the flow terminates at a new wiring stage (`STEP_4_WIRE`)
 whose completion is gated by an explicit confirm-wiring contract and an advisor
-sign-off. The guided-mode design records live under
-[`docs/superpowers/specs/`](docs/superpowers/specs/).
+sign-off. Current operator-facing guidance lives in
+[the release Composer guide](docs/release/composer-guide.md). Implemented
+design records are no longer part of the active public docs tree; maintainers
+may keep them in a local ignored `docs-archive/`, and git history remains the
+public provenance record.
 
 Guided authoring deltas:
 
@@ -184,12 +187,16 @@ Guided authoring deltas:
   standalone static, design-token-based marketing site is added under
   `website/`, separate from the application frontend.
 
-New plugin:
+New ingestion plugins:
 
 - **`azure_document_intelligence` enrichment transform** — enriches rows by
   sending a document to Azure AI Document Intelligence and folding the extracted
   layout/content back onto the row, declared as an external-call boundary with
   fail-closed page-count handling and host:port endpoint pinning.
+- **Blob-backed document ingestion transforms** — `blob_fetch` stores an
+  operator-authorised remote document in the run payload store behind the
+  SSRF-safe HTTP boundary, while `blob_csv_expand` expands stored CSV blobs into
+  row data with bounded size, row-count, and schema-contract handling.
 
 Security and boundary hardening:
 
@@ -205,14 +212,13 @@ Security and boundary hardening:
 - **Output-echoed fields reject environment-variable placeholders**, and audit
   exports redact raw failing rows by default.
 
-**Operational — the web session database resets on upgrade; the audit database
-does not.** `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at 0.6.0) while
-`SQLITE_SCHEMA_EPOCH` — the Landscape audit DB — stays 21, so per the
-delete-the-DB migration policy this is a single-DB, session-only cutover.
-Before the first start on 0.7.0, stop `elspeth-web.service`, archive and remove
-`data/sessions.db` (and its `-wal`/`-shm` sidecars), and restart; the bootstrap
-recreates the session schema on first start. `data/auth.db` is a SEPARATE file —
-local user accounts are NOT reset.
+**Operational — the web session database and Landscape audit database both reset
+on upgrade.** `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at 0.6.0) and
+`SQLITE_SCHEMA_EPOCH` advances to 22. Before the first start on 0.7.0, stop
+`elspeth-web.service`, archive and remove `data/sessions.db` plus sidecars and
+the configured Landscape audit DB plus sidecars, then restart so both schemas
+are recreated. `data/auth.db` is a SEPARATE file — local user accounts are NOT
+reset.
 
 The 0.6.0 multi-worker deployment shape (`elspeth join`, leader/follower
 coordination over one WAL SQLite audit database) is unchanged; see
@@ -399,7 +405,7 @@ Current plugin families include:
 | ------ | -------- |
 | Sources and sinks | CSV, JSON, text, null, Azure Blob, Dataverse, database, Chroma, local file outputs |
 | Row transforms | Field mapping, type coercion, keyword filtering, truncation, line/json expansion |
-| LLM and safety | Regular `llm` transform with Azure OpenAI/OpenRouter support, multi-query and provider pooling, RAG retrieval, Azure Content Safety, Prompt Shield, Azure Document Intelligence extraction |
+| LLM, safety, and document ingestion | Regular `llm` transform with Azure OpenAI/OpenRouter support, multi-query and provider pooling, RAG retrieval, Azure Content Safety, Prompt Shield, Azure Document Intelligence extraction, `blob_fetch`, `blob_csv_expand` |
 | Batch analytics | `batch_distribution_profile`, `batch_experiment_compare`, `batch_classifier_metrics`, `batch_paired_preference`, `batch_drift_compare`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_threshold_summary`, `batch_effect_size` |
 
 The old batch-specific LLM transforms, `azure_batch_llm` and
@@ -901,19 +907,22 @@ See [Docker Guide](docs/guides/docker.md) for complete deployment documentation.
 
 ```text
 elspeth/
-├── src/elspeth/
-│   ├── core/               # Config, canonical JSON, rate limiting, retention
-│   │   ├── dag/            # DAG construction, validation, graph models (NetworkX)
-│   │   └── landscape/      # Audit trail (recorder, exporter, schema, SQLCipher)
+	├── src/elspeth/
+	│   ├── core/               # Config, canonical JSON, rate limiting, retention
+	│   │   ├── dag/            # DAG construction, validation, graph models (NetworkX)
+	│   │   └── landscape/      # Audit trail (recorder, exporter, schema, SQLCipher)
 │   ├── contracts/          # Type contracts, schemas, protocol definitions
 │   ├── engine/             # Orchestrator, processor, retry, DAG navigator
 │   │   └── executors/      # Transform, gate, sink, aggregation executors
 │   ├── plugins/            # Sources, transforms, sinks, LLM integrations
 │   ├── mcp/                # Landscape MCP analysis server
-│   ├── testing/            # ChaosLLM, ChaosWeb, ChaosEngine test servers
-│   ├── tui/                # Terminal UI (Textual)
-│   └── cli.py              # Typer CLI
-└── tests/
+	│   ├── testing/            # ChaosLLM, ChaosWeb, ChaosEngine test servers
+	│   ├── web/                # FastAPI app, Composer routes, auth/session storage, frontend
+	│   ├── tui/                # Terminal UI (Textual)
+	│   └── cli.py              # Typer CLI
+	├── docs/                   # Active public documentation
+	├── website/                # Standalone static marketing site
+	└── tests/
     ├── unit/               # Unit tests
     ├── integration/        # Integration tests
     ├── property/           # Hypothesis property-based tests
@@ -944,7 +953,7 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | -------- | -------- | ------- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Developers | C4 diagrams, data flows, component details |
 | [PLUGIN.md](PLUGIN.md) | Plugin Authors | How to create sources, transforms, sinks |
-| [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | Verified requirements with implementation status |
+| [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | Compatibility pointer to current requirement, contract, and assurance sources |
 | [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
 | [docs/guides/data-trust-and-error-handling.md](docs/guides/data-trust-and-error-handling.md) | Developers | Trust model, external-boundary handling, quarantine, and plugin error semantics |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |

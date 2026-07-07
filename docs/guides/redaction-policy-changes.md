@@ -5,10 +5,10 @@
 snapshot (`tests/unit/web/composer/redaction_policy_snapshot.json`).
 
 **Status.** Current as of spec rev-5 rev-2 iteration (2026-05-12).
-See `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`
-§4.4.5 for the authoritative control definition. The review findings that
-shaped this guide are summarized in that spec; generated reviewer sidecars are
-not required for day-to-day policy changes.
+The authoritative control definition now lives in the redaction `MANIFEST` and
+its policy snapshot tests. Historical spec and review context are preserved in
+git history or maintainer-local archives; generated reviewer sidecars are not
+required for day-to-day policy changes.
 
 ---
 

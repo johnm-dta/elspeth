@@ -7,15 +7,20 @@
 
 ## Context
 
-Phase 6 of the UX redesign 2026-05 (see `docs/composer/ux-redesign-2026-05/09-completion-gestures.md`) introduces three completion gestures the composer surface offers a user once a pipeline is ready:
+Phase 6 of the UX redesign 2026-05 introduced three completion gestures the
+composer surface offers a user once a pipeline is ready:
 
 1. **Save for review** — freeze a snapshot of the composition and mint a signed link the user can share with a reviewer.
 2. **Run pipeline** — the existing Execute path; the result-rendering layer branches on a per-transform capability tag to render a narrative summary when available.
 3. **Copy YAML** — the existing YAML-export route, extended to record a Tier-1 audit event on every export.
 
-Run-analysis is **not** a fourth verb. Per design doc 09 ("Why three verbs, not two or four"), narrative result rendering is a post-run rendering layer that consumes Phase 5b interpretation events; it is not a separate completion gesture.
+Run-analysis is **not** a fourth verb. Per the historical design record's
+"Why three verbs, not two or four" decision, narrative result rendering is a
+post-run rendering layer that consumes Phase 5b interpretation events; it is not
+a separate completion gesture.
 
-This ADR records the architectural decisions made during Phase 6A (backend implementation) — plan at `docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md`. The frontend (Phase 6B) consumes the wire shapes defined here.
+This ADR records the architectural decisions made during Phase 6A (backend
+implementation). The frontend (Phase 6B) consumes the wire shapes defined here.
 
 ## Decisions
 
@@ -33,9 +38,14 @@ The pattern is **established** by Phase 18 (5b)'s `interpretation_events_table` 
 
 **Precedent citation.** The "one new table per event family, closed-enum CHECK on `event_type`, append-only via `BEFORE UPDATE` / `BEFORE DELETE` triggers" pattern is established by Phase 18 (5b). The verifiable artifacts are:
 
-* **Design doc:** `docs/composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md` line 168 ("A **new `interpretation_events_table`** in `web/sessions/models.py`…") and lines 427–449 (event-type vocabulary, audit-table semantics).
+* **Historical design record:** the Phase 18 (5b) surface-LLM-interpretation
+  design that introduced `interpretation_events_table`; preserved in git
+  history or maintainer-local archives.
 * **Live schema:** `src/elspeth/web/sessions/models.py:460` (the `interpretation_events_table` definition itself, alongside `proposal_events_table` at line 423).
-* **Plan reference:** Phase 6A plan `docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md` §Task 1 (line 151) names this same precedent and the same `models.py` anchor when specifying the `composer_completion_events_table` schema.
+* **Historical plan reference:** the Phase 6A backend plan names this same
+  precedent and the same `models.py` anchor when specifying the
+  `composer_completion_events_table` schema; preserved in git history or
+  maintainer-local archives.
 
 Phase 6 follows the precedent with one deliberate sharpening: where `interpretation_events_table` permits DELETE on PENDING rows for orphan recovery, `composer_completion_events_table` is fully append-only — both `BEFORE UPDATE` and `BEFORE DELETE` triggers are unconditional ABORT from day 1 (plan 19a:268, correcting the Phase 18 omission tracked under filigree `elspeth-9aba8da942`).
 
@@ -161,7 +171,7 @@ The precedent for `hmac.compare_digest` at boundary verifiers is `core/payload_s
 
 ### Operator actions on first deploy
 
-Two deploy-time gates documented in `docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md` §"OPERATOR ACTION REQUIRED":
+Two deploy-time gates from the historical Phase 6A operator notes:
 
 1. **Delete the staging sessions DB** before deploying — `SESSION_SCHEMA_EPOCH` bumps from 3 to 4 and the validator refuses to start against the old DB. Any composer sessions saved since the Phase 18 deploy are lost; this is acknowledged cost.
 2. **Add `web.shareable_link_signing_key`** to staging config (generate with `openssl rand -base64 32`). The field is `Field(...)` (required, no default) — the service refuses to start without it.
@@ -170,8 +180,7 @@ The signing key is per-deployment, MUST be ≥32 bytes (HMAC-SHA256's digest siz
 
 ## References
 
-* Plan: [docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md)
-* Sibling plan: [docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md)
-* Design: [docs/composer/ux-redesign-2026-05/09-completion-gestures.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/09-completion-gestures.md)
-* Precedent: [docs/composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md) (interpretation_events_table)
+* Historical Phase 6A backend plan, Phase 6B frontend plan, completion-gestures
+  design, and Phase 18 interpretation-events precedent: preserved in git
+  history or maintainer-local archives
 * Runbook: [docs/guides/sharing-pipelines.md](../../guides/sharing-pipelines.md)

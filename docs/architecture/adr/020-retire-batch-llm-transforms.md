@@ -21,7 +21,10 @@ DeclaredRequiredFieldsContract to non-batch transforms until an ADR-010 amendmen
 lands.
 ```
 
-`docs/superpowers/specs/2026-04-21-batch-llm-invariant-follow-on-design.md` describes a *fix* path (truthful sentinel population for error rows, no-network probe seams). That fix has not landed and would not address the deeper conops critique below.
+A prior 2026-04-21 batch-LLM invariant follow-on design described a *fix* path
+(truthful sentinel population for error rows, no-network probe seams). That
+historical design is retained in git history, not active docs. The fix did not
+land and would not address the deeper conops critique below.
 
 ### The conops critique
 
@@ -112,13 +115,14 @@ These retain a clear conops mapping: `batch_replicate` and `batch_stats` are syn
 - **ADR-010** (Declaration Trust Framework): defines the per-row dispatch site that batch-aware transforms bypass.
 - **ADR-013** (Declared Required Fields Contract): explicitly scopes itself to non-batch transforms, citing the missing batch-pre-execution dispatch site. The contract violation surfaced in the dogfood run originates here.
 - **ADR-019** (Two-Axis Terminal Model): batch-LLM transforms had no novel interaction with the terminal-model migration; retirement does not affect the ADR-019 work.
-- **Supersedes:** `docs/superpowers/specs/2026-04-21-batch-llm-invariant-follow-on-design.md` — that spec proposed the fix path; this ADR retires the targets instead.
+- **Supersedes:** the historical 2026-04-21 batch-LLM invariant follow-on design
+  — that spec proposed the fix path; this ADR retires the targets instead.
 
 ## References
 
 - Filigree ticket: `elspeth-2799f6ec22` (P1 task — Retire batch-LLM transforms)
-- Implementation plan overview: `docs/superpowers/plans/2026-05-06-retire-batch-llm-overview.md`
-- Per-phase plans: `docs/superpowers/plans/2026-05-06-retire-batch-llm-phase-{1..5}-*.md`
+- Historical implementation plan overview and per-phase plans are retained in
+  git history, not active docs.
 - Dogfood run that surfaced the violation: 2026-05-06 session, observed in `examples/openrouter_sentiment/settings_batched.yaml` and `examples/template_lookups/settings_batched.yaml`
 - Migration epic context (scope reduction): `elspeth-be398f0bcb`
 

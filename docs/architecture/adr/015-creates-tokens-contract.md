@@ -107,4 +107,5 @@ new ADR amendment or successor ADR.
 - [ADR-011](011-declared-output-fields-contract.md)
 - `src/elspeth/plugins/infrastructure/base.py`
 - `src/elspeth/contracts/plugin_protocols.py`
-- `docs/plans/2026-04-20-phase-2b-declaration-trust.md`
+- Historical Phase 2B declaration-trust plan: preserved in git history or
+  maintainer-local archives

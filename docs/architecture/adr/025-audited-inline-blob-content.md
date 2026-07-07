@@ -29,8 +29,8 @@ composer, runtime, audit, and lifecycle surfaces.
 
 The cap decision also needs data. Unbounded config content reads are not
 acceptable, but arbitrary caps are likely to be revisited when operators hit
-them. The measured evidence is recorded in
-[`blob-inline-content-cap-2026-05-24.md`](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/evidence/blob-inline-content-cap-2026-05-24.md).
+them. The measured evidence is preserved in git history or maintainer-local
+archives.
 
 ## Decision
 
@@ -163,6 +163,6 @@ YAML brittle.
 
 ## References
 
-- [Audited Content Injection widened `blob_ref` design](../../../docs-archive/2026-06-28-docs-cleanout/docs/superpowers/specs/2026-05-03-config-content-ref-design.md)
-- [Blob inline content cap evidence](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/evidence/blob-inline-content-cap-2026-05-24.md)
+- Historical widened-`blob_ref` design and blob inline content cap evidence:
+  preserved in git history or maintainer-local archives
 - Filigree: `elspeth-fdebcaa79a`

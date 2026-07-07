@@ -616,9 +616,8 @@ represent. The chat history and the partial pipeline state both carry over.
 
 ### See also
 
-- The full technical design of guided mode (server architecture, turn-protocol
-  contract, audit and telemetry, testing strategy) is documented at
-  `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`.
+- Historical guided-mode technical design material is preserved in git history
+  or maintainer-local archives.
 - For freeform composer authoring, plugin discovery, and tool contracts, see
   the composer skill at `src/elspeth/web/composer/skills/pipeline_composer.md`.
 

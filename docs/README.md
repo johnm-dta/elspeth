@@ -2,18 +2,13 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** `0.6.0`
+**Framework status:** `0.7.0`
 **Archive note:** current release, architecture, contract, guide, reference, and
-runbook docs remain visible here. Internal work product — implemented design
-plans and specs, composer evaluation evidence and the 2026-05 UX-redesign phase
-docs, point-in-time audits, agent prompts, and the per-period progress/velocity
-reports — was relocated to
-[`docs-archive/2026-06-28-docs-cleanout/`](../docs-archive/2026-06-28-docs-cleanout/MANIFEST.md)
-ahead of release. Earlier point-in-time audit, architecture-pack,
-generated-review, and handover snapshots are under
-[`docs-archive/2026-05-19-docs-cleanout/`](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md).
-Archived docs keep their relative paths under the dated cleanout directory, so a
-reference to `docs/<path>` resolves at `docs-archive/2026-06-28-docs-cleanout/docs/<path>`.
+runbook docs remain visible here. Implemented plans, superseded specs, generated
+review sidecars, and other internal work product are removed from active public
+docs once they stop being current. Maintainer checkouts may keep those files in
+a local ignored `docs-archive/`; public provenance remains available through git
+history.
 
 ---
 
@@ -107,15 +102,15 @@ Audience-facing release and evaluation documents. See the
 - [Platform Architecture](release/platform-architecture.md) — current platform architecture, trust-boundary, and operational-responsibility overview
 - [Public-Sector Assessment Mapping](release/assessment-mapping.md) — current evidence map for government evaluation touchpoints
 - [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release (current contract surface; §1–§10 RC-3 base, §11–§14 RC-5.2 additions)
-- Per-period progress and velocity reports (RC-1 to RC-5) are internal work product and now live under [`docs-archive/2026-06-28-docs-cleanout/docs/release/`](../docs-archive/2026-06-28-docs-cleanout/docs/release/)
-- [Archived RC snapshots](../docs-archive/2026-05-19-docs-cleanout/docs/release/) — `feature-inventory.md` (RC-3.3), `rc4-executive-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix-postmortem.md` — historical context only; see the [2026-05-19 cleanout MANIFEST](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) for full relocation map
+- Per-period progress and velocity reports (RC-1 to RC-5) are internal work
+  product and no longer ship as active public docs.
+- Superseded RC snapshots such as `feature-inventory.md`,
+  `rc4-executive-brief.md`, `rc-3-release-notes.md`, and
+  `rc-2-checkpoint-fix-postmortem.md` are historical context only and are
+  available through git history or maintainer-local archives.
 
 ## Historical Snapshots
 
-Intentional point-in-time documents retained for reference.
-
-- [RC-3 Release Notes](../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-3-release-notes.md) — RC-3 release-history snapshot, relocated into the 2026-05-19 dated docs archive
-- [Plans index](../docs-archive/2026-06-28-docs-cleanout/docs/plans/README.md) — curated design and implementation plans (all implemented; relocated 2026-06-28)
-- [Composer UX Redesign](../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/) — RC-5.2 composer planning and implementation phase documents (relocated 2026-06-28)
-- [2026-06-28 cleanout manifest](../docs-archive/2026-06-28-docs-cleanout/MANIFEST.md) — relocation map for implemented plans/specs, composer evidence + UX-redesign, internal audits, agent prompts, and progress/velocity reports
-- [2026-05-19 cleanout manifest](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) — relocation map for archived release docs, audits, frozen architecture packs, generated review sidecars, and completed handovers
+Intentional point-in-time documents are retained through git history and, for
+maintainers, optional local ignored archives. They are not part of the active
+public docs index because they describe superseded implementation details.

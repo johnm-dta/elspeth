@@ -303,5 +303,5 @@ workspace" link) returns control to the regular session router.
 ## References
 
 * ADR: [docs/architecture/adr/022-shareable-reviews.md](../architecture/adr/022-shareable-reviews.md)
-* Phase 6A plan: [docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md](../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md)
-* Phase 6B plan (frontend): [docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md](../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md)
+* Historical Phase 6A/6B implementation plans are preserved in git history or
+  maintainer-local archives.

@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import (
     BatchStatus,
@@ -1585,7 +1585,10 @@ class TestRegisterArtifact:
     @pytest.mark.parametrize(
         ("path_or_uri", "match"),
         [
-            ("db://audit@postgresql://user:secret@db.example.test/audit", "raw URL credentials"),
+            (
+                "db://audit@postgresql://user:secret@db.example.test/audit",  # secret-scan: allow-this-line
+                "raw URL credentials",
+            ),
             ("https://api.example.test/hook?token=raw-secret", "sensitive query parameters"),
             (
                 "https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value",
@@ -1916,7 +1919,7 @@ class TestCallRecordingWithPayloadStore:
         store = _TrackingPayloadStore()
         _db, repo, _fac, _tok = _make_repo_with_token(payload_store=store)
 
-        with pytest.raises(LandscapeRecordError, match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write: IntegrityError"):
             repo.record_call(
                 "missing-state",
                 0,
@@ -1933,7 +1936,7 @@ class TestCallRecordingWithPayloadStore:
         store = _TrackingPayloadStore()
         _db, repo, _fac, _tok = _make_repo_with_token(payload_store=store)
 
-        with pytest.raises(LandscapeRecordError, match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write: IntegrityError"):
             repo.record_operation_call(
                 "missing-operation",
                 CallType.HTTP,
@@ -1950,7 +1953,7 @@ class TestCallRecordingWithPayloadStore:
         _db, repo, _fac, tok = _make_repo_with_token(payload_store=store)
         state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
 
-        with pytest.raises(LandscapeRecordError, match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match=r"requires existing state_id=.*missing-edge"):
             repo.record_routing_event(
                 state.state_id,
                 "missing-edge",
@@ -1974,7 +1977,7 @@ class TestCallRecordingWithPayloadStore:
             edge_id="edge-a",
         )
 
-        with pytest.raises((LandscapeRecordError, SQLAlchemyError), match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match=r"requires existing state_id=.*missing-edge"):
             repo.record_routing_events(
                 state.state_id,
                 [

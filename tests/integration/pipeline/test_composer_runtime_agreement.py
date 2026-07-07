@@ -3313,13 +3313,18 @@ class TestComposerRuntimeBlobInlineAgreement:
     @staticmethod
     def _pipeline_yaml(blob_id: UUID, sha256: str) -> str:
         return f"""
-source:
-  plugin: csv
-  options:
-    path: input.csv
+sources:
+  source:
+    plugin: csv
+    on_success: classify_in
+    options:
+      path: input.csv
 transforms:
   - name: classify
     plugin: llm
+    input: classify_in
+    on_success: results
+    on_error: results
     options:
       prompt_template:
         blob_ref: {blob_id}
@@ -3328,6 +3333,7 @@ transforms:
 sinks:
   results:
     plugin: json
+    on_write_failure: discard
     options:
       path: output.jsonl
 """
@@ -3380,7 +3386,7 @@ sinks:
         assert any(error.component_id == "classify" and error.component_type == "transform" for error in result.errors)
 
     @patch("elspeth.web.execution.service.Orchestrator")
-    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.load_settings_from_config_dict")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
@@ -3414,7 +3420,7 @@ sinks:
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
 
-    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.load_settings_from_config_dict")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_records_audit_hash_before_settings_load(
@@ -3452,11 +3458,12 @@ sinks:
 
         session_service.record_blob_inline_resolutions_hook = record_blob_inline_resolutions
 
-        def stop_after_audit(yaml_text: str, *, expand_env_vars: bool = True) -> None:
+        def stop_after_audit(config_dict: dict[str, Any], *, expand_env_vars: bool = True) -> None:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
             # Web-authored YAML must never expand host ${VAR} placeholders.
             assert expand_env_vars is False
-            assert "You are an audited prompt." in yaml_text
+            prompt_template = config_dict["transforms"][0]["options"]["prompt_template"]
+            assert prompt_template == "You are an audited prompt."
             raise RuntimeError("stop after inline audit")
 
         mock_load.side_effect = stop_after_audit

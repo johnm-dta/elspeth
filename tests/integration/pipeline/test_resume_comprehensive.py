@@ -65,6 +65,12 @@ def _runtime_val_manifest_json() -> str:
     return canonical_json(build_runtime_val_manifest())
 
 
+def _finalize_manual_graph(graph: ExecutionGraph, *, pipeline_nodes: list[NodeID] | None = None) -> None:
+    """Populate traversal metadata that production graph construction derives."""
+    graph.set_pipeline_nodes(list(pipeline_nodes or ()))
+    graph.set_node_step_map(graph.build_step_map())
+
+
 def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
     """Build a FIXED SchemaContract; return (audit_record_json, version_hash)."""
     from elspeth.contracts.contract_records import ContractAuditRecord
@@ -144,6 +150,7 @@ def _build_two_source_failed_run(
     graph.add_edge("source-refunds", "sink", label="continue")
     graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
     graph.set_transform_id_map({})
+    _finalize_manual_graph(graph)
 
     with db.engine.begin() as conn:
         conn.execute(
@@ -608,6 +615,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -703,6 +711,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -859,6 +868,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -1110,6 +1120,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1346,6 +1357,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1576,6 +1588,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1805,6 +1818,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -2012,6 +2026,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # CRITICAL: Must crash with clear error, not silently degrade to str
         with pytest.raises(AuditIntegrityError, match=r"unsupported type 'geo-point'"):
@@ -2146,6 +2161,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Pre-write the output file header so any append-mode interaction
         # is consistent (no remaining rows will actually be written; this
@@ -2329,6 +2345,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Pre-write the output file header so any append-mode interaction
         # is consistent (no remaining rows will be processed; this is the
@@ -2640,6 +2657,7 @@ class TestMultiSourceResumeContractDispatch:
         graph.add_edge("source-only", "sink", label="continue")
         graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         graph.set_transform_id_map({})
+        _finalize_manual_graph(graph)
 
         source_schema_json = json.dumps({"properties": {"id": {"type": "integer"}}, "required": ["id"]})
 

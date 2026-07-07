@@ -12,6 +12,7 @@ would cause transforms to execute out of order or produce corrupt audit trails.
 
 from __future__ import annotations
 
+import keyword
 from typing import Literal
 
 import networkx as nx
@@ -459,13 +460,9 @@ class TestGraphConsistencyProperties:
 
 
 # Strategies for generating field sets
-# Use ASCII letters only - schema validation requires valid Python identifiers
-# that can be expressed in config files (stricter than Python's isidentifier())
-ascii_field_names = st.text(
-    min_size=1,
-    max_size=10,
-    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-)
+# Use ASCII identifiers only - schema validation rejects Python keywords and
+# requires names that can be expressed in config files.
+ascii_field_names = st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,10}", fullmatch=True).filter(lambda s: not keyword.iskeyword(s))
 
 field_sets = st.frozensets(ascii_field_names, min_size=0, max_size=5)
 
@@ -585,17 +582,17 @@ class TestGuaranteedFieldsProperties:
 
     @given(
         common_fields=st.frozensets(
-            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            ascii_field_names,
             min_size=1,
             max_size=3,
         ),
         branch_a_only=st.frozensets(
-            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            ascii_field_names,
             min_size=0,
             max_size=2,
         ),
         branch_b_only=st.frozensets(
-            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            ascii_field_names,
             min_size=0,
             max_size=2,
         ),
@@ -672,17 +669,17 @@ class TestGuaranteedFieldsProperties:
 
     @given(
         common_fields=st.frozensets(
-            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            ascii_field_names,
             min_size=0,
             max_size=3,
         ),
         branch_a_only=st.frozensets(
-            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            ascii_field_names,
             min_size=0,
             max_size=2,
         ),
         branch_b_only=st.frozensets(
-            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            ascii_field_names,
             min_size=0,
             max_size=2,
         ),

@@ -25,6 +25,7 @@ or produce incorrect audit trails.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -190,6 +191,10 @@ def make_mock_executor(clock: MockClock | None = None) -> _TestCoalesceExecutor:
         step_resolver=step_resolver,
         clock=clock or MockClock(start=0.0),
         data_flow=data_flow,
+        barrier_restore_reads=SimpleNamespace(
+            get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+            has_completed_row_for_node=execution.has_completed_row_for_node,
+        ),
     )
 
 

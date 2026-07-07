@@ -1457,7 +1457,7 @@ class ZeroEmissionSuccessContractViolation(PluginContractViolation, AuditEvidenc
     def to_audit_dict(self) -> dict[str, Any]:
         return {
             "exception_type": "ZeroEmissionSuccessContractViolation",
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
             "transform": self.transform,
             "transform_node_id": self.transform_node_id,
             "run_id": self.run_id,
@@ -1601,7 +1601,7 @@ class PassThroughContractViolation(DeclarationContractViolation):
         """
         return {
             "exception_type": "PassThroughContractViolation",
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
             "transform": self.transform,
             "transform_node_id": self.transform_node_id,
             "run_id": self.run_id,

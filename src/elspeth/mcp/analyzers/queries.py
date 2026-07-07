@@ -17,7 +17,7 @@ from elspeth.contracts import NodeStateStatus
 from elspeth.contracts.coalesce_metadata import collision_value_fingerprint as _fingerprint_collision_value
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
-from elspeth.core.landscape.formatters import dataclass_to_dict, serialize_datetime
+from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
 from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
     OPERATION_STATUS_VALUES,

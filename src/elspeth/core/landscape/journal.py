@@ -44,7 +44,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from elspeth.contracts.payload_store import IntegrityError, PayloadNotFoundError
 from elspeth.core.landscape._helpers import now
-from elspeth.core.landscape.formatters import serialize_datetime
+from elspeth.core.landscape.serialization import serialize_datetime
 from elspeth.core.payload_store import FilesystemPayloadStore
 
 logger = structlog.get_logger(__name__)

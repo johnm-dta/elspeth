@@ -696,11 +696,11 @@ def explain(
     from elspeth.cli_helpers import resolve_database_url, resolve_run_id
     from elspeth.core.landscape import (
         LandscapeDB,
-        LineageTextFormatter,
-        dataclass_to_dict,
     )
     from elspeth.core.landscape import explain as explain_lineage
     from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.core.landscape.lineage_text import LineageTextFormatter
+    from elspeth.core.landscape.serialization import dataclass_to_dict
 
     if database is None:
         message = "--database is required for explain."

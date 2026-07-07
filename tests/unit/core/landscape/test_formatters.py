@@ -17,6 +17,22 @@ from elspeth.core.landscape.formatters import (
     dataclass_to_dict,
     serialize_datetime,
 )
+from elspeth.core.landscape.lineage_text import LineageTextFormatter
+from elspeth.core.landscape.serialization import dataclass_to_dict as serialization_dataclass_to_dict
+from elspeth.core.landscape.serialization import serialize_datetime as serialization_serialize_datetime
+
+
+class TestFormatterBoundaries:
+    """Import homes for serialization, export formatting, and lineage text."""
+
+    def test_serialization_helpers_live_in_serialization_module(self) -> None:
+        assert serialization_serialize_datetime is serialize_datetime
+        assert serialization_dataclass_to_dict is dataclass_to_dict
+
+    def test_lineage_text_formatter_lives_next_to_cli_presentation(self) -> None:
+        from elspeth.core.landscape.formatters import LineageTextFormatter as compatibility_formatter
+
+        assert compatibility_formatter is LineageTextFormatter
 
 
 class TestSerializeDatetime:

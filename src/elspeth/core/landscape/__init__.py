@@ -61,11 +61,9 @@ from elspeth.core.landscape.factory import LandscapeReadRepositories, LandscapeW
 from elspeth.core.landscape.formatters import (
     CSVFormatter,
     JSONFormatter,
-    LineageTextFormatter,
-    dataclass_to_dict,
-    serialize_datetime,
 )
 from elspeth.core.landscape.lineage import LineageResult, explain
+from elspeth.core.landscape.lineage_text import LineageTextFormatter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.reproducibility import (
     compute_grade,
@@ -73,6 +71,7 @@ from elspeth.core.landscape.reproducibility import (
 )
 from elspeth.core.landscape.row_data import CallDataResult, CallDataState, RowDataResult, RowDataState
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
 from elspeth.core.landscape.write_repository import LandscapeWriteRepository
 
 __all__ = [

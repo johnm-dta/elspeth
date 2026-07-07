@@ -44,6 +44,7 @@ from elspeth.web.composer.tools import (
     _sync_get_blob_by_storage_path,
 )
 from elspeth.web.composer.yaml_generator import generate_public_yaml
+from elspeth.web.paths import allowed_source_directories, resolve_data_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,14 +144,31 @@ def handle_step_1_source(
     # the absolute path off the wire) before committing, so the pipeline can read
     # the blob. No-op for non-sentinel paths.
     resolved = _resolve_blob_ref_path(resolved, session_engine=session_engine, session_id=session_id)
+    source_path = resolved.options.get("path")
+    blob: Mapping[str, Any] | None = None
+    if source_path is not None and session_engine is not None and session_id is not None:
+        blob = _sync_get_blob_by_storage_path(session_engine, str(source_path), session_id)
+
+    observed_columns = resolved.observed_columns
+    schema_columns: tuple[str, ...] = ()
+    if not observed_columns and blob is not None:
+        observed_columns = _observed_columns_from_blob(blob)
+        schema_columns = observed_columns
+    if not observed_columns:
+        observed_columns = _observed_columns_from_allowed_path(resolved.options, data_dir)
+        schema_columns = observed_columns
+
+    commit_options = _source_options_with_guaranteed_fields(resolved.options, schema_columns)
+    commit_resolved = dataclasses.replace(resolved, options=commit_options, observed_columns=observed_columns)
+
     args = {
-        "plugin": resolved.plugin,
-        "options": dict(resolved.options),
+        "plugin": commit_resolved.plugin,
+        "options": dict(commit_resolved.options),
         "on_success": "main",
         # The composer (chat resolution) owns this routing choice; commit what it
         # picked. Manual / schema_form-submission resolved values carry the
         # "discard" default, so this remains "discard" for those paths.
-        "on_validation_failure": resolved.on_validation_failure,
+        "on_validation_failure": commit_resolved.on_validation_failure,
     }
 
     tool_result = _execute_set_source(args, state, ToolContext(catalog=catalog, data_dir=data_dir))
@@ -165,33 +183,60 @@ def handle_step_1_source(
     # Attempt to enrich step_1_result with blob_ref when the source path
     # points to an uploaded blob.  This is the authoritative lookup —
     # we query by storage_path rather than parsing the filename.
-    enriched_resolved = resolved
-    source_path = resolved.options.get("path")
-    if source_path is not None and session_engine is not None and session_id is not None:
-        blob = _sync_get_blob_by_storage_path(session_engine, str(source_path), session_id)
-        if blob is not None:
-            # Inject blob_ref into the SourceResolved snapshot as an
-            # authoritative overlay. The original options are Tier-3
-            # (user-submitted SchemaForm values); we add blob_ref from our own DB
-            # (Tier 1 source), so no .get() or coercion needed here.
-            enriched_options: dict[str, Any] = {**dict(resolved.options), "blob_ref": blob["id"]}
-            # observed_columns is a FACT about the data. The LLM's resolve_source
-            # sometimes returns observed_columns=[]; downstream transform-chain
-            # building keys on observed_columns (the `url` signal), so an empty
-            # list silently routes the canonical web-scrape tutorial to a
-            # degenerate chain. When empty, backfill from the blob content
-            # authoritatively (same overlay rationale as blob_ref). Keep non-empty
-            # LLM columns — its full-content view can be richer than the bounded
-            # inspect scan. This is the commit convergence point, so both the
-            # chat-resolve and schema_form re-submit paths get the backfill.
-            observed_columns = resolved.observed_columns or _observed_columns_from_blob(blob)
-            enriched_resolved = dataclasses.replace(resolved, options=enriched_options, observed_columns=observed_columns)
+    enriched_resolved = commit_resolved
+    if blob is not None:
+        # Inject blob_ref into the SourceResolved snapshot as an authoritative
+        # overlay. The original options are Tier-3 (user-submitted SchemaForm
+        # values); we add blob_ref from our own DB (Tier 1 source), so no .get()
+        # or coercion needed here.
+        enriched_options: dict[str, Any] = {**dict(commit_resolved.options), "blob_ref": blob["id"]}
+        enriched_resolved = dataclasses.replace(commit_resolved, options=enriched_options)
 
     return StepHandlerResult(
         state=tool_result.updated_state,
         session=dataclasses.replace(session, step_1_result=enriched_resolved),
         tool_result=tool_result,
     )
+
+
+def _observed_columns_from_allowed_path(options: Mapping[str, Any], data_dir: str | None) -> tuple[str, ...]:
+    """Derive observed columns from a committed local source path, or ``()``.
+
+    Validation errors remain owned by ``_execute_set_source``. This enrichment
+    mirrors the source path allowlist before reading anything, then degrades
+    unreadable files to no enrichment.
+    """
+    if data_dir is None:
+        return ()
+    raw_path = options.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return ()
+    try:
+        resolved_path = resolve_data_path(raw_path, data_dir)
+    except (OSError, RuntimeError, ValueError):
+        return ()
+    if not any(resolved_path.is_relative_to(directory) for directory in allowed_source_directories(data_dir)):
+        return ()
+    return observed_columns_from_path(
+        path=resolved_path,
+        filename=resolved_path.name,
+        mime_type="",
+    )
+
+
+def _source_options_with_guaranteed_fields(options: Mapping[str, Any], observed_columns: tuple[str, ...]) -> dict[str, Any]:
+    """Publish observed source fields into the committed schema contract."""
+    enriched = dict(options)
+    if not observed_columns:
+        return enriched
+    raw_schema = enriched.get("schema")
+    if not isinstance(raw_schema, Mapping):
+        return enriched
+    schema = dict(raw_schema)
+    if not schema.get("guaranteed_fields"):
+        schema["guaranteed_fields"] = list(observed_columns)
+    enriched["schema"] = schema
+    return enriched
 
 
 def _observed_columns_from_blob(blob: Mapping[str, Any]) -> tuple[str, ...]:
@@ -320,10 +365,11 @@ def handle_step_3_chain_accept(
 
     Reconstructs the full pipeline spec from the existing single guided source
     + state.outputs and the new transforms from the proposal.
-    Source.on_success is rewired to "chain_in" so the chain sits between source
-    and sinks; the last transform produces "main" so outputs (which were
-    committed against the source's original "main" label in Step 2) remain
-    reachable.
+    When the proposal has transforms, Source.on_success is rewired to
+    "chain_in" so the chain sits between source and sinks; the last transform
+    produces "main" so outputs (which were committed against the source's
+    original "main" label in Step 2) remain reachable. An empty proposal is a
+    valid pass-through: source continues to produce "main" directly.
 
     Wiring for N transforms:
         source.on_success="chain_in"
@@ -342,7 +388,7 @@ def handle_step_3_chain_accept(
             at least one output (dispatcher invariant — Steps 1 and 2 must
             have completed before Step 3).
         session: Current guided session.
-        proposal: Chain proposal with one or more transform steps.
+        proposal: Chain proposal with zero or more transform steps.
         catalog: Plugin catalogue service.
         data_dir: Optional data directory for blob path validation.
         session_engine: Optional session DB engine (forwarded to
@@ -350,12 +396,10 @@ def handle_step_3_chain_accept(
         session_id: Optional session ID (forwarded with session_engine).
 
     Raises:
-        InvariantError: if the proposal has zero steps, or if state has no source
-            or no outputs (handler invariant violation — dispatcher guarantees
-            Step 1 and Step 2 have committed before reaching Step 3).
+        InvariantError: if state has no source or no outputs (handler invariant
+            violation — dispatcher guarantees Step 1 and Step 2 have committed
+            before reaching Step 3).
     """
-    if not proposal.steps:
-        raise InvariantError("step 3 proposal had zero steps; refusing empty commit")
     if len(state.sources) != 1:
         raise InvariantError(f"step 3 requires exactly one committed source, got {len(state.sources)}; dispatcher bug")
     if not state.outputs:
@@ -383,7 +427,7 @@ def handle_step_3_chain_accept(
         "sources": {
             source_name: {
                 "plugin": source.plugin,
-                "on_success": "chain_in",  # rewired; was "main" pre-Step-3
+                "on_success": "chain_in" if node_args else "main",
                 "options": dict(source.options),
                 "on_validation_failure": source.on_validation_failure,
             }

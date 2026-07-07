@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
@@ -158,3 +161,125 @@ class TestWebCommandAuthBridging:
 
         assert result.exit_code == 0
         assert captured_env["auth"] == "local"
+
+
+def _auth_user_row(auth_db: Path, username: str) -> tuple[str, str | None, int] | None:
+    with closing(sqlite3.connect(str(auth_db))) as conn:
+        row = conn.execute(
+            "SELECT display_name, email, email_verified FROM users WHERE user_id = ?",
+            (username,),
+        ).fetchone()
+    return row
+
+
+class TestComposerUsersCommand:
+    """Tests for local composer user management commands."""
+
+    def test_add_user_creates_verified_local_auth_user(self, tmp_path: Path) -> None:
+        auth_db = tmp_path / "auth.db"
+
+        result = runner.invoke(
+            app,
+            [
+                "--no-dotenv",
+                "composer",
+                "users",
+                "add",
+                "alice",
+                "--password",
+                "password123",
+                "--display-name",
+                "Alice Smith",
+                "--email",
+                "alice@example.com",
+                "--auth-db",
+                str(auth_db),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "Added composer user alice" in result.output
+        assert _auth_user_row(auth_db, "alice") == (
+            "Alice Smith",
+            "alice@example.com",
+            1,
+        )
+
+    def test_remove_user_deletes_local_auth_user(self, tmp_path: Path) -> None:
+        auth_db = tmp_path / "auth.db"
+        add_result = runner.invoke(
+            app,
+            [
+                "--no-dotenv",
+                "composer",
+                "users",
+                "add",
+                "alice",
+                "--password",
+                "password123",
+                "--auth-db",
+                str(auth_db),
+            ],
+        )
+        assert add_result.exit_code == 0
+
+        result = runner.invoke(
+            app,
+            [
+                "--no-dotenv",
+                "composer",
+                "users",
+                "remove",
+                "alice",
+                "--auth-db",
+                str(auth_db),
+                "--yes",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "Removed composer user alice" in result.output
+        assert _auth_user_row(auth_db, "alice") is None
+
+    def test_remove_missing_auth_db_does_not_create_new_database(self, tmp_path: Path) -> None:
+        auth_db = tmp_path / "missing" / "auth.db"
+
+        result = runner.invoke(
+            app,
+            [
+                "--no-dotenv",
+                "composer",
+                "users",
+                "remove",
+                "alice",
+                "--auth-db",
+                str(auth_db),
+                "--yes",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "auth database not found" in result.output
+        assert not auth_db.exists()
+
+    def test_add_unverified_option_is_not_supported(self, tmp_path: Path) -> None:
+        auth_db = tmp_path / "auth.db"
+
+        result = runner.invoke(
+            app,
+            [
+                "--no-dotenv",
+                "composer",
+                "users",
+                "add",
+                "alice",
+                "--password",
+                "password123",
+                "--auth-db",
+                str(auth_db),
+                "--unverified",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert not auth_db.exists()

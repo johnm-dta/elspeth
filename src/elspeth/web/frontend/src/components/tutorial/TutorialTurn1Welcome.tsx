@@ -9,11 +9,15 @@ import {
 interface TutorialTurn1WelcomeProps {
   onStart: () => void;
   onSkip: () => void;
+  startDisabled?: boolean;
+  startDisabledReason?: string | null;
 }
 
 export function TutorialTurn1Welcome({
   onStart,
   onSkip,
+  startDisabled = false,
+  startDisabledReason = null,
 }: TutorialTurn1WelcomeProps): JSX.Element {
   return (
     <section className="tutorial-turn" aria-labelledby="tutorial-welcome-title">
@@ -34,8 +38,18 @@ export function TutorialTurn1Welcome({
       <AlertBanner tone="info" className="tutorial-disclosure tutorial-preamble">
         {TUTORIAL_RUN_PREAMBLE}
       </AlertBanner>
+      {startDisabledReason !== null && (
+        <AlertBanner className="tutorial-disclosure">
+          {startDisabledReason}
+        </AlertBanner>
+      )}
       <div className="tutorial-actions">
-        <button type="button" className="btn btn-primary" onClick={onStart}>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={onStart}
+          disabled={startDisabled}
+        >
           {TURN_1_PRIMARY_BUTTON}
         </button>
         <button

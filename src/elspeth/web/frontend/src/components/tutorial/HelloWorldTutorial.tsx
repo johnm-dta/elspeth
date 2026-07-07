@@ -21,6 +21,11 @@ import {
 } from "./tutorialMachine";
 import { HELLO_WORLD_PENDING_SESSION_TITLE } from "./copy";
 
+interface HelloWorldTutorialProps {
+  composerAvailable?: boolean;
+  composerUnavailableReason?: string | null;
+}
+
 /**
  * Reducer lazy-initialiser: reconstruct the mount state from the
  * server-persisted resume fields (elspeth-918f4434b3). App.tsx only mounts
@@ -37,7 +42,10 @@ function initTutorialStateFromPreferences(): ReturnType<typeof resumeTutorialSta
   });
 }
 
-export function HelloWorldTutorial(): JSX.Element {
+export function HelloWorldTutorial({
+  composerAvailable = true,
+  composerUnavailableReason = null,
+}: HelloWorldTutorialProps): JSX.Element {
   const [state, dispatch] = useReducer(
     tutorialReducer,
     null,
@@ -187,6 +195,10 @@ export function HelloWorldTutorial(): JSX.Element {
   // POST /guided/start so the backend orphan-cleanup scan (which matches the
   // exact pending title) catches sessions abandoned mid-tutorial.
   const onStart = async (): Promise<void> => {
+    if (!composerAvailable) {
+      setStartError(tutorialComposerUnavailableMessage(composerUnavailableReason));
+      return;
+    }
     setStarting(true);
     setStartError(null);
     try {
@@ -304,7 +316,16 @@ export function HelloWorldTutorial(): JSX.Element {
               {startError}
             </p>
           )}
-          <TutorialTurn1Welcome onStart={() => void onStart()} onSkip={onSkip} />
+          <TutorialTurn1Welcome
+            onStart={() => void onStart()}
+            onSkip={onSkip}
+            startDisabled={!composerAvailable}
+            startDisabledReason={
+              composerAvailable
+                ? null
+                : tutorialComposerUnavailableMessage(composerUnavailableReason)
+            }
+          />
         </>
       )}
       {state.step === "guided" && sessionId !== null && (
@@ -407,4 +428,8 @@ function formatError(err: unknown): string {
     return err.message;
   }
   return "The tutorial session could not be created.";
+}
+
+function tutorialComposerUnavailableMessage(reason: string | null): string {
+  return reason ?? "The guided tutorial needs the composer model, but it is not available. Configure the model provider or skip the tutorial for now.";
 }

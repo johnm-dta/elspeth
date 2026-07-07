@@ -1478,21 +1478,51 @@ export {
   fetchAuditReadinessExplain,
 } from "./auditReadiness";
 
+export interface AuthTokenResponse {
+  access_token: string;
+  token_type?: string;
+}
+
+export type RegisterResponse =
+  | AuthTokenResponse
+  | { status: "verification_required"; email: string };
+
 /**
- * Register a new local-auth account (only available when the backend's
- * registration_mode is "open" — see AuthConfig.registration_mode).
- * The backend auto-logs the new account in and returns a JWT, so no
- * separate login round-trip is needed. display_name defaults to the
- * username; the minimal sign-up form does not collect a separate one.
+ * Register a new local-auth account. Open registration returns a JWT and
+ * email-verified registration returns a pending-verification response.
+ * display_name defaults to the username; the minimal sign-up form does not
+ * collect a separate one.
  */
 export async function register(
   username: string,
   password: string,
-): Promise<{ access_token: string }> {
+  email?: string,
+): Promise<RegisterResponse> {
+  const body: {
+    username: string;
+    password: string;
+    display_name: string;
+    email?: string;
+  } = { username, password, display_name: username };
+  if (email !== undefined) {
+    body.email = email;
+  }
   const response = await fetch("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, display_name: username }),
+    body: JSON.stringify(body),
   });
-  return parseResponse<{ access_token: string }>(response);
+  return parseResponse<RegisterResponse>(response);
+}
+
+/**
+ * Consume an email-verification token and return a normal local-auth JWT.
+ */
+export async function verifyEmail(token: string): Promise<AuthTokenResponse> {
+  const response = await fetch("/api/auth/verify-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  return parseResponse<AuthTokenResponse>(response, { logoutOnUnauthorized: false });
 }

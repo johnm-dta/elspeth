@@ -250,6 +250,32 @@ class TestStep1Advance:
         assert cs["composer_meta"]["guided_session"]["step_1_result"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
         assert storage_path not in json.dumps(body)
 
+    def test_schema_form_path_allowlist_failure_is_actionable_without_path_leak(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+        rejected_path = "/tmp/not-under-elspeth-blobs/rows.csv"
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {"path": rejected_path, "schema": {"mode": "observed"}},
+                    "observed_columns": ["line"],
+                    "sample_rows": [{"line": "hello"}],
+                }
+            },
+        )
+
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert (
+            detail
+            == "Source path is outside the allowed upload area. Upload the file through the composer or use a path under the configured blobs directory."
+        )
+        assert rejected_path not in detail
+        assert "/tmp" not in detail
+
     def test_step_2_single_select_lists_sink_plugins(self, composer_test_client: TestClient) -> None:
         """The step-2 initial turn is single_select listing registered sink plugins."""
         session_id = _create_session(composer_test_client)

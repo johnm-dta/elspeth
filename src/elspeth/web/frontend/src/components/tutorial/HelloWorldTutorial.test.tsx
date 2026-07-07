@@ -216,6 +216,26 @@ describe("HelloWorldTutorial staged flow", () => {
     ).toBeInTheDocument();
   });
 
+  it("preflights composer availability before creating a guided tutorial session", async () => {
+    const api = await import("@/api/client");
+    render(
+      <HelloWorldTutorial
+        composerAvailable={false}
+        composerUnavailableReason="Composer model openrouter/openai/gpt-4o is unavailable: missing OPENROUTER_API_KEY."
+      />,
+    );
+
+    const start = screen.getByRole("button", { name: "Let's go" });
+    expect(start).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "missing OPENROUTER_API_KEY",
+    );
+    expect(
+      screen.getByRole("button", { name: "Skip the tutorial" }),
+    ).toBeEnabled();
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
   // Relocated from the old big-bang test: TutorialTurn4Run dedups the run
   // request under StrictMode's double-invoke. This is the only coverage of
   // that behaviour, so it rides along with HelloWorldTutorial's suite rather

@@ -6,6 +6,8 @@ and validation. The SQLite database is created at db_path on first use.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -20,6 +22,9 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
 from elspeth.web.validation import has_visible_content
 
+_EMAIL_VERIFICATION_TOKEN_BYTES = 32
+_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS = 24 * 60 * 60
+
 
 def _required_visible_string_claim(payload: dict[str, object], claim_name: str) -> str:
     """Extract a required local-JWT claim as a visible string."""
@@ -30,6 +35,10 @@ def _required_visible_string_claim(payload: dict[str, object], claim_name: str) 
     if not isinstance(value, str) or not has_visible_content(value):
         raise AuthenticationError("Invalid token")
     return value
+
+
+def _verification_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 class LocalAuthProvider:
@@ -80,7 +89,23 @@ class LocalAuthProvider:
                     user_id TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
                     display_name TEXT NOT NULL,
-                    email TEXT
+                    email TEXT,
+                    email_verified INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "email_verified" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS email_verification_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
                 """
             )
@@ -91,6 +116,8 @@ class LocalAuthProvider:
         password: str,
         display_name: str,
         email: str | None = None,
+        *,
+        email_verified: bool = True,
     ) -> None:
         """Create a new user with a bcrypt-hashed password.
 
@@ -103,11 +130,103 @@ class LocalAuthProvider:
         with self._connect() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO users (user_id, password_hash, display_name, email) VALUES (?, ?, ?, ?)",
-                    (user_id, password_hash, display_name, email),
+                    "INSERT INTO users (user_id, password_hash, display_name, email, email_verified) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        password_hash,
+                        display_name,
+                        email,
+                        1 if email_verified else 0,
+                    ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"User already exists: {user_id}") from exc
+
+    def delete_user(self, user_id: str) -> bool:
+        """Delete a local auth user and any pending verification tokens."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM email_verification_tokens WHERE user_id = ?",
+                (user_id,),
+            )
+            cursor = conn.execute(
+                "DELETE FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            return cursor.rowcount > 0
+
+    def create_email_verification_token(
+        self,
+        user_id: str,
+        *,
+        ttl_seconds: int = _EMAIL_VERIFICATION_TOKEN_TTL_SECONDS,
+    ) -> str:
+        """Create a one-use verification token for an unverified local user."""
+        now = int(time.time())
+        token = secrets.token_urlsafe(_EMAIL_VERIFICATION_TOKEN_BYTES)
+        token_hash = _verification_token_hash(token)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT email_verified FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"User not found: {user_id}")
+            if row[0]:
+                raise ValueError(f"User already verified: {user_id}")
+            conn.execute(
+                "DELETE FROM email_verification_tokens WHERE user_id = ? AND used_at IS NULL",
+                (user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO email_verification_tokens
+                    (token_hash, user_id, created_at, expires_at, used_at)
+                VALUES (?, ?, ?, ?, NULL)
+                """,
+                (token_hash, user_id, now, now + ttl_seconds),
+            )
+        return token
+
+    def verify_email_token(self, token: str) -> UserIdentity:
+        """Consume a verification token and activate the corresponding user."""
+        token_hash = _verification_token_hash(token)
+        now = int(time.time())
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id, expires_at, used_at
+                FROM email_verification_tokens
+                WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                raise AuthenticationError("Invalid email verification token")
+            user_id, expires_at, used_at = row
+            if used_at is not None:
+                raise AuthenticationError("Email verification token already used")
+            if expires_at < now:
+                raise AuthenticationError("Email verification token expired")
+            user_row = conn.execute(
+                "SELECT 1 FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                raise AuthenticationError("User not found")
+            conn.execute(
+                "UPDATE users SET email_verified = 1 WHERE user_id = ?",
+                (user_id,),
+            )
+            conn.execute(
+                "UPDATE email_verification_tokens SET used_at = ? WHERE token_hash = ?",
+                (now, token_hash),
+            )
+        return UserIdentity(user_id=user_id, username=user_id)
+
+    def issue_token_for_user(self, user_id: str, username: str) -> str:
+        """Issue a local JWT for an already-authorized user."""
+        return self._issue_token(user_id, username)
 
     async def login(self, username: str, password: str) -> str:
         """Authenticate with username/password and return a JWT.
@@ -132,7 +251,7 @@ class LocalAuthProvider:
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT password_hash FROM users WHERE user_id = ?",
+                "SELECT password_hash, email_verified FROM users WHERE user_id = ?",
                 (username,),
             ).fetchone()
 
@@ -144,11 +263,18 @@ class LocalAuthProvider:
         if not bcrypt.checkpw(password.encode(), row[0].encode()):
             raise AuthenticationError("Invalid credentials")
 
+        if not row[1]:
+            raise AuthenticationError("Email verification required")
+
+        return self._issue_token(username, username)
+
+    def _issue_token(self, user_id: str, username: str, *, issued_at: int | None = None) -> str:
         now = int(time.time())
+        iat = now if issued_at is None else issued_at
         payload = {
-            "sub": username,
+            "sub": user_id,
             "username": username,
-            "iat": now,
+            "iat": iat,
             "exp": now + self._token_expiry_hours * 3600,
         }
         token: str = jwt.encode(payload, self._secret_key, algorithm="HS256")
@@ -184,22 +310,17 @@ class LocalAuthProvider:
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM users WHERE user_id = ?",
+                "SELECT email_verified FROM users WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
         if row is None:
             raise AuthenticationError("User not found")
+        if not row[0]:
+            raise AuthenticationError("Email verification required")
 
         # Carry forward the original iat so the chain age accumulates.
         # New logins get a fresh iat; refreshes preserve the original.
-        payload = {
-            "sub": user_id,
-            "username": username,
-            "iat": original_iat,
-            "exp": now + self._token_expiry_hours * 3600,
-        }
-        token: str = jwt.encode(payload, self._secret_key, algorithm="HS256")
-        return token
+        return self._issue_token(user_id, username, issued_at=original_iat)
 
     async def authenticate(self, token: str) -> UserIdentity:
         """Validate a JWT and return the authenticated identity.
@@ -226,10 +347,10 @@ class LocalAuthProvider:
         )
 
     def _user_exists(self, user_id: str) -> bool:
-        """Check if a user still exists in auth.db (sync, called via to_thread)."""
+        """Check if a verified user still exists in auth.db."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM users WHERE user_id = ?",
+                "SELECT 1 FROM users WHERE user_id = ? AND email_verified = 1",
                 (user_id,),
             ).fetchone()
             return row is not None

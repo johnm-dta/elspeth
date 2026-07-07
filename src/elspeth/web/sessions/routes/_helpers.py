@@ -227,6 +227,21 @@ slog = structlog.get_logger()
 
 _REDACTED_SECRET_DETAIL = "<redacted-secret>"
 _PROVIDER_DETAIL_REDACTED = "Provider detail redacted because it may contain secrets."
+_GUIDED_SOURCE_PATH_ALLOWLIST_DETAIL = (
+    "Source path is outside the allowed upload area. "
+    "Upload the file through the composer or use a path under the configured blobs directory."
+)
+
+
+def _guided_source_commit_failure_detail(tool_result: Any) -> str:
+    raw_data = getattr(tool_result, "data", None)
+    if isinstance(raw_data, Mapping):
+        error = raw_data.get(_DATA_ERROR_KEY)
+        if isinstance(error, str) and error.startswith("Path violation (S2):") and "Source file paths" in error:
+            return _GUIDED_SOURCE_PATH_ALLOWLIST_DETAIL
+    return "Step 1 source commit failed"
+
+
 _MAX_PROVIDER_DETAIL_CHARS = 1_000
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
 
@@ -2979,11 +2994,11 @@ async def _dispatch_guided_respond(
                 # Egress control (symmetric with /guided/chat): the raw tool_result
                 # repr dumps CompositionState — incl. inline-content source options
                 # that can carry Tier-3 row data — so it must NOT reach the HTTP body.
-                # Keep the 400 (respond is a deliberate, load-bearing accept); redact
-                # the detail to the generic step label.
+                # Keep the 400 (respond is a deliberate, load-bearing accept); only
+                # expose a sanitized category for source-path allowlist failures.
                 raise HTTPException(
                     status_code=400,
-                    detail="Step 1 source commit failed",
+                    detail=_guided_source_commit_failure_detail(handler_result.tool_result),
                 )
             state = handler_result.state
             # Advance step pointer to STEP_2.

@@ -9,15 +9,16 @@ import { Button, Input, AlertBanner, WordMark } from "../ui";
  *
  * Fetches GET /api/auth/config on mount to determine provider type:
  * - "local": renders a username/password form; when the backend's
- *   registration_mode is "open", also offers a "Create an account"
- *   view (username + password + confirm) that auto-logs the new
- *   account in via the token returned by POST /api/auth/register
+ *   registration_mode is "open" or "email_verified", also offers a
+ *   "Create an account" view. Open registration auto-logs the account in;
+ *   email-verified registration waits for the verification link.
  * - "oidc" or "entra": renders a "Sign in with SSO" button that
  *   redirects to config.authorization_endpoint (resolved from OIDC
  *   discovery by the backend)
  *
  * On return from an OIDC redirect, extracts the token from the URL
- * fragment or query parameter and calls loginWithToken().
+ * fragment or query parameter and calls loginWithToken(). On return from
+ * email verification, consumes ?verify_token=... and adopts the returned JWT.
  *
  * Failed sign-in attempts keep the username and clear only the
  * password (WCAG 3.3.7 Redundant Entry, elspeth-d49f8ad511); the
@@ -33,12 +34,14 @@ const REGISTER_ERROR_ID = "register-error";
 /** Which registration fields the current registration error is about. */
 interface RegisterErrorTargets {
   username: boolean;
+  email: boolean;
   password: boolean;
   confirm: boolean;
 }
 
 const NO_REGISTER_TARGETS: RegisterErrorTargets = {
   username: false,
+  email: false,
   password: false,
   confirm: false,
 };
@@ -59,6 +62,7 @@ const linkButtonStyle: CSSProperties = {
 export function LoginPage() {
   const { login, loginWithToken, loginError } = useAuth();
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -66,6 +70,10 @@ export function LoginPage() {
   const [configLoading, setConfigLoading] = useState(true);
   const [view, setView] = useState<"signin" | "register">("signin");
   const [registerError, setRegisterError] = useState<string | null>(null);
+  const [registerNotice, setRegisterNotice] = useState<string | null>(null);
+  const [verificationError, setVerificationError] = useState<string | null>(
+    null,
+  );
   const [registerErrorTargets, setRegisterErrorTargets] =
     useState<RegisterErrorTargets>(NO_REGISTER_TARGETS);
 
@@ -92,14 +100,28 @@ export function LoginPage() {
       });
   }, []);
 
-  // Handle OIDC callback: extract token from URL fragment or query parameter.
-  // Verifies the state nonce to prevent CSRF / session-fixation attacks (H2/H3).
+  // Handle auth callbacks: email verification token first, then OIDC token.
+  // OIDC verifies the state nonce to prevent CSRF / session-fixation attacks.
   useEffect(() => {
     const savedState = sessionStorage.getItem("oidc_state");
     sessionStorage.removeItem("oidc_state");
 
     const hash = window.location.hash;
     const params = new URLSearchParams(window.location.search);
+    const verificationToken = params.get("verify_token");
+
+    if (verificationToken) {
+      window.history.replaceState(null, "", window.location.pathname);
+      api
+        .verifyEmail(verificationToken)
+        .then(({ access_token }) => loginWithToken(access_token))
+        .catch(() => {
+          setVerificationError(
+            "Email verification failed. Please request a new link.",
+          );
+        });
+      return;
+    }
 
     // Check URL fragment first (implicit flow: #access_token=...)
     if (hash) {
@@ -132,6 +154,7 @@ export function LoginPage() {
     if (!username || !password) return;
 
     setIsSubmitting(true);
+    setVerificationError(null);
     const succeeded = await login(username, password);
     if (!succeeded) {
       // Keep the username (WCAG 3.3.7 Redundant Entry) — only the
@@ -143,27 +166,65 @@ export function LoginPage() {
 
   async function handleRegister(e: FormEvent) {
     e.preventDefault();
-    if (!username || !password || !confirmPassword) return;
+    const emailVerificationRequired =
+      authConfig?.registration_mode === "email_verified";
+    const trimmedEmail = email.trim();
+    if (
+      !username ||
+      !password ||
+      !confirmPassword ||
+      (emailVerificationRequired && !trimmedEmail)
+    ) {
+      return;
+    }
 
     if (password !== confirmPassword) {
       setRegisterError("Passwords do not match.");
-      setRegisterErrorTargets({ username: false, password: true, confirm: true });
+      setRegisterErrorTargets({
+        username: false,
+        email: false,
+        password: true,
+        confirm: true,
+      });
       return;
     }
 
     setIsSubmitting(true);
     setRegisterError(null);
+    setRegisterNotice(null);
+    setVerificationError(null);
     setRegisterErrorTargets(NO_REGISTER_TARGETS);
     try {
-      const { access_token } = await api.register(username, password);
-      // The backend auto-logs the new account in; adopting the returned
-      // token drops the user straight into the app.
-      await loginWithToken(access_token);
+      const result = emailVerificationRequired
+        ? await api.register(username, password, trimmedEmail)
+        : await api.register(username, password);
+      if ("access_token" in result) {
+        // The backend auto-logs open-registration accounts in; adopting the
+        // returned token drops the user straight into the app.
+        await loginWithToken(result.access_token);
+      } else {
+        setRegisterNotice(`Check ${result.email} for the verification link.`);
+        setPassword("");
+        setConfirmPassword("");
+      }
     } catch (err) {
       const apiErr = err as ApiError;
       if (apiErr.status === 409) {
         setRegisterError("That username is not available.");
-        setRegisterErrorTargets({ username: true, password: false, confirm: false });
+        setRegisterErrorTargets({
+          username: true,
+          email: false,
+          password: false,
+          confirm: false,
+        });
+      } else if (apiErr.status === 422 && emailVerificationRequired) {
+        setRegisterError("Enter an email address to verify this account.");
+        setRegisterErrorTargets({
+          username: false,
+          email: true,
+          password: false,
+          confirm: false,
+        });
       } else {
         setRegisterError("Registration failed. Please try again.");
         setRegisterErrorTargets(NO_REGISTER_TARGETS);
@@ -177,9 +238,12 @@ export function LoginPage() {
     setView(next);
     // Keep the username across the switch (it's the common field);
     // passwords and stale errors don't carry over.
+    setEmail("");
     setPassword("");
     setConfirmPassword("");
     setRegisterError(null);
+    setRegisterNotice(null);
+    setVerificationError(null);
     setRegisterErrorTargets(NO_REGISTER_TARGETS);
   }
 
@@ -220,13 +284,15 @@ export function LoginPage() {
 
   const isOidc =
     authConfig?.provider === "oidc" || authConfig?.provider === "entra";
-  // Registration is a local-auth capability; only advertise it when the
-  // backend's effective mode is "open" ("closed" and "email_verified"
-  // both render nothing — the endpoint would refuse the request).
-  const registrationOpen =
+  // Registration is a local-auth capability; email_verified creates a
+  // pending account and completes via the emailed verification link.
+  const registrationAvailable =
     authConfig?.provider === "local" &&
-    authConfig?.registration_mode === "open";
-  const showRegister = registrationOpen && view === "register";
+    (authConfig?.registration_mode === "open" ||
+      authConfig?.registration_mode === "email_verified");
+  const emailVerificationRequired =
+    authConfig?.registration_mode === "email_verified";
+  const showRegister = registrationAvailable && view === "register";
 
   return (
     <div
@@ -278,7 +344,7 @@ export function LoginPage() {
             </Button>
           </>
         ) : showRegister ? (
-          /* Local auth: registration form (registration_mode="open" only) */
+          /* Local auth: registration form */
           <form
             onSubmit={handleRegister}
             aria-label="Create an account"
@@ -299,6 +365,9 @@ export function LoginPage() {
                 {registerError}
               </AlertBanner>
             )}
+            {registerNotice && (
+              <AlertBanner tone="info">{registerNotice}</AlertBanner>
+            )}
 
             <Input
               label="Username"
@@ -313,6 +382,22 @@ export function LoginPage() {
                 registerErrorTargets.username ? REGISTER_ERROR_ID : undefined
               }
             />
+
+            {emailVerificationRequired && (
+              <Input
+                label="Email"
+                id="register-email"
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                aria-invalid={registerErrorTargets.email ? true : undefined}
+                aria-describedby={
+                  registerErrorTargets.email ? REGISTER_ERROR_ID : undefined
+                }
+              />
+            )}
 
             <Input
               label="Password"
@@ -377,6 +462,9 @@ export function LoginPage() {
                 {loginError}
               </AlertBanner>
             )}
+            {verificationError && (
+              <AlertBanner tone="error">{verificationError}</AlertBanner>
+            )}
             <form
               onSubmit={handleSubmit}
               style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}
@@ -418,7 +506,7 @@ export function LoginPage() {
                 {isSubmitting ? "Signing in…" : "Sign in"}
               </Button>
 
-              {registrationOpen && (
+              {registrationAvailable && (
                 <p
                   style={{
                     margin: 0,

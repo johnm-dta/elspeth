@@ -2,6 +2,7 @@
 
 POST /login is only available when auth_provider is "local".
 POST /register is only available when auth_provider is "local" and registration is open.
+POST /verify-email consumes a local-auth email verification token.
 POST /token re-issues a JWT from a valid existing token (local only).
 GET /config returns auth configuration for frontend discovery (unauthenticated).
 GET /me returns the full UserProfile for any auth provider.
@@ -9,13 +10,18 @@ GET /me returns the full UserProfile for any auth provider.
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import cast
+from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
 from elspeth.web.auth.local import LocalAuthProvider
@@ -65,12 +71,45 @@ class RegisterRequest(BaseModel):
             raise ValueError("must contain at least one visible character")
         return v
 
+    @field_validator("email")
+    @classmethod
+    def _email_must_be_deliverable_when_present(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        trimmed = v.strip()
+        if not has_visible_content(trimmed):
+            raise ValueError("must contain at least one visible character")
+        local, separator, domain = trimmed.partition("@")
+        if separator != "@" or not local or not domain:
+            raise ValueError("must be a valid email address")
+        return trimmed
+
+
+class VerifyEmailRequest(BaseModel):
+    """Request body for POST /api/auth/verify-email."""
+
+    token: str
+
+    @field_validator("token")
+    @classmethod
+    def _token_must_not_be_blank(cls, v: str) -> str:
+        if not has_visible_content(v):
+            raise ValueError("must contain at least one visible character")
+        return v
+
 
 class TokenResponse(_StrictResponse):
     """Response for login and token refresh."""
 
     access_token: str
     token_type: str = "bearer"
+
+
+class RegistrationPendingResponse(_StrictResponse):
+    """Response for email-verified registration before token verification."""
+
+    status: str = "verification_required"
+    email: str
 
 
 class UserProfileResponse(_StrictResponse):
@@ -101,6 +140,67 @@ def _mark_token_response_uncacheable(response: Response) -> None:
 
 def _auth_audit_recorder(request: Request) -> AuthAuditWriter:
     return cast(AuthAuditWriter, request.app.state.auth_audit_recorder)
+
+
+def _trusted_request_origin(settings: WebSettings, request: Request) -> str | None:
+    origin = request.headers.get("origin")
+    if origin is None:
+        return None
+    normalized_origin = origin.strip().rstrip("/")
+    trusted_origins = {configured.strip().rstrip("/") for configured in settings.cors_origins}
+    if normalized_origin not in trusted_origins:
+        return None
+    try:
+        safe_origin = validate_credential_safe_https_url(
+            normalized_origin,
+            field_name="Origin",
+            allow_http_loopback=True,
+        ).rstrip("/")
+    except ValueError:
+        return None
+    parsed = urlparse(safe_origin)
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        return None
+    return safe_origin
+
+
+def _email_verification_origin(settings: WebSettings, request: Request) -> str:
+    if settings.public_base_url is not None:
+        return settings.public_base_url
+    trusted_origin = _trusted_request_origin(settings, request)
+    if trusted_origin is not None:
+        return trusted_origin
+    host = settings.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{settings.port}"
+
+
+def _write_email_verification_outbox(
+    outbox_path: Path,
+    *,
+    origin: str,
+    user_id: str,
+    email: str,
+    token: str,
+) -> None:
+    outbox_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "user_id": user_id,
+        "email": email,
+        "token": token,
+        "verification_url": f"{origin}/?{urlencode({'verify_token': token})}",
+    }
+    fd = os.open(outbox_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fp:
+            fd = -1
+            fp.write(json.dumps(record, sort_keys=True))
+            fp.write("\n")
+    finally:
+        if fd != -1:
+            os.close(fd)
 
 
 def create_auth_router() -> APIRouter:
@@ -158,13 +258,17 @@ def create_auth_router() -> APIRouter:
         _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
-    @router.post("/register", response_model=TokenResponse)
+    @router.post(
+        "/register",
+        response_model=TokenResponse | RegistrationPendingResponse,
+        status_code=200,
+    )
     async def register(
         body: RegisterRequest,
         request: Request,
         response: Response,
         _rate_limit: None = Depends(check_auth_rate_limit),
-    ) -> TokenResponse:
+    ) -> TokenResponse | RegistrationPendingResponse:
         """Register a new user account (local auth, open registration only).
 
         Creates the user with bcrypt-hashed password (offloaded to a thread),
@@ -178,10 +282,10 @@ def create_auth_router() -> APIRouter:
         if settings.registration_mode == "closed":
             raise HTTPException(status_code=404, detail="Not found")
 
-        if settings.registration_mode == "email_verified":
+        if settings.registration_mode == "email_verified" and body.email is None:
             raise HTTPException(
-                status_code=501,
-                detail="Email verification not yet available",
+                status_code=422,
+                detail="email is required when registration_mode=email_verified",
             )
 
         provider: LocalAuthProvider = request.app.state.auth_provider
@@ -192,9 +296,36 @@ def create_auth_router() -> APIRouter:
                 body.password,
                 body.display_name,
                 body.email,
+                email_verified=settings.registration_mode != "email_verified",
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        if settings.registration_mode == "email_verified":
+            assert body.email is not None
+            outbox_path = settings.data_dir / "email-verifications.jsonl"
+            origin = _email_verification_origin(settings, request)
+            try:
+                token = await run_sync_in_worker(
+                    provider.create_email_verification_token,
+                    body.username,
+                )
+                await run_sync_in_worker(
+                    _write_email_verification_outbox,
+                    outbox_path,
+                    origin=origin,
+                    user_id=body.username,
+                    email=body.email,
+                    token=token,
+                )
+            except ValueError as exc:
+                await run_sync_in_worker(provider.delete_user, body.username)
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except OSError as exc:
+                await run_sync_in_worker(provider.delete_user, body.username)
+                raise HTTPException(status_code=500, detail="Email verification outbox could not be written") from exc
+            response.status_code = 202
+            return RegistrationPendingResponse(email=body.email)
 
         token = await provider.login(body.username, body.password)
         recorder = _auth_audit_recorder(request)
@@ -205,6 +336,37 @@ def create_auth_router() -> APIRouter:
             username=body.username,
             access_token=token,
             issuance_path="register",
+        )
+        _mark_token_response_uncacheable(response)
+        return TokenResponse(access_token=token)
+
+    @router.post("/verify-email", response_model=TokenResponse)
+    async def verify_email(
+        body: VerifyEmailRequest,
+        request: Request,
+        response: Response,
+        _rate_limit: None = Depends(check_auth_rate_limit),
+    ) -> TokenResponse:
+        """Verify a pending local-auth registration and issue a bearer token."""
+        settings: WebSettings = request.app.state.settings
+        if settings.auth_provider != "local":
+            raise HTTPException(status_code=404, detail="Not found")
+
+        provider: LocalAuthProvider = request.app.state.auth_provider
+        try:
+            identity = await run_sync_in_worker(provider.verify_email_token, body.token)
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=exc.detail) from exc
+
+        token = provider.issue_token_for_user(identity.user_id, identity.username)
+        recorder = _auth_audit_recorder(request)
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=identity.user_id,
+            username=identity.username,
+            access_token=token,
+            issuance_path="email_verification",
         )
         _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)

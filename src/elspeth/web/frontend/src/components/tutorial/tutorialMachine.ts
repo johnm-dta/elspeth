@@ -240,19 +240,22 @@ export interface PersistedTutorialProgress {
 export function resumeTutorialState(
   progress: PersistedTutorialProgress,
 ): TutorialState {
-  if (progress.stage === null || progress.sessionId === null) {
+  const stage = progress.stage ?? null;
+  const sessionId = progress.sessionId ?? null;
+  const runId = progress.runId ?? null;
+  const sourceDataHash = progress.sourceDataHash ?? null;
+  if (stage === null || sessionId === null) {
     return initialTutorialState;
   }
   const base: TutorialState = {
     ...initialTutorialState,
-    sessionId: progress.sessionId,
-    runId: progress.runId,
-    sourceDataHash: progress.sourceDataHash,
+    sessionId,
+    runId,
+    sourceDataHash,
     resumed: true,
   };
-  const hasRunIdentity =
-    progress.runId !== null && progress.sourceDataHash !== null;
-  switch (progress.stage) {
+  const hasRunIdentity = runId !== null && sourceDataHash !== null;
+  switch (stage) {
     case "guided":
       return { ...base, step: "guided", runId: null, sourceDataHash: null };
     case "run":

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
     from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
+    from elspeth.web.auth.local import LocalAuthProvider
 __all__ = [
     "app",
     "load_settings",  # Re-exported from config for convenience
@@ -54,6 +55,10 @@ app = typer.Typer(
     help="ELSPETH: Auditable Sense/Decide/Act pipelines.",
     no_args_is_help=True,
 )
+composer_app = typer.Typer(help="Composer web UI commands.")
+composer_users_app = typer.Typer(help="Local composer user management commands.")
+app.add_typer(composer_app, name="composer")
+composer_app.add_typer(composer_users_app, name="users")
 
 
 def version_callback(value: bool) -> None:
@@ -1508,6 +1513,99 @@ def plugins_inspect(
         return
 
     typer.echo(format_plugin_inspect_text(payload), nl=False)
+
+
+def _resolve_composer_auth_db(*, data_dir: Path, auth_db: Path | None) -> Path:
+    path = auth_db if auth_db is not None else data_dir / "auth.db"
+    return path.expanduser().resolve()
+
+
+def _composer_auth_provider(auth_db: Path) -> LocalAuthProvider:
+    from elspeth.web.auth.local import LocalAuthProvider
+
+    auth_db.parent.mkdir(parents=True, exist_ok=True)
+    secret_key = os.environ.get("ELSPETH_WEB__SECRET_KEY", "composer-cli-user-management")
+    return LocalAuthProvider(db_path=auth_db, secret_key=secret_key)
+
+
+@composer_users_app.command("add")
+def composer_users_add(
+    username: str = typer.Argument(..., help="Local composer username to create."),
+    password: str = typer.Option(
+        ...,
+        "--password",
+        prompt=True,
+        confirmation_prompt=True,
+        hide_input=True,
+        help="Initial password for the local composer user.",
+    ),
+    display_name: str | None = typer.Option(
+        None,
+        "--display-name",
+        help="Display name. Defaults to the username.",
+    ),
+    email: str | None = typer.Option(None, "--email", help="Optional user email."),
+    data_dir: Path = typer.Option(
+        Path("data"),
+        "--data-dir",
+        help="Web data directory containing auth.db.",
+    ),
+    auth_db: Path | None = typer.Option(
+        None,
+        "--auth-db",
+        help="Explicit auth.db path; overrides --data-dir.",
+    ),
+) -> None:
+    """Add a local user for the Composer web interface."""
+    db_path = _resolve_composer_auth_db(data_dir=data_dir, auth_db=auth_db)
+    provider = _composer_auth_provider(db_path)
+    try:
+        provider.create_user(
+            username,
+            password,
+            display_name=display_name or username,
+            email=email,
+            email_verified=True,
+        )
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Added composer user {username} in {db_path}")
+
+
+@composer_users_app.command("remove")
+def composer_users_remove(
+    username: str = typer.Argument(..., help="Local composer username to remove."),
+    data_dir: Path = typer.Option(
+        Path("data"),
+        "--data-dir",
+        help="Web data directory containing auth.db.",
+    ),
+    auth_db: Path | None = typer.Option(
+        None,
+        "--auth-db",
+        help="Explicit auth.db path; overrides --data-dir.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Remove without an interactive confirmation prompt.",
+    ),
+) -> None:
+    """Remove a local Composer web user."""
+    db_path = _resolve_composer_auth_db(data_dir=data_dir, auth_db=auth_db)
+    if not db_path.exists():
+        typer.echo(f"Error: composer auth database not found: {db_path}", err=True)
+        raise typer.Exit(1)
+    if not yes and not typer.confirm(f"Remove composer user {username} from {db_path}?"):
+        typer.echo("Aborted.")
+        raise typer.Exit(1)
+    provider = _composer_auth_provider(db_path)
+    if not provider.delete_user(username):
+        typer.echo(f"Error: composer user not found: {username}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Removed composer user {username} from {db_path}")
 
 
 @app.command()

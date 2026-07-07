@@ -285,33 +285,17 @@ cd ../../../../
 export ELSPETH_WEB__SECRET_KEY="local-dev-secret-key"
 
 # 4) Create a local demo login user (development only)
-python - <<'PY'
-import os
-from pathlib import Path
-from elspeth.web.auth.local import LocalAuthProvider
-
-provider = LocalAuthProvider(
-    db_path=Path("data/auth.db"),
-    secret_key=os.environ["ELSPETH_WEB__SECRET_KEY"],
-)
-try:
-    provider.create_user(
-        user_id="demo",
-        password="demo12345",
-        display_name="Demo User",
-        email="demo@example.com",
-    )
-    print("Created demo user: demo / demo12345")
-except ValueError:
-    print("Demo user already exists: demo / demo12345")
-PY
+elspeth composer users add demo \
+  --display-name "Demo User" \
+  --email demo@example.com
 
 # 5) Start the web app
 elspeth web --host 127.0.0.1 --port 8451
 ```
 
-Open `http://127.0.0.1:8451` and sign in with the local demo credentials
-`demo` / `demo12345`. Do not reuse these credentials outside local development.
+When prompted, enter `demo12345` as the demo password. Open
+`http://127.0.0.1:8451` and sign in with the local demo credentials `demo` /
+`demo12345`. Do not reuse these credentials outside local development.
 
 ### Frontend Development
 
@@ -340,9 +324,11 @@ Then open `http://localhost:5173`.
 - The default auth provider is local auth. Use `--auth oidc` or `--auth entra`
   with the matching `ELSPETH_WEB__*` settings for external identity providers.
 - Local auth exposes `/api/auth/register` when
-  `ELSPETH_WEB__REGISTRATION_MODE=open`. For controlled local setups or closed
-  registration, create users directly in `data/auth.db` through
-  `LocalAuthProvider.create_user(...)` as shown above.
+  `ELSPETH_WEB__REGISTRATION_MODE=open` or `email_verified`. The
+  `email_verified` mode writes verification links to
+  `data/email-verifications.jsonl` for an operator or mailer to deliver.
+  For controlled local setups or closed registration, manage users with
+  `elspeth composer users add ...` and `elspeth composer users remove ...`.
 - Session state is stored in `data/sessions.db`; local auth users are stored in
   `data/auth.db`.
 - Run audit data defaults to `data/runs/audit.db`; payloads default to

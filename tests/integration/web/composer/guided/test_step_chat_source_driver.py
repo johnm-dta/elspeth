@@ -33,6 +33,62 @@ def _fake_resolve_source_response(args: dict) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
+async def test_source_driver_retries_inline_json_control_advice_into_tool_call() -> None:
+    """The source chat must not tell users to pick a nonexistent inline-JSON
+    wizard control when it has the resolve_source tool available.
+    """
+    calls: list[dict] = []
+    responses = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="Choose the inline JSON source option and paste the rows there.",
+                        tool_calls=None,
+                    )
+                )
+            ]
+        ),
+        _fake_resolve_source_response(
+            {
+                "resolution": "source",
+                "plugin": "json",
+                "filename": "rows.json",
+                "mime_type": "application/json",
+                "content": '[{"line": "alpha"}]',
+                "options": {"schema": {"mode": "observed", "guaranteed_fields": ["line"]}},
+                "observed_columns": ["line"],
+                "sample_rows": [{"line": "alpha"}],
+                "assistant_message": "Created the JSON rows as the source.",
+            }
+        ),
+    ]
+
+    async def _first_advises_missing_control_then_resolves(**kwargs):
+        calls.append(kwargs)
+        return responses.pop(0)
+
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_first_advises_missing_control_then_resolves,
+    ):
+        outcome = await maybe_resolve_step_1_source_chat(
+            model="anthropic/claude-sonnet-4.6",
+            user_message='Create a simple inline JSON source with [{"line": "alpha"}].',
+            plugin_hint="json",
+            current_source=None,
+            temperature=None,
+            seed=None,
+        )
+
+    assert len(calls) == 2
+    assert outcome.prose_reply is None
+    assert outcome.resolution is not None
+    assert outcome.resolution.plugin == "json"
+    assert outcome.resolution.observed_columns == ("line",)
+
+
+@pytest.mark.asyncio
 async def test_source_driver_includes_current_source_in_prompt() -> None:
     current = SourceResolved(
         plugin="json",

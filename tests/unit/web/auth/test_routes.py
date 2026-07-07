@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from dataclasses import dataclass, field
 
 import jwt as pyjwt
@@ -419,20 +420,182 @@ class TestRegisterEndpoint:
             )
         assert response.status_code == 404
 
-    async def test_register_email_verified_mode_returns_501(self, tmp_path) -> None:
+    async def test_register_email_verified_mode_creates_pending_user_and_verifies_token(self, tmp_path) -> None:
         provider = LocalAuthProvider(
             db_path=tmp_path / "auth.db",
             secret_key="test-key",
         )
-        app = _create_test_app(provider, registration_mode="email_verified")
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+            )
+            assert response.status_code == 202
+            body = response.json()
+            assert body == {
+                "status": "verification_required",
+                "email": "bob@example.com",
+            }
+
+            with pytest.raises(AuthenticationError, match="Email verification required"):
+                await provider.login("bob", "pw123")
+
+            outbox = tmp_path / "email-verifications.jsonl"
+            records = [json.loads(line) for line in outbox.read_text(encoding="utf-8").splitlines()]
+            assert len(records) == 1
+            assert records[0]["user_id"] == "bob"
+            assert records[0]["email"] == "bob@example.com"
+            assert "pw123" not in repr(records[0])
+            assert stat.S_IMODE(outbox.stat().st_mode) == 0o600
+
+            verify_response = await client.post(
+                "/api/auth/verify-email",
+                json={"token": records[0]["token"]},
+            )
+            assert verify_response.status_code == 200
+            _assert_token_response_uncacheable(verify_response)
+            assert "access_token" in verify_response.json()
+
+            login_response = await client.post(
+                "/api/auth/login",
+                json={"username": "bob", "password": "pw123"},
+            )
+            assert login_response.status_code == 200
+
+    async def test_register_email_verified_mode_requires_email(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
 
         async with _client_for(app) as client:
             response = await client.post(
                 "/api/auth/register",
                 json={"username": "bob", "password": "pw123", "display_name": "Bob"},
             )
-        assert response.status_code == 501
-        assert "Email verification" in response.json()["detail"]
+        assert response.status_code == 422
+        assert "email" in response.json()["detail"]
+
+    async def test_register_email_verified_mode_rejects_blank_email_without_user(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "   ",
+                },
+            )
+
+        assert response.status_code == 422
+        assert not (tmp_path / "email-verifications.jsonl").exists()
+        assert provider.delete_user("bob") is False
+
+    async def test_register_email_verified_mode_uses_configured_public_base_url(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(
+            provider,
+            registration_mode="email_verified",
+            data_dir=tmp_path,
+            public_base_url="https://composer.example.test",
+        )
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+                headers={"host": "evil.example"},
+            )
+
+        assert response.status_code == 202
+        outbox = tmp_path / "email-verifications.jsonl"
+        record = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])
+        assert record["verification_url"].startswith("https://composer.example.test/?verify_token=")
+        assert "evil.example" not in record["verification_url"]
+
+    async def test_register_email_verified_mode_uses_trusted_request_origin_for_dev_proxy(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(
+            provider,
+            registration_mode="email_verified",
+            data_dir=tmp_path,
+            host="127.0.0.1",
+            port=8462,
+            cors_origins=("http://127.0.0.1:5174",),
+        )
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+                headers={"origin": "http://127.0.0.1:5174"},
+            )
+
+        assert response.status_code == 202
+        outbox = tmp_path / "email-verifications.jsonl"
+        record = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])
+        assert record["verification_url"].startswith("http://127.0.0.1:5174/?verify_token=")
+
+    async def test_register_email_verified_mode_outbox_failure_removes_pending_user(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        def fail_outbox(*args, **kwargs) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("elspeth.web.auth.routes._write_email_verification_outbox", fail_outbox)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+            )
+
+        assert response.status_code == 500
+        assert provider.delete_user("bob") is False
 
     async def test_register_non_local_provider_returns_404(self) -> None:
         provider = _FakeAuthProvider()

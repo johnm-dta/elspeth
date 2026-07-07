@@ -378,6 +378,33 @@ class TestAfterCursorExecute:
 
         assert len(existing_buffer) == 1
 
+    def test_payload_hydration_deferred_until_commit(self, tmp_path: Path) -> None:
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        payload_store = _PayloadStoreDouble(content=b"payload content")
+        journal._payload_store = payload_store
+        conn = _make_conn()
+
+        journal._after_cursor_execute(
+            conn,
+            cursor=None,
+            statement="INSERT INTO calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
+            parameters={"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
+            context=None,
+            executemany=False,
+        )
+
+        assert payload_store.refs == []
+
+        journal._after_commit(conn)
+
+        assert payload_store.refs == ["req-ref", "resp-ref"]
+        records = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert records[0]["request_payload"] == "payload content"
+
 
 class TestAfterCommit:
     """Tests for _after_commit — flushes buffer to disk."""

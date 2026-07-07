@@ -164,8 +164,6 @@ class LandscapeJournal:
             "parameters": self._normalize_parameters(parameters),
             "executemany": executemany,
         }
-        if self._include_payloads:
-            self._enrich_with_payloads(record, statement, parameters, executemany)
 
         stack = self._ensure_buffer_stack(conn)
         stack[-1].append(record)
@@ -202,7 +200,18 @@ class LandscapeJournal:
         stack.append([])  # Reset to single root buffer
 
         if all_records:
+            if self._include_payloads:
+                self._enrich_committed_records(all_records)
             self._append_records(all_records)
+
+    def _enrich_committed_records(self, records: list[JournalRecord]) -> None:
+        for record in records:
+            self._enrich_with_payloads(
+                record,
+                record["statement"],
+                record["parameters"],
+                record["executemany"],
+            )
 
     def _after_rollback(self, conn: Connection) -> None:
         if _BUFFER_STACK_KEY in conn.info:

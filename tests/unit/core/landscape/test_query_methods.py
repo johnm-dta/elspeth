@@ -560,6 +560,39 @@ class TestGetToken:
         assert scoped_hit.token_id == "tok-b1"
 
 
+class TestGetTokensByIds:
+    """Set-scoped token-id reads preserve caller order for lineage hydration."""
+
+    def _setup_tokens(self):
+        _db, factory = _setup()
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-a", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-b", source_row_index=1, ingest_sequence=1)
+        factory.data_flow.create_token("row-a", token_id="tok-a")
+        factory.data_flow.create_token("row-b", token_id="tok-b")
+        return factory
+
+    def test_preserves_input_order_and_ignores_missing_tokens(self):
+        factory = self._setup_tokens()
+
+        tokens = factory.query.get_tokens_by_ids(["tok-b", "missing", "tok-a"])
+
+        assert [token.token_id for token in tokens] == ["tok-b", "tok-a"]
+
+    def test_empty_input_returns_empty(self):
+        factory = self._setup_tokens()
+
+        assert factory.query.get_tokens_by_ids([]) == []
+
+    def test_chunked_input_matches_unchunked(self):
+        factory = self._setup_tokens()
+        unchunked = factory.query.get_tokens_by_ids(["tok-b", "tok-a"])
+
+        factory.query._QUERY_CHUNK_SIZE = 1
+
+        chunked = factory.query.get_tokens_by_ids(["tok-b", "tok-a"])
+        assert [token.token_id for token in chunked] == [token.token_id for token in unchunked]
+
+
 class TestGetTokenParents:
     """Tests for RecorderFactory query — parent relationships ordered by ordinal."""
 

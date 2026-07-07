@@ -238,8 +238,10 @@ def explain(
             f"be associated with a lineage operation."
         )
 
+    parent_token_ids = [parent.parent_token_id for parent in parents]
+    parent_tokens_by_id = {parent.token_id: parent for parent in query.get_tokens_by_ids(parent_token_ids)}
     for parent in parents:
-        parent_token = query.get_token(parent.parent_token_id)
+        parent_token = parent_tokens_by_id.get(parent.parent_token_id)
         if parent_token is None:
             # This indicates audit DB corruption - a token_parents record
             # references a parent that doesn't exist. This should be impossible

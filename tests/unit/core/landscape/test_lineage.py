@@ -42,6 +42,7 @@ class _FakeQuery:
     token_parents: list[TokenParent] = field(default_factory=list)
     token_side_effect: Callable[[str], Token | None] | None = None
     get_token_calls: list[str] = field(default_factory=list)
+    get_tokens_by_ids_calls: list[tuple[str, ...]] = field(default_factory=list)
     explain_row_calls: list[tuple[str, str]] = field(default_factory=list)
 
     def get_token(self, token_id: str) -> Token | None:
@@ -59,6 +60,18 @@ class _FakeQuery:
         if token is None or token.run_id != run_id:
             return None
         return token
+
+    def get_tokens_by_ids(self, token_ids: list[str]) -> list[Token]:
+        self.get_tokens_by_ids_calls.append(tuple(token_ids))
+        tokens: list[Token] = []
+        for token_id in token_ids:
+            if self.token_side_effect is not None:
+                token = self.token_side_effect(token_id)
+            else:
+                token = self.token
+            if token is not None:
+                tokens.append(token)
+        return tokens
 
     def explain_row(self, _run_id: str, _row_id: str) -> RowLineage | None:
         self.explain_row_calls.append((_run_id, _row_id))
@@ -449,6 +462,34 @@ class TestExplainParentIntegrity:
 
         with pytest.raises(AuditIntegrityError, match="Cross-run parent lineage"):
             explain(factory.query, factory.data_flow, "run-1", token_id="child-1")
+
+    def test_parent_tokens_are_hydrated_in_one_batch(self) -> None:
+        """Parent hydration must not call get_token once per parent."""
+        child_token = _make_token(token_id="child-1", join_group_id="join-1")
+        parent_1 = _make_token(token_id="parent-1", row_id="row-parent-1")
+        parent_2 = _make_token(token_id="parent-2", row_id="row-parent-2")
+        parent_refs = [
+            TokenParent(token_id="child-1", parent_token_id="parent-1", ordinal=0),
+            TokenParent(token_id="child-1", parent_token_id="parent-2", ordinal=1),
+        ]
+        factory = _make_factory(
+            token=child_token,
+            row_lineage=_make_row_lineage(),
+            token_parents=parent_refs,
+        )
+        tokens_by_id = {
+            child_token.token_id: child_token,
+            parent_1.token_id: parent_1,
+            parent_2.token_id: parent_2,
+        }
+        factory.query.token_side_effect = tokens_by_id.get
+
+        result = explain(factory.query, factory.data_flow, "run-1", token_id="child-1")
+
+        assert result is not None
+        assert [token.token_id for token in result.parent_tokens] == ["parent-1", "parent-2"]
+        assert factory.query.get_tokens_by_ids_calls == [("parent-1", "parent-2")]
+        assert factory.query.get_token_calls == ["child-1"]
 
     def test_join_token_without_parents_raises(self) -> None:
         """Token with join_group_id but no parents is audit corruption."""

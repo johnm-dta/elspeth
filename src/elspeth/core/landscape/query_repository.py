@@ -285,6 +285,27 @@ class QueryRepository:
             return None
         return self._token_loader.load(r)
 
+    def get_tokens_by_ids(self, token_ids: Sequence[str]) -> list[Token]:
+        """Get tokens by ID with one chunked batch query per input chunk.
+
+        Results follow the first-seen order of ``token_ids`` and omit missing
+        tokens. This read is intentionally unscoped by run so callers that
+        validate Tier-1 lineage relationships can distinguish missing parents
+        from cross-run parent corruption after hydration.
+        """
+        if not token_ids:
+            return []
+
+        ordered_token_ids = tuple(dict.fromkeys(token_ids))
+        tokens_by_id: dict[str, Token] = {}
+        for offset in range(0, len(ordered_token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = ordered_token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = select(tokens_table).where(tokens_table.c.token_id.in_(chunk))
+            for row in self._ops.execute_fetchall(query):
+                tokens_by_id[row.token_id] = self._token_loader.load(row)
+
+        return [tokens_by_id[token_id] for token_id in ordered_token_ids if token_id in tokens_by_id]
+
     def get_token_parents(self, token_id: str) -> list[TokenParent]:
         """Get parent relationships for a token (backward lineage).
 

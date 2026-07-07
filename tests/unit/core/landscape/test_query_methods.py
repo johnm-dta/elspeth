@@ -39,6 +39,7 @@ from elspeth.core.landscape.model_loaders import (
     TokenParentLoader,
 )
 from elspeth.core.landscape.row_data import RowDataResult, RowDataState
+from elspeth.core.landscape.run_status_projection import AuditRunStatusProjection
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -106,6 +107,14 @@ class TestQueryRepositoryCapabilityBoundary:
 
         assert not hasattr(factory.query._ops, "execute_insert")
         assert not hasattr(factory.query._ops, "execute_update")
+
+    def test_factory_exposes_run_status_projection_outside_query_repository(self) -> None:
+        db = make_landscape_db()
+        factory = make_factory(db)
+
+        assert isinstance(factory.run_status_projection, AuditRunStatusProjection)
+        assert not hasattr(factory.query, "count_distinct_source_rows_with_terminal_outcome")
+        assert not hasattr(factory.query, "count_failed_coalesce_barrier_rows")
 
 
 class TestGetRows:
@@ -2112,7 +2121,7 @@ def _coalesce_failure(reason: str = "quorum_not_met_at_timeout") -> CoalesceFail
     )
 
 
-class TestCountFailedCoalesceBarrierRows:
+class TestAuditRunStatusProjection:
     """Pin the anchor for ``rows_coalesce_failed`` audit derivation (elspeth-7294de558e).
 
     The counter is per failed BARRIER — one pending key ``(coalesce_name,
@@ -2150,7 +2159,7 @@ class TestCountFailedCoalesceBarrierRows:
         self._fail_state(factory, token_id="tok-branch-a", node_id="coalesce-1", state_id="cs-a")
         self._fail_state(factory, token_id="tok-branch-b", node_id="coalesce-1", state_id="cs-b")
 
-        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 1
+        assert factory.run_status_projection.count_failed_coalesce_barrier_rows("run-1") == 1
 
     def test_attribution_failed_states_at_non_coalesce_nodes_do_not_count(self):
         """The anchor is nodes.node_type='coalesce': an ordinary transform
@@ -2159,7 +2168,7 @@ class TestCountFailedCoalesceBarrierRows:
         factory.data_flow.create_token("row-1", token_id="tok-1")
         self._fail_state(factory, token_id="tok-1", node_id="transform-1", state_id="ts-1")
 
-        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+        assert factory.run_status_projection.count_failed_coalesce_barrier_rows("run-1") == 0
 
     def test_distinct_rows_count_as_distinct_barriers(self):
         """Two rows failing at the same coalesce node are two failed barriers."""
@@ -2170,7 +2179,7 @@ class TestCountFailedCoalesceBarrierRows:
         self._fail_state(factory, token_id="tok-r1", node_id="coalesce-1", state_id="cs-r1")
         self._fail_state(factory, token_id="tok-r2", node_id="coalesce-1", state_id="cs-r2")
 
-        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 2
+        assert factory.run_status_projection.count_failed_coalesce_barrier_rows("run-1") == 2
 
     def test_late_arrival_after_merge_is_excluded(self):
         """A straggler rejected AFTER the barrier resolved (e.g. after a
@@ -2180,7 +2189,7 @@ class TestCountFailedCoalesceBarrierRows:
         factory.data_flow.create_token("row-1", token_id="tok-late")
         self._fail_state(factory, token_id="tok-late", node_id="coalesce-1", state_id="cs-late", reason="late_arrival_after_merge")
 
-        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+        assert factory.run_status_projection.count_failed_coalesce_barrier_rows("run-1") == 0
 
     def test_late_arrival_does_not_mask_a_real_barrier_failure_on_same_pair(self):
         """A failed barrier followed by a late straggler still counts exactly
@@ -2191,12 +2200,12 @@ class TestCountFailedCoalesceBarrierRows:
         self._fail_state(factory, token_id="tok-branch-a", node_id="coalesce-1", state_id="cs-a")
         self._fail_state(factory, token_id="tok-late", node_id="coalesce-1", state_id="cs-late", reason="late_arrival_after_merge")
 
-        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 1
+        assert factory.run_status_projection.count_failed_coalesce_barrier_rows("run-1") == 1
 
     def test_zero_when_no_coalesce_failures(self):
         _db, factory = self._setup_coalesce()
 
-        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+        assert factory.run_status_projection.count_failed_coalesce_barrier_rows("run-1") == 0
 
 
 # =============================================================================

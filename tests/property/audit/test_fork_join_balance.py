@@ -3477,7 +3477,7 @@ class TestForkRecoveryInvariant:
         --------------------------------------------------------------
         ``rows_processed`` is reconstructed as the count of DISTINCT source
         ``row_id`` reaching a terminal outcome (see
-        ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``),
+        ``AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome``),
         NOT a per-terminal-token tally.  This matches the live loops, which
         increment ``rows_processed`` once per source row regardless of fork
         fan-out, aggregation fan-in, or expand fan-out.  For this 1-source-row
@@ -3706,7 +3706,7 @@ class TestForkRecoveryInvariant:
         # vacuously here. The field IS audit-derived now (the old resume-graft
         # over a derive-time 0 was deleted with F1):
         # derive_resume_terminal_status_from_audit sets rows_coalesce_failed
-        # from query.count_failed_coalesce_barrier_rows — DISTINCT
+        # from run_status_projection.count_failed_coalesce_barrier_rows — DISTINCT
         # (coalesce node, row_id) pairs with FAILED node_states, the
         # _fail_pending writes — which is cumulative over run-1 AND resume
         # re-drives (elspeth-7294de558e). A non-vacuous reconciliation of this

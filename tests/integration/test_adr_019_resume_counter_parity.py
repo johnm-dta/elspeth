@@ -159,7 +159,7 @@ def test_resume_counter_derivation_replays_diversion_structural_count(
 # F2 (resume-fork-reemit): rows_processed is per SOURCE ROW, not per terminal
 # token.  derive_resume_terminal_status_from_audit reconstructs it as the count
 # of DISTINCT source row_id reaching a terminal outcome
-# (QueryRepository.count_distinct_source_rows_with_terminal_outcome), NOT a
+# (AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome), NOT a
 # per-leaf tally.  Structural fan-out (fork / expand) and fan-in (aggregation)
 # are the cases where the two diverge — the parametrized scenarios above are all
 # 1-row-1-leaf and so cannot catch a per-leaf regression.  These archetype
@@ -636,7 +636,7 @@ def test_resume_derives_rows_coalesce_failed_from_durable_audit() -> None:
     # Non-vacuity: run-1 must have already consumed SOME (but not all) barrier
     # failures before the interrupt — otherwise this test would not distinguish
     # cumulative audit derivation from the old resume-only graft.
-    run1_failed_barriers = RecorderFactory(db_b).query.count_failed_coalesce_barrier_rows(run_id)
+    run1_failed_barriers = RecorderFactory(db_b).run_status_projection.count_failed_coalesce_barrier_rows(run_id)
     assert 1 <= run1_failed_barriers < run_a.rows_coalesce_failed, (
         f"run-1 must consume at least one barrier failure pre-interrupt and leave at least one for the "
         f"resume (got {run1_failed_barriers} of {run_a.rows_coalesce_failed}); the topology drifted — "

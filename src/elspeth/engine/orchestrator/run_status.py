@@ -130,7 +130,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     ``rows_processed`` is reconstructed per *source row* (distinct
     ``row_id`` reaching a terminal outcome) rather than per terminal
     token; see the inline comment and
-    ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``.
+    ``AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome``.
 
     Returns:
         ``(terminal_status, counters)``.  ``counters`` feeds the local
@@ -141,7 +141,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
     counters = ExecutionCounters()
     # ``rows_processed`` is per *source row*, not per terminal token — see
-    # ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``.  It
+    # ``AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome``.  It
     # MUST NOT be accumulated per-case below: a 1-source-row fork emits two leaf
     # tokens, a 3-source-row aggregation emits one result token, a 1-source-row
     # expand emits N children, yet each contributes exactly its source rows
@@ -150,7 +150,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     # unique value that matches an uninterrupted run (F2 reconciliation). All
     # OTHER counters below are genuine per-terminal-token tallies and stay
     # per-case.
-    counters.rows_processed = factory.query.count_distinct_source_rows_with_terminal_outcome(run_id)
+    counters.rows_processed = factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome(run_id)
     # ``rows_coalesce_failed`` has no token_outcomes arm: a failed coalesce
     # records per-branch (FAILURE, UNROUTED) outcomes (so ``rows_failed``
     # reconstructs below) but those carry no node attribution, and a naive
@@ -161,7 +161,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     # value (elspeth-7294de558e) — it is cumulative over run-1 AND resume
     # re-drives (same run_id), replacing the resume-only live-counter graft
     # that forgot run-1 failures.
-    counters.rows_coalesce_failed = factory.query.count_failed_coalesce_barrier_rows(run_id)
+    counters.rows_coalesce_failed = factory.run_status_projection.count_failed_coalesce_barrier_rows(run_id)
     for outcome_record in outcomes:
         if not outcome_record.completed:
             if (outcome_record.outcome, outcome_record.path) == (None, TerminalPath.BUFFERED):

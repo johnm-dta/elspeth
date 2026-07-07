@@ -36,6 +36,7 @@ from elspeth.core.landscape.plugin_audit_writer import PluginAuditWriterAdapter 
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.run_status_projection import AuditRunStatusProjection
 from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -199,7 +200,15 @@ class ExecutionReadRepository:
 class LandscapeReadRepositories:
     """Typed read repository surface for inspection-only Landscape callers."""
 
-    __slots__ = ("barrier_restore", "data_flow", "execution", "payload_store", "query", "run_lifecycle")
+    __slots__ = (
+        "barrier_restore",
+        "data_flow",
+        "execution",
+        "payload_store",
+        "query",
+        "run_lifecycle",
+        "run_status_projection",
+    )
 
     def __init__(
         self,
@@ -208,6 +217,7 @@ class LandscapeReadRepositories:
         data_flow: DataFlowReadRepository,
         execution: ExecutionReadRepository,
         query: QueryRepository,
+        run_status_projection: AuditRunStatusProjection,
         barrier_restore: BarrierRestoreReadModel,
         payload_store: PayloadStore | None,
     ) -> None:
@@ -215,6 +225,7 @@ class LandscapeReadRepositories:
         self.data_flow = data_flow
         self.execution = execution
         self.query = query
+        self.run_status_projection = run_status_projection
         self.barrier_restore = barrier_restore
         self.payload_store = payload_store
 
@@ -232,6 +243,7 @@ class LandscapeWriteRepositories:
         "read",
         "run_coordination",
         "run_lifecycle",
+        "run_status_projection",
         "scheduler",
     )
 
@@ -252,6 +264,7 @@ class LandscapeWriteRepositories:
         self.execution = execution
         self.data_flow = data_flow
         self.query = read.query
+        self.run_status_projection = read.run_status_projection
         self.barrier_restore = read.barrier_restore
         self.payload_store = read.payload_store
         self.scheduler = scheduler
@@ -348,12 +361,14 @@ class RecorderFactory:
             scheduler_event_loader=scheduler_event_loader,
             payload_store=payload_store,
         )
+        run_status_projection = AuditRunStatusProjection(read_ops)
 
         return LandscapeReadRepositories(
             run_lifecycle=RunLifecycleReadRepository(run_lifecycle),
             data_flow=DataFlowReadRepository(data_flow),
             execution=ExecutionReadRepository(execution),
             query=query,
+            run_status_projection=run_status_projection,
             barrier_restore=barrier_restore,
             payload_store=payload_store,
         )
@@ -432,6 +447,7 @@ class RecorderFactory:
             scheduler_event_loader=scheduler_event_loader,
             payload_store=payload_store,
         )
+        self._run_status_projection = AuditRunStatusProjection(read_ops)
         # The scheduler repository is a pure write surface (its constructor
         # runs a SQLite Tier-1 PRAGMA probe when applicable).  On a
         # read-only handle — MCP analyzer, web read surfaces, immutable
@@ -470,6 +486,10 @@ class RecorderFactory:
         return self._query
 
     @property
+    def run_status_projection(self) -> AuditRunStatusProjection:
+        return self._run_status_projection
+
+    @property
     def scheduler(self) -> TokenSchedulerRepository:
         if self._scheduler is None:
             raise RuntimeError("scheduler repository is not available on a read-only LandscapeDB handle")
@@ -496,6 +516,7 @@ class RecorderFactory:
             data_flow=DataFlowReadRepository(self._data_flow),
             execution=ExecutionReadRepository(self._execution),
             query=self._query,
+            run_status_projection=self._run_status_projection,
             barrier_restore=self._barrier_restore,
             payload_store=self._payload_store,
         )

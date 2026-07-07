@@ -42,12 +42,22 @@ _RECORDED_AT = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
 
 @dataclass(frozen=True, slots=True)
 class _FakeQuery:
-    """Minimal stand-in for ``RecorderFactory.query`` returning canned outcomes.
+    """Minimal stand-in for ``RecorderFactory.query`` returning canned outcomes."""
+
+    outcomes: list[TokenOutcome]
+
+    def get_all_token_outcomes_for_run(self, run_id: str) -> list[TokenOutcome]:
+        return self.outcomes
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeRunStatusProjection:
+    """Minimal stand-in for the dedicated audit counter projection.
 
     These tests exercise the per-case ``routed_destinations`` tally and the
     Tier-1 ``sink_name`` guard, NOT ``rows_processed`` — the canned
     ``TokenOutcome`` records carry no ``row_id`` (the real distinct-``row_id``
-    count is computed by ``QueryRepository`` via a JOIN to the tokens table).
+    count is computed by the projection via a JOIN to the tokens table).
     ``count_distinct_source_rows_with_terminal_outcome`` therefore returns the
     count of distinct ``token_id`` among completed canned outcomes — sufficient
     to satisfy the helper's call and keep the RunResult biconditional happy
@@ -55,9 +65,6 @@ class _FakeQuery:
     """
 
     outcomes: list[TokenOutcome]
-
-    def get_all_token_outcomes_for_run(self, run_id: str) -> list[TokenOutcome]:
-        return self.outcomes
 
     def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
         return len({o.token_id for o in self.outcomes if o.completed})
@@ -73,6 +80,11 @@ class _FakeQuery:
 @dataclass(frozen=True, slots=True)
 class _FakeFactory:
     query: _FakeQuery
+    run_status_projection: _FakeRunStatusProjection
+
+
+def _fake_factory(outcomes: list[TokenOutcome]) -> _FakeFactory:
+    return _FakeFactory(query=_FakeQuery(outcomes), run_status_projection=_FakeRunStatusProjection(outcomes))
 
 
 def _routed_outcome(path: TerminalPath, outcome: TerminalOutcome, *, sink_name: str | None) -> TokenOutcome:
@@ -101,7 +113,7 @@ def _routed_outcome(path: TerminalPath, outcome: TerminalOutcome, *, sink_name: 
 def test_routed_outcome_missing_sink_name_crashes(path: TerminalPath, outcome: TerminalOutcome) -> None:
     """A routed token_outcomes row with NULL sink_name must crash the resume
     aggregator — a Tier-1 audit-integrity violation, never a silent skip."""
-    factory = _FakeFactory(query=_FakeQuery([_routed_outcome(path, outcome, sink_name=None)]))
+    factory = _fake_factory([_routed_outcome(path, outcome, sink_name=None)])
     with pytest.raises(OrchestrationInvariantError, match="missing sink_name"):
         derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
 
@@ -115,7 +127,7 @@ def test_routed_outcome_missing_sink_name_crashes(path: TerminalPath, outcome: T
 )
 def test_routed_outcome_tallies_destination(path: TerminalPath, outcome: TerminalOutcome, destination: str) -> None:
     """The happy path still tallies routed_destinations by sink_name."""
-    factory = _FakeFactory(query=_FakeQuery([_routed_outcome(path, outcome, sink_name=destination)]))
+    factory = _fake_factory([_routed_outcome(path, outcome, sink_name=destination)])
     _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
     assert counters.routed_destinations[destination] == 1
 
@@ -149,14 +161,12 @@ def test_flat_coalesce_success_counts_merged_output_once() -> None:
     """A 2-branch coalesce-success writes two consumed inputs (sink_name=None)
     plus one merged output (sink_name set). The derive must count the merged
     output ONCE — counting every COALESCED record would report 3."""
-    factory = _FakeFactory(
-        query=_FakeQuery(
-            [
-                _coalesced_outcome("branch-1", sink_name=None),
-                _coalesced_outcome("branch-2", sink_name=None),
-                _coalesced_outcome("merged", sink_name="out_sink"),
-            ]
-        )
+    factory = _fake_factory(
+        [
+            _coalesced_outcome("branch-1", sink_name=None),
+            _coalesced_outcome("branch-2", sink_name=None),
+            _coalesced_outcome("merged", sink_name="out_sink"),
+        ]
     )
     _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
     assert counters.rows_coalesced == 1
@@ -167,17 +177,15 @@ def test_nested_coalesce_counts_only_final_merged_output() -> None:
     """An inner merged token consumed by an outer coalesce is itself recorded as
     a consumed input (sink_name=None), so it is NOT counted at the inner level.
     Only the OUTER merged output (which reaches the final sink) is counted."""
-    factory = _FakeFactory(
-        query=_FakeQuery(
-            [
-                _coalesced_outcome("inner-branch-1", sink_name=None),
-                _coalesced_outcome("inner-branch-2", sink_name=None),
-                # inner merged token, absorbed by the outer coalesce -> sink_name None
-                _coalesced_outcome("inner-merged", sink_name=None),
-                # outer merged token reaches the final sink -> the only counted record
-                _coalesced_outcome("outer-merged", sink_name="final_sink"),
-            ]
-        )
+    factory = _fake_factory(
+        [
+            _coalesced_outcome("inner-branch-1", sink_name=None),
+            _coalesced_outcome("inner-branch-2", sink_name=None),
+            # inner merged token, absorbed by the outer coalesce -> sink_name None
+            _coalesced_outcome("inner-merged", sink_name=None),
+            # outer merged token reaches the final sink -> the only counted record
+            _coalesced_outcome("outer-merged", sink_name="final_sink"),
+        ]
     )
     _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
     assert counters.rows_coalesced == 1

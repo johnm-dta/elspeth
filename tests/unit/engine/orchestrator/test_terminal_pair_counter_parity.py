@@ -76,6 +76,11 @@ class _FakeQuery:
     def get_all_token_outcomes_for_run(self, run_id: str) -> list[TokenOutcome]:
         return self.outcomes
 
+
+@dataclass(frozen=True, slots=True)
+class _FakeRunStatusProjection:
+    outcomes: list[TokenOutcome]
+
     def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
         return len({o.token_id for o in self.outcomes if o.completed})
 
@@ -86,6 +91,11 @@ class _FakeQuery:
 @dataclass(frozen=True, slots=True)
 class _FakeFactory:
     query: _FakeQuery
+    run_status_projection: _FakeRunStatusProjection
+
+
+def _fake_factory(outcomes: list[TokenOutcome]) -> _FakeFactory:
+    return _FakeFactory(query=_FakeQuery(outcomes), run_status_projection=_FakeRunStatusProjection(outcomes))
 
 
 def _token_outcome(
@@ -173,14 +183,14 @@ class TestAuditDeriveMatchesTable:
         # COALESCED derive counts only the merged output (sink_name set);
         # routed pairs are contract-bound to carry sink_name.
         sink_name = _SINK if (effect.counts_routed_destination or pair[1] is TerminalPath.COALESCED) else None
-        factory = _FakeFactory(query=_FakeQuery([_token_outcome(pair[0], pair[1], sink_name=sink_name)]))
+        factory = _fake_factory([_token_outcome(pair[0], pair[1], sink_name=sink_name)])
 
         _status, counters = derive_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
 
         _assert_governed_fields_match(counters, _expected_counters(effect), context=f"derive {pair!r}")
 
     def test_buffered_record_counts_rows_buffered(self) -> None:
-        factory = _FakeFactory(query=_FakeQuery([_token_outcome(None, TerminalPath.BUFFERED, sink_name=None, completed=False)]))
+        factory = _fake_factory([_token_outcome(None, TerminalPath.BUFFERED, sink_name=None, completed=False)])
 
         _status, counters = derive_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
 
@@ -189,7 +199,7 @@ class TestAuditDeriveMatchesTable:
 
     def test_coalesced_consumed_input_counts_nothing(self) -> None:
         """A consumed branch input (sink_name None) delegates to the merged token."""
-        factory = _FakeFactory(query=_FakeQuery([_token_outcome(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name=None)]))
+        factory = _fake_factory([_token_outcome(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name=None)])
 
         _status, counters = derive_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
 

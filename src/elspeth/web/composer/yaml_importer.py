@@ -41,8 +41,8 @@ class RuntimeYamlImportError(ValueError):
     """Raised when runtime YAML cannot be represented as composer state."""
 
 
-class _NoAliasSafeLoader(yaml.SafeLoader):
-    """``SafeLoader`` that rejects YAML anchors/aliases.
+def _reject_yaml_aliases(pipeline_yaml: str) -> None:
+    """Reject YAML anchors/aliases before safe construction.
 
     Neither the eval-replay harness nor the composer's own export
     (:func:`elspeth.web.composer.yaml_generator.generate_public_yaml`) ever
@@ -57,20 +57,14 @@ class _NoAliasSafeLoader(yaml.SafeLoader):
     amplification vector for user-pasted YAML with no loss of legitimate
     functionality.
     """
-
-    def compose_node(self, parent: Any, index: Any) -> Any:
-        # PyYAML ships no inline type annotations for Parser.check_event /
-        # get_event (both untyped in the upstream library), so mypy flags
-        # these as no-untyped-call regardless of how they're invoked.
-        if self.check_event(yaml.events.AliasEvent):  # type: ignore[no-untyped-call]
-            event = self.get_event()  # type: ignore[no-untyped-call]
+    for event in yaml.parse(pipeline_yaml):
+        if isinstance(event, yaml.events.AliasEvent):
             raise yaml.composer.ComposerError(
                 None,
                 None,
                 "aliases are not permitted in pipeline YAML imports",
                 event.start_mark,
             )
-        return super().compose_node(parent, index)
 
 
 def _require_mapping(value: Any, path: str) -> Mapping[str, Any]:
@@ -274,22 +268,16 @@ def composition_state_from_runtime_yaml(pipeline_yaml: str, *, version: int = 1)
     if len(pipeline_yaml) > MAX_RUNTIME_YAML_IMPORT_CHARS:
         raise RuntimeYamlImportError("pipeline YAML exceeds the 262144 character import limit")
     try:
-        # NOTE for reviewers/scanners: this is yaml.load() with an explicit
-        # Loader=, not yaml.load() with the dangerous default (yaml.Loader /
-        # yaml.UnsafeLoader). _NoAliasSafeLoader subclasses yaml.SafeLoader
-        # and registers no additional constructors -- it only intercepts
-        # alias composition (see class docstring) -- so this call is exactly
-        # as safe against arbitrary-object construction as yaml.safe_load();
-        # `!!python/object:` tags still raise ConstructorError.
-        parsed = yaml.load(pipeline_yaml, Loader=_NoAliasSafeLoader)
+        _reject_yaml_aliases(pipeline_yaml)
+        parsed = yaml.safe_load(pipeline_yaml)
     except (yaml.YAMLError, RecursionError) as exc:
         # RecursionError: a deeply (but not textually large) nested mapping
         # chain -- e.g. ~500 levels of ``a:\n  a:\n    a:\n ...`` fits well
         # under the character cap above but exhausts CPython's default
         # recursion limit inside PyYAML's pure-Python composer/constructor.
-        # ``yaml.safe_load``/``yaml.load`` always use the pure-Python
-        # SafeLoader (never the libyaml-backed CSafeLoader) so this is a
-        # plain, safely-catchable Python exception, not a C stack overflow.
+        # ``yaml.safe_load`` uses PyYAML's safe constructors, so this is a
+        # plain, catchable parser/constructor failure rather than arbitrary
+        # object construction.
         raise RuntimeYamlImportError(f"YAML parse failed: {exc.__class__.__name__}") from exc
     doc = _require_mapping(parsed, "pipeline YAML")
     if not _PIPELINE_SECTION_KEYS & doc.keys():

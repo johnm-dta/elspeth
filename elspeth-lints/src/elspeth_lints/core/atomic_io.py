@@ -189,7 +189,7 @@ def atomic_write_text(
         fd = os.open(
             str(temp_path),
             os.O_CREAT | os.O_WRONLY | os.O_EXCL,
-            0o644,
+            0o600,
         )
         temp_created = True
         try:

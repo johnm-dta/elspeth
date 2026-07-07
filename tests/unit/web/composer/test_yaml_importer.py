@@ -305,7 +305,7 @@ sinks:
 
 def test_composition_state_from_runtime_yaml_reimports_generate_public_yaml_output() -> None:
     """Hardening regression guard: T-1's whole point is the export -> import
-    round trip, so the hardening added in this pass (no-alias loader,
+    round trip, so the hardening added in this pass (no-alias pre-scan,
     recursion-safety, non-pipeline-mapping gate) must not break re-importing
     what the composer's own public export (``generate_public_yaml``, the
     function ``GET /state/yaml`` actually calls) produces.
@@ -313,7 +313,7 @@ def test_composition_state_from_runtime_yaml_reimports_generate_public_yaml_outp
     Also empirically confirms ``generate_public_yaml`` never emits YAML
     anchors/aliases for a representative multi-node/multi-sink state --
     if it ever did (e.g. from a future change that shares an options dict
-    object across nodes), the no-alias loader added in this pass would
+    object across nodes), the no-alias pre-scan added in this pass would
     reject the composer's own export, and this test would catch it.
     """
     state = CompositionState(
@@ -383,7 +383,7 @@ def test_composition_state_from_runtime_yaml_reimports_generate_public_yaml_outp
 
     exported_yaml = generate_public_yaml(state)
 
-    # No anchor/alias markers -- confirms the no-alias loader's rejection
+    # No anchor/alias markers -- confirms the no-alias pre-scan's rejection
     # of aliases (added for the billion-laughs defense) has no cost against
     # the composer's own export shape.
     assert "&" not in exported_yaml.split("\n")[0:1][0]  # sanity: not YAML-document-start noise

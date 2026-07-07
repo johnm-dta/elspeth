@@ -171,6 +171,8 @@ def _build_linear_graph(config: PipelineConfig) -> ExecutionGraph:
     graph.set_transform_id_map(transform_ids)
     graph.set_route_resolution_map({})
     graph.set_config_gate_id_map({})
+    graph.set_pipeline_nodes(list(transform_ids.values()))
+    graph.set_node_step_map(graph.build_step_map())
 
     return graph
 
@@ -870,6 +872,8 @@ class TestResumeIdempotence:
         graph_b.set_transform_id_map({0: NodeID("transform_0")})
         graph_b.set_route_resolution_map({})
         graph_b.set_config_gate_id_map({})
+        graph_b.set_pipeline_nodes([NodeID("transform_0")])
+        graph_b.set_node_step_map(graph_b.build_step_map())
 
         # Simulate that first 3 rows were processed (doubled)
         pre_crash_output = [{"id": i, "value": (i + 1) * 10 * 2} for i in range(3)]

@@ -56,6 +56,10 @@ class TokenRef:
 _SOURCE_FILE_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{16}")
 _SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 
+type OperationType = Literal["source_load", "sink_write", "runtime_preflight"]
+
+OPERATION_TYPE_VALUES: tuple[OperationType, ...] = ("source_load", "sink_write", "runtime_preflight")
+
 
 def validate_resolved_prompt_template_hash(call_type: CallType, resolved_prompt_template_hash: str | None) -> None:
     """Validate the cross-DB prompt-hash anchor invariant (Tier 1).
@@ -923,7 +927,7 @@ class Operation:
     operation_id: str
     run_id: str
     node_id: str
-    operation_type: Literal["source_load", "sink_write", "runtime_preflight"]
+    operation_type: OperationType
     started_at: datetime
     status: Literal["open", "completed", "failed", "pending"]
     completed_at: datetime | None = None
@@ -934,7 +938,7 @@ class Operation:
     error_message: str | None = None
     duration_ms: float | None = None
 
-    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"runtime_preflight", "source_load", "sink_write"})
+    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset(OPERATION_TYPE_VALUES)
     _ALLOWED_STATUSES: ClassVar[frozenset[str]] = frozenset({"open", "completed", "failed", "pending"})
 
     def __post_init__(self) -> None:

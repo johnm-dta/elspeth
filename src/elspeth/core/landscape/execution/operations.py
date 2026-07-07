@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from elspeth.contracts import FrameworkBugError, Operation
+from elspeth.contracts import FrameworkBugError, Operation, OperationType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -50,7 +50,7 @@ class OperationRepository:
         self,
         run_id: str,
         node_id: str,
-        operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
+        operation_type: OperationType,
         *,
         input_data: Mapping[str, object] | None = None,
     ) -> Operation:

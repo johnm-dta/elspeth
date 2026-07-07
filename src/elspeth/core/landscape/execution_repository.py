@@ -35,6 +35,7 @@ from elspeth.contracts import (
     NodeStatePending,
     NodeStateStatus,
     Operation,
+    OperationType,
     RoutingEvent,
     RoutingMode,
     RoutingReason,
@@ -346,7 +347,7 @@ class ExecutionRepository:
         self,
         run_id: str,
         node_id: str,
-        operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
+        operation_type: OperationType,
         *,
         input_data: Mapping[str, object] | None = None,
     ) -> Operation:

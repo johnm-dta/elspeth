@@ -13,7 +13,7 @@ from typing import Annotated, Any, ClassVar, Final, Literal, Self, TypeAliasType
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from elspeth.contracts import NodeStateStatus, Operation, TerminalOutcome
+from elspeth.contracts import OPERATION_TYPE_VALUES, NodeStateStatus, Operation, OperationType, TerminalOutcome
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SessionRunStatus,
@@ -685,7 +685,7 @@ class DiscardSummary(_StrictResponse):
 
 type RunDiagnosticNodeStateStatus = Literal["open", "pending", "completed", "failed"]
 type RunDiagnosticTerminalOutcome = Literal["success", "failure", "transient"]
-type RunDiagnosticOperationType = Literal["source_load", "sink_write", "runtime_preflight"]
+RunDiagnosticOperationType = OperationType
 type RunDiagnosticOperationStatus = Literal["open", "completed", "failed", "pending"]
 type RunDiagnosticDurationMs = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 type RunDiagnosticCount = Annotated[int, Field(ge=0)]
@@ -697,7 +697,7 @@ def _type_alias_literal_values(alias: TypeAliasType) -> frozenset[str]:
 
 RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticNodeStateStatus)
 RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticTerminalOutcome)
-RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticOperationType)
+RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES: frozenset[str] = frozenset(OPERATION_TYPE_VALUES)
 RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticOperationStatus)
 
 if frozenset(status.value for status in NodeStateStatus) != RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES:
@@ -709,10 +709,10 @@ if frozenset(outcome.value for outcome in TerminalOutcome) != RUN_DIAGNOSTIC_TER
         "RunDiagnosticToken.terminal_outcome Literal values must mirror "
         f"TerminalOutcome values; got {RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES}"
     )
-if RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES != Operation._ALLOWED_OPERATION_TYPES:
+if frozenset(OPERATION_TYPE_VALUES) != RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES:
     raise AssertionError(
         "RunDiagnosticOperation.operation_type Literal values must mirror "
-        f"Operation._ALLOWED_OPERATION_TYPES; got {RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES}"
+        f"OPERATION_TYPE_VALUES; got {RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES}"
     )
 if RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES != Operation._ALLOWED_STATUSES:
     raise AssertionError(

@@ -21,6 +21,7 @@ Import patterns:
 """
 
 from elspeth.contracts.audit import (
+    OPERATION_TYPE_VALUES,
     Artifact,
     Batch,
     BatchMember,
@@ -38,6 +39,7 @@ from elspeth.contracts.audit import (
     NodeStatePending,
     NonCanonicalMetadata,
     Operation,
+    OperationType,
     RoutingEvent,
     Row,
     RowLineage,
@@ -311,6 +313,8 @@ __all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
     "Operation",
+    "OperationType",
+    "OPERATION_TYPE_VALUES",
     # errors
     "CommencementGateFailedError",
     "DependencyFailedError",

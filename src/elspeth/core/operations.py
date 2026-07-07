@@ -25,7 +25,7 @@ import elspeth.contracts.errors as contract_errors
 from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 
 if TYPE_CHECKING:
-    from elspeth.contracts import Operation
+    from elspeth.contracts import Operation, OperationType
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.landscape.execution_repository import ExecutionRepository
 
@@ -88,7 +88,7 @@ def track_operation(
     recorder: ExecutionRepository,
     run_id: str,
     node_id: str,
-    operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
+    operation_type: OperationType,
     ctx: PluginContext,
     *,
     input_data: dict[str, Any] | None = None,

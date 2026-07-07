@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Required, get_args, get_origin, get_type_hints
+from typing import Literal, Required, TypeAliasType, get_args, get_origin, get_type_hints
 
 from elspeth.mcp import types
 from elspeth.mcp.server import _TOOLS
@@ -11,6 +11,8 @@ from elspeth.mcp.server import _TOOLS
 def _literal_values(hint: object) -> set[str]:
     if get_origin(hint) is Required:
         hint = get_args(hint)[0]
+    if isinstance(hint, TypeAliasType):
+        hint = hint.__value__
     assert get_origin(hint) is Literal
     return set(get_args(hint))
 

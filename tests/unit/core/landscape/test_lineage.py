@@ -25,7 +25,7 @@ from elspeth.contracts.audit import (
 )
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.lineage import LineageResult, explain
+from elspeth.core.landscape.lineage import LineageIntegrityValidator, LineageResult, explain
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -529,6 +529,44 @@ class TestExplainParentIntegrity:
         )
         with pytest.raises(AuditIntegrityError, match=r"parent relationships.*but no group ID"):
             explain(factory.query, factory.data_flow, "run-1", token_id="tok-1")
+
+
+class TestLineageIntegrityValidator:
+    """Tests for the reusable parent-lineage integrity boundary."""
+
+    def test_checked_parent_tokens_are_available_without_explain(self) -> None:
+        """Parent-lineage policy is reusable outside the query composer."""
+        child_token = _make_token(token_id="child-1", join_group_id="join-1")
+        parent_1 = _make_token(token_id="parent-1", row_id="row-parent-1")
+        parent_2 = _make_token(token_id="parent-2", row_id="row-parent-2")
+        parent_refs = [
+            TokenParent(token_id="child-1", parent_token_id="parent-1", ordinal=0),
+            TokenParent(token_id="child-1", parent_token_id="parent-2", ordinal=1),
+        ]
+        query = _FakeQuery(token_parents=parent_refs)
+        tokens_by_id = {
+            child_token.token_id: child_token,
+            parent_1.token_id: parent_1,
+            parent_2.token_id: parent_2,
+        }
+        query.token_side_effect = tokens_by_id.get
+
+        parent_tokens = LineageIntegrityValidator().get_parent_tokens_checked(query, child_token, "run-1")
+
+        assert [token.token_id for token in parent_tokens] == ["parent-1", "parent-2"]
+        assert query.get_tokens_by_ids_calls == [("parent-1", "parent-2")]
+        assert query.get_token_calls == []
+
+    def test_checked_parent_tokens_rejects_mismatched_child_run_context(self) -> None:
+        """Reusable callers cannot weaken the child-token run binding."""
+        child_token = _make_token(token_id="child-1", join_group_id="join-1", run_id="run-1")
+        parent_token = _make_token(token_id="parent-1", row_id="row-parent-1", run_id="run-2")
+        parent_ref = TokenParent(token_id="child-1", parent_token_id="parent-1", ordinal=0)
+        query = _FakeQuery(token_parents=[parent_ref])
+        query.token_side_effect = {parent_token.token_id: parent_token}.get
+
+        with pytest.raises(AuditIntegrityError, match=r"requested run.*child token"):
+            LineageIntegrityValidator().get_parent_tokens_checked(query, child_token, "run-2")
 
 
 # ===========================================================================

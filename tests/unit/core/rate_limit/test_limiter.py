@@ -125,6 +125,22 @@ class TestRateLimiter:
             # Second (immediate): should fail without blocking
             assert limiter.try_acquire() is False
 
+    def test_underlying_limiter_stays_in_wrapper_nonblocking_mode(self) -> None:
+        """Wrapper polling should not mutate pyrate-limiter mode per acquire."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with RateLimiter(name="nonblocking_mode", requests_per_minute=1) as limiter:
+            assert limiter._limiter.max_delay is None
+            assert limiter._limiter.raise_when_fail is False
+
+            assert limiter.try_acquire() is True
+            assert limiter._limiter.max_delay is None
+            assert limiter._limiter.raise_when_fail is False
+
+            assert limiter.try_acquire() is False
+            assert limiter._limiter.max_delay is None
+            assert limiter._limiter.raise_when_fail is False
+
     def test_limiter_with_sqlite_persistence(self, tmp_path: Path) -> None:
         """Rate limits persist across limiter instances."""
         from elspeth.core.rate_limit import RateLimiter

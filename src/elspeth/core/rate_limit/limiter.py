@@ -233,17 +233,20 @@ class RateLimiter:
         else:
             self._bucket = InMemoryBucket(rates=rates)
 
-        # Single limiter with per-minute rate. Omit the clock argument in
-        # production so pyrate-limiter keeps its wall-clock behavior; inject the
-        # adapter only for deterministic in-memory tests.
+        # Single limiter with per-minute rate. The wrapper owns blocking by
+        # polling try_acquire(), so configure pyrate-limiter in non-blocking
+        # mode once instead of mutating limiter flags on every acquire attempt.
+        # Omit the clock argument in production so pyrate-limiter keeps its
+        # wall-clock behavior; inject the adapter only for deterministic
+        # in-memory tests.
         if clock is None:
-            self._limiter = Limiter(self._bucket, max_delay=self._window_ms, raise_when_fail=True)
+            self._limiter = Limiter(self._bucket, max_delay=None, raise_when_fail=False)
         else:
             self._limiter = Limiter(
                 self._bucket,
                 clock=_PyrateClockAdapter(clock),
-                max_delay=self._window_ms,
-                raise_when_fail=True,
+                max_delay=None,
+                raise_when_fail=False,
             )
 
     def _monotonic(self) -> float:
@@ -303,22 +306,7 @@ class RateLimiter:
             raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
         self._validate_weight(weight)
         with self._lock:
-            # Temporarily disable blocking + raising so the library reports the
-            # rate-limit outcome as its documented bool return instead of via a
-            # BucketFullException. With max_delay=None the limiter never waits,
-            # and with raise_when_fail=False it returns False on a full bucket
-            # rather than raising — letting us return that bool directly. The
-            # limiter is otherwise constructed with raise_when_fail=True for the
-            # blocking acquire() path, so both flags are restored in finally.
-            original_max_delay = self._limiter.max_delay
-            original_raise_when_fail = self._limiter.raise_when_fail
-            self._limiter.max_delay = None
-            self._limiter.raise_when_fail = False
-            try:
-                return bool(self._limiter.try_acquire(self.name, weight=weight))
-            finally:
-                self._limiter.max_delay = original_max_delay
-                self._limiter.raise_when_fail = original_raise_when_fail
+            return bool(self._limiter.try_acquire(self.name, weight=weight))
 
     def close(self) -> None:
         """Close the rate limiter and release resources."""

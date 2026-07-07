@@ -83,6 +83,94 @@ class TestExecutionError:
         assert error.exception == "<redacted-secret>"
         assert secret not in str(error.to_dict())
 
+    def test_execution_error_traceback_redacts_only_secret_lines(self) -> None:
+        """Traceback scrubbing preserves safe frame diagnostics around a secret line."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        traceback = (
+            "Traceback (most recent call last):\n"
+            '  File "worker.py", line 10, in run\n'
+            "    run_step()\n"
+            '  File "plugin.py", line 20, in run_step\n'
+            f"    raise RuntimeError('Authorization: Bearer {secret}')\n"
+            "RuntimeError: failed\n"
+        )
+
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=traceback,
+        )
+
+        assert error.traceback == (
+            "Traceback (most recent call last):\n"
+            '  File "worker.py", line 10, in run\n'
+            "    run_step()\n"
+            '  File "plugin.py", line 20, in run_step\n'
+            "<redacted-secret>\n"
+            "RuntimeError: failed\n"
+        )
+        assert secret not in error.traceback
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_traceback_scrubs_embedded_secret_for_audit(self) -> None:
+        """Traceback text must not persist secret-bearing messages in audit payloads."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=f"RuntimeError: Authorization: Bearer {secret}",
+        )
+
+        assert error.traceback == "<redacted-secret>"
+        assert error.to_dict()["traceback"] == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_traceback_scrubs_secret_split_across_message_lines(self) -> None:
+        """Traceback scrubbing does not treat newlines as secret-evasion boundaries."""
+        from elspeth.contracts import ExecutionError
+
+        traceback = (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\nRuntimeError: Authorization:\nBearer opaque-token\n'
+        )
+
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=traceback,
+        )
+
+        assert error.traceback == (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\n<redacted-secret>\n<redacted-secret>\n'
+        )
+        assert "Authorization" not in error.traceback
+        assert "opaque-token" not in error.traceback
+        assert "opaque-token" not in str(error.to_dict())
+
+    def test_execution_error_traceback_scrubs_secret_continuation_after_redacted_message_line(self) -> None:
+        """Continuation lines after a redacted exception message tail are redacted."""
+        from elspeth.contracts import ExecutionError
+
+        traceback = (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\nRuntimeError: Authorization: Bearer\nopaque-token\n'
+        )
+
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=traceback,
+        )
+
+        assert error.traceback == (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\n<redacted-secret>\n<redacted-secret>\n'
+        )
+        assert "Authorization" not in error.traceback
+        assert "opaque-token" not in error.traceback
+        assert "opaque-token" not in str(error.to_dict())
+
 
 class TestRuntimePreflightFailedError:
     """Tests for runtime-preflight audit payloads."""

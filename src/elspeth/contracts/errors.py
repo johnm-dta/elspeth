@@ -22,6 +22,9 @@ from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.contracts.tier_registry import FrameworkBugError as _FrameworkBugError
 from elspeth.contracts.tier_registry import tier_1_error
 
+_REDACTED_SECRET = "<redacted-secret>"
+_TRACEBACK_SECRET_WINDOW_SIZE = 4
+
 FrameworkBugError = tier_1_error(
     reason="ADR-008: framework internal inconsistency — engine bug",
     caller_module=__name__,
@@ -30,6 +33,94 @@ FrameworkBugError = tier_1_error(
 if TYPE_CHECKING:
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
     from elspeth.contracts.coordination import RegisteredWorker
+
+
+def _scrub_traceback_for_audit(traceback_text: str) -> str:
+    """Scrub traceback lines independently so safe frame diagnostics survive."""
+    lines = traceback_text.splitlines(keepends=True)
+    line_parts = [_split_line_ending(line) for line in lines]
+
+    redacted_indexes: set[int] = set()
+    scrubbed_content_by_index: dict[int, str] = {}
+    for index, (content, _line_ending) in enumerate(line_parts):
+        scrubbed_content = scrub_text_for_audit(content)
+        scrubbed_content_by_index[index] = scrubbed_content
+        if scrubbed_content != content:
+            redacted_indexes.add(index)
+
+    nonstructural_runs = _nonstructural_traceback_runs(line_parts)
+    for run_start, run_stop in nonstructural_runs:
+        tail_start = _traceback_exception_tail_start(line_parts, run_start, run_stop)
+        if tail_start is not None:
+            tail_text = _join_line_parts(line_parts[tail_start:run_stop])
+            if scrub_text_for_audit(tail_text) != tail_text:
+                redacted_indexes.update(range(tail_start, run_stop))
+
+    for run_start, run_stop in nonstructural_runs:
+        for start in range(run_start, run_stop):
+            window_stop = min(run_stop, start + _TRACEBACK_SECRET_WINDOW_SIZE)
+            for stop in range(start + 2, window_stop + 1):
+                window_indexes = range(start, stop)
+                if any(index in redacted_indexes for index in window_indexes):
+                    continue
+                window_text = _join_line_parts(line_parts[start:stop])
+                if scrub_text_for_audit(window_text) != window_text:
+                    redacted_indexes.update(window_indexes)
+
+    return "".join(
+        f"{scrubbed_content_by_index[index] if index not in redacted_indexes else _REDACTED_SECRET}{line_ending}"
+        for index, (_content, line_ending) in enumerate(line_parts)
+    )
+
+
+def _split_line_ending(line: str) -> tuple[str, str]:
+    content = line.rstrip("\r\n")
+    return content, line[len(content) :]
+
+
+def _nonstructural_traceback_runs(line_parts: list[tuple[str, str]]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for index, (content, _line_ending) in enumerate(line_parts):
+        if _is_traceback_structure_line(content):
+            if run_start is not None:
+                runs.append((run_start, index))
+                run_start = None
+            continue
+        if run_start is None:
+            run_start = index
+    if run_start is not None:
+        runs.append((run_start, len(line_parts)))
+    return runs
+
+
+def _traceback_exception_tail_start(line_parts: list[tuple[str, str]], run_start: int, run_stop: int) -> int | None:
+    for index in range(run_start, run_stop):
+        content = line_parts[index][0]
+        if _is_traceback_exception_message_line(content):
+            return index
+    return None
+
+
+def _is_traceback_exception_message_line(content: str) -> bool:
+    candidate = content.lstrip(" |")
+    type_name, separator, _message = candidate.partition(":")
+    if not separator:
+        return False
+    return bool(type_name) and all(part.isidentifier() for part in type_name.split("."))
+
+
+def _is_traceback_structure_line(content: str) -> bool:
+    return (
+        content.endswith("Traceback (most recent call last):")
+        or content.lstrip().startswith('File "')
+        or content.startswith("During handling of the above exception")
+        or content.startswith("The above exception was the direct cause")
+    )
+
+
+def _join_line_parts(line_parts: list[tuple[str, str]]) -> str:
+    return "".join(f"{content}{line_ending}" for content, line_ending in line_parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +167,7 @@ class ExecutionError:
         """
         object.__setattr__(self, "exception", scrub_text_for_audit(self.exception))
         if self.traceback is not None:
-            object.__setattr__(self, "traceback", scrub_text_for_audit(self.traceback))
+            object.__setattr__(self, "traceback", _scrub_traceback_for_audit(self.traceback))
         if not self.exception:
             raise ValueError("ExecutionError.exception must not be empty")
         if not self.exception_type:

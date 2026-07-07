@@ -98,20 +98,6 @@ class PluginAuditWriterAdapter:
         response_ref: str | None = None,
         resolved_prompt_template_hash: str | None = None,
     ) -> Call:
-        if call_index is not None:
-            return self._execution.record_operation_call(
-                operation_id,
-                call_type,
-                status,
-                request_data,
-                response_data,
-                error,
-                latency_ms,
-                call_index=call_index,
-                request_ref=request_ref,
-                response_ref=response_ref,
-                resolved_prompt_template_hash=resolved_prompt_template_hash,
-            )
         return self._execution.record_operation_call(
             operation_id,
             call_type,
@@ -120,6 +106,7 @@ class PluginAuditWriterAdapter:
             response_data,
             error,
             latency_ms,
+            call_index=call_index,
             request_ref=request_ref,
             response_ref=response_ref,
             resolved_prompt_template_hash=resolved_prompt_template_hash,

@@ -223,6 +223,7 @@ class TestOperationCallRoutesToExecution:
             None,
             error,
             3.25,
+            call_index=None,
             request_ref="op-request-ref",
             response_ref=None,
             # Phase 5b Task 9: cross-DB hash anchor; None unless the caller

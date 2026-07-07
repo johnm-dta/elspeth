@@ -50,6 +50,13 @@ class TokenOutcomeDisplayInfo(TypedDict, total=False):
     artifact: TuiArtifactInfo
 
 
+class TokenParentDisplayInfo(TypedDict):
+    """Parent token evidence attached to a focused token."""
+
+    token_id: str
+    row_id: str
+
+
 class TokenDisplayInfo(TypedDict, total=False):
     """Token information formatted for TUI display.
 
@@ -61,6 +68,7 @@ class TokenDisplayInfo(TypedDict, total=False):
     row_id: Required[str]
     path: Required[list[str]]
     outcome: TokenOutcomeDisplayInfo
+    parent_tokens: list[TokenParentDisplayInfo]
 
 
 class LineageData(TypedDict):

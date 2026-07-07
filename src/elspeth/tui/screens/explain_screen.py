@@ -36,6 +36,9 @@ class _LineageResultLike(Protocol):
     def node_states(self) -> Sequence[NodeState]: ...
 
     @property
+    def parent_tokens(self) -> Sequence[Token]: ...
+
+    @property
     def outcome(self) -> TokenOutcome | None: ...
 
 
@@ -253,6 +256,14 @@ class ExplainScreen:
             "row_id": lineage_result.token.row_id,
             "path": [state.node_id for state in lineage_result.node_states],
         }
+        if lineage_result.parent_tokens:
+            token_info["parent_tokens"] = [
+                {
+                    "token_id": parent.token_id,
+                    "row_id": parent.row_id,
+                }
+                for parent in lineage_result.parent_tokens
+            ]
         if lineage_result.outcome is not None:
             artifact = self._artifact_for_lineage(lineage_result.node_states, artifacts_by_state_id)
             token_info["outcome"] = self._outcome_display_info(lineage_result.outcome, artifact)

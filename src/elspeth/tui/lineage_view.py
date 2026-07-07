@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from elspeth.contracts import NodeType
-from elspeth.tui.types import TokenDisplayInfo, TreeSelection
+from elspeth.tui.types import TokenDisplayInfo, TokenParentDisplayInfo, TreeSelection
 
 
 class _NodeLike(Protocol):
@@ -72,6 +72,7 @@ _TYPE_LABELS = {
     NodeType.SINK: "Sink",
 }
 _HIDDEN_EDGE_LABELS = {"continue", "default", "on_success"}
+_FOCUSED_TOKEN_PATH_ELIDABLE_NODE_TYPES = frozenset({NodeType.QUEUE})
 
 
 def build_lineage_view_model(
@@ -164,8 +165,16 @@ def _append_node(
     label = _node_label(node)
     selection = _node_selection(run_id, node)
     current_path = (*traversal_path, node.node_id)
-    token_children = sorted(token_nodes_by_path.get(current_path, []), key=lambda token: (token["row_id"], token["token_id"]))
-    has_focused_path_here = _has_focused_path_at_or_below(focused_token_paths, current_path)
+    token_children = sorted(
+        (
+            token
+            for token_path, path_tokens in token_nodes_by_path.items()
+            if _token_path_matches_current_path(token_path, current_path, node_by_id)
+            for token in path_tokens
+        ),
+        key=lambda token: (token["row_id"], token["token_id"]),
+    )
+    has_focused_path_here = _has_focused_path_at_or_below(focused_token_paths, current_path, node_by_id)
     repeated_without_focused_path = node.node_id in expanded_node_ids and not has_focused_path_here
     if node.node_id in path_node_ids or repeated_without_focused_path:
         items.append(
@@ -184,7 +193,9 @@ def _append_node(
     outgoing_edges = _sort_edges(outgoing_by_node.get(node.node_id, []))
     if node.node_id in expanded_node_ids:
         outgoing_edges = [
-            edge for edge in outgoing_edges if _has_focused_path_at_or_below(focused_token_paths, (*current_path, edge.to_node_id))
+            edge
+            for edge in outgoing_edges
+            if _has_focused_path_at_or_below(focused_token_paths, (*current_path, edge.to_node_id), node_by_id)
         ]
     items.append(
         TuiLineageItem(
@@ -230,6 +241,8 @@ def _append_node(
 
     for token in token_children:
         has_outcome = "outcome" in token
+        parent_tokens = tuple(token["parent_tokens"]) if "parent_tokens" in token else ()
+        has_token_children = has_outcome or bool(parent_tokens)
         items.append(
             TuiLineageItem(
                 label=f"Token: {token['token_id']} (row: {token['row_id']})",
@@ -240,12 +253,14 @@ def _append_node(
                     "row_id": token["row_id"],
                 },
                 depth=depth + 1,
-                has_children=has_outcome,
-                expanded=has_outcome,
+                has_children=has_token_children,
+                expanded=has_token_children,
                 node_type="token",
                 token_id=token["token_id"],
             )
         )
+        for parent_token in parent_tokens:
+            items.append(_parent_token_item(run_id=run_id, parent_token=parent_token, depth=depth + 2))
         if has_outcome:
             items.append(_outcome_item(run_id=run_id, token=token, depth=depth + 2))
 
@@ -295,8 +310,61 @@ def _should_show_edge_row(edge: _EdgeLike, siblings: Sequence[_EdgeLike]) -> boo
     return len(siblings) > 1 or edge.label not in _HIDDEN_EDGE_LABELS
 
 
-def _has_focused_path_at_or_below(focused_token_paths: set[tuple[str, ...]], prefix: tuple[str, ...]) -> bool:
-    return any(len(path) >= len(prefix) and path[: len(prefix)] == prefix for path in focused_token_paths)
+def _token_path_matches_current_path(
+    token_path: tuple[str, ...],
+    current_path: tuple[str, ...],
+    node_by_id: dict[str, _NodeLike],
+) -> bool:
+    """Return whether a token's recorded state path belongs under this rendered path."""
+    if not token_path or token_path[-1] != current_path[-1]:
+        return False
+    return _token_comparable_path(current_path, token_path, node_by_id) == token_path
+
+
+def _has_focused_path_at_or_below(
+    focused_token_paths: set[tuple[str, ...]],
+    prefix: tuple[str, ...],
+    node_by_id: dict[str, _NodeLike],
+) -> bool:
+    for token_path in focused_token_paths:
+        comparable_prefix = _token_comparable_path(prefix, token_path, node_by_id)
+        if not comparable_prefix:
+            continue
+        if len(comparable_prefix) <= len(token_path) and token_path[: len(comparable_prefix)] == comparable_prefix:
+            return True
+    return False
+
+
+def _token_comparable_path(
+    traversal_path: tuple[str, ...],
+    token_path: tuple[str, ...],
+    node_by_id: dict[str, _NodeLike],
+) -> tuple[str, ...]:
+    token_node_ids = frozenset(token_path)
+    comparable_path: list[str] = []
+    for node_id in traversal_path:
+        node = node_by_id.get(node_id)
+        if node_id not in token_node_ids and node is not None and node.node_type in _FOCUSED_TOKEN_PATH_ELIDABLE_NODE_TYPES:
+            continue
+        comparable_path.append(node_id)
+    return tuple(comparable_path)
+
+
+def _parent_token_item(*, run_id: str, parent_token: TokenParentDisplayInfo, depth: int) -> TuiLineageItem:
+    return TuiLineageItem(
+        label=f"Parent token: {parent_token['token_id']} (row: {parent_token['row_id']})",
+        selection={
+            "kind": "token",
+            "run_id": run_id,
+            "token_id": parent_token["token_id"],
+            "row_id": parent_token["row_id"],
+        },
+        depth=depth,
+        has_children=False,
+        expanded=False,
+        node_type="parent_token",
+        token_id=parent_token["token_id"],
+    )
 
 
 def _outcome_item(*, run_id: str, token: TokenDisplayInfo, depth: int) -> TuiLineageItem:

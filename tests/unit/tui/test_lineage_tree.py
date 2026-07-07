@@ -1,6 +1,8 @@
 """Tests for lineage tree widget."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
@@ -34,6 +36,25 @@ def _edge(edge_id: str, from_node_id: str, to_node_id: str, label: str) -> Edge:
         default_mode=RoutingMode.MOVE,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenLike:
+    token_id: str
+    row_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NodeStateLike:
+    node_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _LineageResultLikeStub:
+    token: _TokenLike
+    node_states: tuple[_NodeStateLike, ...]
+    parent_tokens: tuple[_TokenLike, ...] = ()
+    outcome: None = None
 
 
 class TestLineageTreeWidget:
@@ -367,6 +388,103 @@ class TestLineageTreeWidget:
             "artifact_size_bytes": 12,
             "state_id": "state-sink",
         }
+
+    def test_focused_token_matches_across_structural_queue_node(self) -> None:
+        """Focused token evidence attaches when structural nodes are absent from state paths."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("queue", "work_queue", NodeType.QUEUE, sequence=1),
+                _node("sink", "json_sink", NodeType.SINK, sequence=2),
+            ],
+            edges=[
+                _edge("edge-queue", "src", "queue", "default"),
+                _edge("edge-sink", "queue", "sink", "default"),
+            ],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-queued",
+                    row_id="row-1",
+                    path=["src", "sink"],
+                    outcome={
+                        "outcome": "success",
+                        "path": "default_flow",
+                        "completed": True,
+                        "sink": "json_sink",
+                    },
+                )
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+
+        assert "Queue: work_queue" in labels
+        assert "Token: token-queued (row: row-1)" in labels
+        assert "Outcome: success / default_flow -> json_sink" in labels
+        assert labels.index("Queue: work_queue") < labels.index("Token: token-queued (row: row-1)")
+
+    def test_focused_token_parent_tokens_are_rendered_as_ancestry(self) -> None:
+        """Fork/coalesce parent token evidence remains visible in the TUI model."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("merge", "join", NodeType.COALESCE, sequence=1),
+            ],
+            edges=[_edge("edge-merge", "src", "merge", "default")],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-child",
+                    row_id="row-child",
+                    path=["src", "merge"],
+                    parent_tokens=[
+                        {"token_id": "token-parent-a", "row_id": "row-a"},
+                        {"token_id": "token-parent-b", "row_id": "row-b"},
+                    ],
+                )
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+        parent_a = next(item for item in view.items if item.label == "Parent token: token-parent-a (row: row-a)")
+        parent_b = next(item for item in view.items if item.label == "Parent token: token-parent-b (row: row-b)")
+
+        assert labels.index("Token: token-child (row: row-child)") < labels.index("Parent token: token-parent-a (row: row-a)")
+        assert parent_a.depth == parent_b.depth
+        assert parent_a.selection == {
+            "kind": "token",
+            "run_id": "run-1",
+            "token_id": "token-parent-a",
+            "row_id": "row-a",
+        }
+
+    def test_explain_screen_serializes_parent_tokens_for_focused_lineage(self) -> None:
+        """The screen does not drop parent-token evidence before building the view."""
+        from elspeth.tui.screens.explain_screen import ExplainScreen, _LineageResultLike
+
+        lineage_result = cast(
+            _LineageResultLike,
+            _LineageResultLikeStub(
+                token=_TokenLike(token_id="token-child", row_id="row-child"),
+                node_states=(_NodeStateLike(node_id="src"), _NodeStateLike(node_id="merge")),
+                parent_tokens=(
+                    _TokenLike(token_id="token-parent-a", row_id="row-a"),
+                    _TokenLike(token_id="token-parent-b", row_id="row-b"),
+                ),
+            ),
+        )
+
+        token_info = ExplainScreen()._token_display_info(lineage_result, {})
+
+        assert token_info["parent_tokens"] == [
+            {"token_id": "token-parent-a", "row_id": "row-a"},
+            {"token_id": "token-parent-b", "row_id": "row-b"},
+        ]
 
 
 class TestTreeNodeImmutability:

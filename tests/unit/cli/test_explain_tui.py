@@ -206,6 +206,7 @@ class TestExplainScreenLoading:
                 SimpleNamespace(node_id="tfm-1"),
                 SimpleNamespace(node_id="sink-1"),
             ),
+            parent_tokens=(),
             outcome=None,
         )
         edges = [
@@ -254,6 +255,7 @@ class TestExplainScreenLoading:
         lineage_result = SimpleNamespace(
             token=SimpleNamespace(token_id="tok-123", row_id="row-456"),
             node_states=(SimpleNamespace(node_id="src-1", state_id="state-src"), sink_state),
+            parent_tokens=(),
             outcome=TokenOutcome(
                 outcome_id="outcome-1",
                 run_id="run-123",
@@ -666,6 +668,7 @@ class TestExplainScreenNodeSelection:
         lineage_result = SimpleNamespace(
             token=SimpleNamespace(token_id="token-focused", row_id="row-focused"),
             node_states=(focused_state,),
+            parent_tokens=(),
             outcome=None,
         )
         query = FakeQuery(node_states=[latest_other_state])

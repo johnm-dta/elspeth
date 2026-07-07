@@ -735,25 +735,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[14]/body[22]/body[2]/body[0]/value'
   judge_metadata_signature: 'hmac-sha256:v2:c3e490f45b54a54e85d38b2f4706657eb9f6f4a6d71309f5b90e6c8df488d573'
-- key: plugins/infrastructure/clients/http.py:R4:AuditedHTTPClient:_emit_telemetry_after_audit:fp=c4f175091e2b6cef
-  owner: john
-  reason: |-
-    In AuditedHTTPClient._emit_telemetry_after_audit (http.py:282), the broad except Exception as tel_err is the last clause of a layered filter: contract_errors.TIER_1_ERRORS are re-raised (line 278) and programmer-bug exceptions TypeError/AttributeError/KeyError/NameError are re-raised (line 280). The method name and the telemetry-primacy policy confirm audit (Landscape) has already fired before this point, so the remaining broad catch covers genuine telemetry-channel failures (network/serialization in the async sink) which are best-effort and must not corrupt the main HTTP call path once audit succeeded. logger.warning is the correct last-resort channel here precisely because telemetry itself is the broken subsystem. Narrowly scoped after the re-raise filters; not silent swallowing of audit or programmer-bug failures. Matches the existing rationale.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T10:10:17.363777+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. The broad except is the terminal clause of a layered filter that has already re-raised Tier-1/audit-integrity errors and programmer-bug exceptions (TypeError/AttributeError/KeyError/NameError). Per the Telemetry primacy policy, audit has fired first (the method is _emit_telemetry_after_audit), and telemetry is explicitly best-effort; logger.warning is the documented last-resort channel precisely when telemetry itself is the broken subsystem. The catch logs with exc_info and structured fields, so the failure is recorded rather than silently swallowed.
-  judge_signature_version: 2
-  scope_fingerprint: 4b0862d7dbc9d1ca49f0b3fe5a623bc4a25b56f16607eef262a51f4469261a2c
-  judge_transport: openrouter
-  ast_path: 'body[25]/body[10]/body[2]/handlers[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:f5bfe1ffe358770b3b8102b430c6f3978241a09f993bfe189eca481a2fe0dca7'
 - key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=6783ed5388156ba6
   owner: john
   reason: |-
@@ -809,25 +790,6 @@ allow_hits:
     carried. The qname-level rationale above was re-verified against the
     current code at this site.
   expires: '2026-09-03'
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_send_ssrf_safe_request:fp=bdc0a2470c42fe8d
-  owner: john
-  reason: |-
-    False positive on HTTP client.get method dispatch; this is not dict.get default fabrication, and the response remains inside the audited request path.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:44:33.653149+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.97
-  judge_rationale: |-
-    RULE MISFIRES. The flagged `.get` is `client.get(...)` — an HTTP method call on an `httpx.Client` instance, not `dict.get()`. The R1 rule's premise (silent key-default fabrication on a dict) does not apply to a method named `get` on an HTTP client; the analyzer matched on the attribute name alone. The visible code confirms `client: httpx.Client` and the call shape (URL plus keyword args) is the httpx GET method, not a dict lookup.
-  judge_signature_version: 2
-  scope_fingerprint: 28b45302d6aa98e6ecfbb7d23b974317f3739ef404b10995c0580c5c381b184f
-  judge_transport: openrouter
-  ast_path: 'body[25]/body[15]/body[1]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:b47043633c0f02863668e09a43789dfa555d4f023ccde5e9af351c1247852e26'
 - key: plugins/sinks/json_sink.py:R6:JSONSink:write:fp=8ea5125d55f85391
   owner: john
   reason: |-
@@ -904,63 +866,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[30]/body[11]/body[9]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:72a8e8f11fd1dbe52f7ee312b5b060882451a179dbb4a3593df85a9f0038cf1f'
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=425f61d7be233f63
-  owner: john
-  reason: |-
-    PRESCRIBED FORM. The row data here is Tier-3 external row content (sink receives row dicts whose per-field presence is not guaranteed by any first-party contract — metadata_fields is operator-configured and rows are heterogeneous). The narrow KeyError catch on an OPTIONAL metadata field is the EAFP form of 'field absent → omit it', not fabrication: no value is invented, the field simply is not added to this row's metadata dict, and downstream code explicitly handles the empty-meta case. This is meaningfully distinct from the required-field path immediately above (which quarantines via _divert_row), and bad-type values are still routed to _divert_row. The except is narrow (KeyError only), scoped to one row[field] access, and the rationale ties directly to R6's concern.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:10:12.496062+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The row content is Tier-3 external data (per-field presence not guaranteed by any first-party contract), and metadata fields are explicitly optional per-field. The narrow KeyError-on-row[field] catch implements 'field absent → omit' without fabricating a value (nothing is added to meta), which is meaning-preserving absence handling, not silent recovery. Required fields above use the same EAFP form but route to _divert_row; bad-type values here also route to _divert_row. The except is tightly scoped to one access and KeyError only, addressing R6's concern directly.
-  judge_signature_version: 2
-  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
-  judge_transport: openrouter
-  ast_path: 'body[30]/body[11]/body[9]/body[1]/body[2]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:ecadb73299ff47a086bf5dc267594121b120a6464e50e883e53fac54d01e7e2a'
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=38d7ff24365d137c
-  owner: john
-  reason: |-
-    RULE MISFIRES / PRESCRIBED FORM. Per Sink policy, ChromaDB metadata accepts only str|int|float|bool|None — this is an external-system (Tier-2→external) boundary where the sink must verify value types match the external API's contract before handing off. The isinstance check drives per-row diversion via _divert_row (recorded quarantine with reason), not silent coercion or fabrication; a wrong-typed value is recorded and routed, preserving auditability. The row dict values come from arbitrary source columns whose per-field type is not contractually pinned to ChromaDB's accepted set, so guarding at the external handoff is legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:10:20.453670+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The row values come from arbitrary source columns whose per-field types are not pinned by any first-party contract to ChromaDB's accepted scalar set (str|int|float|bool|None) — this is a sink-side external-API boundary where the contract belongs to ChromaDB, not ELSPETH. The isinstance check routes wrong-typed values to _divert_row with a recorded reason (quarantine, not silent coercion or fabrication), which is the prescribed Tier-3-style boundary handling. The guard does not entrench an upward import, invoke legacy compatibility, or fabricate defaults; absence is skipped (metadata is optional per-field) and bad shape is recorded.
-  judge_signature_version: 2
-  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
-  judge_transport: openrouter
-  ast_path: 'body[30]/body[11]/body[9]/body[1]/body[2]/body[1]/test/values[1]/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:1313e33a8591cb1028a7ee52ac651b22456794f0f075a8fe151a47a5663ad68f'
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=61907237f23e26c1
-  owner: john
-  reason: |-
-    RULE MISFIRES (boundary-egress shape gate). The sink is at the egress boundary to ChromaDB, an external system with its own value constraints (rejects non-finite floats). The isinstance(value, float) narrows the union member before calling math.isfinite — it is gating a value-level check, not re-asserting a first-party shape contract. The bad value is recorded into bad_fields and the row is diverted via _divert_row (quarantine), which matches the prescribed Tier-3 boundary handling: validate, record what we got, route the unit. Nothing is silently coerced or fabricated.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:10:32.553612+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The isinstance(value, float) is narrowing a union-typed value to perform a value-level check (math.isfinite) at the egress boundary to ChromaDB, which rejects non-finite floats. This is not a redundant first-party shape re-check: row values come from upstream data whose per-field types are Tier-2 shape-valid but value-unsafe (NaN/inf are type-valid floats), and ChromaDB has its own value constraints. The handling is the prescribed form — bad values are recorded in bad_fields and the row is quarantined via _divert_row; no coercion or fabrication occurs.
-  judge_signature_version: 2
-  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
-  judge_transport: openrouter
-  ast_path: 'body[30]/body[11]/body[9]/body[1]/body[2]/body[1]/orelse[0]/test/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:65c2c1bf0bb024d2b4c2b4f2802f06a0abf563b715c1bd398bb91e3d313b0805'
 - key: plugins/sinks/azure_blob_sink.py:R6:AzureBlobSink:write:fp=304f148f13df7df3
   owner: john
   reason: |-
@@ -1059,25 +964,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[27]/body[21]/body[1]/test/left'
   judge_metadata_signature: 'hmac-sha256:v2:fcd25c8cef1e623bbea6cc911b81907118089340374b7c970f67efd87429965c'
-- key: plugins/sinks/csv_sink.py:R6:CSVSink:_stage_rows_per_row:fp=3d0d5561e6153afb
-  owner: john
-  reason: |-
-    This is a prescribed per-row operation-failure diversion, not a swallowed defensive-programming defect. In `src/elspeth/plugins/sinks/csv_sink.py:437-489`, `_stage_rows_per_row` trial-serializes each Tier-2 row into a throwaway `StringIO`; the caught site is only around `row_writer.writerow(row)` and `row_buffer.getvalue().encode(self._encoding)`. The code documents and implements the narrow boundary: `src/elspeth/plugins/sinks/csv_sink.py:450-453` says "only serialization-shaped errors are diverted" and that arbitrary broken-object exceptions propagate. At the finding site, `src/elspeth/plugins/sinks/csv_sink.py:485-487` catches only `(ValueError, csv.Error)`, records the row with `self._divert_row(row, row_index=row_index, reason=f"CSV encoding ({self._encoding}) failed: {exc}")`, then continues to stage other rows. That is site-specific row quarantine for operation-unsafe row content during CSV serialization, not Tier-1 audit data suppression or a broad swallowed exception.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:17:14.194652+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the try/except, and the visible code shows the policy-prescribed quarantine handling: a narrow except clause catching only serialization-shaped exceptions (ValueError, csv.Error), an explicit recorded diversion via self._divert_row with row_index and a descriptive reason, then continue to process remaining rows. This is per-row quarantine of operation-unsafe Tier-2 row content during CSV serialization (a value-level failure, not a shape guard), which the Quick Reference explicitly endorses for row-level faults. The except is bounded to a trial encode on an in-memory StringIO, so batch-integrity concerns are not in scope here.
-  judge_signature_version: 2
-  scope_fingerprint: 988f8d3592b41e7aba4be4df03336d3a791918ec43c800216bf602219789a532
-  judge_transport: openrouter
-  ast_path: 'body[21]/body[13]/body[2]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:28f817a7414b797cc1e68bb0b26ac337f6e7ddf076768a28eb03e8f05c701aba'
 - key: plugins/transforms/batch_stats.py:R1:BatchStats:_group_rows:fp=77ce59cd33af214a
   owner: john
   reason: |-
@@ -1135,46 +1021,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[27]/body[22]/body[3]/body[0]/value'
   judge_metadata_signature: 'hmac-sha256:v2:8241977bf24c1ffd433f77cd76f64f2168313e56ebf62a38244aefd3304efeb8'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=ef2262c78a035626
-  owner: john
-  reason: |-
-    This is a source-plugin Tier-3 ingestion boundary, not a Tier-1 audit-data read. In `src/elspeth/plugins/sources/azure_blob_source.py:1039`, `_validate_and_yield(self, row: Any, ctx: SourceContext, *, source_row_index: int)` validates an externally supplied Azure blob row; the docstring says the input `row` "May be non-dict for malformed external data" at lines 1045-1047. The caught exception is raised while accepting sparse JSON/JSONL fields from that external row: lines 1108-1111 call `self._contract_builder.process_sparse_fields(validated_row, self._field_resolution.resolution_mapping)`, and `ContractBuilder.process_sparse_fields` enforces a cap on externally inferred fields. At the flagged site, lines 1134-1147 do not silently continue: `except ContractFieldLimitExceeded as e:` records the validation failure with `ctx.record_validation_error(... error=str(e) ...)` and, unless configured to discard invalid source data, yields `SourceRow.quarantined(...)`.
-
-    The future-drift-sensitive part is that this suppression is valid only while this catch remains limited to `ContractFieldLimitExceeded` from sparse external field inference and continues to record/quarantine the row. Nearby internal invariants still crash: line 1107 raises `ValueError("field_resolution must be established before sparse-field contract inference")` and is not caught by this handler. If this catch were broadened, stopped calling `ctx.record_validation_error`, or started covering internal corruption/config defects, it would become BLOCK.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:17:43.320017+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. This is the Tier-3 source ingestion boundary: the except catches a specific, narrow domain exception (ContractFieldLimitExceeded) raised while inferring sparse fields from external blob data, and it does NOT silently swallow — it records the failure via ctx.record_validation_error and yields a SourceRow.quarantined (the policy-prescribed quarantine path). The nearby internal-invariant ValueError at line 1107 is correctly NOT covered by this handler, so first-party invariant breaks still crash. The rationale correctly identifies the tier, the exception type is narrow, and the visible code shows the recorded-quarantine pattern the policy prescribes.
-  judge_signature_version: 2
-  scope_fingerprint: bb2cb31df26800cfbd245cda54a92b1d933364861ba0cbe8db9a9fe5a11cfce9
-  judge_transport: openrouter
-  ast_path: 'body[34]/body[14]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:794cca26b4cc89c934cfbd7fce2e9776faab4d057e0e835b922c45b0b276eb0c'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=062ecb6d2752d61d
-  owner: john
-  reason: |-
-    Prescribed Tier-3 source-boundary quarantine, not a silent swallow. In `src/elspeth/plugins/sources/azure_blob_source.py:1039`, `_validate_and_yield` is validating external Azure Blob row data: the docstring says `row` "May be non-dict for malformed external data". The cited catch at `src/elspeth/plugins/sources/azure_blob_source.py:1148` is narrow to Pydantic validation failures from `self._schema_class.model_validate(row_to_validate)` at line 1082. It records the failure before suppressing it: `ctx.record_validation_error(row=row_to_validate, error=str(e), schema_mode=self._schema_config.mode, destination=self._on_validation_failure)` at lines 1151-1156, then either yields `SourceRow.quarantined(...)` at lines 1160-1166 or intentionally drops the row only when `self._on_validation_failure == "discard"` per lines 1158-1160. Tier-1/internal faults in the same function are not hidden by this catch: the code raises plain `ValueError` for missing `field_resolution` at lines 1087-1089 and 1106-1107, which is not caught by `except ValidationError as e`. This is the prescribed source-ingestion pattern: validate external data at the boundary, audit the validation error, quarantine or configured-discard the bad external row.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:17:49.030431+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a Tier-3 source boundary handling Pydantic ValidationError from external Azure Blob row data. The except block does not silently swallow: it records the failure via ctx.record_validation_error (audit trail), then either yields SourceRow.quarantined for routing to the configured sink, or intentionally discards per explicit config. This is precisely the prescribed source-ingestion pattern (validate at boundary, quarantine failures, record what we got). The catch is narrow to ValidationError, so Tier-1 ValueErrors raised elsewhere in the function still propagate.
-  judge_signature_version: 2
-  scope_fingerprint: bb2cb31df26800cfbd245cda54a92b1d933364861ba0cbe8db9a9fe5a11cfce9
-  judge_transport: openrouter
-  ast_path: 'body[34]/body[14]/body[2]/handlers[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:108c2e3edc9153d21400539168f7fed731f3a7f6a1868ab3949e5e5c28c04130'
 - key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=a23f99d2b5035239
   owner: john
   reason: |-

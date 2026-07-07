@@ -165,48 +165,6 @@ per_file_rules:
   expires: null
   max_hits: 35
 allow_hits:
-- key: contracts/url.py:R6:SanitizedDatabaseUrl:from_raw_url:fp=a8a9139e2ff09e37
-  owner: john
-  reason: |-
-    In SanitizedDatabaseUrl.from_raw_url, line 169 (`except ValueError: have_key = False`) is exception-as-control-flow, not error swallowing. get_fingerprint_key() raises ValueError as its documented signal that ELSPETH_FINGERPRINT_KEY is unset; the except converts that into a `have_key` flag and the code then branches explicitly: if have_key, compute the secret fingerprint; elif fail_if_no_key, raise SecretFingerprintError (production path); else dev-mode sanitize without fingerprint. The ValueError is a configuration probe with both outcomes handled and the production path re-raising a typed error, so no failure is hidden. This is the EAFP/narrow-except control-flow signal pattern, not defensive suppression, and there is no fabrication or audit-trail loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:40:35.572157+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on shape (ValueError caught without re-raise in the handler) but the code is the legitimate exception-as-control-flow pattern. Verified at contracts/security.py:47-58 that get_fingerprint_key() raises ValueError as its DOCUMENTED signal for 'ELSPETH_FINGERPRINT_KEY is unset' — a configuration probe, not an error. The handler converts that signal into have_key and then both outcomes are explicitly handled: have_key=True computes the fingerprint, have_key=False with fail_if_no_key raises a typed SecretFingerprintError (production loud-fail path, lines 177-183), else dev-mode sanitizes without fingerprint per documented contract. No error is swallowed, no fabrication, and the audit-relevant production failure is a typed raise the caller can route. R6's concern (hidden failure) does not apply here.
-  judge_signature_version: 2
-  scope_fingerprint: 2dcb8451d77ff38628637a63c8482f7cfa403cc5510dd43ac8256901378f5cad
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[8]/body[4]/body[4]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:fae253e65af04e80397598c9b9176d1cab7fb321aac89eb6c67c40069eae8d31'
-- key: contracts/url.py:R6:SanitizedWebhookUrl:from_raw_url:fp=ec8dd835c4c43c96
-  owner: john
-  reason: |-
-    In SanitizedWebhookUrl.from_raw_url, line 341 (`except ValueError: have_key = False`) is the same documented two-branch control flow as the database-URL sibling. get_fingerprint_key() raises ValueError to signal 'no fingerprint key configured'; the except records have_key=False and the code branches explicitly: if have_key, fingerprint the collected sensitive values; elif fail_if_no_key, raise SecretFingerprintError; else dev-mode sanitize without fingerprint. The exception is used as a configuration probe with both outcomes audited and the production path re-raising a typed error. This is EAFP control-flow, not defensive error swallowing, and credentials are still stripped on every path so there is no silent secret leak or audit loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:40:52.995454+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the bare `except ValueError: have_key = False`, but the visible code shows this is a configuration probe, not silent suppression: get_fingerprint_key()'s ValueError signals 'no fingerprint key configured' and is immediately translated into a have_key boolean that gates three explicit, audited branches — fingerprint when keyed (line 344), raise typed SecretFingerprintError when fail_if_no_key is set (line 351), or proceed to dev-mode sanitisation without fingerprint (line 358 comment). The production path re-raises a typed error, the credential-stripping at lines 362-371 runs on every path so no secret leaks, and the rationale's mapping to each branch is corroborated by the excerpt. EAFP probe with a typed re-raise on the production branch is the prescribed legitimate form for R6.
-  judge_signature_version: 2
-  scope_fingerprint: a0ca40a8ecf31894e0237a767120cd97d2d4edb54a9acd721c6eeda4cc902734
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[9]/body[4]/body[14]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:04528d6605dae557a505f7185114974bb88a4ac2cfeb437e300d7767587907c1'
-  judge_excerpt_redactions:
-    - pattern: dotenv_secret_assignment
-      byte_count: 22
-      redacted_hash: fce1f9a1f9fa3c94
 - key: contracts/data.py:R6:_get_allow_inf_nan:fp=a073efa3e28410f3
   owner: john
   reason: |-
@@ -397,63 +355,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[15]/body[0]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:8072f04508921266bced2a9ec1c85af8e2de1d713a3a66426ea11a4e1807f57d'
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=f4f040480f6caace
-  owner: john
-  reason: |-
-    PluginContext.record_call line 347 (`except (OSError, ConnectionError, TimeoutError) as tel_err`) wraps only the telemetry_emit call, which fires AFTER the call has already been recorded to the Landscape (the primary audit channel, returned at line 361). Per the primacy order, audit fires first sync/crash-on-failure and telemetry second async/best-effort, so suppressing transport-level network errors at the telemetry emit site is correct. The except is narrowly scoped to transport exceptions; the comment and code confirm Tier-1 and programming errors (e.g. KeyError) propagate naturally. The failure is recorded via logger.warning rather than silently dropped, and the legal record (Landscape) is already written, so there is no audit loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:51:57.759112+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The except wraps only the telemetry_emit call, which by policy fires second/async/best-effort AFTER the Landscape audit record has been written (recorded_call is returned at 408). The exception filter is narrowly scoped to transport-level errors (OSError/ConnectionError/TimeoutError); Tier-1 integrity errors and programming bugs like KeyError propagate naturally. The failure is observable via logger.warning, and the primary audit record is already persisted, so there is no audit loss. This matches the primacy-order policy exactly.
-  judge_signature_version: 2
-  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
-  judge_transport: openrouter
-  ast_path: 'body[17]/body[21]/body[10]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:164d785ad004585c1e5f9c67661833b054b5daf1af9aa6ec59967ff0bc78008d'
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=40638bb5c17326c3
-  owner: john
-  reason: |-
-    PRESCRIBED FORM — meaning-preserving optional read of an external (Tier-3) field on a typed-dict receiver. In PluginContext.record_call (contracts/plugin_context.py:315), `raw_usage = response_snapshot.get("usage")` reads the optional "usage" key from response_snapshot, which is the method's response_data parameter (typed `dict[str, Any] | None`, guarded by `response_snapshot is not None` at line 312). The receiver is therefore a typed dict — `.get` has a valid Mapping receiver, not an arbitrary object — but its CONTENTS are Tier-3: for an LLM call this dict is the external provider response, and "usage" is provider-OPTIONAL metadata that legitimately may be absent (not every response carries token usage). This is the sanctioned `.get()` use: a meaning-preserving optional read where absence is real. It passes the null-correctness test — there IS a case where None is correct (the provider returned no usage), so this is not papering over a missing key on data we own. No default is supplied, so absence maps to None, and TokenUsage.from_dict(raw_usage) is the boundary validator that accepts Any and returns unknown()/has_data=False for None or non-Mapping input (the comment documents this). No fabrication: an absent usage becomes token_usage=None, not a synthesized zero. R1 flags `.get()` generically and cannot tell a Tier-3 optional read from a Tier-1/Tier-2 defensive access. Per-line allowlist is the prescribed mechanism.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:52:05.576564+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM — response_data is the external LLM provider response (Tier-3 contents in a typed dict courier), and 'usage' is provider-optional metadata that legitimately may be absent. The .get() returns None on absence with no fabricated default; TokenUsage.from_dict is the boundary validator that accepts Any and yields has_data=False for None/non-Mapping. This is the sanctioned meaning-preserving optional read of an external optional field, not a defensive guard on first-party data. The decorator nudge does not apply: this is not at a function whose parameter is the external source in the @trust_boundary sense (record_call's response_data is a forwarded provider payload deep within a context method, not a tool-call boundary function).
-  judge_signature_version: 2
-  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
-  judge_transport: openrouter
-  ast_path: 'body[17]/body[21]/body[10]/body[5]/body[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:07394211b8b48bc07c80353fd4eeac69858673e708c94009b38368d2bd1e44e6'
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=c48a9a71d7e1196a
-  owner: john
-  reason: |-
-    PRESCRIBED FORM. The except at line 401 sits inside `record_validation_error`, whose contractual job is to record already-malformed Tier-3 source rows for audit; the `row` parameter is explicitly documented as possibly non-dict, non-serializable external data. The catch is narrow (`ValueError, TypeError` — exactly what `stable_hash` raises on NaN/Infinity/non-serializable content), not bare; it does not swallow but falls back to `repr_hash` so the quarantined row still gets a deterministic id and reaches the Landscape audit row recorded just below. A warning logs the exception type/message without leaking row content, consistent with the logging-policy. This is the Tier-3 'record what we got even when malformed' form, not silent suppression — losing the audit row instead would itself be the defect. Decorator nudge does not apply: R6 is outside the decorator's suppressible set ({R1, R5}).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:52:12.048459+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. This is the Tier-3 record-what-we-got pattern at a genuine boundary: record_validation_error is called specifically to record already-malformed external rows for audit, and the row may be non-serializable (NaN/Infinity/non-dict primitives). The except is narrow (ValueError, TypeError — exactly what stable_hash raises on non-canonical input), does not silently swallow but falls back to repr_hash so the quarantined row still gets a deterministic id and reaches the Landscape record below, and the warning deliberately logs only the exception type to avoid leaking row content. Losing the audit row on a hash failure would itself be the defect. R6 is outside the @trust_boundary decorator's suppressible set ({R1, R5}), so the decorator nudge does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: dca71e98bc547f9546650be3ad9dcd5e0e71fd418d6d3dbce1870b7bf8437ac8
-  judge_transport: openrouter
-  ast_path: 'body[17]/body[22]/body[2]/orelse[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:353bc6b5b7c77acff2935a52bce2e1f6ccdc87adfeaf931a59982fa19c130e76'
 - key: contracts/barrier_scalars.py:R5:_validate_envelope:fp=22e574a5735a990c
   owner: john
   reason: |-
@@ -625,25 +526,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[12]/body[6]/body[3]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:c65b5f80dd9539bd71dcef6d46be09edced3b3f745961fe9fdf61c9758185f05'
-- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=58b7a5ffda3a7299
-  owner: john
-  reason: |-
-    `contracts/barrier_scalars.py:293-316` is a Tier-1 checkpoint read path, and the enclosing function explicitly documents that it reconstructs from a checkpoint column and must crash on corruption: `"""Reconstruct from checkpoint column value (Tier 1 — crash on corruption)."""`. The flagged check at `contracts/barrier_scalars.py:312` is not masking bad internal state or falling back; it immediately raises `AuditIntegrityError` with the corrupt aggregation key and actual type: `raise AuditIntegrityError(f"Corrupted BarrierScalars: aggregation[{node_id!r}] must be a dict, got {type(node_data).__name__}.")`. This is the prescribed Tier-1 offensive validation form for serialized audit/checkpoint data: detect structural corruption at the read boundary and crash with context before constructing `AggregationNodeScalars`.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:00:28.023655+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a checkpoint-reread boundary: per policy, our-authored checkpoint data re-read from our DB stays Tier-1, and the seal-check on deserialized structure is the offensive validation form — detect structural corruption and raise AuditIntegrityError with context. The isinstance check at line 312 immediately raises a typed integrity error naming the corrupt key and actual type, which is exactly the prescribed crash-on-corruption pattern for Tier-1 audit data. The code is not coercing, defaulting, or swallowing; the raise type is one that bubbles to abort the run, matching audit-integrity routing.
-  judge_signature_version: 2
-  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
-  judge_transport: openrouter
-  ast_path: 'body[12]/body[6]/body[5]/body[0]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:ab34cc02e5d6e055ecfd4aaac8a8e9a2365ac753f8056713c68cf8d0c33f8705'
 - key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=6aee2d5b20defe50
   owner: john
   reason: |-

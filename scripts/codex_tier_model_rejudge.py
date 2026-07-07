@@ -125,7 +125,30 @@ def _strip_allowlist(src: Path, dst: Path, strip_keys: set[str]) -> int:
             else:
                 out.append(lines[i])
                 i += 1
-        path.write_text("\n".join(out))
+        stripped_lines = "\n".join(out).splitlines()
+        allowlist_headers = [
+            line_index
+            for line_index, line in enumerate(stripped_lines)
+            if line.strip() in {"allow_hits:", "allow_hits: []"}
+        ]
+        if len(allowlist_headers) > 1:
+            normalised_lines: list[str] = []
+            for line_index, line in enumerate(stripped_lines):
+                if line_index == allowlist_headers[0] and line.strip() == "allow_hits: []":
+                    continue
+                if line_index > 0 and line.strip() == "" and line_index - 1 == allowlist_headers[0]:
+                    continue
+                normalised_lines.append(line)
+            stripped_lines = normalised_lines
+        for line_index, line in enumerate(stripped_lines):
+            if line.strip() != "allow_hits:":
+                continue
+            next_index = line_index + 1
+            while next_index < len(stripped_lines) and stripped_lines[next_index].strip() == "":
+                next_index += 1
+            if next_index == len(stripped_lines) or not stripped_lines[next_index].startswith("- "):
+                stripped_lines[line_index] = "allow_hits: []"
+        path.write_text("\n".join(stripped_lines) + "\n")
     return removed
 
 

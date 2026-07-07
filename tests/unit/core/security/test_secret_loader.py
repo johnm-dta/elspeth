@@ -151,6 +151,13 @@ class TestKeyVaultSecretLoader:
         assert second_ref.source == "keyvault"
         assert client.calls == ["API_KEY"]
 
+    def test_cache_policy_is_delegated_to_generic_cache_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_azure_modules(monkeypatch)
+        loader = KeyVaultSecretLoader("https://delegated-cache.vault.azure.net")
+
+        assert not hasattr(loader, "_cache")
+        assert isinstance(loader._cache_loader, CachedSecretLoader)
+
     def test_get_secret_none_value_raises_secret_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://empty-secret.vault.azure.net")
@@ -311,34 +318,22 @@ class TestCompositeSecretLoader:
 
 
 class TestClearCacheThreadSafety:
-    """Regression: clear_cache() must acquire the lock."""
+    """Clear-cache delegation and locking behavior."""
 
-    def test_keyvault_clear_cache_acquires_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_keyvault_clear_cache_delegates_to_generic_cache_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://test.vault.azure.net")
-        # Verify lock is acquired by checking that clear_cache
-        # blocks when lock is held
-        import threading
+        delegated = False
 
-        lock_acquired = threading.Event()
-        clear_started = threading.Event()
+        def clear_cache() -> None:
+            nonlocal delegated
+            delegated = True
 
-        def blocking_test() -> None:
-            clear_started.set()
-            with loader._lock:
-                lock_acquired.set()
-                # Hold lock briefly
-                import time
+        loader._cache_loader.clear_cache = clear_cache  # type: ignore[method-assign]
 
-                time.sleep(0.1)
-
-        t = threading.Thread(target=blocking_test)
-        t.start()
-        clear_started.wait()
-        lock_acquired.wait()
-        # clear_cache should block until lock is released
         loader.clear_cache()
-        t.join()
+
+        assert delegated is True
 
     def test_cached_loader_clear_cache_acquires_lock(self) -> None:
         inner = _MissingLoader()

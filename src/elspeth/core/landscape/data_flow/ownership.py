@@ -9,10 +9,13 @@ dependent write.
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape._database_ops import DatabaseOps
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import rows_table, tokens_table
 
 __all__ = ["RowTokenOwnership"]
@@ -65,7 +68,7 @@ class RowTokenOwnership:
         ingest_sequence: int = result.ingest_sequence
         return ingest_sequence
 
-    def resolve_token_ownership(self, token_id: str) -> tuple[str, str]:
+    def resolve_token_ownership(self, token_id: str, *, conn: Connection | None = None) -> tuple[str, str]:
         """Resolve the (row_id, run_id) that owns a given token_id.
 
         Looks up token -> row_id, then row -> run_id. This is Tier 1 (our data).
@@ -81,7 +84,12 @@ class RowTokenOwnership:
             AuditIntegrityError: If token or its row not found (Tier 1 corruption)
         """
         query = select(tokens_table.c.row_id, tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)
-        result = self._ops.execute_fetchone(query)
+        try:
+            result = conn.execute(query).fetchone() if conn is not None else self._ops.execute_fetchone(query)
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"resolve_token_ownership failed for token_id={token_id!r} — database rejected audit query: {type(exc).__name__}"
+            ) from exc
         if result is None:
             raise AuditIntegrityError(
                 f"Token {token_id!r} does not exist in the tokens table. "
@@ -89,7 +97,7 @@ class RowTokenOwnership:
             )
         return result.row_id, result.run_id
 
-    def validate_token_run_ownership(self, ref: TokenRef) -> None:
+    def validate_token_run_ownership(self, ref: TokenRef, *, conn: Connection | None = None) -> None:
         """Validate that a token belongs to the specified run.
 
         Per Tier 1 trust model: cross-run contamination of audit records is
@@ -101,7 +109,7 @@ class RowTokenOwnership:
         Raises:
             AuditIntegrityError: If token does not belong to the specified run
         """
-        _row_id, actual_run_id = self.resolve_token_ownership(ref.token_id)
+        _row_id, actual_run_id = self.resolve_token_ownership(ref.token_id, conn=conn)
         if actual_run_id != ref.run_id:
             raise AuditIntegrityError(
                 f"Cross-run contamination prevented: token {ref.token_id!r} belongs to "

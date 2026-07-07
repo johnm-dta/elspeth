@@ -7,12 +7,15 @@ and deterministic artifact reads for export.
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import Artifact
 from elspeth.contracts.results import require_no_artifact_uri_credentials
 from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import now
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import ArtifactLoader
 from elspeth.core.landscape.schema import artifacts_table
 
@@ -41,6 +44,7 @@ class ArtifactRepository:
         *,
         artifact_id: str | None = None,
         idempotency_key: str | None = None,
+        conn: Connection | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink.
 
@@ -75,20 +79,31 @@ class ArtifactRepository:
             idempotency_key=idempotency_key,
         )
 
-        self._ops.execute_insert(
-            artifacts_table.insert().values(
-                artifact_id=artifact.artifact_id,
-                run_id=artifact.run_id,
-                produced_by_state_id=artifact.produced_by_state_id,
-                sink_node_id=artifact.sink_node_id,
-                artifact_type=artifact.artifact_type,
-                path_or_uri=artifact.path_or_uri,
-                content_hash=artifact.content_hash,
-                size_bytes=artifact.size_bytes,
-                idempotency_key=artifact.idempotency_key,
-                created_at=artifact.created_at,
-            )
+        stmt = artifacts_table.insert().values(
+            artifact_id=artifact.artifact_id,
+            run_id=artifact.run_id,
+            produced_by_state_id=artifact.produced_by_state_id,
+            sink_node_id=artifact.sink_node_id,
+            artifact_type=artifact.artifact_type,
+            path_or_uri=artifact.path_or_uri,
+            content_hash=artifact.content_hash,
+            size_bytes=artifact.size_bytes,
+            idempotency_key=artifact.idempotency_key,
+            created_at=artifact.created_at,
         )
+        if conn is None:
+            self._ops.execute_insert(stmt)
+        else:
+            try:
+                result = conn.execute(stmt)
+            except SQLAlchemyError as exc:
+                raise LandscapeRecordError(
+                    f"register_artifact failed for state_id={state_id!r} — database rejected audit write: {type(exc).__name__}"
+                ) from exc
+            if result.rowcount == 0:
+                raise LandscapeRecordError(
+                    f"register_artifact: zero rows affected for state_id={state_id!r} — audit write failed"
+                )
 
         return artifact
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Literal, overload
 
+from sqlalchemy.engine import Connection
+
 from elspeth.contracts import (
     Artifact,
     Batch,
@@ -238,9 +240,11 @@ class ExecutionRepository:
     def complete_node_states_completed_many(
         self,
         completions: Sequence[tuple[str, Mapping[str, object], float]],
+        *,
+        conn: Connection | None = None,
     ) -> None:
         """Complete many node states as COMPLETED in one audit transaction."""
-        return self.node_states.complete_node_states_completed_many(completions)
+        return self.node_states.complete_node_states_completed_many(completions, conn=conn)
 
     def get_node_state(self, state_id: str) -> NodeState | None:
         """Get a node state by ID."""
@@ -539,6 +543,7 @@ class ExecutionRepository:
         *,
         artifact_id: str | None = None,
         idempotency_key: str | None = None,
+        conn: Connection | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink."""
         return self.artifacts.register_artifact(
@@ -551,6 +556,7 @@ class ExecutionRepository:
             size_bytes,
             artifact_id=artifact_id,
             idempotency_key=idempotency_key,
+            conn=conn,
         )
 
     def get_artifacts(

@@ -132,6 +132,31 @@ class SinkExecutor:
         self._spans = span_factory
         self._run_id = run_id
 
+    def _uses_real_atomic_repositories(self) -> bool:
+        return isinstance(self._execution, ExecutionRepository) and isinstance(self._data_flow, DataFlowRepository)
+
+    def _complete_primary_states_for_legacy_double(
+        self,
+        primary_sink_outputs: list[tuple[str, Mapping[str, object], float]],
+    ) -> set[str]:
+        completed_primary_ids: set[str] = set()
+        legacy_execution: object = self._execution
+        if isinstance(legacy_execution, _BulkCompleteNodeStateRepository):
+            # Single audit transaction: on failure nothing was completed,
+            # so leaving completed_primary_ids empty is accurate.
+            legacy_execution.complete_node_states_completed_many(tuple(primary_sink_outputs))
+            completed_primary_ids.update(state_id for state_id, _output, _ms in primary_sink_outputs)
+        else:
+            for state_id, sink_output, duration in primary_sink_outputs:
+                self._execution.complete_node_state(
+                    state_id=state_id,
+                    status=NodeStateStatus.COMPLETED,
+                    output_data=sink_output,
+                    duration_ms=duration,
+                )
+                completed_primary_ids.add(state_id)
+        return completed_primary_ids
+
     @staticmethod
     def _require_sink_write_result(
         *,
@@ -634,52 +659,77 @@ class SinkExecutor:
                 )
             )
         completed_primary_ids: set[str] = set()
+        artifact: Artifact | None = None
         try:
-            if isinstance(self._execution, _BulkCompleteNodeStateRepository):
-                # Single audit transaction: on failure nothing was completed,
-                # so leaving completed_primary_ids empty is accurate.
-                self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs))
+            if self._uses_real_atomic_repositories():
+                # One audit transaction: primary node_states, the artifact row,
+                # and terminal token_outcomes commit or roll back together.
+                with self._data_flow.write_connection() as conn:
+                    self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs), conn=conn)
+                    first_state = primary_states[0][1]
+                    artifact = self._execution.register_artifact(
+                        run_id=self._run_id,
+                        state_id=first_state.state_id,
+                        sink_node_id=sink_node_id,
+                        artifact_type=artifact_info.artifact_type,
+                        path=artifact_info.path_or_uri,
+                        content_hash=artifact_info.content_hash,
+                        size_bytes=artifact_info.size_bytes,
+                        conn=conn,
+                    )
+
+                    for token, _ in primary_states:
+                        join_group_id: str | None = None
+                        if pending_outcome.path == TerminalPath.COALESCED:
+                            join_group_id = token.join_group_id
+                            if join_group_id is None:
+                                raise OrchestrationInvariantError(
+                                    f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
+                                    "requires token.join_group_id before sink recording"
+                                )
+                        self._data_flow.record_token_outcome(
+                            ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                            outcome=pending_outcome.outcome,
+                            path=pending_outcome.path,
+                            error_hash=pending_outcome.error_hash,
+                            sink_name=sink_name,
+                            join_group_id=join_group_id,
+                            conn=conn,
+                        )
                 completed_primary_ids.update(state_id for state_id, _output, _ms in primary_sink_outputs)
             else:
-                for state_id, sink_output, duration in primary_sink_outputs:
-                    self._execution.complete_node_state(
-                        state_id=state_id,
-                        status=NodeStateStatus.COMPLETED,
-                        output_data=sink_output,
-                        duration_ms=duration,
-                    )
-                    completed_primary_ids.add(state_id)
+                completed_primary_ids.update(self._complete_primary_states_for_legacy_double(primary_sink_outputs))
 
-            # Register artifact (linked to first primary state)
-            first_state = primary_states[0][1]
-            artifact = self._execution.register_artifact(
-                run_id=self._run_id,
-                state_id=first_state.state_id,
-                sink_node_id=sink_node_id,
-                artifact_type=artifact_info.artifact_type,
-                path=artifact_info.path_or_uri,
-                content_hash=artifact_info.content_hash,
-                size_bytes=artifact_info.size_bytes,
-            )
-
-            # Record durable outcomes for primary tokens.
-            for token, _ in primary_states:
-                join_group_id: str | None = None
-                if pending_outcome.path == TerminalPath.COALESCED:
-                    join_group_id = token.join_group_id
-                    if join_group_id is None:
-                        raise OrchestrationInvariantError(
-                            f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
-                            "requires token.join_group_id before sink recording"
-                        )
-                self._data_flow.record_token_outcome(
-                    ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                    outcome=pending_outcome.outcome,
-                    path=pending_outcome.path,
-                    error_hash=pending_outcome.error_hash,
-                    sink_name=sink_name,
-                    join_group_id=join_group_id,
+                # Register artifact (linked to first primary state)
+                first_state = primary_states[0][1]
+                artifact = self._execution.register_artifact(
+                    run_id=self._run_id,
+                    state_id=first_state.state_id,
+                    sink_node_id=sink_node_id,
+                    artifact_type=artifact_info.artifact_type,
+                    path=artifact_info.path_or_uri,
+                    content_hash=artifact_info.content_hash,
+                    size_bytes=artifact_info.size_bytes,
                 )
+
+                # Record durable outcomes for primary tokens.
+                for token, _ in primary_states:
+                    join_group_id = None
+                    if pending_outcome.path == TerminalPath.COALESCED:
+                        join_group_id = token.join_group_id
+                        if join_group_id is None:
+                            raise OrchestrationInvariantError(
+                                f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
+                                "requires token.join_group_id before sink recording"
+                            )
+                    self._data_flow.record_token_outcome(
+                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                        outcome=pending_outcome.outcome,
+                        path=pending_outcome.path,
+                        error_hash=pending_outcome.error_hash,
+                        sink_name=sink_name,
+                        join_group_id=join_group_id,
+                    )
 
             # Checkpoint callback — only for primary tokens.
             # Failures crash with AuditIntegrityError: the sink write is durable
@@ -719,6 +769,8 @@ class SinkExecutor:
                 )
             raise
 
+        if artifact is None:
+            raise FrameworkBugError("Primary sink audit recording did not produce an artifact.")
         return artifact
 
     def _handle_failsink_diversions(

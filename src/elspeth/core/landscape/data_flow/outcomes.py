@@ -12,7 +12,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import and_, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Row as SQLAlchemyRow
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
     NodeType,
@@ -26,6 +28,7 @@ from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.data_flow.ownership import RowTokenOwnership
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import TokenOutcomeLoader
 from elspeth.core.landscape.schema import (
     artifacts_table,
@@ -53,6 +56,21 @@ class TokenOutcomeRepository:
         self._ops = ops
         self._token_outcome_loader = token_outcome_loader
         self._ownership = ownership
+
+    def _execute_fetchone(self, query: Any, *, conn: Connection | None) -> Any | None:
+        if conn is None:
+            return self._ops.execute_fetchone(query)
+        try:
+            rows = conn.execute(query).fetchmany(2)
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"execute_fetchone failed — database rejected audit query: {type(exc).__name__}"
+            ) from exc
+        if len(rows) > 1:
+            raise LandscapeRecordError("execute_fetchone matched multiple rows — single-row audit query is ambiguous")
+        if not rows:
+            return None
+        return rows[0]
 
     def _validate_outcome_fields(
         self,
@@ -116,6 +134,7 @@ class TokenOutcomeRepository:
         sink_name: str | None,
         sink_node_id: str | None,
         artifact_id: str | None,
+        conn: Connection | None = None,
     ) -> None:
         """Validate ADR-019 real-time cross-table invariants.
 
@@ -139,7 +158,7 @@ class TokenOutcomeRepository:
                     "failsink artifact_id witness."
                 )
 
-            completed_sink_state = self._ops.execute_fetchone(
+            completed_sink_state_query = (
                 select(node_states_table.c.state_id, node_states_table.c.node_id)
                 .select_from(
                     node_states_table.join(
@@ -156,6 +175,7 @@ class TokenOutcomeRepository:
                 .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
                 .where(nodes_table.c.node_type == NodeType.SINK.value)
             )
+            completed_sink_state = self._execute_fetchone(completed_sink_state_query, conn=conn)
             if completed_sink_state is None:
                 raise AuditIntegrityError(
                     f"ADR-019 I1c violation for token {ref.token_id}: "
@@ -163,7 +183,7 @@ class TokenOutcomeRepository:
                     f"node_state at sink_node_id={sink_node_id!r}."
                 )
 
-            artifact_row = self._ops.execute_fetchone(
+            artifact_query = (
                 select(artifacts_table.c.artifact_id)
                 .select_from(
                     artifacts_table.join(
@@ -187,6 +207,7 @@ class TokenOutcomeRepository:
                 .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
                 .where(nodes_table.c.node_type == NodeType.SINK.value)
             )
+            artifact_row = self._execute_fetchone(artifact_query, conn=conn)
             if artifact_row is None:
                 raise AuditIntegrityError(
                     f"ADR-019 I1c violation for token {ref.token_id}: "
@@ -203,7 +224,7 @@ class TokenOutcomeRepository:
                     f"got {sink_name!r}."
                 )
 
-            completed_sink_state = self._ops.execute_fetchone(
+            completed_sink_state_query = (
                 select(node_states_table.c.state_id)
                 .select_from(
                     node_states_table.join(
@@ -219,6 +240,7 @@ class TokenOutcomeRepository:
                 .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
                 .where(nodes_table.c.node_type == NodeType.SINK.value)
             )
+            completed_sink_state = self._execute_fetchone(completed_sink_state_query, conn=conn)
             if completed_sink_state is not None:
                 raise AuditIntegrityError(
                     f"ADR-019 I3 violation for token {ref.token_id}: discard "
@@ -241,6 +263,7 @@ class TokenOutcomeRepository:
         expand_group_id: str | None = None,
         error_hash: str | None = None,
         context: Mapping[str, object] | None = None,
+        conn: Connection | None = None,
     ) -> str:
         """Record a token's (outcome, path) audit terminal in the audit trail.
 
@@ -287,7 +310,7 @@ class TokenOutcomeRepository:
         )
 
         # Validate token belongs to the specified run (Tier 1 invariant)
-        self._ownership.validate_token_run_ownership(ref)
+        self._ownership.validate_token_run_ownership(ref, conn=conn)
         self._validate_cross_table_invariants(
             ref,
             outcome,
@@ -295,30 +318,43 @@ class TokenOutcomeRepository:
             sink_name=sink_name,
             sink_node_id=sink_node_id,
             artifact_id=artifact_id,
+            conn=conn,
         )
 
         outcome_id = f"out_{generate_id()[:12]}"
         completed = outcome is not None
         context_json = canonical_json(context) if context is not None else None
 
-        self._ops.execute_insert(
-            token_outcomes_table.insert().values(
-                outcome_id=outcome_id,
-                run_id=ref.run_id,
-                token_id=ref.token_id,
-                outcome=outcome.value if outcome is not None else None,
-                path=path.value,
-                completed=1 if completed else 0,
-                recorded_at=now(),
-                sink_name=sink_name,
-                batch_id=batch_id,
-                fork_group_id=fork_group_id,
-                join_group_id=join_group_id,
-                expand_group_id=expand_group_id,
-                error_hash=error_hash,
-                context_json=context_json,
-            )
+        stmt = token_outcomes_table.insert().values(
+            outcome_id=outcome_id,
+            run_id=ref.run_id,
+            token_id=ref.token_id,
+            outcome=outcome.value if outcome is not None else None,
+            path=path.value,
+            completed=1 if completed else 0,
+            recorded_at=now(),
+            sink_name=sink_name,
+            batch_id=batch_id,
+            fork_group_id=fork_group_id,
+            join_group_id=join_group_id,
+            expand_group_id=expand_group_id,
+            error_hash=error_hash,
+            context_json=context_json,
         )
+        if conn is None:
+            self._ops.execute_insert(stmt)
+        else:
+            try:
+                result = conn.execute(stmt)
+            except SQLAlchemyError as exc:
+                raise LandscapeRecordError(
+                    f"record_token_outcome failed for token_id={ref.token_id!r} — database rejected audit write: "
+                    f"{type(exc).__name__}"
+                ) from exc
+            if result.rowcount == 0:
+                raise LandscapeRecordError(
+                    f"record_token_outcome: zero rows affected for token_id={ref.token_id!r} — audit write failed"
+                )
 
         return outcome_id
 

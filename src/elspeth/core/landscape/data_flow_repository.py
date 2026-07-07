@@ -17,6 +17,7 @@ the flat delegators.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.engine import Connection
@@ -111,6 +112,10 @@ class DataFlowRepository:
             transform_error_loader=transform_error_loader,
             ownership=self.ownership,
         )
+
+    def write_connection(self) -> AbstractContextManager[Connection]:
+        """Open a caller-owned audit write transaction for composed repository verbs."""
+        return self._db.write_connection()
 
     # ── Tier-3 audit serialization (module functions in data_flow.serialization) ──
 
@@ -389,6 +394,7 @@ class DataFlowRepository:
         expand_group_id: str | None = None,
         error_hash: str | None = None,
         context: Mapping[str, object] | None = None,
+        conn: Connection | None = None,
     ) -> str:
         """Record a token's (outcome, path) audit terminal in the audit trail."""
         return self.outcomes.record_token_outcome(
@@ -404,6 +410,7 @@ class DataFlowRepository:
             expand_group_id=expand_group_id,
             error_hash=error_hash,
             context=context,
+            conn=conn,
         )
 
     def find_orphaned_transient_parents(self, run_id: str) -> list[SQLAlchemyRow[Any]]:

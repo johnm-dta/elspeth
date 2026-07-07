@@ -19,7 +19,7 @@ from elspeth.contracts import PendingOutcome, PluginSchema, TokenInfo
 from elspeth.contracts.audit import Artifact
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import NodeStateStatus, NodeType, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     FrameworkBugError,
@@ -28,7 +28,9 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.core.landscape.schema import artifacts_table, node_states_table, token_outcomes_table
 from elspeth.engine.executors.sink import SinkExecutor
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 
 class _PermissiveSchema(PluginSchema):
@@ -1401,6 +1403,78 @@ class TestCompletePrimaryFailureClosesDivertAnchors:
         for state_id, kwargs in failed_by_state.items():
             assert kwargs["error"].phase == "primary_audit_recording"
             assert kwargs["error"].exception_type == "RuntimeError", state_id
+
+
+class TestPrimaryAuditAtomicity:
+    """Primary sink completion and terminal outcomes commit atomically."""
+
+    def test_outcome_recording_failure_rolls_back_completed_primary_states(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        setup = make_recorder_with_run(run_id="run-sink-atomic")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "node-primary",
+            node_type=NodeType.SINK,
+            plugin_name="primary",
+        )
+        sink = _make_sink(name="primary", node_id="node-primary")
+        tokens: list[TokenInfo] = []
+        for index in range(2):
+            row, db_token = setup.data_flow.create_row_with_token(
+                run_id=setup.run_id,
+                source_node_id=setup.source_node_id,
+                row_index=index,
+                data={"field": f"value-{index}"},
+                source_row_index=index,
+                ingest_sequence=index,
+            )
+            tokens.append(
+                TokenInfo(
+                    row_id=row.row_id,
+                    token_id=db_token.token_id,
+                    row_data=_RowDouble({"field": f"value-{index}"}),  # type: ignore[arg-type]
+                )
+            )
+
+        def _fail_record_token_outcome(*args: object, **kwargs: object) -> str:
+            del args, kwargs
+            raise RuntimeError("DB connection lost")
+
+        monkeypatch.setattr(setup.data_flow, "record_token_outcome", _fail_record_token_outcome)
+        executor = SinkExecutor(setup.execution, setup.data_flow, _SpanFactoryDouble(), setup.run_id)
+
+        with pytest.raises(RuntimeError, match="DB connection lost"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,
+                ctx=_make_context(setup.run_id),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        with setup.db.engine.connect() as conn:
+            completed_states = conn.execute(
+                node_states_table.select().where(
+                    node_states_table.c.run_id == setup.run_id,
+                    node_states_table.c.node_id == "node-primary",
+                    node_states_table.c.status == NodeStateStatus.COMPLETED.value,
+                )
+            ).fetchall()
+            failed_states = conn.execute(
+                node_states_table.select().where(
+                    node_states_table.c.run_id == setup.run_id,
+                    node_states_table.c.node_id == "node-primary",
+                    node_states_table.c.status == NodeStateStatus.FAILED.value,
+                )
+            ).fetchall()
+            outcomes = conn.execute(token_outcomes_table.select().where(token_outcomes_table.c.run_id == setup.run_id)).fetchall()
+            artifacts = conn.execute(artifacts_table.select().where(artifacts_table.c.run_id == setup.run_id)).fetchall()
+
+        assert completed_states == []
+        assert {row.token_id for row in failed_states} == {token.token_id for token in tokens}
+        assert outcomes == []
+        assert artifacts == []
 
 
 class TestSystemErrorStateCleanup:

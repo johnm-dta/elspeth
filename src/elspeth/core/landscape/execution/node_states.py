@@ -398,6 +398,8 @@ class NodeStateRepository:
     def complete_node_states_completed_many(
         self,
         completions: Sequence[tuple[str, Mapping[str, object], float]],
+        *,
+        conn: Connection | None = None,
     ) -> None:
         """Complete many node states as COMPLETED in one audit transaction.
 
@@ -446,40 +448,47 @@ class NodeStateRepository:
                 completed_at=bindparam("batch_completed_at"),
             )
         )
-        try:
-            with self._db.write_connection() as conn:
-                before_rows: list[Any] = []
-                for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
-                    chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]
-                    before_rows.extend(
-                        conn.execute(
-                            select(node_states_table.c.state_id, node_states_table.c.status).where(node_states_table.c.state_id.in_(chunk))
-                        ).fetchall()
-                    )
-                before_by_id = {row.state_id: row.status for row in before_rows}
-                missing = [state_id for state_id in state_ids if state_id not in before_by_id]
-                if missing:
-                    raise LandscapeRecordError(
-                        f"complete_node_states_completed_many: target rows do not exist (state_ids={missing!r}) — audit data corruption"
-                    )
-                terminal = [(state_id, before_by_id[state_id]) for state_id in state_ids if before_by_id[state_id] in terminal_values]
-                if terminal:
-                    first_state_id, first_status = terminal[0]
-                    raise LandscapeRecordError(
-                        f"Cannot complete node state {first_state_id}: current status {first_status!r} is already terminal. "
-                        "Terminal node states are immutable."
-                    )
+        def _complete_on(active_conn: Connection) -> list[Any]:
+            before_rows: list[Any] = []
+            for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
+                chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]
+                before_rows.extend(
+                    active_conn.execute(
+                        select(node_states_table.c.state_id, node_states_table.c.status).where(node_states_table.c.state_id.in_(chunk))
+                    ).fetchall()
+                )
+            before_by_id = {row.state_id: row.status for row in before_rows}
+            missing = [state_id for state_id in state_ids if state_id not in before_by_id]
+            if missing:
+                raise LandscapeRecordError(
+                    f"complete_node_states_completed_many: target rows do not exist (state_ids={missing!r}) — audit data corruption"
+                )
+            terminal = [(state_id, before_by_id[state_id]) for state_id in state_ids if before_by_id[state_id] in terminal_values]
+            if terminal:
+                first_state_id, first_status = terminal[0]
+                raise LandscapeRecordError(
+                    f"Cannot complete node state {first_state_id}: current status {first_status!r} is already terminal. "
+                    "Terminal node states are immutable."
+                )
 
-                result = conn.execute(stmt, params)
-                if result.rowcount not in (-1, len(params)):
-                    raise LandscapeRecordError(
-                        f"complete_node_states_completed_many affected {result.rowcount} rows for {len(params)} states; "
-                        "expected one audit update per token."
-                    )
-                after_rows: list[Any] = []
-                for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
-                    chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]
-                    after_rows.extend(conn.execute(select(node_states_table).where(node_states_table.c.state_id.in_(chunk))).fetchall())
+            result = active_conn.execute(stmt, params)
+            if result.rowcount not in (-1, len(params)):
+                raise LandscapeRecordError(
+                    f"complete_node_states_completed_many affected {result.rowcount} rows for {len(params)} states; "
+                    "expected one audit update per token."
+                )
+            after_rows: list[Any] = []
+            for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
+                chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]
+                after_rows.extend(active_conn.execute(select(node_states_table).where(node_states_table.c.state_id.in_(chunk))).fetchall())
+            return after_rows
+
+        try:
+            if conn is None:
+                with self._db.write_connection() as active_conn:
+                    after_rows = _complete_on(active_conn)
+            else:
+                after_rows = _complete_on(conn)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
                 f"complete_node_states_completed_many failed for {len(params)} states — database rejected audit update: "

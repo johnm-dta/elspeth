@@ -228,6 +228,40 @@ class TestExportLandscapeJSON:
         assert len(replace_calls) == 1
         assert len(json.loads(output_path.read_text())) == 1001
 
+    def test_jsonl_export_failure_removes_staged_partial_file(self, tmp_path: Path) -> None:
+        """A failed multi-batch JSONL export must not leave a truncated final artifact."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_path = tmp_path / "audit.jsonl"
+        sink = JSONSink({"path": str(output_path), "format": "jsonl", "schema": {"mode": "observed"}})
+        ctx = PluginContext(run_id="run-1", config={}, landscape=None, payload_store=None, node_id="export:json")
+        original_write = sink.write
+        write_calls = 0
+
+        def fail_on_second_batch(rows: list[dict[str, Any]], ctx_arg: PluginContext) -> Any:
+            nonlocal write_calls
+            write_calls += 1
+            if write_calls == 2:
+                raise OSError("disk full")
+            return original_write(rows, ctx_arg)
+
+        sink.write = fail_on_second_batch  # type: ignore[method-assign]
+
+        try:
+            with pytest.raises(OSError, match="disk full"):
+                _write_json_export_batches(
+                    sink=sink,
+                    ctx=ctx,
+                    records=({"record_type": "row", "index": i} for i in range(1001)),
+                    batch_size=1000,
+                )
+        finally:
+            sink.close()
+
+        assert write_calls == 2
+        assert not output_path.exists()
+        assert not output_path.with_suffix(output_path.suffix + ".tmp").exists()
+
     def test_json_export_records_count_as_operation_output(self) -> None:
         """JSON record_count is captured after streaming, not pre-counted as input."""
         db = object()

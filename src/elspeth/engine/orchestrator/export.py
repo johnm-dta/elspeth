@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any
@@ -147,19 +148,86 @@ def _write_json_export_batches(
     batches_written = 0
     batch: list[dict[str, Any]] = []
 
-    for record in records:
-        batch.append(record)
-        record_count += 1
-        if len(batch) >= batch_size:
+    with _jsonl_export_staging_target(sink):
+        for record in records:
+            batch.append(record)
+            record_count += 1
+            if len(batch) < batch_size:
+                continue
             sink.write(batch, ctx)
             batches_written += 1
             batch = []
 
-    if batch:
-        sink.write(batch, ctx)
-        batches_written += 1
+        if batch:
+            sink.write(batch, ctx)
+            batches_written += 1
 
     return record_count, batches_written
+
+
+@contextmanager
+def _jsonl_export_staging_target(sink: SinkProtocol) -> Iterator[None]:
+    """Stage write-mode filesystem JSONL exports and publish only after full success."""
+    final_path = _jsonl_filesystem_sink_path(sink)
+    if final_path is None:
+        yield
+        return
+
+    claim_write_target = getattr(sink, "_claim_write_target", None)
+    if callable(claim_write_target):
+        claim_write_target()
+        final_path = _jsonl_filesystem_sink_path(sink)
+        if final_path is None:
+            yield
+            return
+
+    temp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    if temp_path.exists():
+        temp_path.unlink()
+
+    sink._path = temp_path  # type: ignore[attr-defined]
+    try:
+        yield
+        _close_sink_file_if_open(sink)
+        if temp_path.exists():
+            os.replace(temp_path, final_path)
+            _fsync_parent_directory(final_path)
+    except BaseException:
+        _close_sink_file_if_open(sink)
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    finally:
+        sink._path = final_path  # type: ignore[attr-defined]
+
+
+def _jsonl_filesystem_sink_path(sink: SinkProtocol) -> Path | None:
+    if not _sink_supports_incremental_json_export_writes(sink):
+        return None
+    if getattr(sink, "_mode", None) == "append":
+        return None
+    path = getattr(sink, "_path", None)
+    if not isinstance(path, Path):
+        return None
+    return path
+
+
+def _close_sink_file_if_open(sink: SinkProtocol) -> None:
+    file_obj = getattr(sink, "_file", None)
+    if file_obj is None:
+        return
+    file_obj.flush()
+    os.fsync(file_obj.fileno())
+    file_obj.close()
+    sink._file = None  # type: ignore[attr-defined]
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:

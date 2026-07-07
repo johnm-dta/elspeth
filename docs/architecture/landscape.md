@@ -245,7 +245,8 @@ interfaces rather than raw SQL:
 - Rows, tokens, token outcomes, and errors: `DataFlowRepository`.
 - Node states, routing, calls, operations, batches, and artifacts:
   `ExecutionRepository`.
-- Plugin-facing audit writes: `_PluginAuditWriterAdapter` in `factory.py`.
+- Plugin-facing audit writes: `PluginAuditWriterAdapter` in `plugin_audit_writer.py`,
+  constructed by `RecorderFactory.plugin_audit_writer()`.
 
 Direct SQL belongs in schema migrations, diagnostics, or read-only operator
 investigation where a maintained read API is not enough.

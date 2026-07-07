@@ -9,10 +9,12 @@ from typing import cast
 import pytest
 from sqlalchemy.engine import Connection, Engine
 
+import elspeth.core.landscape.factory as factory_module
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.factory import RecorderFactory, _PluginAuditWriterAdapter
+from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.plugin_audit_writer import PluginAuditWriterAdapter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from tests.fixtures.stores import MockPayloadStore
@@ -110,4 +112,8 @@ class TestPluginAuditWriter:
 
     def test_plugin_audit_writer_is_adapter(self, factory: RecorderFactory) -> None:
         writer = factory.plugin_audit_writer()
-        assert isinstance(writer, _PluginAuditWriterAdapter)
+        assert isinstance(writer, PluginAuditWriterAdapter)
+
+    def test_factory_does_not_define_plugin_audit_writer_adapter(self) -> None:
+        assert "_PluginAuditWriterAdapter" not in vars(factory_module)
+        assert "PluginAuditWriterAdapter" not in vars(factory_module)

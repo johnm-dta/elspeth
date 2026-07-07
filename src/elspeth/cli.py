@@ -189,12 +189,19 @@ def _ensure_output_directories(config: ElspethSettings) -> list[str]:
     payload_path = config.payload_store.base_path
     if not payload_path.exists():
         try:
-            payload_path.mkdir(parents=True, exist_ok=True)
+            # FilesystemPayloadStore rejects group/world-writable roots. mkdir()
+            # mode is still filtered through umask, so normalize only the root
+            # this preflight creates instead of weakening validation later.
+            payload_path.mkdir(mode=0o700, parents=True, exist_ok=False)
+            os.chmod(payload_path, 0o700)
+        except FileExistsError as e:
+            if not payload_path.exists():
+                errors.append(f"Cannot create payload store directory: {payload_path.resolve()}\n  Error: {e}")
         except OSError as e:
             errors.append(f"Cannot create payload store directory: {payload_path.resolve()}\n  Error: {e}")
-    elif not payload_path.is_dir():
+    if payload_path.exists() and not payload_path.is_dir():
         errors.append(f"Payload store path exists but is not a directory: {payload_path.resolve()}")
-    elif not os.access(payload_path, os.W_OK):
+    elif payload_path.exists() and not os.access(payload_path, os.W_OK):
         errors.append(f"Payload store directory is not writable: {payload_path.resolve()}")
 
     # 3. Ensure sink output directories exist (for file-based sinks)

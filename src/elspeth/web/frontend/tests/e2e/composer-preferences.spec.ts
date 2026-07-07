@@ -287,7 +287,7 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     }
   });
 
-  test("Journey 4: inline opt-out from guided chrome flips default to freeform", async ({
+  test("Journey 4: guided chrome keeps opt-out in settings, not inline", async ({
     page,
   }) => {
     const composer = new ComposerPage(page);
@@ -301,27 +301,20 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     // Confirm we landed in guided mode.
     await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
-    // The inline checkbox lives in the guided chrome below the wizard.
-    const checkbox = page.getByLabel(
-      /always start new sessions in freeform mode/i,
-    );
-    await expect(checkbox).not.toBeChecked();
-    const inlinePatchDone = page.waitForResponse(
-      (response) =>
-        response.url().includes("/api/composer-preferences") &&
-        response.request().method() === "PATCH" &&
-        response.status() === 200,
-    );
-    await checkbox.check();
-    await inlinePatchDone;
+    // Current UX keeps the default-mode opt-out in Account -> Composer
+    // preferences. The guided chrome should not render the retired inline
+    // checkbox.
+    await expect(
+      page.getByLabel(/always start new sessions in freeform mode/i),
+    ).toHaveCount(0);
 
-    // Verify the new default landed on the backend.
+    // Verify merely starting a guided session did not change the default.
     const storageState = await page.context().storageState();
     const token = tokenFromStorageState(storageState);
     const ctx = await authedContext(token);
     try {
       const prefs = await getPreferences(ctx);
-      expect(prefs.default_mode).toBe("freeform");
+      expect(prefs.default_mode).toBe("guided");
     } finally {
       await ctx.dispose();
     }

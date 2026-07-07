@@ -19,9 +19,35 @@ import {
   authedContext,
   createSession,
   deleteSession,
+  seedCompositionState,
   tokenFromStorageState,
 } from "./helpers/api";
 import { ComposerPage } from "./page-objects/composer-page";
+
+function exportableCompositionState() {
+  return {
+    version: 1,
+    metadata: { name: "E2E exportable pipeline", description: "" },
+    sources: {
+      source: {
+        plugin: "csv",
+        on_success: "results",
+        options: { path: "input.csv" },
+        on_validation_failure: "discard",
+      },
+    },
+    nodes: [],
+    edges: [],
+    outputs: [
+      {
+        name: "results",
+        plugin: "csv",
+        options: { path: "output.csv" },
+        on_write_failure: "discard",
+      },
+    ],
+  };
+}
 
 // ── Shared afterEach cleanup ──────────────────────────────────────────────────
 // Each test creates its own session; cleanup is out-of-band so a failing test
@@ -140,17 +166,19 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
       try {
         const session = await createSession(ctx, "pw-3b-yaml-open-close");
         sessionId = session.id;
+        await seedCompositionState(ctx, sessionId, exportableCompositionState());
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();
 
-        // ExportYamlButton only renders when an activeSessionId is present
-        // (ExportYamlButton.tsx:7). The session navigation sets that in the
-        // store, so the button should be visible after waitForChatReady.
+        // ExportYamlButton is content-gated. Seed an exportable state above so
+        // this test covers the open/close path instead of the empty-pipeline
+        // disabled affordance.
         const exportYamlBtn = page.getByRole("button", {
           name: /export yaml/i,
         });
         await expect(exportYamlBtn).toBeVisible();
+        await expect(exportYamlBtn).toBeEnabled();
         await exportYamlBtn.click();
 
         const dialog = page.getByRole("dialog", { name: /export yaml/i });
@@ -176,6 +204,7 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
       try {
         const session = await createSession(ctx, "pw-3b-yaml-deeplink");
         sessionId = session.id;
+        await seedCompositionState(ctx, sessionId, exportableCompositionState());
 
         await page.goto(`/#/${sessionId}/yaml`);
         await new ComposerPage(page).waitForChatReady();
@@ -202,6 +231,7 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
       try {
         const session = await createSession(ctx, "pw-3b-yaml-shortcut");
         sessionId = session.id;
+        await seedCompositionState(ctx, sessionId, exportableCompositionState());
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();

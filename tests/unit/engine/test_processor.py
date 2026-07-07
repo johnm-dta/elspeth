@@ -4867,13 +4867,14 @@ class TestDurableSchedulerResumeDrain:
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
         routed_result = RowResult(
             token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
             final_data=source_payload,
             outcome=TerminalOutcome.FAILURE,
             path=TerminalPath.ON_ERROR_ROUTED,
             sink_name="errors",
-            error=FailureInfo(exception_type="TransformError", message="bad row"),
+            error=FailureInfo(exception_type="TransformError", message=f"provider failed: {raw_secret}"),
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
@@ -4896,6 +4897,7 @@ class TestDurableSchedulerResumeDrain:
                     token_work_items_table.c.pending_sink_name,
                     token_work_items_table.c.pending_outcome,
                     token_work_items_table.c.pending_path,
+                    token_work_items_table.c.pending_error_message,
                     token_work_items_table.c.row_payload_json,
                 ).where(token_work_items_table.c.token_id == "token-on-error-routed")
             ).one()
@@ -4903,6 +4905,8 @@ class TestDurableSchedulerResumeDrain:
         assert row_state.pending_sink_name == "errors"
         assert row_state.pending_outcome == TerminalOutcome.FAILURE.value
         assert row_state.pending_path == TerminalPath.ON_ERROR_ROUTED.value
+        assert row_state.pending_error_message == "<redacted-secret>"
+        assert raw_secret not in row_state.pending_error_message
         assert factory.scheduler.deserialize_row_payload(row_state.row_payload_json).to_dict() == source_payload.to_dict()
 
     def test_durable_scheduler_tuple_failure_for_claimed_token_marks_work_failed(self) -> None:
@@ -6290,9 +6294,13 @@ class TestExecuteTransformNoRetry:
             leader_worker_id=_TEST_LEADER_WORKER_ID,
         )
         factory = setup.factory
-        processor = _make_processor(factory, run_id=setup.run_id, retry_manager=None)
+        processor = _make_processor(
+            factory,
+            run_id=setup.run_id,
+            retry_manager=None,
+            node_step_map={NodeID("t1"): 1},
+        )
         processor._error_edge_ids = {NodeID("t1"): "error-edge-1"}
-        register_test_node(factory.data_flow, setup.run_id, "t1", node_type=NodeType.TRANSFORM, plugin_name="llm")
         register_test_node(factory.data_flow, setup.run_id, "error-sink", node_type=NodeType.SINK, plugin_name="csv")
         factory.data_flow.register_edge(
             run_id=setup.run_id,
@@ -6372,6 +6380,223 @@ class TestExecuteTransformNoRetry:
             sort_keys=True,
         )
         assert raw_secret not in durable_text
+
+    def test_returned_transform_error_text_is_scrubbed_before_audit_routing_scheduler_and_export(self, tmp_path: Any) -> None:
+        """TransformResult.error(reason['error']) must not persist raw provider secrets."""
+        from elspeth.core.landscape.exporter import LandscapeExporter
+        from elspeth.core.payload_store import FilesystemPayloadStore
+        from tests.fixtures.landscape import register_test_node
+
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        setup = make_recorder_with_run(
+            run_id="run-returned-error-scrub",
+            source_node_id="source-0",
+            source_plugin_name="csv",
+            payload_store=payload_store,
+            leader_worker_id=_TEST_LEADER_WORKER_ID,
+        )
+        factory = setup.factory
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        transform = _make_mock_transform(
+            node_id="t1",
+            name="llm",
+            on_error="error-sink",
+            result=TransformResult.error({"reason": "api_error", "error": f"provider failed: {raw_secret}"}),
+        )
+        transform._on_start_called = True
+        register_test_node(factory.data_flow, setup.run_id, "t1", node_type=NodeType.TRANSFORM, plugin_name="llm")
+        register_test_node(factory.data_flow, setup.run_id, "error-sink", node_type=NodeType.SINK, plugin_name="csv")
+        factory.data_flow.register_edge(
+            run_id=setup.run_id,
+            from_node_id="t1",
+            to_node_id="error-sink",
+            label="__error_0__",
+            mode=RoutingMode.DIVERT,
+            edge_id="error-edge-1",
+        )
+        processor = _make_processor(
+            factory,
+            run_id=setup.run_id,
+            retry_manager=None,
+            edge_map={(NodeID("t1"), "__error_0__"): "error-edge-1"},
+            node_step_map={NodeID("source-0"): 0, NodeID("t1"): 1},
+            node_to_next={NodeID("source-0"): NodeID("t1"), NodeID("t1"): None},
+            node_to_plugin={NodeID("t1"): transform},
+            sink_names=frozenset({"error-sink"}),
+        )
+
+        results = processor.process_row(
+            row_index=0,
+            source_row=_make_source_row(),
+            transforms=[transform],
+            ctx=make_context(run_id=setup.run_id, landscape=factory.plugin_audit_writer()),
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        assert len(results) == 1
+        result = results[0]
+        _assert_outcome_pair(result, TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED)
+        assert result.error is not None
+        assert "<redacted-secret>" in result.error.message
+        assert raw_secret not in result.error.message
+        assert processor._sink_emission_from_result(result).error_message == result.error.message
+
+        transform_errors = factory.data_flow.get_transform_errors_for_run(setup.run_id)
+        assert len(transform_errors) == 1
+        transform_error_payload = json.loads(transform_errors[0].error_details_json)
+        assert transform_error_payload == {"reason": "api_error", "error": "<redacted-secret>"}
+
+        routing_events = factory.query.get_all_routing_events_for_run(setup.run_id)
+        assert len(routing_events) == 1
+        assert routing_events[0].reason_ref is not None
+        routing_reason_payload = json.loads(payload_store.retrieve(routing_events[0].reason_ref).decode("utf-8"))
+        assert routing_reason_payload == transform_error_payload
+
+        export_records = list(LandscapeExporter(setup.db).export_run(setup.run_id))
+        transform_error_export = next(record for record in export_records if record["record_type"] == "transform_error")
+        exported_error_payload = json.loads(transform_error_export["error_details_json"])
+        assert exported_error_payload == transform_error_payload
+
+        durable_text = json.dumps(
+            {
+                "result": result.error.message,
+                "pending_error_message": processor._sink_emission_from_result(result).error_message,
+                "transform_error": transform_error_payload,
+                "routing_reason": routing_reason_payload,
+                "transform_error_export": transform_error_export,
+            },
+            sort_keys=True,
+        )
+        assert raw_secret not in durable_text
+
+    def test_returned_error_reason_is_scrubbed_before_audit_routing_and_export(self, tmp_path: Any) -> None:
+        """TransformResult.error reasons must not persist raw provider secrets."""
+        from elspeth.core.landscape.exporter import LandscapeExporter
+        from elspeth.core.payload_store import FilesystemPayloadStore
+        from tests.fixtures.landscape import register_test_node
+
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        setup = make_recorder_with_run(
+            run_id="run-returned-error-scrub",
+            source_node_id="source-0",
+            source_plugin_name="csv",
+            payload_store=payload_store,
+            leader_worker_id=_TEST_LEADER_WORKER_ID,
+        )
+        factory = setup.factory
+        register_test_node(factory.data_flow, setup.run_id, "t1", node_type=NodeType.TRANSFORM, plugin_name="llm")
+        register_test_node(factory.data_flow, setup.run_id, "error-sink", node_type=NodeType.SINK, plugin_name="csv")
+        factory.data_flow.register_edge(
+            run_id=setup.run_id,
+            from_node_id="t1",
+            to_node_id="error-sink",
+            label="__error_0__",
+            mode=RoutingMode.DIVERT,
+            edge_id="error-edge-1",
+        )
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        api_key = "FAKE_TOKEN_PLACEHOLDER"
+        transform = _make_mock_transform(
+            node_id="t1",
+            on_error="error-sink",
+            result=TransformResult.error(
+                {
+                    "reason": "api_error",
+                    "error": f"provider returned {raw_secret}",
+                    "message": f"last provider message had {raw_secret}",
+                    "provider": "azure",
+                    "response": {
+                        "headers": {"authorization": f"Bearer {api_key}"},
+                        "events": [{"message": f"retry target {raw_secret}"}],
+                    },
+                }
+            ),
+        )
+        transform._on_start_called = True
+        processor = _make_processor(
+            factory,
+            run_id=setup.run_id,
+            retry_manager=None,
+            edge_map={(NodeID("t1"), "__error_0__"): "error-edge-1"},
+            node_step_map={NodeID("source-0"): 0, NodeID("t1"): 1},
+            node_to_next={NodeID("source-0"): NodeID("t1"), NodeID("t1"): None},
+            node_to_plugin={NodeID("t1"): transform},
+            sink_names=frozenset({"error-sink"}),
+        )
+        token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(
+            factory,
+            token,
+            run_id=setup.run_id,
+            source_node_id=setup.source_node_id,
+        )
+        ctx = make_context(
+            run_id=setup.run_id,
+            token=token,
+            landscape=factory.plugin_audit_writer(),
+        )
+
+        result, _out_token, error_sink = processor._execute_transform_with_retry(
+            transform=transform,
+            token=token,
+            ctx=ctx,
+        )
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.reason["error"] == "<redacted-secret>"
+        assert result.reason["message"] == "<redacted-secret>"
+        assert result.reason["provider"] == "azure"
+        assert result.reason["response"] == {
+            "headers": {"authorization": "<redacted-secret>"},
+            "events": [{"message": "<redacted-secret>"}],
+        }
+        assert error_sink == "error-sink"
+
+        transform_errors = factory.data_flow.get_transform_errors_for_run(setup.run_id)
+        assert len(transform_errors) == 1
+        transform_error_payload = json.loads(transform_errors[0].error_details_json)
+        assert transform_error_payload == result.reason
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import node_states_table
+
+        with setup.db.connection() as conn:
+            node_state_error_json = conn.execute(
+                select(node_states_table.c.error_json)
+                .where(node_states_table.c.run_id == setup.run_id)
+                .where(node_states_table.c.node_id == "t1")
+            ).scalar_one()
+        assert node_state_error_json is not None
+        node_state_error_payload = json.loads(node_state_error_json)
+        assert node_state_error_payload == result.reason
+
+        routing_events = factory.query.get_all_routing_events_for_run(setup.run_id)
+        assert len(routing_events) == 1
+        assert routing_events[0].reason_ref is not None
+        routing_reason_payload = json.loads(payload_store.retrieve(routing_events[0].reason_ref).decode("utf-8"))
+        assert routing_reason_payload == result.reason
+
+        export_records = list(LandscapeExporter(setup.db).export_run(setup.run_id))
+        transform_error_export = next(record for record in export_records if record["record_type"] == "transform_error")
+        exported_error_payload = json.loads(transform_error_export["error_details_json"])
+        assert exported_error_payload == result.reason
+
+        durable_text = json.dumps(
+            {
+                "result": result.reason,
+                "node_state": node_state_error_payload,
+                "transform_error": transform_error_payload,
+                "routing_reason": routing_reason_payload,
+                "transform_error_export": transform_error_export,
+            },
+            sort_keys=True,
+        )
+        assert raw_secret not in durable_text
+        assert api_key not in durable_text
 
     def test_retryable_llm_error_with_missing_error_edge_raises(self) -> None:
         """Retryable error with named sink but no DIVERT edge → OrchestrationInvariantError."""

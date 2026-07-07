@@ -5462,6 +5462,58 @@ class TestRecordTransformErrorWithRouting:
         assert kwargs["mode"] == RoutingMode.DIVERT
         assert kwargs["reason"] == recorded[0]["error_details"]
 
+    def test_scrubs_freeform_error_payload_before_transform_error_and_divert_audit(self) -> None:
+        from elspeth.engine.executors.transform import record_transform_error_with_routing
+
+        factory = _make_factory()
+        transform = _make_transform(on_error="error_sink")
+        token = _make_token()
+        ctx = make_context()
+        recorded: list[dict[str, object]] = []
+        ctx.record_transform_error = lambda **kwargs: recorded.append(kwargs)  # type: ignore[method-assign]
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        api_key = "FAKE_TOKEN_PLACEHOLDER"
+
+        record_transform_error_with_routing(
+            ctx=ctx,
+            execution=factory.execution,
+            error_edge_ids={NodeID("node_1"): "edge-err-1"},
+            state_id="state-1",
+            token=token,
+            transform=transform,
+            row={"field": "value"},
+            error_details={
+                "reason": "api_error",
+                "error": f"provider failed: {raw_secret}",
+                "message": f"request failed for {raw_secret}",
+                "provider": "azure",
+                "response": {
+                    "headers": {"authorization": f"Bearer {api_key}"},
+                    "events": [{"message": f"attempt used {raw_secret}"}],
+                },
+            },
+            on_error="error_sink",
+        )
+
+        assert len(recorded) == 1
+        transform_error_details = recorded[0]["error_details"]
+        routing_reason = factory.execution.record_routing_event.call_args.kwargs["reason"]
+        assert transform_error_details == {
+            "reason": "api_error",
+            "error": "<redacted-secret>",
+            "message": "<redacted-secret>",
+            "provider": "azure",
+            "response": {
+                "headers": {"authorization": "<redacted-secret>"},
+                "events": [{"message": "<redacted-secret>"}],
+            },
+        }
+        assert routing_reason == transform_error_details
+        assert raw_secret not in repr(transform_error_details)
+        assert raw_secret not in repr(routing_reason)
+        assert api_key not in repr(transform_error_details)
+        assert api_key not in repr(routing_reason)
+
     def test_divert_without_state_id_raises_invariant(self) -> None:
         with pytest.raises(OrchestrationInvariantError, match="state_id is required"):
             self._call(on_error="error_sink", state_id=None)

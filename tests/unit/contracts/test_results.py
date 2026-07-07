@@ -1001,6 +1001,19 @@ class TestFailureInfo:
         assert info.attempts == 3
         assert info.last_error == "Connection refused"
 
+    def test_freeform_messages_are_scrubbed_for_audit_storage(self) -> None:
+        """FailureInfo feeds scheduler error messages, so raw secrets are scrubbed."""
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        info = FailureInfo(
+            exception_type="TransformError",
+            message=f"provider returned {raw_secret}",
+            last_error=f"last attempt used {raw_secret}",
+        )
+
+        assert info.message == "<redacted-secret>"
+        assert info.last_error == "<redacted-secret>"
+        assert raw_secret not in repr(info)
+
     def test_is_frozen(self) -> None:
         """FailureInfo is frozen — failure evidence must be immutable."""
         info = FailureInfo(

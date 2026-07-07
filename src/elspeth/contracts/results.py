@@ -36,6 +36,7 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.routing import RoutingAction
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 
 def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
@@ -209,6 +210,12 @@ class FailureInfo:
     message: str
     attempts: int | None = None
     last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        """Scrub freeform failure text before it reaches durable audit fields."""
+        object.__setattr__(self, "message", scrub_text_for_audit(self.message))
+        if self.last_error is not None:
+            object.__setattr__(self, "last_error", scrub_text_for_audit(self.last_error))
 
     @classmethod
     def from_max_retries_exceeded(cls, e: MaxRetriesExceeded) -> FailureInfo:

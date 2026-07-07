@@ -1,7 +1,7 @@
 """TransformExecutor - wraps transform.process() with audit recording."""
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 
@@ -36,6 +36,7 @@ from elspeth.contracts.errors import (
     ZeroEmissionSuccessContractViolation,
 )
 from elspeth.contracts.plugin_context import PluginContext, plugin_context_scope
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
@@ -53,6 +54,14 @@ if TYPE_CHECKING:
     from elspeth.contracts import TransformErrorReason
     from elspeth.contracts.schema_contract import PipelineRow
     from elspeth.engine.batch_adapter import SharedBatchAdapter
+
+
+def _scrub_transform_error_details(error_details: "TransformErrorReason") -> "TransformErrorReason":
+    """Scrub freeform transform error payload while preserving category fields."""
+    scrubbed = scrub_payload_for_audit(error_details)
+    if scrubbed == error_details:
+        return error_details
+    return cast("TransformErrorReason", scrubbed)
 
 
 def record_transform_error_with_routing(
@@ -84,11 +93,13 @@ def record_transform_error_with_routing(
     if node_id is None:
         raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
 
+    scrubbed_error_details = _scrub_transform_error_details(error_details)
+
     ctx.record_transform_error(
         token_id=token.token_id,
         transform_id=node_id,
         row=row,
-        error_details=error_details,
+        error_details=scrubbed_error_details,
         destination=on_error,
     )
 
@@ -116,7 +127,7 @@ def record_transform_error_with_routing(
             state_id=state_id,
             edge_id=error_edge_id,
             mode=RoutingMode.DIVERT,
-            reason=error_details,
+            reason=scrubbed_error_details,
         )
 
 
@@ -820,6 +831,8 @@ class TransformExecutor:
                             f"Transform '{transform.name}' returned error but reason is None. "
                             'Use TransformResult.error({{"reason": "...", ...}}) to create error results.'
                         )
+                    sanitized_reason = _scrub_transform_error_details(result.reason)
+                    result.reason = sanitized_reason
 
                     # Record transform_error + DIVERT routing_event BEFORE terminal
                     # completion (record-before-complete, elspeth-2d65e04912 —
@@ -838,14 +851,14 @@ class TransformExecutor:
                         token=token,
                         transform=transform,
                         row=input_dict,  # Use extracted dict for Landscape recording
-                        error_details=result.reason,
+                        error_details=sanitized_reason,
                         on_error=on_error,
                     )
 
                     guard.complete(
                         NodeStateStatus.FAILED,
                         duration_ms=duration_ms,
-                        error=result.reason,
+                        error=sanitized_reason,
                         context_after=result.context_after,
                     )
 

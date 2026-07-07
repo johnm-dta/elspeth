@@ -81,6 +81,7 @@ class JournalRecord(TypedDict):
     response_payload: NotRequired[str | None]
     request_payload_error: NotRequired[str]
     response_payload_error: NotRequired[str]
+    _payload_ref_columns: NotRequired[list[str]]
 
 
 class LandscapeJournal:
@@ -164,6 +165,10 @@ class LandscapeJournal:
             "parameters": self._normalize_parameters(parameters),
             "executemany": executemany,
         }
+        if self._include_payloads:
+            payload_ref_columns = self._payload_ref_columns_from_context(context, parameters)
+            if payload_ref_columns is not None:
+                record["_payload_ref_columns"] = payload_ref_columns
 
         stack = self._ensure_buffer_stack(conn)
         stack[-1].append(record)
@@ -206,12 +211,8 @@ class LandscapeJournal:
 
     def _enrich_committed_records(self, records: list[JournalRecord]) -> None:
         for record in records:
-            self._enrich_with_payloads(
-                record,
-                record["statement"],
-                record["parameters"],
-                record["executemany"],
-            )
+            self._enrich_with_payloads(record)
+            record.pop("_payload_ref_columns", None)
 
     def _after_rollback(self, conn: Connection) -> None:
         if _BUFFER_STACK_KEY in conn.info:
@@ -326,7 +327,8 @@ class LandscapeJournal:
 
     @staticmethod
     def _serialize_record(record: JournalRecord) -> str:
-        safe = serialize_datetime(record)
+        public_record = {key: value for key, value in record.items() if not key.startswith("_")}
+        safe = serialize_datetime(public_record)
         try:
             return json.dumps(safe, allow_nan=False)
         except TypeError as exc:
@@ -353,25 +355,37 @@ class LandscapeJournal:
         sql = statement.lstrip().upper()
         return sql.startswith("INSERT") or sql.startswith("UPDATE") or sql.startswith("DELETE") or sql.startswith("REPLACE")
 
-    def _enrich_with_payloads(self, record: JournalRecord, statement: str, parameters: Any, executemany: bool) -> None:
-        table, columns = self._parse_insert_statement(statement)
-        allow_extra_params = False
-        if table is None:
-            table, columns = self._parse_update_statement(statement)
-            allow_extra_params = True
-        base_table = table.split(".")[-1] if table else table
-        if base_table != "calls" or columns is None or self._payload_store is None:
+    def _payload_ref_columns_from_context(self, context: object, parameters: Any) -> list[str] | None:
+        compiled = getattr(context, "compiled", None)
+        statement = getattr(compiled, "statement", None)
+        table = getattr(statement, "table", None)
+        table_name = getattr(table, "name", None)
+        if table_name != "calls":
+            return None
+        positiontup = getattr(compiled, "positiontup", None)
+        if positiontup:
+            return [str(column) for column in positiontup]
+        if isinstance(parameters, Mapping):
+            return [str(column) for column in parameters]
+        params = getattr(compiled, "params", None)
+        if isinstance(params, Mapping):
+            return [str(column) for column in params]
+        return None
+
+    def _enrich_with_payloads(self, record: JournalRecord) -> None:
+        columns = record.get("_payload_ref_columns")
+        if columns is None or self._payload_store is None:
             return
         if "request_ref" not in columns and "response_ref" not in columns:
             return
 
-        if executemany:
+        if record["executemany"]:
             enrichments: list[PayloadInfo] = []
-            for param_set in parameters:
-                enrichments.append(self._payloads_for_params(columns, param_set, allow_extra_params=allow_extra_params))
+            for param_set in cast("list[object]", record["parameters"]):
+                enrichments.append(self._payloads_for_params(columns, param_set))
             record["payloads"] = enrichments
         else:
-            payload_dict = self._payloads_for_params(columns, parameters, allow_extra_params=allow_extra_params)
+            payload_dict = self._payloads_for_params(columns, record["parameters"])
             if "request_ref" in payload_dict:
                 record["request_ref"] = payload_dict["request_ref"]
             if "request_payload" in payload_dict:
@@ -385,8 +399,8 @@ class LandscapeJournal:
             if "response_payload_error" in payload_dict:
                 record["response_payload_error"] = payload_dict["response_payload_error"]
 
-    def _payloads_for_params(self, columns: list[str], params: Any, *, allow_extra_params: bool = False) -> PayloadInfo:
-        values = self._update_columns_to_values(columns, params) if allow_extra_params else self._columns_to_values(columns, params)
+    def _payloads_for_params(self, columns: list[str], params: Any) -> PayloadInfo:
+        values = self._columns_to_values(columns, params)
         return self._payloads_for_values(values)
 
     def _payloads_for_values(self, values: Mapping[str, object]) -> PayloadInfo:
@@ -440,56 +454,7 @@ class LandscapeJournal:
             return None, f"payload_decode_failed: {exc}"
 
     @staticmethod
-    def _parse_insert_statement(statement: str) -> tuple[str | None, list[str] | None]:
-        sql = statement.strip()
-        upper = sql.upper()
-        if not upper.startswith("INSERT INTO "):
-            return None, None
-        after_into = sql[len("INSERT INTO ") :]
-        paren_index = after_into.find("(")
-        if paren_index == -1:
-            return None, None
-        table = after_into[:paren_index].strip().strip('"').strip("'").lower()
-        end_paren = after_into.find(")", paren_index)
-        if end_paren == -1:
-            return table, None
-        columns_part = after_into[paren_index + 1 : end_paren]
-        columns = [col.strip().strip('"').strip("'") for col in columns_part.split(",")]
-        return table, columns
-
-    @staticmethod
-    def _parse_update_statement(statement: str) -> tuple[str | None, list[str] | None]:
-        sql = statement.strip()
-        upper = sql.upper()
-        if not upper.startswith("UPDATE "):
-            return None, None
-        set_index = upper.find(" SET ")
-        if set_index == -1:
-            return None, None
-        table = sql[len("UPDATE ") : set_index].strip().strip('"').strip("'").lower()
-        where_index = upper.find(" WHERE ", set_index + len(" SET "))
-        assignments = sql[set_index + len(" SET ") :] if where_index == -1 else sql[set_index + len(" SET ") : where_index]
-        columns: list[str] = []
-        for assignment in assignments.split(","):
-            lhs, separator, _rhs = assignment.partition("=")
-            if separator == "":
-                return table, None
-            column = lhs.strip().strip('"').strip("'")
-            if "." in column:
-                column = column.rsplit(".", 1)[-1].strip().strip('"').strip("'")
-            columns.append(column)
-        return table, columns
-
-    @staticmethod
     def _columns_to_values(columns: list[str], params: Any) -> dict[str, object]:
         if isinstance(params, dict):
             return {col: params[col] for col in columns}
         return dict(zip(columns, params, strict=True))
-
-    @staticmethod
-    def _update_columns_to_values(columns: list[str], params: Any) -> dict[str, object]:
-        if isinstance(params, dict):
-            return {col: params[col] for col in columns}
-        if len(params) < len(columns):
-            return dict(zip(columns, params, strict=True))
-        return dict(zip(columns, params[: len(columns)], strict=True))

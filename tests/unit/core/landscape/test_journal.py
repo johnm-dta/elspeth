@@ -4,7 +4,6 @@ Tests cover:
 - Statement classification (_is_write_statement)
 - Parameter normalization (_normalize_parameters)
 - Record serialization (_serialize_record)
-- INSERT statement parsing (_parse_insert_statement)
 - Column-to-values mapping (_columns_to_values)
 - SQLAlchemy event lifecycle (buffer → commit/rollback)
 - Failure circuit breaker with periodic recovery
@@ -22,6 +21,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import Column, MetaData, String, Table, create_engine, insert, update
 
 from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.call_data import RawCallPayload
@@ -200,41 +200,19 @@ class TestSerializeRecord:
         with pytest.raises(AuditIntegrityError, match="Tier 1 violation"):
             LandscapeJournal._serialize_record(record)
 
-
-# ===========================================================================
-# INSERT statement parsing
-# ===========================================================================
-
-
-class TestParseInsertStatement:
-    """Tests for _parse_insert_statement — extracts table name and columns."""
-
-    def test_basic_insert(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("INSERT INTO calls (call_id, state_id) VALUES (?, ?)")
-        assert table == "calls"
-        assert cols == ["call_id", "state_id"]
-
-    def test_quoted_columns(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement('INSERT INTO "calls" ("call_id", "state_id") VALUES (?, ?)')
-        assert table == "calls"
-        assert cols == ["call_id", "state_id"]
-
-    def test_non_insert_returns_none(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("UPDATE calls SET status = ?")
-        assert table is None
-        assert cols is None
-
-    def test_no_column_list_parses_values_as_columns(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("INSERT INTO calls VALUES (1, 2)")
-        # Parser finds the first '(' which is the VALUES paren, so table name
-        # absorbs "VALUES" and the values parens become the "column list"
-        assert table == "calls values"
-        assert cols == ["1", "2"]
-
-    def test_missing_close_paren_returns_none_columns(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("INSERT INTO calls (col1, col2")
-        assert table == "calls"
-        assert cols is None
+    def test_internal_payload_ref_columns_not_serialized(self) -> None:
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "t",
+                "statement": "INSERT",
+                "parameters": {},
+                "executemany": False,
+                "_payload_ref_columns": ["request_ref"],
+            },
+        )
+        parsed = json.loads(LandscapeJournal._serialize_record(record))
+        assert "_payload_ref_columns" not in parsed
 
 
 # ===========================================================================
@@ -386,24 +364,62 @@ class TestAfterCursorExecute:
         )
         payload_store = _PayloadStoreDouble(content=b"payload content")
         journal._payload_store = payload_store
-        conn = _make_conn()
-
-        journal._after_cursor_execute(
-            conn,
-            cursor=None,
-            statement="INSERT INTO calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            parameters={"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
-            context=None,
-            executemany=False,
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        calls = Table(
+            "calls",
+            metadata,
+            Column("call_id", String),
+            Column("request_ref", String),
+            Column("response_ref", String),
         )
+        metadata.create_all(engine)
+        journal.attach(engine)
 
-        assert payload_store.refs == []
+        with engine.connect() as conn:
+            transaction = conn.begin()
+            conn.execute(insert(calls).values(call_id="c1"))
+            conn.execute(update(calls).where(calls.c.call_id == "c1").values(request_ref="req-ref", response_ref="resp-ref"))
 
-        journal._after_commit(conn)
+            assert payload_store.refs == []
+
+            transaction.commit()
 
         assert payload_store.refs == ["req-ref", "resp-ref"]
         records = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
-        assert records[0]["request_payload"] == "payload content"
+        call_updates = [record for record in records if record["statement"].lstrip().upper().startswith("UPDATE CALLS SET")]
+        assert call_updates[0]["request_payload"] == "payload content"
+
+    def test_payload_enrichment_uses_structured_sqlalchemy_context_not_sql_parser(self, tmp_path: Path) -> None:
+        assert not hasattr(LandscapeJournal, "_parse_insert_statement")
+        assert not hasattr(LandscapeJournal, "_parse_update_statement")
+
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        journal._payload_store = _PayloadStoreDouble(content=b"payload content")
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        calls = Table(
+            "calls",
+            metadata,
+            Column("call_id", String),
+            Column("request_ref", String),
+            Column("response_ref", String),
+        )
+        metadata.create_all(engine)
+
+        journal.attach(engine)
+        with engine.begin() as conn:
+            conn.execute(insert(calls).values(call_id="c1"))
+            conn.execute(update(calls).where(calls.c.call_id == "c1").values(request_ref="req-ref", response_ref="resp-ref"))
+
+        records = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
+        call_updates = [record for record in records if record["statement"].lstrip().upper().startswith("UPDATE CALLS SET")]
+        assert call_updates[0]["request_ref"] == "req-ref"
+        assert call_updates[0]["request_payload"] == "payload content"
 
 
 class TestAfterCommit:
@@ -786,41 +802,17 @@ class TestLoadPayload:
 class TestEnrichWithPayloads:
     """Tests for _enrich_with_payloads — adds payload data to call records."""
 
-    def test_non_calls_table_skipped(self, tmp_path: Path) -> None:
+    def test_records_without_structured_payload_columns_skipped(self, tmp_path: Path) -> None:
         journal = _make_journal(
             tmp_path,
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
         record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO rows (id) VALUES (?)",
-            {"id": "r1"},
-            executemany=False,
-        )
+        journal._enrich_with_payloads(record)
         # No payload keys should be added
         assert "request_ref" not in record
         assert "payloads" not in record
-
-    def test_schema_qualified_calls_table_enriched(self, tmp_path: Path) -> None:
-        """Regression: schema-qualified table names like public.calls must match."""
-        journal = _make_journal(
-            tmp_path,
-            include_payloads=True,
-            payload_base_path=str(tmp_path / "payloads"),
-        )
-        journal._payload_store = _PayloadStoreDouble(content=b"payload content")
-
-        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO public.calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
-            executemany=False,
-        )
-        assert record["request_ref"] == "req-ref"
-        assert record["request_payload"] == "payload content"
 
     def test_single_call_enriched(self, tmp_path: Path) -> None:
         journal = _make_journal(
@@ -830,13 +822,17 @@ class TestEnrichWithPayloads:
         )
         journal._payload_store = _PayloadStoreDouble(content=b"payload content")
 
-        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
-            executemany=False,
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "t",
+                "statement": "INSERT",
+                "parameters": {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
+                "executemany": False,
+                "_payload_ref_columns": ["call_id", "request_ref", "response_ref"],
+            },
         )
+        journal._enrich_with_payloads(record)
 
         assert record["request_ref"] == "req-ref"
         assert record["request_payload"] == "payload content"
@@ -850,16 +846,20 @@ class TestEnrichWithPayloads:
         )
         journal._payload_store = _PayloadStoreDouble(content=b"payload")
 
-        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": True})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            [
-                {"call_id": "c1", "request_ref": "r1", "response_ref": "r2"},
-                {"call_id": "c2", "request_ref": "r3", "response_ref": None},
-            ],
-            executemany=True,
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "t",
+                "statement": "INSERT",
+                "parameters": [
+                    {"call_id": "c1", "request_ref": "r1", "response_ref": "r2"},
+                    {"call_id": "c2", "request_ref": "r3", "response_ref": None},
+                ],
+                "executemany": True,
+                "_payload_ref_columns": ["call_id", "request_ref", "response_ref"],
+            },
         )
+        journal._enrich_with_payloads(record)
 
         assert "payloads" in record
         assert len(record["payloads"]) == 2

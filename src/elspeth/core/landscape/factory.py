@@ -46,8 +46,8 @@ if TYPE_CHECKING:
 class RecorderFactory:
     """Construction point for Landscape repositories.
 
-    Creates all 4 repositories from a LandscapeDB, sharing loader instances
-    to ensure consistent object construction across repositories.
+    Creates the Landscape repository graph from a LandscapeDB, sharing loader
+    instances to ensure consistent object construction across repositories.
     """
 
     def __init__(self, db: LandscapeDB, *, payload_store: PayloadStore | None = None) -> None:

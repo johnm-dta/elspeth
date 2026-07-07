@@ -65,9 +65,13 @@ def factory(db: LandscapeDB) -> RecorderFactory:
 
 
 class TestRepositoryConstruction:
-    """Verify the factory creates all four repositories with correct types."""
+    """Verify the factory creates the expected repository graph."""
 
-    def test_creates_all_four_repositories(self, factory: RecorderFactory) -> None:
+    def test_factory_docstring_describes_repository_graph_without_fixed_count(self) -> None:
+        assert RecorderFactory.__doc__ is not None
+        assert "all 4 repositories" not in RecorderFactory.__doc__
+
+    def test_creates_core_repository_surfaces(self, factory: RecorderFactory) -> None:
         assert isinstance(factory.run_lifecycle, RunLifecycleRepository)
         assert isinstance(factory.execution, ExecutionRepository)
         assert isinstance(factory.data_flow, DataFlowRepository)

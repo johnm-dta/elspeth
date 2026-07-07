@@ -441,6 +441,9 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 
 | Plugin | Purpose |
 |--------|---------|
+| `azure_document_intelligence` | Enrich rows with Azure AI Document Intelligence extraction |
+| `blob_fetch` | Fetch an operator-authorised remote document into the run payload store |
+| `blob_csv_expand` | Expand a payload-store CSV blob into output rows |
 | `passthrough` | Pass rows unchanged |
 | `field_mapper` | Rename, compute, drop fields |
 | `truncate` | Limit string field lengths |

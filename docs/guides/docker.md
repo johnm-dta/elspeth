@@ -49,7 +49,7 @@ Mount your configuration and data directories to standard container paths:
 | `./config` | `/app/config` | `ro` | Pipeline YAML, settings |
 | `./input` | `/app/input` | `ro` | Source data files (CSV, JSON, etc.) |
 | `./output` | `/app/output` | `rw` | Sink output files |
-| `./state` | `/app/state` | `rw` | SQLite landscape DB, checkpoints, payloads |
+| `./data` | `/app/data` | `rw` | SQLite audit DB, checkpoints, payloads |
 | `./secrets` | `/app/secrets` | `ro` | Sensitive config files (optional) |
 
 **Example:**
@@ -59,7 +59,7 @@ docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
-  -v $(pwd)/state:/app/state \
+  -v $(pwd)/data:/app/data \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 ```
@@ -72,13 +72,13 @@ Pass secrets and configuration via environment variables. See the [Environment V
 
 ```bash
 docker run --rm \
-  -e DATABASE_URL="sqlite:////app/state/landscape.db" \
+  -e DATABASE_URL="sqlite:////app/data/audit.db" \
   -e OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
   -e ELSPETH_FINGERPRINT_KEY="${ELSPETH_FINGERPRINT_KEY}" \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
-  -v $(pwd)/state:/app/state \
+  -v $(pwd)/data:/app/data \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 ```
@@ -104,7 +104,7 @@ docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
-  -v $(pwd)/state:/app/state \
+  -v $(pwd)/data:/app/data \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 ```
@@ -124,23 +124,23 @@ For interactive exploration, mount the state and use the TUI (requires `-it`):
 
 ```bash
 docker run -it --rm \
-  -v $(pwd)/state:/app/state:ro \
+  -v $(pwd)/data:/app/data:ro \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
-  explain --run latest --row 42 --database /app/state/landscape.db
+  explain --run latest --row 42 --database /app/data/audit.db
 ```
 
 For non-interactive environments (CI/CD), use text or JSON explain output:
 
 ```bash
 docker run --rm \
-  -v $(pwd)/state:/app/state:ro \
+  -v $(pwd)/data:/app/data:ro \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
-  explain --run latest --row 42 --no-tui --database /app/state/landscape.db
+  explain --run latest --row 42 --no-tui --database /app/data/audit.db
 
 docker run --rm \
-  -v $(pwd)/state:/app/state:ro \
+  -v $(pwd)/data:/app/data:ro \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
-  explain --run latest --row 42 --json --database /app/state/landscape.db
+  explain --run latest --row 42 --json --database /app/data/audit.db
 ```
 
 ### Resume an Interrupted Run
@@ -150,7 +150,7 @@ docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
-  -v $(pwd)/state:/app/state \
+  -v $(pwd)/data:/app/data \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   resume abc123 --execute
 ```
@@ -167,14 +167,14 @@ services:
   elspeth:
     image: ghcr.io/johnm-dta/elspeth:${IMAGE_TAG:?set IMAGE_TAG to sha-<commit> or v*}
     environment:
-      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/state/landscape.db}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/data/audit.db}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - ELSPETH_FINGERPRINT_KEY=${ELSPETH_FINGERPRINT_KEY:-}
     volumes:
       - ./config:/app/config:ro
       - ./input:/app/input:ro
       - ./output:/app/output
-      - ./state:/app/state
+      - ./data:/app/data
     command: ["--help"]
 ```
 
@@ -191,7 +191,7 @@ docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
 docker compose run --rm elspeth health --verbose
 
 # Explain a decision (interactive TUI)
-docker compose run -it --rm elspeth explain --run latest --row 42 --database /app/state/landscape.db
+docker compose run -it --rm elspeth explain --run latest --row 42 --database /app/data/audit.db
 ```
 
 ### Production docker-compose
@@ -210,7 +210,7 @@ services:
       - ./config:/app/config:ro
       - ./input:/app/input:ro
       - ./output:/app/output
-      - elspeth_state:/app/state
+      - elspeth_data:/app/data
     depends_on:
       - db
 
@@ -328,10 +328,10 @@ sinks:
       path: /app/output/results.csv  # Container path
 
 landscape:
-  url: ${DATABASE_URL:-sqlite:////app/state/landscape.db}
+  url: ${DATABASE_URL:-sqlite:////app/data/audit.db}
 
 payload_store:
-  base_path: /app/state/payloads
+  base_path: /app/data/payloads
 ```
 
 **Common mistake:** Using host paths like `./input/data.csv` instead of container paths `/app/input/data.csv`.

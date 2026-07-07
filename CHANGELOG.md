@@ -316,7 +316,9 @@ data or being forged, and tighten transport and endpoint authentication.
   required for bearer and OpenRouter endpoints; the Prometheus metrics
   endpoint requires authentication; managed-identity RAG configs are blocked;
   blob mutations are gated behind approval; recovery execution is bound to
-  reviewed state; and the secret inventory is made metadata-only.
+  reviewed state; web-authored OpenRouter base URLs are gated to the canonical
+  endpoint; AWS IPv6 metadata endpoints are blocked alongside the existing
+  SSRF-safe web controls; and the secret inventory is made metadata-only.
 - **CI judge-tool fail-closed gates and signature verification
   (`elspeth_lints`)** — agent judge tools fail closed; judge-tool reads are
   gated through the scrubber and blocked on signing paths; rejudge and new
@@ -347,11 +349,16 @@ data or being forged, and tighten transport and endpoint authentication.
   `report_assemble` transform rejects env-var placeholders in the fields it
   echoes to output, so an unresolved `${VAR}` cannot be surfaced as literal
   content.
+- **Host environment exposure reduced** — commencement gates no longer receive
+  the process environment by default, and in-memory pipeline YAML loading no
+  longer expands host environment variables unless the caller explicitly opts in.
 - **Further audit-export and gate hardening** — raw failing rows are redacted
-  from audit exports by default; harness credentials are kept out of the eval
-  `curl` argv and backfill sink paths are restricted to data roots; and the
-  `elspeth_lints` gates gain reaudit-limit, allowlist-expiry,
-  stale-judged-signature, and override-hash-IO fail-closed handling.
+  from audit exports by default; CSV audit exports neutralize spreadsheet
+  formulas; JSONL filesystem exports are staged before publish; harness
+  credentials are kept out of the eval `curl` argv and backfill sink paths are
+  restricted to data roots; and the `elspeth_lints` gates gain reaudit-limit,
+  allowlist-expiry, stale-judged-signature, and override-hash-IO fail-closed
+  handling.
 
 ### Operational
 
@@ -383,6 +390,17 @@ data or being forged, and tighten transport and endpoint authentication.
   `release/0.7.0` HEAD rather than reuse a prebuilt bundle; a stale bundle
   will not render the new login, email-verification, design-token, or guided
   wire-stage surfaces.
+- **CLI/MCP audit database defaults consolidate under `data/`.** Ad-hoc CLI and
+  MCP Landscape defaults now point at `data/audit.db` instead of the older
+  `state/audit.db` path, matching the release's system-database layout and
+  reducing accidental split-brain audit stores during local operator work.
+- **Local and CI gate behaviour is explicit.** The operator-approved pre-commit
+  cleanup removes the whole-tree wardline hook from the local hook set; release
+  agents still run `wardline scan . --fail-on ERROR` explicitly before handoff
+  when external-input boundaries are touched. CodeQL now runs the
+  `security-extended` query suite without `security-and-quality`, matching the
+  release's security-gate posture and avoiding quality-only noise from blocking
+  the release.
 
 ---
 

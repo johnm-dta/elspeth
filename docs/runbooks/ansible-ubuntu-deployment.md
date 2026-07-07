@@ -2892,16 +2892,17 @@ migration runner. For now, the deploy procedure is:
    service, removes stale `.db-wal` / `.db-shm` sidecars (which
    otherwise replay over the restored file on next open), and
    archives the pre-rollback `audit.db` off-host before overwrite.
-2. **For a schema-incompatible upgrade**, after a successful deploy and
-   verification, delete the *session* DB:
+2. **For a schema-incompatible 0.7.0 upgrade**, stop the service and follow the
+   two-database reset runbook before handing the site back to users:
    ```bash
    sudo -u elspeth rm /var/lib/elspeth/sessions.db
+   sudo -u elspeth rm /var/lib/elspeth/runs/audit.db
    sudo systemctl restart elspeth-web.service
    ```
-   Do **not** delete `audit.db`. The landscape schema is append-only at
-   the row level; if a code change requires a landscape schema migration,
-   that change is currently blocked from shipping (it is a future-release
-   gate, not an operator decision).
+   The exact paths and SQLite sidecar handling depend on the deployment; use
+   [staging-session-db-recreation.md](staging-session-db-recreation.md) as the
+   current operational source of truth. `data/auth.db` is separate and survives
+   the 0.7.0 reset.
 3. **On rollback**, restore both pre-deploy snapshots before re-running the
    previous-version playbook. See [Rollback Automation](#rollback-automation).
 4. **Snapshot retention**: keep at least the last three pre-deploy snapshots
@@ -2924,8 +2925,8 @@ and crashes the service with an actionable error if it diverges from the
 constant the running code expects:
 
 ```text
-SessionSchemaError: Session DB schema version 4 does not match
-SESSION_SCHEMA_EPOCH=5. Pre-release ELSPETH does not migrate session
+SessionSchemaError: Session DB schema version 25 does not match
+SESSION_SCHEMA_EPOCH=26. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.
 ```
 
@@ -2961,6 +2962,7 @@ exhausts and the unit goes into `failed` state.
 | 3 | `composition_proposals.user_message_id` added (chat-message provenance). |
 | 4 | `composer_completion_events_table` added (Phase 6A — `mark_ready_for_review`, `export_yaml`). |
 | 5 | Per-event-type partial CHECK constraints on `composer_completion_events` (Phase 6A post-merge hardening). |
+| 26 | 0.7.0 current schema; includes guided Composer state, local auth/email-verification support, and first-run tutorial resume fields. |
 
 The constant should be the authoritative reference; this table is a
 durability aid for operators reading the runbook in isolation.

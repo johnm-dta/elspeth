@@ -1,62 +1,72 @@
-# Current State — ELSPETH        Checkpoint: 2026-06-28 · branch release/0.7.0
+# Current State — ELSPETH
 
-> ⚠️ **This workspace is ~2 weeks stale.** It was last written at the 2026-06-14
-> bootstrap; only the tier-model-signing delta below was checkpointed since.
-> Reality has moved to the `release/0.7.0` line (composer UX phases 1–8, passive
-> tutorial e2e, website, design system — see project memory), none of which is
-> reflected here. **The next session must run `/own-product` for a full RESUME +
-> re-orient and re-confirm the Now bet with the owner — do not treat the bet below
-> as current.**
+**Checkpoint:** 2026-07-08
+**Branch:** `release/0.7.0`
+**Release PR:** #86, `release/0.7.0` → `main`
 
-## The bet right now (stated, NOT re-confirmed this session)
+## The Bet Right Now
 
-**Web hardening to GA** — the 2026-06-14 owner-confirmed primary (close the five
-Web-surface assurance clusters). It was **not advanced this session** and predates
-the 0.7.0 line; treat it as unverified until the next RESUME re-confirms or replaces
-it. Metric: north-star (run assurance completeness) + Web-GA input.
+**Ship the 0.7.0 line to merge-ready, minus the operator signing stage.**
 
-## In flight
+The 0.7.0 release is the active delivery focus. It packages the LLM-primary
+guided Composer, first-run tutorial recut, document-ingestion plugins, CLI/TUI
+operator refresh, local Composer user/email-verification flow, public website,
+release documentation refresh, and the release hardening body recorded in the
+root changelog.
 
-- **Turnkey tier-model signing (this session) — BUILT, not pushed, e2e owed.** The
-  stage→sign-bundle seam: agent stages key-free via the `elspeth-judge` MCP server;
-  operator fires `sign-bundle` / `rekey` with the HMAC key. Committed to
-  `release/0.7.0`: feature `6e0d66f9`, spec `b87829bc3`, plan `d59fbccdd`, refinements
-  `af30dfc6e` / `786a609ab`. Green (70 new tests; 5 security invariants pinned).
-  tracker: **elspeth-281582acc9** (still `building` — built, not closed pending e2e).
-  See `decisions/0002` (proposed) + `docs/judge-signature-handoff.md`.
-- **Web hardening clusters** — still Now per roadmap, still un-dispatched. tracker:
-  elspeth-250f698aaf, elspeth-ef52049338, elspeth-0fd9dfcb7e, elspeth-16ddaa7d02,
-  elspeth-248536c9e6. (Reconcile against 0.7.0 reality at next RESUME.)
+The longer-running **Web hardening to GA** bet remains on the roadmap, but the
+current checkout is in release-closeout mode: finish PR #86, preserve the
+operator-only signing boundary, and avoid adding new scope that does not move
+the release toward merge.
 
-## Open questions / blocked-on-owner
+## Current Release State
 
-- **[owner sign-off — PDR-0002] Tier-model signing is an escalate-before-acting
-  domain.** Three calls gate to you: (a) adopt the stage→sign-bundle seam as the
-  *sanctioned* signing workflow; (b) confirm the runbook removal stands (the
-  `notes/060-*` runbooks are gone from disk — gitignored scratch; `sign_accept_backlog.py`
-  is git-recoverable); (c) authorize the **push** of `release/0.7.0`.
-- **[owner] Live-judge e2e not yet run** — the new path is unit-tested with a
-  monkeypatched judge only; it has not been exercised `stage_scan → sign-bundle`
-  against a real `ELSPETH_JUDGE_METADATA_HMAC_KEY` + live LLM. Run before relying on it.
-- **[next RESUME] Workspace staleness** — roadmap still says "Ship the 0.6.0 line" as
-  Now; we're on 0.7.0. The whole workspace needs reconciliation against the actual
-  shipped line and a re-confirmed Now bet.
-- **[carried from bootstrap, unresolved]** metrics uninstrumented (every north-star/
-  input is a placeholder); tracker drift (C1/C2/C3 fixed-in-branch vs P0-READY); 5
-  stale claims; Landscape MCP epoch 11 vs DB epoch 21.
+- Public docs have been refreshed for 0.7.0 across `CHANGELOG.md`, `README.md`,
+  `ARCHITECTURE.md`, `SECURITY.md`, `GOVERNANCE.md`, `SUPPORT.md`, and
+  `docs/release/`.
+- Implemented plans, superseded specs, generated review sidecars, and other
+  work-product docs have been removed from the tracked active docs tree. A
+  maintainer may keep local copies under ignored `docs-archive/`; git history is
+  the public provenance record.
+- `docs-archive/` is intentionally local-only and ignored. It is not sensitive,
+  but it is not part of the public repository.
+- Local release verification is green for the currently exercised lint, type,
+  contract, unit, and frontend E2E checks recorded in PR #86.
+- GitHub CI is green except for the expected operator-owned Static analysis
+  failure caused by signed trust-tier allowlist drift.
 
-## Last checkpoint did
+## In Flight
 
-- Recorded the tier-model signing seam as **PDR-0002 (proposed)** — built + shipped
-  to `release/0.7.0` this session under direct owner direction; flagged the three
-  signing-domain items for owner sign-off (adopt / runbook-removal / push).
-- Refreshed `metrics.md`: red-gate guardrail **strengthened** (structural operator-only
-  custody + CI-never-signs); no reversal trigger crossed; full battery not re-run.
-- Did **not** touch `roadmap.md` (no roadmap bet changed horizon — the signing seam was
-  an owner-directed side task, not a tracked bet).
+- **PR #86 release closeout** — docs are current, PR text records scope,
+  verification, archive policy, CodeQL/E2E fixes, and the remaining
+  operator-only stage.
+- **Signed trust-tier allowlist repair** — tracked as
+  `elspeth-2670a38693`, assigned to `operator`. Agents should diagnose and
+  report drift, but must not mint or rotate signed allowlist metadata.
+- **Final live-judge verification** — owed after the operator signing process,
+  using the real judge-signature key material and live LLM path.
 
-## Next session, start here
+## Open Questions / Blockers
 
-Run **`/own-product`** for a full RESUME — the workspace is stale and the Now bet must
-be re-confirmed against the 0.7.0 reality. Then get owner sign-off on **PDR-0002**
-(signing workflow + push) and run the live-judge e2e before closing elspeth-281582acc9.
+- Operator must repair/sign the trust-tier allowlist with release key material.
+- Operator must rerun Static analysis / aggregate CI after signing.
+- Operator must run the final live-judge end-to-end path before merge.
+- Release approval still needs final provenance in the public release materials.
+- Security disclosure and supply-chain artifact evidence remain publication
+  readiness items unless explicitly deferred in the release record.
+
+## Last Checkpoint Did
+
+- Reviewed the release commit log against the changelog and downstream docs.
+- Refreshed current release docs and removed obsolete pre-0.7 public-facing wording.
+- Preserved the ignored/local-only archive policy for `docs-archive/`.
+- Confirmed the remaining release blocker is the operator-owned signing stage,
+  not an agent-fixable lint or documentation issue.
+
+## Next Session, Start Here
+
+1. Confirm the operator has completed signed allowlist repair for
+   `elspeth-2670a38693`.
+2. Rerun or inspect Static analysis and aggregate CI on the current PR head.
+3. Run the final live-judge verification path.
+4. Update PR #86 and release provenance with the final CI/signing evidence.

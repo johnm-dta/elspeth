@@ -437,7 +437,7 @@ sinks:
 
 # Audit trail
 landscape:
-  url: sqlite:////app/state/audit.db  # Note: 4 slashes for absolute path
+  url: sqlite:////app/data/audit.db  # Note: 4 slashes for absolute path
 EOF
 ```
 
@@ -470,7 +470,7 @@ docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
-  -v $(pwd)/state:/app/state \
+  -v $(pwd)/data:/app/data \
   ghcr.io/johnm-dta/elspeth:latest \
   run --settings /app/config/pipeline.yaml --execute
 ```
@@ -500,9 +500,9 @@ For Docker environments where TUI isn't available, use non-interactive explain o
 
 ```bash
 docker run --rm \
-  -v $(pwd)/state:/app/state:ro \
+  -v $(pwd)/data:/app/data:ro \
   ghcr.io/johnm-dta/elspeth:latest \
-  explain --run latest --row 2 --no-tui --database /app/state/audit.db
+  explain --run latest --row 2 --no-tui --database /app/data/audit.db
 ```
 
 > **Tip:** Use `--no-tui` for plain text output or `--json` for machine-readable output. The TUI requires an interactive terminal, so use these flags in CI/CD environments.
@@ -522,7 +522,7 @@ services:
       - ./config:/app/config:ro
       - ./input:/app/input:ro
       - ./output:/app/output
-      - ./state:/app/state
+      - ./data:/app/data
 ```
 
 ```bash
@@ -533,7 +533,7 @@ docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
 docker compose run --rm elspeth run --settings /app/config/pipeline.yaml --execute
 
 # Explain (interactive TUI)
-docker compose run -it --rm elspeth explain --run latest --row 2 --database /app/state/audit.db
+docker compose run -it --rm elspeth explain --run latest --row 2 --database /app/data/audit.db
 ```
 
 ---
@@ -762,7 +762,7 @@ docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
-  -v $(pwd)/state:/app/state \
+  -v $(pwd)/data:/app/data \
   ghcr.io/johnm-dta/elspeth:latest \
   <command>
 ```

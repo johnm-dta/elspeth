@@ -68,7 +68,7 @@ Re-enforcement happens automatically.
 ## Removing the hook entirely
 
 Later removal is a governance decision. Any PR removing the hook MUST cite
-[20-phase-8-polish-and-telemetry.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md)
-§"Cohort attribution via commit trailers (A4 — load-bearing)" in the
-removal commit's body and explain how cross-phase attribution will be
-preserved by the replacement mechanism.
+the cohort-attribution rationale in this README and the commit history for the
+hook's introduction in the removal commit's body, then explain how cross-phase
+attribution will be preserved by the replacement mechanism. Do not rely on a
+maintainer-local `docs-archive/` path as public evidence.

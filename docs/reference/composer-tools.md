@@ -1,12 +1,18 @@
 # Composer Tool Reference
 
-Complete reference for the composer-facing tools and export surfaces available to the LLM pipeline composer. These tools are used in a tool-use loop where the LLM translates natural-language pipeline descriptions into valid ELSPETH pipeline configurations.
+Reference for the composer-facing tools, guided authoring concepts, and export
+surfaces available to the LLM pipeline composer. The freeform composer uses a
+tool-use loop where the LLM translates natural-language pipeline descriptions
+into valid ELSPETH pipeline configurations; guided mode uses staged
+`/guided/chat` turns that apply validated source, sink, transform, and wiring
+changes to the same composition state.
 
 ---
 
 ## Table of Contents
 
 - [How Tools Work](#how-tools-work)
+- [Guided Authoring Surface](#guided-authoring-surface)
 - [Discovery Tools](#discovery-tools)
 - [Export Surface](#export-surface)
 - [Mutation Tools](#mutation-tools)
@@ -29,6 +35,28 @@ Tools fall into two categories:
 | **Mutation** | Modify the `CompositionState`. Return updated state + validation. | 15 turns with at least one mutation |
 
 Every mutation tool returns a `ToolResult` containing the full validation state, so the LLM can detect and fix errors immediately.
+
+---
+
+## Guided Authoring Surface
+
+Guided mode is not a separate runtime. It is a staged authoring protocol over
+the same Composer state and validators.
+
+| Concept or endpoint | Purpose |
+|---|---|
+| `POST /guided/start` | Creates or resumes a guided session entry point and seeds the closed-enum `WorkflowProfile`. |
+| `WorkflowProfile` | Distinguishes normal guided sessions from tutorial-guided sessions; tutorial profile state is stripped on fork. |
+| `/guided/chat` | Applies the operator's stage instruction through the source, sink, transform, or wiring driver. |
+| `STEP_4_WIRE` | Final guided stage that renders the proposed wiring and contract overlay. |
+| `CONFIRM_WIRING` | Required payload for accepting final wiring; invalid payloads re-emit the wire turn. |
+| `REQUEST_ADVISOR` | Wire-stage escape path that asks for advisor review and never auto-completes the pipeline. |
+| Advisor sign-off | Persisted-counter-bound checkpoint that gates terminal completion at the wire stage. |
+| Pending interpretation card | Read-only review card for subjective model interpretations; advancement is blocked until resolved. |
+
+Use the staged guided surface when the operator wants the model to build each
+stage from intent. Use the freeform tools below when the operator needs direct
+tool-driven editing or custom topology.
 
 ---
 

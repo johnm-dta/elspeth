@@ -102,10 +102,12 @@ ELSPETH integrates with external systems through plugins and clients, including:
 
 - CSV and JSON files;
 - Azure Blob Storage;
+- Azure Document Intelligence;
 - Microsoft Dataverse;
 - ChromaDB;
 - Azure OpenAI;
 - OpenRouter;
+- blob-backed document fetch and CSV expansion transforms;
 - web-scraping targets, with controls intended to prevent requests to internal
   network locations.
 

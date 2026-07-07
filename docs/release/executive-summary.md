@@ -70,8 +70,8 @@ The following capabilities are present, tested, and documented in the current re
 
 ### What the platform's design does not yet provide
 
-- **Outside the orchestration scope, no broader independent third-party assessment** has been completed. Beyond the orchestration component's interim ATO: no Information Security Registered Assessors Program (IRAP) assessment of the broader platform, no Digital Transformation Agency or Australian Government Design System conformance review beyond visual styling, and no independent penetration test. The audit-trail and trust-tier claims are the designed behaviour and are exercised by an automated test suite (approximately 14,100 cases at RC-5.2, May 2026). Outside the orchestration component's interim ATO, they have not been independently certified.
-- **No formal mapping** has been compiled to the Protective Security Policy Framework (PSPF), the Information Security Manual (ISM), the Essential Eight, or the Digital Service Standard. The platform is designed to support these obligations, but the mapping itself has not been compiled.
+- **Outside the orchestration scope, no broader independent third-party assessment** has been completed. Beyond the orchestration component's interim ATO: no Information Security Registered Assessors Program (IRAP) assessment of the broader platform, no Digital Transformation Agency or Australian Government Design System conformance review beyond visual styling, and no independent penetration test. The audit-trail and trust-tier claims are the designed behaviour and are exercised by the automated test suite and CI gates recorded for the release. Outside the orchestration component's interim ATO, they have not been independently certified.
+- **No formal assessor-validated mapping** has been compiled to the Protective Security Policy Framework (PSPF), the Information Security Manual (ISM), the Essential Eight, or the Digital Service Standard. The 0.7.0 evidence map in [`assessment-mapping.md`](assessment-mapping.md) identifies current evidence and gaps, but it is not a conformance statement.
 
 ### Evidence produced by the audit trail, by ISM control family
 
@@ -91,23 +91,23 @@ The mapping above identifies evidence that is already present. It is not a claim
 
 ## Deployment readiness
 
-| Dimension | State at RC-5.3 |
+| Dimension | State at 0.7.0 |
 |-----------|----------------|
 | Pilot deployment | RC-3 deployed in orchestration-only mode under the interim ATO; pilot evaluation processed approximately 2,200 rows, each producing a complete audit record. Full pipeline platform not yet deployed in any Australian government agency. |
 | Air-gapped deployment | Supported (Local auth provider, no required external services) |
 | Federated identity | Supported (OpenID Connect, Microsoft Entra) |
 | Encryption at rest | Optional (SQLCipher passphrase, opt-in) |
 | Encryption in transit | Required for external calls (validated at the trust boundary) |
-| Manual upgrade steps | Yes — current release requires operator-administered database schema recreation between certain versions. An automated migration path is on the roadmap. |
+| Manual upgrade steps | Yes — 0.7.0 requires operator-administered recreation of both the web session database and the Landscape audit database before first start. An automated migration path is on the roadmap. |
 | Operational documentation | Runbooks present for resume, routing investigation, incident response, database maintenance, backup, Key Vault configuration, and Ansible-based Ubuntu deployment |
 
 ---
 
 ## Residual risk
 
-The following risks are present at RC-5.3. Mitigations in place are noted where they exist; residual exposure is described against each item.
+The following risks are present at 0.7.0. Mitigations in place are noted where they exist; residual exposure is described against each item.
 
-1. **Single-contributor continuity.** The platform has been developed by a single DTA staff member. The departure or unavailability of that contributor would suspend further development of the platform. Mitigations in place include architectural-decision records covering each load-bearing design choice, a contracts subsystem enforced by automated static analysis (so that future engineers cannot silently breach the trust-tier model), an operational runbook set covering resume, routing investigation, incident response, database maintenance, backup, Key Vault configuration, and Ansible-based Ubuntu deployment, and a test suite of approximately 14,100 cases that functions as an executable specification. Mitigations not yet in place include the onboarding of a second engineer, a documented succession arrangement, and a multi-party commitment to runbook and architecture-document currency. An adopting agency should treat continuity planning as a precondition for pilot adoption. Reasonable approaches include contributing engineering capacity, negotiating a documented succession arrangement, or scoping the engagement as a defined deliverable rather than as an ongoing capability.
+1. **Single-contributor continuity.** The platform has been developed by a single DTA staff member. The departure or unavailability of that contributor would suspend further development of the platform. Mitigations in place include architectural-decision records covering each load-bearing design choice, a contracts subsystem enforced by automated static analysis (so that future engineers cannot silently breach the trust-tier model), an operational runbook set covering resume, routing investigation, incident response, database maintenance, backup, Key Vault configuration, and Ansible-based Ubuntu deployment, and an automated test suite that functions as an executable specification. Mitigations not yet in place include the onboarding of a second engineer, a documented succession arrangement, and a multi-party commitment to runbook and architecture-document currency. An adopting agency should treat continuity planning as a precondition for pilot adoption. Reasonable approaches include contributing engineering capacity, negotiating a documented succession arrangement, or scoping the engagement as a defined deliverable rather than as an ongoing capability.
 2. **Independent assurance is scope-limited.** The orchestration component holds an interim ATO. The rest of the platform — audit-integrity, trust-tier, and access-control claims outside the orchestration scope — has been internally tested but not independently assessed by an IRAP-registered assessor or equivalent. An agency adopting beyond the orchestration scope under a high-assurance obligation should factor an independent assessment into its adoption plan.
 3. **Deployment scope is pilot-only.** RC-3 has been deployed in orchestration-only mode for pilot evaluation under the interim ATO, processing approximately 2,200 rows. The full pipeline platform has not been deployed in production by any agency. Operational characteristics under sustained agency load — concurrent users, audit-database growth over time, and long-running pipelines on contended infrastructure — have been exercised in simulation; the pilot supplies real-world data for the orchestration-only scope at the volume noted above.
 4. **Manual schema migration between certain releases.** Upgrading between some releases currently requires an operator to recreate the session database manually. The procedure is documented, but it is a manual step rather than an automated migration.

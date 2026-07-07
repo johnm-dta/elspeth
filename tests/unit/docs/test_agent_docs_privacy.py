@@ -17,7 +17,7 @@ def _tracked_markdown_files() -> list[Path]:
         capture_output=True,
         text=True,
     )
-    return [REPO_ROOT / line for line in proc.stdout.splitlines()]
+    return [path for line in proc.stdout.splitlines() if (path := REPO_ROOT / line).exists()]
 
 
 def test_tracked_markdown_docs_do_not_disclose_sensitive_operator_attributes() -> None:

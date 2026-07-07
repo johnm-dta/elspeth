@@ -1,29 +1,20 @@
-"""Regression checks for prompt-guide citation/provenance hygiene."""
+"""Regression checks for transcript citation placeholder hygiene."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PROMPT_GUIDE = REPO_ROOT / "docs-archive" / "2026-06-28-docs-cleanout" / "docs" / "assets" / "prompt-guide.md"
+PLACEHOLDERS = ("filecite", "cite", "turn0file", "turn7view")
 
 
-def test_prompt_guide_has_no_transcript_citation_placeholders() -> None:
-    text = PROMPT_GUIDE.read_text(encoding="utf-8")
+def test_public_docs_have_no_transcript_citation_placeholders() -> None:
+    offenders: list[str] = []
 
-    assert "filecite" not in text
-    assert "cite" not in text
-    assert "turn0file" not in text
-    assert "turn7view" not in text
+    for path in [*REPO_ROOT.glob("*.md"), *REPO_ROOT.glob("docs/**/*.md")]:
+        text = path.read_text(encoding="utf-8")
+        for placeholder in PLACEHOLDERS:
+            if placeholder in text:
+                offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {placeholder}")
 
-
-def test_prompt_guide_records_provenance_and_bibliography() -> None:
-    text = PROMPT_GUIDE.read_text(encoding="utf-8")
-
-    assert "## Provenance, Date, And Scope" in text
-    assert "Source prompt reviewed: `src/elspeth/web/composer/skills/pipeline_composer.md`" in text
-    assert "Review artifact remediated: 2026-05-20" in text
-    assert "## Bibliography" in text
-    assert "https://platform.openai.com/docs/guides/prompt-engineering" in text
-    assert "https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview" in text
-    assert "https://ai.google.dev/gemini-api/docs/long-context" in text
+    assert offenders == []

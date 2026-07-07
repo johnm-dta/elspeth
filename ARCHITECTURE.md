@@ -162,7 +162,7 @@ C4Container
 | **Rate Limiting** | pyrate-limiter | ~300 | External call throttling with persistence |
 | **Core** | Python | ~5,000 | Config, canonical JSON, DAG package, payload store |
 | **Contracts** | Python | ~8,300 | Shared dataclasses, enums, protocols (leaf module) |
-| **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (21 tables) |
+| **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (29 tables; SQLite schema epoch 22) |
 | **Payload Store** | Filesystem | — | Content-addressable blob storage with retention |
 
 **Total Production LOC:** ~173,900 (447 Python files in `src/elspeth/`; frontend TSX/CSS not included) | **Total Test LOC:** ~448,300 (1,095 Python files) | **Test Ratio:** 2.6:1
@@ -263,7 +263,7 @@ C4Component
 | **DataFlowRepository** | `data_flow_repository.py` | ~1,430 | Rows, tokens, calls, artifacts, validation/transform errors |
 | **QueryRepository** | `query_repository.py` | ~530 | `explain()`, row data retrieval, lineage queries |
 | **LandscapeDB** | `database.py` | ~500 | Connection management, schema validation, SQLCipher support |
-| **Schema** | `schema.py` | ~520 | SQLAlchemy table definitions (21 tables) |
+| **Schema** | `schema.py` | ~520 | SQLAlchemy table definitions (29 tables; SQLite schema epoch 22) |
 | **Model Loaders** | `model_loaders.py` | ~600 | Row→Object conversion with Tier 1 validation |
 | **Lineage** | `lineage.py` | ~235 | `explain()` queries for complete lineage |
 | **Exporter** | `exporter.py` | ~594 | Audit data export (JSON, CSV) |
@@ -271,16 +271,18 @@ C4Component
 | **Journal** | `journal.py` | ~286 | JSONL change journaling backup stream |
 | **Reproducibility** | `reproducibility.py` | ~147 | Grade computation (FULL → ATTRIBUTABLE_ONLY) |
 
-### Audit Trail Tables (21 Total)
+### Audit Trail Tables (29 Total)
 
 ```
-runs (run lifecycle) → nodes (DAG nodes) → edges (DAG edges)
+runs (run lifecycle) → run_attributions / preflight_results / run_sources
+  ↓
+nodes (DAG nodes) → edges (DAG edges)
   ↓
 rows (source data) → tokens (row instances) → token_parents (lineage)
          ↓
     node_states (processing) → routing_events (gate decisions)
          ↓                           ↓
-      calls (external APIs)     batches → batch_members
+      calls / operations        batches → batch_members
                                    ↓
                               batch_outputs
                                    ↓
@@ -290,9 +292,17 @@ validation_errors, transform_errors (error tracking)
 token_outcomes (terminal states)
 secret_resolutions (Key Vault usage)
 field_resolutions (header normalization)
+token_work_items / scheduler_events (durable scheduler)
+run_coordination / run_coordination_events / run_workers
+coalesce_branch_losses
+checkpoints, auth_events
 ```
 
-**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` table requires using denormalized `node_states.run_id` directly in queries.
+**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` and run-scoped
+`routing_events` require using denormalized `run_id` fields directly in queries.
+As of SQLite schema epoch 22, `routing_events` carries `run_id` and composite
+foreign keys to `node_states(state_id, run_id)` and `edges(edge_id, run_id)` so
+gate decisions cannot cross audit-run boundaries.
 
 ### 3.3 Plugins Components
 

@@ -240,7 +240,7 @@ An expression like `"__import__('os').system('rm -rf /')"` is rejected at config
 | Record | Contents |
 |--------|----------|
 | `node_states` | `state_id`, `token_id`, `node_id`, `status=COMPLETED`, `input_hash`, `output_hash`, `duration_ms` |
-| `routing_events` | `state_id`, `edge_id`, `mode` (MOVE/COPY), `reason` (condition text or plugin metadata) |
+| `routing_events` | `state_id`, `run_id`, `edge_id`, `mode` (MOVE/COPY), `reason` (condition text or plugin metadata) |
 | Row modifications | If gate modified the row: `input_hash ≠ output_hash`, delta traceable |
 
 ---
@@ -340,7 +340,7 @@ Parent Token (T1)
 |--------|----------|
 | `tokens` | One record per child: `token_id`, `row_id`, `fork_group_id` |
 | `token_outcomes` | Parent: `outcome=FORKED`. Children: outcomes determined by their individual journeys |
-| `routing_events` | One per branch: `state_id`, `edge_id`, `mode=COPY` |
+| `routing_events` | One per branch: `state_id`, `run_id`, `edge_id`, `mode=COPY` |
 
 ---
 

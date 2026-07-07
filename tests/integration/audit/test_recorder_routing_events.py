@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import NodeType, RoutingMode, RoutingSpec, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
@@ -633,10 +634,22 @@ class TestRoutingEventDistinguishability:
             error_hash="0123456789abcdef",
         )
 
-        with pytest.raises(LandscapeRecordError, match="UNIQUE constraint failed"):
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write: IntegrityError") as exc_info:
             factory.data_flow.record_token_outcome(
                 ref,
                 TerminalOutcome.SUCCESS,
                 TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
+        assert isinstance(exc_info.value.__cause__, IntegrityError)
+
+        with landscape_db.engine.connect() as conn:
+            outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path, token_outcomes_table.c.sink_name)
+                .where(token_outcomes_table.c.token_id == token.token_id)
+                .order_by(token_outcomes_table.c.recorded_at, token_outcomes_table.c.outcome_id)
+            ).fetchall()
+
+        assert [(row.outcome, row.path, row.sink_name) for row in outcomes] == [
+            (TerminalOutcome.FAILURE.value, TerminalPath.ON_ERROR_ROUTED.value, "error_sink")
+        ]

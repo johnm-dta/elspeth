@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from jinja2 import Environment
-from jinja2.nodes import Call, Const, Getattr, Getitem, Name, Node
+from jinja2.nodes import Call, Const, Filter, Getattr, Getitem, Name, Node
 
 if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
@@ -52,6 +52,8 @@ __all__ = [
 ]
 
 DYNAMIC_ROW_FIELD = "<dynamic-row-field>"
+ATTR_FILTER_DYNAMIC_ACCESS = "attr"
+MAP_ATTRIBUTE_FILTER_DYNAMIC_ACCESS = "map(attribute)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,9 +192,52 @@ def _walk_ast(node: Node, namespace: str, fields: set[str], dynamic_accesses: li
         else:
             dynamic_accesses.append("item")
 
+    if isinstance(node, Filter):
+        _record_dynamic_attribute_filter_access(node, namespace, fields, dynamic_accesses)
+
     # Recurse into child nodes
     for child in node.iter_child_nodes():
         _walk_ast(child, namespace, fields, dynamic_accesses)
+
+
+def _record_dynamic_attribute_filter_access(
+    node: Filter,
+    namespace: str,
+    fields: set[str],
+    dynamic_accesses: list[str],
+) -> None:
+    """Record attribute-resolving filters that can hide dynamic row-field reads."""
+    if not _node_references_namespace(node.node, namespace):
+        return
+
+    if node.name == "attr":
+        if node.args and isinstance(node.args[0], Const) and isinstance(node.args[0].value, str):
+            if isinstance(node.node, Name) and node.node.name == namespace:
+                fields.add(node.args[0].value)
+            return
+        if node.args:
+            dynamic_accesses.append(ATTR_FILTER_DYNAMIC_ACCESS)
+        return
+
+    if node.name == "map":
+        attribute_arg = _filter_keyword_value(node, "attribute")
+        if attribute_arg is not None and not (isinstance(attribute_arg, Const) and isinstance(attribute_arg.value, str)):
+            dynamic_accesses.append(MAP_ATTRIBUTE_FILTER_DYNAMIC_ACCESS)
+
+
+def _filter_keyword_value(node: Filter, key: str) -> Node | None:
+    for keyword in node.kwargs:
+        if keyword.key == key:
+            return keyword.value
+    return None
+
+
+def _node_references_namespace(node: Node | None, namespace: str) -> bool:
+    if node is None:
+        return False
+    if isinstance(node, Name):
+        return node.name == namespace
+    return any(_node_references_namespace(child, namespace) for child in node.iter_child_nodes())
 
 
 def extract_jinja2_fields_with_details(
@@ -251,6 +296,18 @@ def extract_jinja2_fields_with_details(
                 append_access(node.arg.value, "item")
             else:
                 append_access(DYNAMIC_ROW_FIELD, "item_dynamic")
+
+        if isinstance(node, Filter) and _node_references_namespace(node.node, namespace):
+            if node.name == "attr":
+                if node.args and isinstance(node.args[0], Const) and isinstance(node.args[0].value, str):
+                    if isinstance(node.node, Name) and node.node.name == namespace:
+                        append_access(node.args[0].value, "attr")
+                elif node.args:
+                    append_access(DYNAMIC_ROW_FIELD, "attr_dynamic")
+            elif node.name == "map":
+                attribute_arg = _filter_keyword_value(node, "attribute")
+                if attribute_arg is not None and not (isinstance(attribute_arg, Const) and isinstance(attribute_arg.value, str)):
+                    append_access(DYNAMIC_ROW_FIELD, "map_attribute_dynamic")
 
         for child in node.iter_child_nodes():
             walk(child)

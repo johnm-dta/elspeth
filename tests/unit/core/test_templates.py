@@ -136,6 +136,26 @@ class TestExtractJinja2Fields:
         assert result.dynamic_accesses == ("get",)
         assert result.has_dynamic_access is True
 
+    def test_dynamic_attr_filter_reported_by_usage(self) -> None:
+        """row|attr(expr) is a dynamic row-field read."""
+        from elspeth.core.templates import extract_jinja2_field_usage
+
+        result = extract_jinja2_field_usage("{{ row | attr(row.selector) }}")
+
+        assert result.fields == frozenset({"selector"})
+        assert result.dynamic_accesses == ("attr",)
+        assert result.has_dynamic_access is True
+
+    def test_dynamic_map_attribute_filter_reported_by_usage(self) -> None:
+        """row|map(attribute=expr) is an attribute-resolving dynamic access."""
+        from elspeth.core.templates import extract_jinja2_field_usage
+
+        result = extract_jinja2_field_usage("{{ row | map(attribute=field_name) | list }}")
+
+        assert result.fields == frozenset()
+        assert result.dynamic_accesses == ("map(attribute)",)
+        assert result.has_dynamic_access is True
+
     def test_for_loop(self) -> None:
         """Field used in for loop is extracted."""
         from elspeth.core.templates import extract_jinja2_fields
@@ -252,6 +272,22 @@ class TestExtractJinja2FieldsWithDetails:
 
         result = extract_jinja2_fields_with_details("{{ row.get(key, 'N/A') }}")
         assert result == {DYNAMIC_ROW_FIELD: ["get_dynamic"]}
+
+    def test_dynamic_attr_filter_details_reported(self) -> None:
+        """row|attr(expr) is visible in detailed dynamic access output."""
+        from elspeth.core.templates import DYNAMIC_ROW_FIELD, extract_jinja2_fields_with_details
+
+        result = extract_jinja2_fields_with_details("{{ row | attr(row.selector) }}")
+
+        assert result == {"selector": ["attr"], DYNAMIC_ROW_FIELD: ["attr_dynamic"]}
+
+    def test_dynamic_map_attribute_filter_details_reported(self) -> None:
+        """row|map(attribute=expr) is visible in detailed dynamic access output."""
+        from elspeth.core.templates import DYNAMIC_ROW_FIELD, extract_jinja2_fields_with_details
+
+        result = extract_jinja2_fields_with_details("{{ row | map(attribute=field_name) | list }}")
+
+        assert result == {DYNAMIC_ROW_FIELD: ["map_attribute_dynamic"]}
 
     def test_dynamic_item_access_details_reported(self) -> None:
         """row[dynamic_key] is visible as a dynamic item access detail."""

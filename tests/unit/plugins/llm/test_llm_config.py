@@ -157,6 +157,34 @@ class TestLLMConfigBase:
         assert "dynamic row field access" in message
         assert "row.get(expr)" in message
 
+    def test_dynamic_row_attr_filter_requires_explicit_opt_out(self) -> None:
+        """Dynamic row|attr(expr) access must fail closed by default."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ row | attr(row.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row|attr(expr)" in message
+
+    def test_dynamic_row_map_attribute_filter_requires_explicit_opt_out(self) -> None:
+        """Dynamic row|map(attribute=expr) access must fail closed by default."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ row | map(attribute=field_name) | list }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
     def test_dynamic_row_access_rejected_even_with_declared_fields(self) -> None:
         """A declared field list is not a dynamic-key allowlist."""
         with pytest.raises(ValidationError, match="dynamic row field access"):

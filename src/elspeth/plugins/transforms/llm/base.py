@@ -200,9 +200,16 @@ class LLMConfig(TransformDataConfig):
             return self
 
         access_kinds = sorted(set(dynamic_accesses))
+        access_examples_by_kind = {
+            "attr": "row|attr(expr)",
+            "get": "row.get(expr)",
+            "item": "row[expr]",
+            "map(attribute)": "map(attribute=expr)",
+        }
+        access_examples = ", ".join(access_examples_by_kind.get(kind, kind) for kind in access_kinds)
         raise ValueError(
             "LLM prompt_template uses dynamic row field access "
-            f"({', '.join(access_kinds)} via row[expr] or row.get(expr)). "
+            f"({', '.join(access_kinds)} via {access_examples}). "
             "Dynamic row keys cannot be audited against options.required_input_fields. "
             "Use static row.field or row['field'] references, or set "
             "options.required_input_fields: [] to explicitly opt out and accept runtime risk."

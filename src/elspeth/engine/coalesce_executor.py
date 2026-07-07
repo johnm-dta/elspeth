@@ -40,6 +40,7 @@ from elspeth.engine.journal_restore import CoalesceJournalRestorer
 from elspeth.engine.spans import SpanFactory
 
 if TYPE_CHECKING:
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.engine.clock import Clock
     from elspeth.engine.tokens import TokenManager
 
@@ -327,6 +328,7 @@ def build_coalesce_merge(
             use_precomputed = False
 
         if use_precomputed:
+            assert precomputed is not None
             merged_contract = merge_with_original_names_fn(precomputed, branch_contracts, field_origins)
         else:
             merged_contract = merge_union_contracts(
@@ -406,6 +408,7 @@ def build_coalesce_merge(
             if settings.union_collision_policy == "first_wins":
                 merged_data_dict, first_wins_origins = _resolve_first_wins(merged_data_dict, field_origins, collision_values)
                 if use_precomputed:
+                    assert precomputed is not None
                     merged_contract = merge_with_original_names_fn(precomputed, branch_contracts, first_wins_origins)
                 coalesce_metadata = replace(
                     coalesce_metadata,
@@ -452,6 +455,7 @@ class CoalesceExecutor:
         data_flow: DataFlowRepository,
         clock: "Clock | None" = None,
         max_completed_keys: int = 10000,
+        barrier_restore_reads: "BarrierRestoreReadModel | None" = None,
     ) -> None:
         """Initialize executor.
 
@@ -470,8 +474,11 @@ class CoalesceExecutor:
         """
         if max_completed_keys <= 0:
             raise OrchestrationInvariantError(f"max_completed_keys must be > 0, got {max_completed_keys}")
+        if barrier_restore_reads is None:
+            raise OrchestrationInvariantError("barrier_restore_reads is required for coalesce restore/late-arrival reads")
 
         self._execution = execution
+        self._barrier_restore_reads = barrier_restore_reads
         self._data_flow = data_flow
         self._spans = span_factory
         self._token_manager = token_manager
@@ -643,7 +650,7 @@ class CoalesceExecutor:
         restored = CoalesceJournalRestorer(
             settings=self._settings,
             node_ids=self._node_ids,
-            execution=self._execution,
+            barrier_restore_reads=self._barrier_restore_reads,
             run_id=self._run_id,
             clock=self._clock,
         ).restore(
@@ -707,7 +714,7 @@ class CoalesceExecutor:
             return False
         node_id = self._node_ids[coalesce_name]
 
-        if self._execution.has_completed_row_for_node(run_id=self._run_id, node_id=str(node_id), row_id=row_id):
+        if self._barrier_restore_reads.has_completed_row_for_node(run_id=self._run_id, node_id=str(node_id), row_id=row_id):
             self._mark_completed((coalesce_name, row_id))
             return True
         return False

@@ -617,6 +617,7 @@ class RowProcessor:
         # crashed sink attempt) must stamp resume_attempt_offset/-checkpoint_id
         # so the re-driven sink node_state does not collide at attempt 0.
         self._resume_checkpoint_id: str | None = barrier_restore.resume_checkpoint_id if barrier_restore is not None else None
+        restore_reads = barrier_restore_reads if barrier_restore_reads is not None else execution
         # Barrier subsystem (elspeth-e76a186916): the intake and recovery
         # coordinators own the crash-window adoption/restore ordering (open
         # batch -> fenced adopt -> feed memory -> evaluate trigger) behind one
@@ -627,6 +628,7 @@ class RowProcessor:
             scheduler=scheduler,
             data_flow=data_flow,
             execution=execution,
+            barrier_restore_reads=restore_reads,
             aggregation_executor=self._aggregation_executor,
             coalesce_executor=self._coalesce_executor,
             nav=self._nav,
@@ -659,6 +661,7 @@ class RowProcessor:
             scheduler=scheduler,
             work_codec=self._work_codec,
             execution=execution,
+            barrier_restore_reads=restore_reads,
             clock=self._clock,
             run_coordination=run_coordination,
             coordination_token=coordination_token,

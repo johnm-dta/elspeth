@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.types import CoalesceName, NodeID
     from elspeth.core.landscape.execution_repository import ExecutionRepository
     from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
     from elspeth.engine.barrier_coordination import _LiveBarrierHold
     from elspeth.engine.clock import Clock
@@ -270,6 +271,7 @@ class SchedulerDrainCoordinator:
         scheduler: TokenSchedulerRepository,
         work_codec: SchedulerWorkCodec,
         execution: ExecutionRepository,
+        barrier_restore_reads: BarrierRestoreReadModel | ExecutionRepository,
         clock: Clock,
         run_coordination: RunCoordinationRepository | None,
         coordination_token: CoordinationToken | None,
@@ -290,6 +292,7 @@ class SchedulerDrainCoordinator:
         self._scheduler = scheduler
         self._work_codec = work_codec
         self._execution = execution
+        self._barrier_restore_reads = barrier_restore_reads
         self._clock = clock
         self._run_coordination = run_coordination
         self._coordination_token = coordination_token
@@ -770,7 +773,7 @@ class SchedulerDrainCoordinator:
         # attempt or its node_state insert collides with audited history.
         # Scoped to the sink step — the only step a pending-sink re-drive
         # writes; producer-node attempts must not inflate the offset.
-        max_attempts = self._execution.get_max_node_state_attempts(
+        max_attempts = self._barrier_restore_reads.get_max_node_state_attempts(
             self._run_id,
             [scheduled.token_id],
             step_index=self._processor.resolve_sink_step(),

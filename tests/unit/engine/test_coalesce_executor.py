@@ -87,6 +87,13 @@ def _next_state_id() -> str:
     return f"state_{next(_state_counter):04d}"
 
 
+def _restore_reads_from_execution_double(execution: MagicMock) -> SimpleNamespace:
+    return SimpleNamespace(
+        get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+        has_completed_row_for_node=execution.has_completed_row_for_node,
+    )
+
+
 class _CallRecord:
     def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         self.args = args
@@ -212,6 +219,7 @@ def _make_executor(
         clock=clock,
         max_completed_keys=max_completed_keys,
         data_flow=data_flow,
+        barrier_restore_reads=_restore_reads_from_execution_double(execution),
     )
     return executor, execution, data_flow, token_manager, clock
 
@@ -243,6 +251,7 @@ def _make_raw_executor(
         clock=clock,
         max_completed_keys=max_completed_keys,
         data_flow=data_flow,
+        barrier_restore_reads=_restore_reads_from_execution_double(execution),
     )
     return executor, execution, data_flow, token_manager, clock
 
@@ -2228,6 +2237,21 @@ class TestAuditTrailDetails:
 
 
 class TestDefaultClock:
+    def test_requires_barrier_restore_read_model(self):
+        execution = MagicMock(spec=ExecutionRepository)
+        execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id="s1")
+
+        with pytest.raises(OrchestrationInvariantError, match="barrier_restore_reads is required"):
+            CoalesceExecutor(
+                execution,
+                _SpanFactorySentinel(),
+                _TokenManagerDouble(),
+                "run_1",
+                step_resolver=lambda n: 0,
+                clock=None,
+                data_flow=MagicMock(spec=DataFlowRepository),
+            )
+
     def test_uses_default_clock_when_none(self):
         """Constructor should use DEFAULT_CLOCK when clock=None."""
         from elspeth.engine.clock import DEFAULT_CLOCK
@@ -2242,6 +2266,7 @@ class TestDefaultClock:
             step_resolver=lambda n: 0,
             clock=None,
             data_flow=MagicMock(spec=DataFlowRepository),
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
         assert executor._clock is DEFAULT_CLOCK
 
@@ -2257,6 +2282,7 @@ class TestDefaultClock:
             step_resolver=lambda n: 0,
             clock=clock,
             data_flow=MagicMock(spec=DataFlowRepository),
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
         assert executor._clock is clock
 

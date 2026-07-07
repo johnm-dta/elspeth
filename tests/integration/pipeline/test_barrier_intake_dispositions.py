@@ -105,6 +105,7 @@ def _real_coalesce_executor(factory: Any, clock: MockClock, *, policy: str) -> C
         step_resolver=lambda node_id: 2,
         clock=clock,
         data_flow=factory.data_flow,
+        barrier_restore_reads=factory.barrier_restore,
     )
     executor.register_coalesce(
         CoalesceSettings(

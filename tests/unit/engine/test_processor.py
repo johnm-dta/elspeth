@@ -5199,6 +5199,7 @@ class TestDurableSchedulerResumeDrain:
             run_id="test-run",
             step_resolver=step_resolver,
             data_flow=factory.data_flow,
+            barrier_restore_reads=factory.barrier_restore,
         )
         executor.register_coalesce(
             CoalesceSettings(name="merge", branches=["path_a", "path_b"], policy="require_all", merge="union"),

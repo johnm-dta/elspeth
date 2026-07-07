@@ -234,6 +234,7 @@ def build_row_processor(
             clock=clock,
             max_completed_keys=coalesce_completed_keys_limit,
             data_flow=factory.data_flow,
+            barrier_restore_reads=factory.barrier_restore,
         )
 
         for coalesce_settings_entry in settings.coalesce:

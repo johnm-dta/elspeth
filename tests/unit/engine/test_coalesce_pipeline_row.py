@@ -87,6 +87,13 @@ def _coalesce_tokens_impl(parents: list[TokenInfo], merged_data: PipelineRow, no
     )
 
 
+def _restore_reads_from_execution_double(execution: _RecorderDouble) -> SimpleNamespace:
+    return SimpleNamespace(
+        get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+        has_completed_row_for_node=execution.has_completed_row_for_node,
+    )
+
+
 def _make_contract(fields: list[Any] | None = None) -> SchemaContract:
     """Create a schema contract for testing."""
     if fields is None:
@@ -172,6 +179,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         # Register coalesce point
@@ -239,6 +247,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         settings = CoalesceSettings(
@@ -317,6 +326,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         settings = CoalesceSettings(
@@ -374,6 +384,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         # Two branches with "first" policy - merge on first arrival
@@ -418,6 +429,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         settings = CoalesceSettings(

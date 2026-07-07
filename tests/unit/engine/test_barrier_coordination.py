@@ -207,11 +207,13 @@ def _make_coordinator(
         )
 
     resolved_nav = nav or FakeNav(transform=_batch_aware_transform())
+    restore_reads = SimpleNamespace(get_max_node_state_attempts=lambda run_id, token_ids: {})
     return BarrierIntakeCoordinator(
         run_id="run-1",
         scheduler=scheduler,
         data_flow=SimpleNamespace(record_token_outcome=lambda **kwargs: None),
-        execution=SimpleNamespace(get_max_node_state_attempts=lambda run_id, token_ids: {}),
+        execution=SimpleNamespace(),
+        barrier_restore_reads=restore_reads,
         aggregation_executor=aggregation_executor or RecordingAggregationExecutor(),
         coalesce_executor=coalesce_executor,
         nav=resolved_nav,

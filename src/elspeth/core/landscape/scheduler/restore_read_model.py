@@ -11,16 +11,18 @@ from collections.abc import Sequence
 
 from sqlalchemy import func, select
 
-from elspeth.contracts import TokenOutcome
+from elspeth.contracts import NodeStateStatus, TokenOutcome
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.model_loaders import TokenOutcomeLoader
-from elspeth.core.landscape.schema import token_outcomes_table
+from elspeth.core.landscape.schema import node_states_table, token_outcomes_table, tokens_table
+
+_TOKEN_ID_CHUNK_SIZE = 500
 
 
 class BarrierRestoreReadModel:
-    """Read-only token-outcome queries used by barrier journal restore."""
+    """Read-only audit queries used by barrier journal restore."""
 
     def __init__(
         self,
@@ -56,6 +58,101 @@ class BarrierRestoreReadModel:
             .order_by(token_outcomes_table.c.recorded_at, token_outcomes_table.c.outcome_id)
         )
         return [self._token_outcome_loader.load(row) for row in self._ops.execute_fetchall(query)]
+
+    def get_max_node_state_attempts(
+        self,
+        run_id: str,
+        token_ids: Sequence[str],
+        *,
+        step_index: int | None = None,
+    ) -> dict[str, int]:
+        """Max ``node_states.attempt`` per token for resume attempt offsets."""
+        result: dict[str, int] = {}
+        for i in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = list(token_ids[i : i + _TOKEN_ID_CHUNK_SIZE])
+            query = (
+                select(node_states_table.c.token_id, func.max(node_states_table.c.attempt).label("max_attempt"))
+                .where(node_states_table.c.run_id == run_id)
+                .where(node_states_table.c.token_id.in_(chunk))
+                .group_by(node_states_table.c.token_id)
+            )
+            if step_index is not None:
+                query = query.where(node_states_table.c.step_index == step_index)
+            for row in self._ops.execute_fetchall(query):
+                result[row.token_id] = int(row.max_attempt)
+        return result
+
+    def get_open_node_state_ids(
+        self,
+        run_id: str,
+        *,
+        node_ids: Sequence[str],
+        token_ids: Sequence[str],
+    ) -> dict[str, str]:
+        """Outstanding OPEN coalesce-hold node_state ids per token."""
+        if not node_ids:
+            return {}
+        result: dict[str, str] = {}
+        for i in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = list(token_ids[i : i + _TOKEN_ID_CHUNK_SIZE])
+            query = (
+                select(node_states_table.c.token_id, node_states_table.c.state_id)
+                .where(node_states_table.c.run_id == run_id)
+                .where(node_states_table.c.node_id.in_(list(node_ids)))
+                .where(node_states_table.c.token_id.in_(chunk))
+                .where(node_states_table.c.status == NodeStateStatus.OPEN.value)
+                .order_by(node_states_table.c.token_id, node_states_table.c.attempt)
+            )
+            for row in self._ops.execute_fetchall(query):
+                result[row.token_id] = row.state_id
+        return result
+
+    def get_completed_row_ids_for_nodes(
+        self,
+        run_id: str,
+        node_ids: frozenset[str],
+    ) -> set[tuple[str, str]]:
+        """Completed ``(node_id, row_id)`` pairs for coalesce restore."""
+        if not node_ids:
+            return set()
+
+        query = (
+            select(node_states_table.c.node_id, tokens_table.c.row_id)
+            .select_from(
+                node_states_table.join(
+                    tokens_table,
+                    node_states_table.c.token_id == tokens_table.c.token_id,
+                )
+            )
+            .where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.node_id.in_(node_ids),
+                node_states_table.c.completed_at.isnot(None),
+            )
+            .distinct()
+        )
+        rows = self._ops.execute_fetchall(query)
+        return {(row.node_id, row.row_id) for row in rows}
+
+    def has_completed_row_for_node(self, *, run_id: str, node_id: str, row_id: str) -> bool:
+        """Return whether one coalesce row completed at one node in one run."""
+        query = (
+            select(node_states_table.c.state_id)
+            .select_from(
+                node_states_table.join(
+                    tokens_table,
+                    node_states_table.c.token_id == tokens_table.c.token_id,
+                )
+            )
+            .where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.node_id == node_id,
+                tokens_table.c.row_id == row_id,
+                node_states_table.c.completed_at.isnot(None),
+            )
+            .limit(1)
+        )
+        return self._ops.execute_fetchone(query) is not None
 
     def find_failed_unrouted_terminal_token_ids(self, run_id: str, token_ids: Sequence[str]) -> frozenset[str]:
         """Token ids holding terminal ``(FAILURE, UNROUTED)`` outcomes.

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -115,7 +116,7 @@ def _coalesce_restorer(
     return CoalesceJournalRestorer(
         settings=settings if settings is not None else {"merge": _coalesce_settings()},
         node_ids=node_ids if node_ids is not None else {"merge": NodeID("co-1")},
-        execution=execution,
+        barrier_restore_reads=SimpleNamespace(get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes),
         run_id="run_1",
         clock=clock if clock is not None else MockClock(start=100.0),
     )
@@ -366,6 +367,10 @@ class TestCoalesceFacadeValidateBeforeMutate:
             step_resolver=lambda node_id: 1,
             data_flow=MagicMock(spec=DataFlowRepository),
             clock=MockClock(start=100.0),
+            barrier_restore_reads=SimpleNamespace(
+                get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+                has_completed_row_for_node=execution.has_completed_row_for_node,
+            ),
         )
         executor.register_coalesce(settings if settings is not None else _coalesce_settings(), NodeID("co-1"))
         return executor

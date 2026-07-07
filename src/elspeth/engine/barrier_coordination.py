@@ -192,6 +192,7 @@ class BarrierIntakeCoordinator:
         scheduler: TokenSchedulerRepository,
         data_flow: DataFlowRepository,
         execution: ExecutionRepository,
+        barrier_restore_reads: BarrierRestoreReadModel | ExecutionRepository,
         aggregation_executor: AggregationExecutor,
         coalesce_executor: CoalesceExecutor | None,
         nav: DAGNavigator,
@@ -213,6 +214,7 @@ class BarrierIntakeCoordinator:
         self._scheduler = scheduler
         self._data_flow = data_flow
         self._execution = execution
+        self._barrier_restore_reads = barrier_restore_reads
         self._aggregation_executor = aggregation_executor
         self._coalesce_executor = coalesce_executor
         self._nav = nav
@@ -273,7 +275,7 @@ class BarrierIntakeCoordinator:
             return hold.token
         if self._resume_checkpoint_id is None:
             return token_from_journal_item(row, attempt_offset=0, resume_checkpoint_id=None)
-        max_attempts = self._execution.get_max_node_state_attempts(self._run_id, [row.token_id])
+        max_attempts = self._barrier_restore_reads.get_max_node_state_attempts(self._run_id, [row.token_id])
         return token_from_journal_item(
             row,
             attempt_offset=max_attempts.get(row.token_id, -1) + 1,
@@ -772,7 +774,7 @@ class BarrierRecoveryCoordinator:
         # tokens), which excludes exactly the tokens this restore needs
         # offsets for.
         token_ids = [item.token_id for item in items]
-        max_attempts = self._execution.get_max_node_state_attempts(self._run_id, token_ids) if token_ids else {}
+        max_attempts = self._barrier_restore_reads.get_max_node_state_attempts(self._run_id, token_ids) if token_ids else {}
         attempt_offsets: dict[str, int] = {
             token_id: (max_attempts[token_id] if token_id in max_attempts else -1) + 1 for token_id in token_ids
         }
@@ -897,7 +899,7 @@ class BarrierRecoveryCoordinator:
         # time at the coalesce node (the executor calls it the PENDING hold).
         coalesce_state_ids: Mapping[str, str] = {}
         if coalesce_items:
-            coalesce_state_ids = self._execution.get_open_node_state_ids(
+            coalesce_state_ids = self._barrier_restore_reads.get_open_node_state_ids(
                 self._run_id,
                 node_ids=[str(node_id) for node_id in self._coalesce_node_ids.values()],
                 token_ids=[item.token_id for item in coalesce_items],
@@ -931,7 +933,7 @@ class BarrierRecoveryCoordinator:
             if holdless:
                 # Resolve the Landscape completed set once for all holdless rows.
                 node_id_to_coalesce_name: dict[str, str] = {str(nid): str(name) for name, nid in self._coalesce_node_ids.items()}
-                completed_pairs = self._execution.get_completed_row_ids_for_nodes(
+                completed_pairs = self._barrier_restore_reads.get_completed_row_ids_for_nodes(
                     self._run_id,
                     frozenset(node_id_to_coalesce_name.keys()),
                 )
@@ -1093,9 +1095,7 @@ class BarrierRecoveryCoordinator:
         batch_id: str | None = None
         first_token_id: str | None = None
         for item in node_items:
-            live_buffered = self._barrier_restore_reads.list_live_buffered_outcomes(
-                TokenRef(token_id=item.token_id, run_id=self._run_id)
-            )
+            live_buffered = self._barrier_restore_reads.list_live_buffered_outcomes(TokenRef(token_id=item.token_id, run_id=self._run_id))
             if len(live_buffered) > 1:
                 # ADR-030 §C.4 row 6a / §E.4: token_outcomes has no non-terminal
                 # uniqueness; >1 live BUFFERED rows means a deposed leader's

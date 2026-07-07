@@ -38,10 +38,10 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.scheduler import TokenWorkItem
 from elspeth.contracts.types import NodeID
 from elspeth.core.config import CoalesceSettings
-from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 
 if TYPE_CHECKING:
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.engine.clock import Clock
 
 slog = structlog.get_logger(__name__)
@@ -104,7 +104,7 @@ class CoalesceJournalRestorer:
         *,
         settings: Mapping[str, CoalesceSettings],
         node_ids: Mapping[str, NodeID],
-        execution: ExecutionRepository,
+        barrier_restore_reads: "BarrierRestoreReadModel",
         run_id: str,
         clock: "Clock",
     ) -> None:
@@ -114,14 +114,14 @@ class CoalesceJournalRestorer:
             settings: Registered coalesce configurations, keyed by name.
             node_ids: Registered coalesce node ids, keyed by coalesce name —
                 used to reconstruct completed keys from the Landscape.
-            execution: Execution repository (Landscape audit reads only).
+            barrier_restore_reads: Restore read model for Landscape audit reads.
             run_id: Run identifier for error context and audit queries.
             clock: Clock supplying the monotonic scale restored arrival
                 anchors are expressed on.
         """
         self._settings = settings
         self._node_ids = node_ids
-        self._execution = execution
+        self._barrier_restore_reads = barrier_restore_reads
         self._run_id = run_id
         self._clock = clock
 
@@ -361,7 +361,7 @@ class CoalesceJournalRestorer:
         # Build reverse map: node_id → coalesce_name
         node_id_to_name: dict[str, str] = {str(nid): name for name, nid in self._node_ids.items()}
 
-        completed_pairs = self._execution.get_completed_row_ids_for_nodes(
+        completed_pairs = self._barrier_restore_reads.get_completed_row_ids_for_nodes(
             run_id=self._run_id,
             node_ids=frozenset(node_id_to_name.keys()),
         )

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+
+import pytest
+
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 
@@ -29,6 +33,25 @@ def test_secret_like_text_is_redacted() -> None:
 
 def test_openrouter_key_like_text_is_redacted() -> None:
     assert scrub_text_for_audit("secret sk-or-v1-abcdefghijklmnopqrstuvwxyz123456 leaked") == REDACTED
+
+
+@pytest.mark.parametrize(
+    ("credential_shape", "secret_text"),
+    (
+        ("github_fine_grained_pat", "github_pat_" + ("A" * 22) + "_" + ("B" * 59)),
+        ("github_oauth_token", "gho_" + ("A" * 36)),
+        ("github_server_token", "ghs_" + ("A" * 36)),
+        ("github_refresh_token", "ghr_" + ("A" * 36)),
+        ("google_api_key", "AIza" + ("A" * 35)),
+        ("slack_app_token", "xapp-" + ("1-" * 8) + "abcde"),
+        ("slack_xoxe_token", "xoxe-" + ("1-" * 8) + "abcde"),
+        ("azure_storage_account_key", base64.b64encode(b"a" * 64).decode("ascii")),
+    ),
+)
+def test_common_credential_shapes_in_freeform_text_are_redacted(credential_shape: str, secret_text: str) -> None:
+    audit_text = f"plugin diagnostics exposed {credential_shape} {secret_text}"
+
+    assert scrub_text_for_audit(audit_text) == REDACTED
 
 
 def test_aws_access_key_redacted() -> None:

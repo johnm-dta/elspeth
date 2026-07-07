@@ -38,14 +38,23 @@ _REDACTED = "<redacted-secret>"
 #    HTTPS endpoints (Landscape resource URIs, example.com links) do not
 #    get nuked in triage payloads — see ``test_plain_https_url_without
 #    _credentials_passes_through``.
+#  - Common hosted-service credentials: fine-grained GitHub PATs and app
+#    tokens, Google API keys, newer Slack token prefixes, and Azure storage
+#    account keys (64 raw bytes serialized as 88-character base64).
 _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]{20,}"),  # OpenRouter API key
     re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI / generic "sk-" key
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained PAT
+    re.compile(r"gh[osr]_[A-Za-z0-9]{36,}"),  # GitHub OAuth/server/refresh token
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),  # Google API key
     re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),  # Slack token
+    re.compile(r"xapp-[A-Za-z0-9-]{10,}"),  # Slack app token
+    re.compile(r"xoxe-[A-Za-z0-9-]{10,}"),  # Slack workspace token
     re.compile(r"ghp_[A-Za-z0-9]{36,}"),  # GitHub PAT
     re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"),  # JWT
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),  # PEM
+    re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{86}==(?=$|[^A-Za-z0-9+/=])"),  # Azure storage account key
     # Azure SAS signature — the ``sig=`` parameter value is the authenticator.
     re.compile(r"sig=[A-Za-z0-9%/+=]{20,}"),
     # ODBC-style conn-string password field; case-insensitive because

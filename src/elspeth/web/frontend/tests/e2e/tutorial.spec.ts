@@ -266,7 +266,15 @@ async function installTutorialRoutes(
     }
 
     if (path === "/api/sessions" && method === "GET") {
-      await route.fulfill({ json: [] });
+      await route.fulfill({
+        json: [
+          {
+            ...tutorialSession,
+            title: "First-run tutorial",
+            updated_at: "2026-05-19T12:11:00Z",
+          },
+        ],
+      });
       return;
     }
 
@@ -312,6 +320,22 @@ async function installTutorialRoutes(
     }
 
     if (
+      path === `/api/sessions/${tutorialSession.id}/guided/tutorial-sample` &&
+      method === "GET"
+    ) {
+      await route.fulfill({
+        json: {
+          sample_urls: [
+            "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html",
+            "https://johnm-dta.github.io/elspeth/tutorial-site/project-2.html",
+            "https://johnm-dta.github.io/elspeth/tutorial-site/project-3.html",
+          ],
+        },
+      });
+      return;
+    }
+
+    if (
       path === `/api/sessions/${tutorialSession.id}/guided` &&
       method === "GET"
     ) {
@@ -324,6 +348,53 @@ async function installTutorialRoutes(
           ]),
           terminal: null,
           composition_state: null,
+        },
+      });
+      return;
+    }
+
+    if (
+      path === `/api/sessions/${tutorialSession.id}/guided/chat` &&
+      method === "POST"
+    ) {
+      state.guidedRespondCount += 1;
+      const n = state.guidedRespondCount;
+      state.requestLog.push(`guided-chat:${n}`);
+      let next: Record<string, unknown> | null;
+      let session = guidedSession("step_2_sink");
+      if (n === 1) {
+        next = singleSelectTurn("What format should the output be in?", [
+          ["jsonl", "jsonl"],
+          ["json", "json"],
+        ]);
+      } else {
+        next = {
+          type: "recipe_offer",
+          step_index: 2,
+          payload: {
+            mode: "recipe_decision",
+            knobs: { fields: [] },
+            prefilled: {},
+            recipe_context: {
+              recipe_name: "web-scrape-llm-rate-jsonl",
+              description: "Scrape each URL and rate the page.",
+              alternatives: [],
+            },
+          },
+        };
+        session = guidedSession("step_2_5_recipe_match");
+      }
+      await route.fulfill({
+        json: {
+          assistant_message:
+            n === 1
+              ? "I set this up as an inline source."
+              : "I set up a JSONL output.",
+          assistant_message_kind: "assistant",
+          guided_session: session,
+          next_turn: next,
+          terminal: null,
+          composition_state: compositionState,
         },
       });
       return;
@@ -482,6 +553,29 @@ async function installTutorialRoutes(
       return;
     }
 
+    if (
+      path === `/api/sessions/${tutorialSession.id}/audit-readiness` &&
+      method === "GET"
+    ) {
+      await route.fulfill({
+        json: {
+          session_id: tutorialSession.id,
+          composition_version: 1,
+          checked_at: "2026-05-19T12:11:00Z",
+          rows: [],
+          validation_result: {
+            is_valid: true,
+            summary: "Tutorial pipeline is valid.",
+            checks: [],
+            errors: [],
+            warnings: [],
+            semantic_contracts: [],
+          },
+        },
+      });
+      return;
+    }
+
     if (path === `/api/sessions/${tutorialSession.id}/runs` && method === "GET") {
       await route.fulfill({ json: [] });
       return;
@@ -569,12 +663,10 @@ test.describe("first-run tutorial (staged guided flow)", () => {
     await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
     // ── Step 1 source ────────────────────────────────────────────────────────
-    await page.getByRole("button", { name: "inline_blob", exact: true }).click();
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
     // ── Step 2 sink ──────────────────────────────────────────────────────────
-    await expect(
-      page.getByRole("button", { name: "jsonl", exact: true }),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "jsonl", exact: true }).click();
+    await expect(page.getByText(/Save the pipeline's results/i)).toBeVisible();
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
     // ── Step 2.5 recipe-apply ────────────────────────────────────────────────
     await expect(
       page.getByRole("button", { name: "Apply recipe", exact: true }),
@@ -584,11 +676,13 @@ test.describe("first-run tutorial (staged guided flow)", () => {
     // ── Step 4 wire stage: topology + edge-contract overlay (M1 from/to) ─────
     await expect(page.getByRole("heading", { name: "Review wiring" })).toBeVisible();
     await expect(
-      page.getByRole("listitem", { name: "source to scrape" }),
+      page.getByRole("listitem", { name: "Source to Fetch step" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("listitem", { name: "scrape to rate" }),
+      page.getByRole("listitem", { name: "Fetch step to Llm Rate step" }),
     ).toBeVisible();
+    await expect(page.getByText(/Source\s+→\s+Fetch step\s+—\s+connected/)).toBeVisible();
+    await expect(page.getByText(/Fetch step\s+→\s+Llm Rate step\s+—\s+connected/)).toBeVisible();
     // M1 guard: post-M1 naming, never from_id/to_id.
     await expect(
       page.getByRole("listitem", { name: /from_id|to_id/ }),
@@ -626,8 +720,11 @@ test.describe("first-run tutorial (staged guided flow)", () => {
     await page.getByRole("button", { name: "Take me to the composer" }).click();
 
     // Graduation renamed the tutorial session, saved guided default, and
-    // created a fresh composer session (second POST /api/sessions).
-    await expect.poll(() => state.sessionPostCount).toBe(2);
+    // landed on the built pipeline instead of creating a fresh empty session.
+    await expect.poll(() => state.sessionPostCount).toBe(1);
+    await expect(
+      page.getByRole("button", { name: /Session switcher: First-run tutorial/i }),
+    ).toBeVisible();
     expect(state.requestLog).toContain("guided-start");
   });
 
@@ -659,7 +756,7 @@ test.describe("first-run tutorial (staged guided flow)", () => {
     await page.goto("/");
     await expect(
       page.getByText(
-        /This is calling the configured LLM and fetching the URLs/i,
+        /This step calls the configured LLM and fetches pages over the network/i,
       ),
     ).toBeVisible();
   });

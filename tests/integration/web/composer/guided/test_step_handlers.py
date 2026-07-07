@@ -7,6 +7,7 @@ helpers; only the catalog is constructed via the public test seam
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from uuid import uuid4
 
@@ -114,6 +115,69 @@ class TestStep1Handler:
 
         assert result.tool_result.success is False
         assert result.state is state  # unchanged on failure
+        assert result.session.step_1_result is None
+
+    def test_path_source_backfills_observed_columns_into_committed_schema(self, tmp_path) -> None:
+        """Manual guided JSON paths under data_dir/blobs publish observed fields.
+
+        The web form can submit a path-only source with empty observed_columns.
+        The commit seam must derive bounded field facts from the allowed source
+        path and put them into CompositionState, not only into step_1_result,
+        because the wire validator reads the committed source schema.
+        """
+        data_dir = tmp_path
+        blobs_dir = data_dir / "blobs"
+        blobs_dir.mkdir()
+        (blobs_dir / "lines.json").write_text(
+            json.dumps([{"line": "alpha"}, {"line": "beta"}]),
+            encoding="utf-8",
+        )
+
+        result = handle_step_1_source(
+            state=_empty_state(),
+            session=GuidedSession.initial(),
+            resolved=SourceResolved(
+                plugin="json",
+                options={"path": "blobs/lines.json", "schema": {"mode": "observed"}},
+                observed_columns=(),
+                sample_rows=(),
+            ),
+            catalog=create_catalog_service(),
+            data_dir=str(data_dir),
+        )
+
+        assert result.tool_result.success is True
+        assert result.session.step_1_result is not None
+        assert result.session.step_1_result.observed_columns == ("line",)
+        source = result.state.sources["source"]
+        assert tuple(dict(source.options["schema"])["guaranteed_fields"]) == ("line",)
+
+    def test_outside_allowlist_path_is_not_inspected_before_rejection(self, tmp_path, monkeypatch) -> None:
+        """Path field inference must not read a local file before S2 validation."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        outside_path = tmp_path / "outside.json"
+        outside_path.write_text(json.dumps([{"secret": "do-not-read"}]), encoding="utf-8")
+
+        def _fail_if_called(*_args, **_kwargs) -> tuple[str, ...]:
+            raise AssertionError("outside allowlist path was inspected")
+
+        monkeypatch.setattr("elspeth.web.composer.guided.steps.observed_columns_from_path", _fail_if_called)
+
+        result = handle_step_1_source(
+            state=_empty_state(),
+            session=GuidedSession.initial(),
+            resolved=SourceResolved(
+                plugin="json",
+                options={"path": str(outside_path), "schema": {"mode": "observed"}},
+                observed_columns=(),
+                sample_rows=(),
+            ),
+            catalog=create_catalog_service(),
+            data_dir=str(data_dir),
+        )
+
+        assert result.tool_result.success is False
         assert result.session.step_1_result is None
 
 
@@ -357,17 +421,52 @@ class TestStep3Handler:
         assert http["abuse_contact"] == "noreply@example.com"
         assert http["scraping_reason"] == "demo"
 
-    def test_refuses_empty_proposal(self) -> None:
+    def test_empty_proposal_is_valid_passthrough_to_wire(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
-        with pytest.raises(InvariantError, match="zero steps"):
-            handle_step_3_chain_accept(
-                state=_empty_state(),
-                session=GuidedSession.initial(),
-                catalog=create_catalog_service(),
-                proposal=ChainProposal(steps=(), why="empty"),
-            )
+        catalog = create_catalog_service()
+        step_1 = handle_step_1_source(
+            state=_empty_state(),
+            session=GuidedSession.initial(),
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="json",
+                options={"path": "rows.json", "schema": {"mode": "observed", "guaranteed_fields": ["line"]}},
+                observed_columns=("line",),
+                sample_rows=({"line": "alpha"},),
+            ),
+        )
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.json", "schema": {"mode": "observed"}},
+                        required_fields=(),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+
+        result = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_2.session,
+            catalog=catalog,
+            proposal=ChainProposal(steps=(), why="source rows already match the output"),
+        )
+
+        assert result.tool_result.success is True
+        assert result.state.nodes == ()
+        assert result.state.sources["source"].on_success == "main"
+        assert result.session.step is GuidedStep.STEP_4_WIRE
+        assert result.session.step_3_proposal is not None
+        assert result.session.step_3_proposal.steps == ()
 
     def test_refuses_when_no_source(self) -> None:
         from elspeth.web.composer.guided.state_machine import ChainProposal

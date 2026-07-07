@@ -808,4 +808,24 @@ describe("client-known invalid chain (elspeth-3b35abf148 variant 3)", () => {
     await user.click(confirm);
     expect(onConfirm).not.toHaveBeenCalled();
   });
+
+  it("keeps an escape control visible when validation issues disable confirm", async () => {
+    const user = userEvent.setup();
+    const onExitToFreeform = vi.fn();
+    render(
+      <WireStageTurn
+        data={canonicalData()}
+        onConfirm={vi.fn()}
+        confirmDisabled={false}
+        onExitToFreeform={onExitToFreeform}
+        invalidChainIssues={["Source -> Output is missing field line."]}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    );
+
+    expect(onExitToFreeform).toHaveBeenCalledTimes(1);
+  });
 });

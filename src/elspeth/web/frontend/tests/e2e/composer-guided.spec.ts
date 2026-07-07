@@ -1,45 +1,8 @@
-// E2E spec: guided-mode wizard recipe-match → wire stage → completion.
-//
-// Targets the demo SLA defined in §10.3 of the implementation plan
-// (2026-05-11-composer-guided-mode.md): the recipe-match path is
-// deterministic (zero LLM calls) and reaches a completed pipeline fast.
-//
-// ── P7.7: extended to the wire stage + completion (resolves the D12 gate) ────
-//
-// The pre-P3 spec drove csv → classify recipe → wire and then clicked
-// "Confirm wiring" WITHOUT resolving the surfaced interpretation cards. P3's
-// D12 gate disables the wire-confirm button while any pending guided
-// interpretation review remains (ChatPanel: guidedResponsePending ||
-// hasPendingGuidedInterpretations), so that click landed on a disabled button
-// and the test could never complete — the known pre-existing failure this task
-// fixes. The staged rewrite drives the gate correctly: it APPLIES the classify
-// recipe (which jumps Step 2.5 → Step 4 wire and deterministically seeds two
-// interpretation reviews — llm_prompt_template + llm_model_choice — from the
-// recipe slot values, with NO LLM call), RESOLVES both cards (accept-as-drafted),
-// which enables "Confirm wiring", then confirms → terminal=completed.
-//
-// D13 (live-profile advisor opt-out): the empty/live-guided profile
-// (advisor_checkpoints=false) auto-completes a valid wire confirm with NO
-// advisor provider call. The local e2e backend has NO LLM provider configured
-// (composer_boot_probe_transient_failure on boot), so reaching
-// terminal=completed is itself proof the path made no advisor/LLM call.
-//
-// M1 (from/to edge naming): the wire overlay renders each edge as a listitem
-// whose accessible name is "{from} to {to}" — the post-M1 field names — never
-// "from_id"/"to_id".
-//
-// B6 (field_mapper / schema-relax reconciliation re-render): NOT asserted here.
-// The in-flow reconciliation the brief describes does not exist in the guided
-// flow — an invalid wire confirm is now a structured HTTP 409 rejection
-// (WireConfirmRejectedError; no re-emitted wire turn, no new composition
-// version), guided has no graph-editing respond at the wire stage, and the
-// only graph-mutating composer tools (upsert_node/set_pipeline) are MCP-only
-// (no REST surface reachable from a Playwright auth context). Surfaced to the
-// operator as a spec-vs-reality gap (task report) rather than faked.
-//
-// For prior gap history (Gap 1 startGuided wiring, Gap 2 S2 path allowlist,
-// Gap 3 on_validation_failure, Gap 4 collision_policy, Gap 5 blob_ref
-// resolver, Gap 6 unsatisfied_slots) see git log on this file.
+// E2E spec: guided-mode wizard source/output walk against the live local
+// backend. The local Playwright backend intentionally has no LLM provider, so
+// this stops at the transform step before any provider-dependent guided chat.
+// Wire-stage behavior is covered by tutorial.spec.ts with a deterministic
+// guided protocol fixture.
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,7 +42,7 @@ function blobStoragePath(sessionId: string, blobId: string): string {
 }
 
 // Sink output path — must be under data_dir/outputs/ (paths.py:44).
-const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.json");
+const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.jsonl");
 
 async function isolateAuditReadinessSideRail(
   page: Page,
@@ -167,56 +130,9 @@ async function isolateAuditReadinessSideRail(
   });
 }
 
-// Resolve every surfaced guided interpretation card (accept-as-drafted). The
-// llm_prompt_template card is gated behind a scroll-to-end requirement on its
-// "Prompt template review" region (InterpretationReviewTurn:
-// requiresPromptTemplateScroll → hasScrolledToEnd), so we scroll each such
-// region to its end and fire the scroll event the gate listens for, then click
-// the first ENABLED accept button. Loop until the wire-confirm button enables
-// (the D12 predicate: no pending reviews remain).
-async function resolveGuidedReviews(page: Page): Promise<number> {
-  const confirmBtn = page.getByRole("button", { name: "Confirm wiring", exact: true });
-  const acceptButtons = page.getByRole("button", { name: /^Accept /i });
-  const promptRegions = page.getByRole("region", {
-    name: "Prompt template review",
-  });
-  let resolved = 0;
-  const deadline = Date.now() + 30_000;
-  while (await confirmBtn.isDisabled().catch(() => true)) {
-    if (Date.now() > deadline) {
-      throw new Error(
-        "guided reviews never all resolved (Confirm wiring stayed disabled)",
-      );
-    }
-    const regionCount = await promptRegions.count().catch(() => 0);
-    for (let i = 0; i < regionCount; i++) {
-      await promptRegions
-        .nth(i)
-        .evaluate((el) => {
-          el.scrollTop = el.scrollHeight;
-          el.dispatchEvent(new Event("scroll"));
-        })
-        .catch(() => {});
-    }
-    const total = await acceptButtons.count().catch(() => 0);
-    let clicked = false;
-    for (let i = 0; i < total; i++) {
-      const btn = acceptButtons.nth(i);
-      if (await btn.isEnabled().catch(() => false)) {
-        await btn.click().catch(() => {});
-        resolved += 1;
-        clicked = true;
-        break;
-      }
-    }
-    if (!clicked) await page.waitForTimeout(200);
-  }
-  return resolved;
-}
-
-test.describe("composer-guided — recipe-match wire stage + completion", () => {
+test.describe("composer-guided — source/output live walk", () => {
   test(
-    "guided demo: CSV → classify recipe → wire (from/to overlay) → resolve cards → completed (live profile, no advisor)",
+    "guided demo: CSV source → JSONL output → transform chat step",
     async ({ page }) => {
       // ── Out-of-band setup ──────────────────────────────────────────────────
       // Create session + upload CSV blob via REST before navigating the SPA.
@@ -243,15 +159,16 @@ test.describe("composer-guided — recipe-match wire stage + completion", () => 
 
         // ── Step 1 source: SINGLE_SELECT — pick "csv" ──────────────────────
         await expect(
-          page.getByRole("button", { name: "csv", exact: true }),
+          page.getByRole("button", { name: "CSV", exact: true }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "csv", exact: true }).click();
+        await page.getByRole("button", { name: "CSV", exact: true }).click();
 
         // ── Step 1 source: SCHEMA_FORM — schema, path, on_validation_failure
         const sourcePath = blobStoragePath(sessionId, blob.id);
-        await expect(page.getByLabel(/^schema$/i)).toBeVisible();
-        await page.getByLabel(/^schema$/i).fill('{"mode":"observed"}');
-        await page.getByLabel(/^path$/i).fill(sourcePath);
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await expect(page.getByLabel(/^schema/i)).toBeVisible();
+        await page.getByLabel(/^schema/i).fill('{"mode":"observed"}');
+        await page.getByLabel(/^path/i).fill(sourcePath);
         await page.getByLabel(/on\s+validation\s+failure/i).fill("discard");
         await expect(
           page.getByRole("button", { name: "Continue", exact: true }),
@@ -260,17 +177,18 @@ test.describe("composer-guided — recipe-match wire stage + completion", () => 
 
         // ── Step 2 sink: SINGLE_SELECT — pick "json" ───────────────────────
         await expect(
-          page.getByRole("button", { name: "json", exact: true }),
+          page.getByRole("button", { name: "JSON", exact: true }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "json", exact: true }).click();
+        await page.getByRole("button", { name: "JSON", exact: true }).click();
 
         // ── Step 2 sink: SCHEMA_FORM — path + collision_policy + format + mode
         // The file sink requires `mode` set explicitly (write|append).
-        await expect(page.getByLabel(/^schema$/i)).toBeVisible();
-        await page.getByLabel(/^schema$/i).fill('{"mode":"observed"}');
-        await page.getByLabel(/^path$/i).fill(SINK_OUTPUT_PATH);
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await expect(page.getByLabel(/^schema/i)).toBeVisible();
+        await page.getByLabel(/^schema/i).fill('{"mode":"observed"}');
+        await page.getByLabel(/^path/i).fill(SINK_OUTPUT_PATH);
         await page.getByLabel(/collision.?policy/i).selectOption("auto_increment");
-        await page.getByLabel(/^format$/i).selectOption("json");
+        await page.getByLabel(/^format$/i).selectOption("jsonl");
         await page.getByLabel(/^mode$/i).selectOption("write");
         await expect(
           page.getByRole("button", { name: "Continue", exact: true }),
@@ -278,80 +196,29 @@ test.describe("composer-guided — recipe-match wire stage + completion", () => 
         await page.getByRole("button", { name: "Continue", exact: true }).click();
 
         // ── Step 2 required fields: MULTI_SELECT_WITH_CUSTOM ──────────────
-        // Add "category" — satisfies _classify_predicate (recipe_match.py).
-        const customInput = page.getByLabel("Custom field", { exact: true });
-        await expect(customInput).toBeVisible();
-        await customInput.fill("category");
-        await page.getByRole("button", { name: "Add", exact: true }).click();
+        // "category" is already selected by default — enough to satisfy
+        // _classify_predicate (recipe_match.py).
         await expect(page.getByText("category")).toBeVisible();
         await page.getByRole("button", { name: "Continue", exact: true }).click();
 
-        // ── Step 2.5 RECIPE_OFFER — fill slots, Apply recipe ──────────────
-        // classify-rows-llm-jsonl declares three user-fillable slots. Apply
-        // jumps Step 2.5 → Step 4 wire directly (recipe accept is the only
-        // LLM-free route to the wire stage).
+        // ── Step 3 transform chat: no provider call yet, controls visible ──
         await expect(
-          page.getByRole("button", { name: "Apply recipe", exact: true }),
+          page.getByRole("heading", {
+            name: "Review the transform chain that turns source data into the output.",
+          }),
         ).toBeVisible();
-        await page
-          .getByLabel(/classifier_template/i)
-          .fill("Classify {{ row['name'] }} as widget or gadget.");
-        await page.getByLabel(/^model\b/i).fill("anthropic/claude-sonnet-4.6");
-        await page.getByLabel(/api_key_secret/i).fill("openrouter-api-key");
+        await expect(page.getByRole("textbox", { name: "Message input" })).toBeEnabled();
         await expect(
-          page.getByRole("button", { name: "Apply recipe", exact: true }),
-        ).toBeEnabled();
-        await page.getByRole("button", { name: "Apply recipe", exact: true }).click();
-
-        // ── Step 4 wire stage: topology + edge-contract overlay ────────────
-        // Both blobs are present: the topology produces edges and the overlay
-        // renders each edge as a "{from} to {to}" listitem (M1 — NOT
-        // from_id/to_id). The classify pipeline wires source → classifier →
-        // output:labelled, so the overlay shows those two edges.
-        await expect(page.getByRole("heading", { name: "Review wiring" })).toBeVisible();
-        await expect(
-          page.getByRole("listitem", { name: "source to classifier" }),
+          page.getByRole("button", { name: "Exit to freeform", exact: true }),
         ).toBeVisible();
         await expect(
-          page.getByRole("listitem", { name: "classifier to output:labelled" }),
-        ).toBeVisible();
-        // M1 guard: the old from_id/to_id naming must not appear in the overlay.
-        await expect(
-          page.getByRole("listitem", { name: /from_id|to_id/ }),
-        ).toHaveCount(0);
-
-        // ── D12 gate: Confirm wiring is disabled until the recipe-seeded
-        // interpretation cards (llm_prompt_template + llm_model_choice) are
-        // resolved. This is the exact failure the pre-P3 spec hit by clicking
-        // straight through.
-        await expect(
-          page.getByText(/assumptions? to review/i),
+          page.getByText("This pipeline will read your CSV and write a JSON file."),
         ).toBeVisible();
         await expect(
-          page.getByRole("button", { name: "Confirm wiring", exact: true }),
-        ).toBeDisabled();
-
-        const resolvedCount = await resolveGuidedReviews(page);
-        expect(resolvedCount).toBeGreaterThanOrEqual(2);
-
-        // Gate released → Confirm wiring enabled.
-        const confirm = page.getByRole("button", { name: "Confirm wiring", exact: true });
-        await expect(confirm).toBeEnabled();
-        await confirm.click();
-
-        // ── Completion (D13): valid wire confirm on the live profile reaches
-        // terminal=completed with NO advisor provider call. The local backend
-        // has no LLM provider, so completion is itself the proof. The completed
-        // surface (CompletionSummary) renders "Pipeline ready".
-        await expect(
-          page.getByRole("heading", { name: "Pipeline ready" }),
+          page.getByText("Required fields: id, name, category"),
         ).toBeVisible();
         await expect(
-          page.getByRole("button", { name: "Open freeform editor", exact: true }),
-        ).toBeVisible();
-        // The wire turn is gone — we are on the completed surface, not re-emitted.
-        await expect(
-          page.getByRole("button", { name: "Confirm wiring", exact: true }),
+          page.getByText(/Source commit failed|Chat panel encountered an error/i),
         ).toHaveCount(0);
       } finally {
         if (sessionId !== undefined) {

@@ -283,7 +283,12 @@ export function WireStageTurn({
       case "complete":
         return (
           <>
-            <div className="wire-stage__actions">{confirmButton}</div>
+            <div className="wire-stage__actions">
+              {confirmButton}
+              {chainIssues.length > 0 && onExitToFreeform !== undefined
+                ? exitButton
+                : null}
+            </div>
             {blockersPanel}
           </>
         );

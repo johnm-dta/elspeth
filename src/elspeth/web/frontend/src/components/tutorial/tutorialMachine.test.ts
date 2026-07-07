@@ -162,6 +162,12 @@ describe("resumeTutorialState (elspeth-918f4434b3)", () => {
     ).toEqual(initialTutorialState);
   });
 
+  it("treats omitted persisted fields as a fresh Welcome state", () => {
+    expect(
+      resumeTutorialState({} as Parameters<typeof resumeTutorialState>[0]),
+    ).toEqual(initialTutorialState);
+  });
+
   it("refuses to resume a stage without its session (incoherent row)", () => {
     expect(
       resumeTutorialState({

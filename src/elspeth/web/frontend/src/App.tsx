@@ -451,7 +451,10 @@ function App() {
           onSignOut={logout}
         />
         {showTutorial ? (
-          <HelloWorldTutorial />
+          <HelloWorldTutorial
+            composerAvailable={systemStatus?.composer_available ?? true}
+            composerUnavailableReason={systemStatus?.composer_reason ?? null}
+          />
         ) : showEmptyLanding ? (
           <div className="app-main" role="main">
             <section

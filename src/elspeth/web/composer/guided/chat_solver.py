@@ -115,9 +115,17 @@ _STEP_1_FALSE_TOOL_DECLINE_RESEND_MARKERS: Final[tuple[str, ...]] = (
     "just say go ahead",
 )
 
+_STEP_1_NONEXISTENT_INLINE_CONTROL_MARKERS: Final[tuple[str, ...]] = (
+    "inline json source option",
+    "inline json option",
+    "inline source option",
+    "paste the rows there",
+)
+
 _STEP_1_SOURCE_ACTIONABLE_USER_MARKERS: Final[tuple[str, ...]] = (
     "csv",
     "json",
+    "inline",
     "path",
     "file",
     "headers",
@@ -141,6 +149,16 @@ _STEP_1_SOURCE_FALSE_DECLINE_RETRY_ADDENDUM: Final[str] = (
     "message contains source-building details. Do not ask the user to re-send "
     "or say `go ahead`; either call `resolve_source` now, or explain the "
     "specific missing source data in plain prose."
+)
+
+_STEP_1_SOURCE_INLINE_CONTROL_RETRY_ADDENDUM: Final[str] = (
+    "## Retry after nonexistent inline-source control advice\n\n"
+    "Your previous reply told the user to choose an inline JSON/source wizard "
+    "control, but this wizard does not expose that control. This request DOES "
+    "include the `resolve_source` tool. If the user supplied rows or enough "
+    "source content, call `resolve_source` now and include that content. If "
+    "data is missing, ask for the specific missing rows or file information; "
+    "do not point the user at inline JSON/source controls."
 )
 
 
@@ -204,6 +222,18 @@ def _should_retry_step_1_source_false_tool_decline(
     if not any(marker in lowered_reply for marker in _STEP_1_FALSE_TOOL_DECLINE_REPLY_MARKERS):
         return False
     if not any(marker in lowered_reply for marker in _STEP_1_FALSE_TOOL_DECLINE_RESEND_MARKERS):
+        return False
+    return _step_1_user_message_has_source_action_signal(user_message, current_source=current_source)
+
+
+def _should_retry_step_1_source_nonexistent_control_advice(
+    *,
+    user_message: str,
+    prose_reply: str,
+    current_source: SourceResolved | None,
+) -> bool:
+    lowered_reply = prose_reply.lower()
+    if not any(marker in lowered_reply for marker in _STEP_1_NONEXISTENT_INLINE_CONTROL_MARKERS):
         return False
     return _step_1_user_message_has_source_action_signal(user_message, current_source=current_source)
 
@@ -761,6 +791,14 @@ async def maybe_resolve_step_1_source_chat(
                 ):
                     status = ComposerLLMCallStatus.SUCCESS
                     retry_addendum = _STEP_1_SOURCE_FALSE_DECLINE_RETRY_ADDENDUM
+                    continue
+                if attempt_index == 0 and _should_retry_step_1_source_nonexistent_control_advice(
+                    user_message=user_message,
+                    prose_reply=prose,
+                    current_source=current_source,
+                ):
+                    status = ComposerLLMCallStatus.SUCCESS
+                    retry_addendum = _STEP_1_SOURCE_INLINE_CONTROL_RETRY_ADDENDUM
                     continue
                 status = ComposerLLMCallStatus.SUCCESS
                 return Step1SourceChatOutcome(resolution=None, prose_reply=prose)

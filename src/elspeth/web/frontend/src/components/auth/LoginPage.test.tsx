@@ -15,6 +15,7 @@ vi.mock("../../api/client", () => ({
   fetchAuthConfig: vi.fn(),
   login: vi.fn(),
   register: vi.fn(),
+  verifyEmail: vi.fn(),
   fetchCurrentUser: vi.fn(),
   fetchUserComposerPreferences: vi.fn(),
   updateUserComposerPreferences: vi.fn(),
@@ -140,7 +141,15 @@ describe("LoginPage", () => {
       ).toBeInTheDocument();
     });
 
-    it.each(["closed", "email_verified"] as const)(
+    it("offers Create an account when email verification is required", async () => {
+      vi.mocked(api.fetchAuthConfig).mockResolvedValue(localConfig("email_verified"));
+      render(<LoginPage />);
+      expect(
+        await screen.findByRole("button", { name: "Create an account" }),
+      ).toBeInTheDocument();
+    });
+
+    it.each(["closed"] as const)(
       "renders no registration affordance when registration_mode is %s",
       async (mode) => {
         vi.mocked(api.fetchAuthConfig).mockResolvedValue(localConfig(mode));
@@ -184,6 +193,39 @@ describe("LoginPage", () => {
         username: "newuser",
       });
       expect(localStorage.getItem("auth_token")).toBe("tok-new");
+    });
+
+    it("registers an email-verified account and waits for verification", async () => {
+      vi.mocked(api.fetchAuthConfig).mockResolvedValue(localConfig("email_verified"));
+      vi.mocked(api.register).mockResolvedValue({
+        status: "verification_required",
+        email: "new@example.com",
+      });
+      const user = userEvent.setup();
+      render(<LoginPage />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Create an account" }),
+      );
+      await user.type(screen.getByLabelText("Username"), "newuser");
+      await user.type(screen.getByLabelText("Email"), "new@example.com");
+      await user.type(screen.getByLabelText("Password"), "correct-horse");
+      await user.type(
+        screen.getByLabelText("Confirm password"),
+        "correct-horse",
+      );
+      await user.click(screen.getByRole("button", { name: "Create account" }));
+
+      expect(api.register).toHaveBeenCalledWith(
+        "newuser",
+        "correct-horse",
+        "new@example.com",
+      );
+      expect(
+        await screen.findByText(/check new@example.com/i),
+      ).toBeInTheDocument();
+      expect(useAuthStore.getState().token).toBeNull();
+      expect(localStorage.getItem("auth_token")).toBeNull();
     });
 
     it("rejects mismatched passwords locally with aria-wired feedback", async () => {

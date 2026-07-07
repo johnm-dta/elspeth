@@ -14,7 +14,7 @@ from typing import Any
 from elspeth.contracts.enums import CallStatus, NodeType, RoutingMode
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.mcp.types import (
     DAGStructureReport,
     ErrorAnalysisReport,
@@ -26,8 +26,10 @@ from elspeth.mcp.types import (
     SchemaDescription,
 )
 
+AnalyzerRepositories = LandscapeReadRepositories | RecorderFactory
 
-def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunSummaryReport | ErrorResult:
+
+def get_run_summary(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> RunSummaryReport | ErrorResult:
     """Get summary statistics for a run.
 
     Args:
@@ -180,7 +182,7 @@ def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> R
     }
 
 
-def get_dag_structure(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> DAGStructureReport | ErrorResult:
+def get_dag_structure(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> DAGStructureReport | ErrorResult:
     """Get the DAG structure for a run as a structured object.
 
     Returns nodes, edges, and a mermaid diagram for visualization.
@@ -260,7 +262,7 @@ def get_dag_structure(db: LandscapeDB, factory: RecorderFactory, run_id: str) ->
     }
 
 
-def get_performance_report(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> PerformanceReport | ErrorResult:
+def get_performance_report(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> PerformanceReport | ErrorResult:
     """Get performance analysis for a run.
 
     Identifies slow nodes, outliers, and processing bottlenecks.
@@ -354,7 +356,7 @@ def get_performance_report(db: LandscapeDB, factory: RecorderFactory, run_id: st
     }
 
 
-def get_error_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> ErrorAnalysisReport | ErrorResult:
+def get_error_analysis(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> ErrorAnalysisReport | ErrorResult:
     """Analyze errors for a run, grouping by type and identifying patterns.
 
     Args:
@@ -456,7 +458,7 @@ def get_error_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str) -
     }
 
 
-def get_llm_usage_report(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> LLMUsageReport | ErrorResult:
+def get_llm_usage_report(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> LLMUsageReport | ErrorResult:
     """Get LLM usage statistics for a run.
 
     Analyzes external calls that were LLM API calls.
@@ -598,7 +600,7 @@ def get_llm_usage_report(db: LandscapeDB, factory: RecorderFactory, run_id: str)
     }
 
 
-def describe_schema(db: LandscapeDB, factory: RecorderFactory) -> SchemaDescription:
+def describe_schema(db: LandscapeDB, factory: AnalyzerRepositories) -> SchemaDescription:
     """Describe the database schema for ad-hoc query exploration.
 
     Args:
@@ -651,7 +653,7 @@ def describe_schema(db: LandscapeDB, factory: RecorderFactory) -> SchemaDescript
     }
 
 
-def get_outcome_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> OutcomeAnalysisReport | ErrorResult:
+def get_outcome_analysis(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> OutcomeAnalysisReport | ErrorResult:
     """Analyze token outcomes for a run.
 
     Shows terminal state distribution, fork/join patterns, and sink routing.

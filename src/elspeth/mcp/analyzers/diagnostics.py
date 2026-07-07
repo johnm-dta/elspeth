@@ -14,7 +14,7 @@ from typing import Any
 from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.mcp.types import (
     DiagnosticReport,
     ErrorResult,
@@ -22,8 +22,10 @@ from elspeth.mcp.types import (
     RecentActivityReport,
 )
 
+AnalyzerRepositories = LandscapeReadRepositories | RecorderFactory
 
-def diagnose(db: LandscapeDB, factory: RecorderFactory) -> DiagnosticReport:
+
+def diagnose(db: LandscapeDB, factory: AnalyzerRepositories) -> DiagnosticReport:
     """Emergency diagnostic: What's broken right now?
 
     Scans for failed runs, high error rates, stuck runs, and recent problems.
@@ -219,7 +221,7 @@ def diagnose(db: LandscapeDB, factory: RecorderFactory) -> DiagnosticReport:
     }
 
 
-def get_failure_context(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int = 10) -> FailureContextReport | ErrorResult:
+def get_failure_context(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str, limit: int = 10) -> FailureContextReport | ErrorResult:
     """Get comprehensive context about failures in a run.
 
     Use this when investigating why a run failed. Returns failed node states,
@@ -391,7 +393,7 @@ def get_failure_context(db: LandscapeDB, factory: RecorderFactory, run_id: str, 
     }
 
 
-def get_recent_activity(db: LandscapeDB, factory: RecorderFactory, minutes: int = 60) -> RecentActivityReport:
+def get_recent_activity(db: LandscapeDB, factory: AnalyzerRepositories, minutes: int = 60) -> RecentActivityReport:
     """Get recent pipeline activity timeline.
 
     Use this to understand what happened recently when investigating issues.

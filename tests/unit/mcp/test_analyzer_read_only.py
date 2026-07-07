@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import insert
 
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import LandscapeReadRepositories
 from elspeth.core.landscape.schema import runs_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 
@@ -101,6 +102,7 @@ def test_landscape_analyzer_reads_committed_rows_from_live_wal(tmp_path: Path) -
 
         analyzer = LandscapeAnalyzer(f"sqlite:///{db_path}")
         try:
+            assert isinstance(analyzer._factory, LandscapeReadRepositories)
             runs = analyzer.list_runs()
             assert [run["run_id"] for run in runs] == ["run-live-wal"]
         finally:

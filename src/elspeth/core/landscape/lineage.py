@@ -5,7 +5,7 @@ complete lineage for a token or row.
 """
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Protocol, cast
 
 from elspeth.contracts import (
     Call,
@@ -19,8 +19,25 @@ from elspeth.contracts import (
     ValidationErrorRecord,
 )
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.query_repository import QueryRepository
+
+
+class LineageDataFlowReadPort(Protocol):
+    """Read-only data-flow methods needed to compose lineage."""
+
+    def get_token_outcomes_for_row(self, run_id: str, row_id: str) -> list[TokenOutcome]: ...
+
+    def get_validation_errors_for_row(
+        self,
+        run_id: str,
+        row_hash: str | None = None,
+        *,
+        row_id: str | None = None,
+    ) -> list[ValidationErrorRecord]: ...
+
+    def get_transform_errors_for_token(self, token_id: str) -> list[TransformErrorRecord]: ...
+
+    def get_token_outcome(self, token_id: str) -> TokenOutcome | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +96,7 @@ class LineageResult:
 
 def explain(
     query: QueryRepository,
-    data_flow: DataFlowRepository,
+    data_flow: LineageDataFlowReadPort,
     run_id: str,
     token_id: str | None = None,
     row_id: str | None = None,

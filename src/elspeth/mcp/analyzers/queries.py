@@ -16,7 +16,7 @@ from typing import Any, cast
 from elspeth.contracts import NodeStateStatus
 from elspeth.contracts.coalesce_metadata import collision_value_fingerprint as _fingerprint_collision_value
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.core.landscape.formatters import dataclass_to_dict, serialize_datetime
 from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
@@ -39,9 +39,10 @@ from elspeth.mcp.types import (
 
 _serialize_datetime = serialize_datetime
 _dataclass_to_dict = dataclass_to_dict
+AnalyzerRepositories = LandscapeReadRepositories | RecorderFactory
 
 
-def list_runs(db: LandscapeDB, factory: RecorderFactory, limit: int = 50, status: str | None = None) -> list[RunRecord]:
+def list_runs(db: LandscapeDB, factory: AnalyzerRepositories, limit: int = 50, status: str | None = None) -> list[RunRecord]:
     """List pipeline runs.
 
     Args:
@@ -85,7 +86,7 @@ def list_runs(db: LandscapeDB, factory: RecorderFactory, limit: int = 50, status
     ]
 
 
-def get_run(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunDetail | None:
+def get_run(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> RunDetail | None:
     """Get details of a specific run.
 
     Args:
@@ -102,7 +103,7 @@ def get_run(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunDetail
     return cast(RunDetail, _dataclass_to_dict(run))
 
 
-def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int = 100, offset: int = 0) -> list[RowRecord]:
+def list_rows(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str, limit: int = 100, offset: int = 0) -> list[RowRecord]:
     """List source rows for a run.
 
     Args:
@@ -145,7 +146,7 @@ def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int
     ]
 
 
-def list_nodes(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> list[NodeDetail]:
+def list_nodes(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> list[NodeDetail]:
     """List all nodes (plugin instances) for a run.
 
     Args:
@@ -162,7 +163,7 @@ def list_nodes(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> list[N
 
 def list_tokens(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     row_id: str | None = None,
     limit: int = 100,
@@ -208,7 +209,7 @@ def list_tokens(
 
 def get_token_children(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     parent_token_id: str,
 ) -> list[TokenChildRecord]:
     """Get child tokens created from a parent (forward lineage).
@@ -239,7 +240,7 @@ def get_token_children(
 
 def list_operations(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     operation_type: str | None = None,
     status: str | None = None,
@@ -320,7 +321,7 @@ def list_operations(
     ]
 
 
-def get_operation_calls(db: LandscapeDB, factory: RecorderFactory, operation_id: str) -> list[OperationCallRecord]:
+def get_operation_calls(db: LandscapeDB, factory: AnalyzerRepositories, operation_id: str) -> list[OperationCallRecord]:
     """Get external calls for a source/sink operation.
 
     Unlike get_calls() which takes a state_id for transform calls, this
@@ -361,7 +362,7 @@ def get_operation_calls(db: LandscapeDB, factory: RecorderFactory, operation_id:
 
 def explain_token(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     token_id: str | None = None,
     row_id: str | None = None,
@@ -414,7 +415,7 @@ def explain_token(
 
 def get_errors(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     error_type: str = "all",
     limit: int = 100,
@@ -490,7 +491,7 @@ def get_errors(
 
 def get_node_states(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     node_id: str | None = None,
     status: str | None = None,
@@ -590,7 +591,7 @@ def get_node_states(
     return results
 
 
-def get_calls(db: LandscapeDB, factory: RecorderFactory, state_id: str) -> list[CallDetail]:
+def get_calls(db: LandscapeDB, factory: AnalyzerRepositories, state_id: str) -> list[CallDetail]:
     """Get external calls for a node state.
 
     Args:
@@ -631,7 +632,7 @@ def _collision_value_fingerprint(value: Any) -> CollisionValueFingerprint:
 
 def list_collisions(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     limit: int = 100,
 ) -> list[CollisionRecord]:
@@ -1035,7 +1036,7 @@ def _validate_readonly_sql(sql: str) -> None:
 
 def query(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     sql: str,
     params: dict[str, Any] | None = None,
     limit: int = MCP_QUERY_DEFAULT_LIMIT,

@@ -63,7 +63,7 @@ class LandscapeAnalyzer:
             passphrase: SQLCipher encryption passphrase (if database is encrypted)
         """
         self._db = LandscapeDB.from_url(database_url, passphrase=passphrase, create_tables=False, read_only=True)
-        self._factory = RecorderFactory(self._db)
+        self._factory = RecorderFactory.read_only(self._db)
 
     def close(self) -> None:
         """Close database connection."""

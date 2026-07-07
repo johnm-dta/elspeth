@@ -5,6 +5,8 @@ Every decision is traceable to its source through the RecorderFactory API.
 
 Primary API:
     RecorderFactory - Constructs domain repositories from LandscapeDB
+    LandscapeReadRepositories - Explicit read-only repository surface
+    LandscapeWriteRepositories - Explicit writable repository surface
     LandscapeDB - Database connection management
 
 Model Classes:
@@ -55,7 +57,7 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.exporter import LandscapeExporter
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import LandscapeReadRepositories, LandscapeWriteRepositories, RecorderFactory
 from elspeth.core.landscape.formatters import (
     CSVFormatter,
     JSONFormatter,
@@ -93,6 +95,8 @@ __all__ = [
     "JSONFormatter",
     "LandscapeDB",
     "LandscapeExporter",
+    "LandscapeReadRepositories",
+    "LandscapeWriteRepositories",
     "LandscapeWriteRepository",
     "LineageResult",
     "LineageTextFormatter",

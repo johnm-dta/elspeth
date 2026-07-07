@@ -339,11 +339,11 @@ Do not refactor or change `run`, `resume`, or `join` streaming command internals
 JSON purity tests must parse `json.loads(result.stdout)`, assert stdout starts with `{`, assert no human headings or banners precede the JSON object, and assert successful commands write nothing to stderr. Add one subprocess smoke with `capture_output=True` to verify real stdout/stderr separation outside Typer's in-process runner.
 
 **Definition of Done:**
-- [ ] Existing text tests still pass.
-- [ ] JSON list output is valid JSON with no banner contamination.
-- [ ] Inspect command exists for text and JSON.
-- [ ] Invalid plugin type/name exits non-zero with a useful message.
-- [ ] JSON success paths are parseable from stdout and do not write success noise to stderr.
+- [x] Existing text tests still pass.
+- [x] JSON list output is valid JSON with no banner contamination.
+- [x] Inspect command exists for text and JSON.
+- [x] Invalid plugin type/name exits non-zero with a useful message.
+- [x] JSON success paths are parseable from stdout and do not write success noise to stderr.
 
 **Verify:**
 

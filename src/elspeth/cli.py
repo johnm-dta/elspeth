@@ -1435,40 +1435,6 @@ plugins_app = typer.Typer(help="Plugin management commands.")
 app.add_typer(plugins_app, name="plugins")
 
 
-@dataclass(frozen=True, slots=True)
-class PluginInfo:
-    """Metadata for a registered plugin.
-
-    Attributes:
-        name: The plugin identifier used in configuration files.
-        description: Human-readable description of the plugin's purpose.
-    """
-
-    name: str
-    description: str
-
-
-def _build_plugin_registry() -> dict[str, list[PluginInfo]]:
-    """Build plugin registry dynamically from discovered plugins.
-
-    Uses PluginManager to discover all plugins and extracts descriptions
-    from their docstrings.
-
-    Returns:
-        Dict mapping plugin type to list of PluginInfo for each plugin.
-    """
-    from elspeth.plugins.infrastructure.discovery import get_plugin_description
-    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-
-    manager = get_shared_plugin_manager()
-
-    return {
-        "source": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sources()],
-        "transform": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_transforms()],
-        "sink": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sinks()],
-    }
-
-
 @plugins_app.command("list")
 def plugins_list(
     plugin_type: str | None = typer.Option(
@@ -1477,32 +1443,64 @@ def plugins_list(
         "-t",
         help="Filter by plugin type (source, transform, sink).",
     ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format (text, json).",
+    ),
 ) -> None:
     """List available plugins."""
-    # Build registry dynamically from discovered plugins
-    registry = _build_plugin_registry()
-    valid_types = set(registry.keys())
+    from elspeth.cli_plugins import format_plugins_list_text, list_plugins_payload, parse_plugin_kind
 
-    if plugin_type and plugin_type not in valid_types:
-        typer.echo(f"Error: Invalid type '{plugin_type}'.", err=True)
-        typer.echo(f"Valid types: {', '.join(sorted(valid_types))}", err=True)
+    if output_format not in {"text", "json"}:
+        typer.echo(f"Error: Invalid format '{output_format}'.", err=True)
+        typer.echo("Valid formats: text, json", err=True)
         raise typer.Exit(1)
 
-    types_to_show = [plugin_type] if plugin_type else list(registry.keys())
+    try:
+        parsed_type = parse_plugin_kind(plugin_type) if plugin_type is not None else None
+        payload = list_plugins_payload(parsed_type)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
 
-    for ptype in types_to_show:
-        # types_to_show only contains keys from registry (either filtered by validated plugin_type
-        # or directly from registry.keys()), so direct access is safe
-        plugins = registry[ptype]
-        if plugins:
-            typer.echo(f"\n{ptype.upper()}S:")
-            for plugin in plugins:
-                typer.echo(f"  {plugin.name:20} - {plugin.description}")
-        else:
-            typer.echo(f"\n{ptype.upper()}S:")
-            typer.echo("  (none available)")
+    if output_format == "json":
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
 
-    typer.echo()  # Final newline
+    typer.echo(format_plugins_list_text(payload), nl=False)
+
+
+@plugins_app.command("inspect")
+def plugins_inspect(
+    plugin_type: str = typer.Argument(..., help="Plugin type (source, transform, sink)."),
+    name: str = typer.Argument(..., help="Plugin name."),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format (text, json).",
+    ),
+) -> None:
+    """Inspect one plugin's catalog schema."""
+    from elspeth.cli_plugins import format_plugin_inspect_text, inspect_plugin_payload, parse_plugin_kind
+
+    if output_format not in {"text", "json"}:
+        typer.echo(f"Error: Invalid format '{output_format}'.", err=True)
+        typer.echo("Valid formats: text, json", err=True)
+        raise typer.Exit(1)
+
+    try:
+        parsed_type = parse_plugin_kind(plugin_type)
+        payload = inspect_plugin_payload(parsed_type, name)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    if output_format == "json":
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    typer.echo(format_plugin_inspect_text(payload), nl=False)
 
 
 @app.command()

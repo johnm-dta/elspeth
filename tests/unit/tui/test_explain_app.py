@@ -11,6 +11,8 @@ from typing import cast
 import pytest
 
 from elspeth.core.landscape import LandscapeDB
+from elspeth.tui.lineage_view import TuiLineageItem, TuiLineageView
+from elspeth.tui.screens.explain_screen import LoadedState
 from elspeth.tui.types import LineageData, TreeSelection
 
 
@@ -26,6 +28,39 @@ def _sample_lineage_data() -> LineageData:
         "sinks": [{"name": "json", "node_id": "sink-1", "node_type": "sink"}],
         "tokens": [{"token_id": "token-1", "row_id": "row-1", "path": ["source-1", "transform-1", "sink-1"]}],
     }
+
+
+def _lineage_view_from_data(data: LineageData) -> TuiLineageView:
+    from elspeth.tui.widgets.lineage_tree import LineageTree
+
+    nodes = LineageTree(data).get_tree_nodes()
+    return TuiLineageView(
+        run_id=data["run_id"],
+        items=tuple(
+            TuiLineageItem(
+                label=node["label"],
+                selection=node["selection"],
+                depth=node["depth"],
+                has_children=node["has_children"],
+                expanded=node["expanded"],
+                node_id=node["node_id"],
+                node_type=node["node_type"],
+            )
+            for node in nodes
+        ),
+    )
+
+
+def _loaded_state_from_data(db: LandscapeDB, data: LineageData) -> LoadedState:
+    from elspeth.tui.widgets.lineage_tree import LineageTree
+
+    lineage_view = _lineage_view_from_data(data)
+    return LoadedState(
+        db=db,
+        run_id=data["run_id"],
+        lineage_view=lineage_view,
+        tree=LineageTree(lineage_view),
+    )
 
 
 class TestExplainApp:
@@ -113,19 +148,12 @@ class TestExplainApp:
 
         from elspeth.tui.constants import WidgetIDs
         from elspeth.tui.explain_app import ExplainApp
-        from elspeth.tui.screens.explain_screen import LoadedState
-        from elspeth.tui.widgets.lineage_tree import LineageTree
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         class FakeScreen:
             def __init__(self) -> None:
                 lineage_data = _sample_lineage_data()
-                self.state = LoadedState(
-                    db=_fake_db(),
-                    run_id="run-1",
-                    lineage_data=lineage_data,
-                    tree=LineageTree(lineage_data),
-                )
+                self.state = _loaded_state_from_data(_fake_db(), lineage_data)
                 self.detail_panel = NodeDetailPanel(None)
                 self.selected_node_ids: list[str] = []
 
@@ -165,19 +193,12 @@ class TestExplainApp:
 
         from elspeth.tui.constants import WidgetIDs
         from elspeth.tui.explain_app import ExplainApp
-        from elspeth.tui.screens.explain_screen import LoadedState
-        from elspeth.tui.widgets.lineage_tree import LineageTree
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         class FakeScreen:
             def __init__(self) -> None:
                 lineage_data = _sample_lineage_data()
-                self.state = LoadedState(
-                    db=_fake_db(),
-                    run_id="run-1",
-                    lineage_data=lineage_data,
-                    tree=LineageTree(lineage_data),
-                )
+                self.state = _loaded_state_from_data(_fake_db(), lineage_data)
                 self.detail_panel = NodeDetailPanel(None)
                 self.selected: list[TreeSelection | str | None] = []
 
@@ -222,19 +243,12 @@ class TestExplainApp:
 
         from elspeth.tui.constants import WidgetIDs
         from elspeth.tui.explain_app import ExplainApp
-        from elspeth.tui.screens.explain_screen import LoadedState
-        from elspeth.tui.widgets.lineage_tree import LineageTree
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         class FakeScreen:
             def __init__(self) -> None:
                 lineage_data = _sample_lineage_data()
-                self.state = LoadedState(
-                    db=_fake_db(),
-                    run_id="run-1",
-                    lineage_data=lineage_data,
-                    tree=LineageTree(lineage_data),
-                )
+                self.state = _loaded_state_from_data(_fake_db(), lineage_data)
                 self.detail_panel = NodeDetailPanel(None)
                 self.selected: list[TreeSelection | str | None] = []
 
@@ -288,19 +302,13 @@ class TestExplainApp:
 
         from elspeth.tui.constants import WidgetIDs
         from elspeth.tui.explain_app import ExplainApp
-        from elspeth.tui.screens.explain_screen import LoadedState, LoadingFailedState, ScreenState, UninitializedState
-        from elspeth.tui.widgets.lineage_tree import LineageTree
+        from elspeth.tui.screens.explain_screen import LoadingFailedState, ScreenState, UninitializedState
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         class FakeScreen:
             def __init__(self) -> None:
                 lineage_data = _sample_lineage_data()
-                self.state: ScreenState = LoadedState(
-                    db=_fake_db(),
-                    run_id="run-1",
-                    lineage_data=lineage_data,
-                    tree=LineageTree(lineage_data),
-                )
+                self.state: ScreenState = _loaded_state_from_data(_fake_db(), lineage_data)
                 self.detail_panel = NodeDetailPanel(
                     {
                         "node_id": "source-1",
@@ -343,8 +351,7 @@ class TestExplainApp:
 
         from elspeth.tui.constants import WidgetIDs
         from elspeth.tui.explain_app import ExplainApp
-        from elspeth.tui.screens.explain_screen import LoadedState, LoadingFailedState, ScreenState, UninitializedState
-        from elspeth.tui.widgets.lineage_tree import LineageTree
+        from elspeth.tui.screens.explain_screen import LoadingFailedState, ScreenState, UninitializedState
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         class FakeScreen:
@@ -358,12 +365,7 @@ class TestExplainApp:
 
             def load(self, db: object, run_id: str, **kwargs: object) -> None:
                 lineage_data = _sample_lineage_data()
-                self.state = LoadedState(
-                    db=_fake_db(),
-                    run_id="run-1",
-                    lineage_data=lineage_data,
-                    tree=LineageTree(lineage_data),
-                )
+                self.state = _loaded_state_from_data(_fake_db(), lineage_data)
 
         fake_screen = FakeScreen()
 
@@ -388,8 +390,6 @@ class TestExplainApp:
 
         from elspeth.tui.constants import WidgetIDs
         from elspeth.tui.explain_app import ExplainApp
-        from elspeth.tui.screens.explain_screen import LoadedState
-        from elspeth.tui.widgets.lineage_tree import LineageTree
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         empty_data: LineageData = {
@@ -402,12 +402,7 @@ class TestExplainApp:
 
         class FakeScreen:
             def __init__(self) -> None:
-                self.state = LoadedState(
-                    db=_fake_db(),
-                    run_id="run-empty",
-                    lineage_data=empty_data,
-                    tree=LineageTree(empty_data),
-                )
+                self.state = _loaded_state_from_data(_fake_db(), empty_data)
                 self.detail_panel = NodeDetailPanel(None)
 
         with patch("elspeth.tui.explain_app.ExplainScreen", return_value=FakeScreen()):

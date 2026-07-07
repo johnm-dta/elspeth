@@ -433,6 +433,13 @@ PYTHONPATH=elspeth-lints/src uv run python scripts/cicd/parity_harness.py --mani
 
 Keep `wardline scan . --fail-on ERROR`, but pair it with the trust-boundary lint commands above while Wardline reports zero recognized trust boundaries. After Wardline, check `git status --short` for generated `findings.jsonl` artifacts and do not commit scan output unless it is intentionally part of a separate evidence artifact.
 
+**Review closeout notes (2026-07-07):**
+- Accepted TUI findings were fixed: focused token rows now attach to the exact traversed graph path, terminal outcome rows show sink/path/completion, artifact evidence is shown in the detail panel when the focused sink state produced an artifact, and `LoadedState` carries the graph-backed `TuiLineageView` rather than the legacy linear `LineageData`.
+- Accepted CLI finding was fixed: human `plugins list` now uses a lightweight manager/docstring summary path; JSON list and inspect keep using the full catalog schema path.
+- Metadata lint findings were fixed: stale plugin `source_file_hash` values were refreshed and the runtime YAML import trust-boundary test fingerprint was bound.
+- Wardline passed with 0 active findings but reported the taint gate inert because it recognized 0 trust boundaries; do not cite that pass as proof of taint-boundary coverage.
+- Full `ruff format --check` still reports 8 unrelated pre-existing files that would be reformatted. Full `mypy src/ elspeth-lints/src/` still reports missing optional web/LLM stubs plus unrelated existing type errors outside this CLI/TUI work.
+
 ---
 
 ## Task 8: Commit the Completed Worktree
@@ -449,8 +456,8 @@ git commit -m "feat(cli,tui): modernize explain TUI and plugin catalog CLI"
 ```
 
 **Definition of Done:**
-- [ ] All review findings accepted by the main agent are fixed.
-- [ ] Final verification commands pass or any residual warnings are explicitly recorded.
-- [ ] Checkpoint commits exist for TUI shell stabilization, graph/detail behavior, plugin catalog CLI, and final docs/review cleanup unless a later finding requires squashing before handoff.
-- [ ] Worktree is committed on `feature/elspeth-82c3914f95-cli-tui-upgrade`.
-- [ ] Main release branch is not merged or modified beyond Filigree metadata.
+- [x] All review findings accepted by the main agent are fixed.
+- [x] Final verification commands pass or any residual warnings are explicitly recorded.
+- [x] Checkpoint commits exist for TUI shell stabilization, graph/detail behavior, plugin catalog CLI, and final docs/review cleanup unless a later finding requires squashing before handoff.
+- [x] Worktree is committed on `feature/elspeth-82c3914f95-cli-tui-upgrade`.
+- [x] Main release branch is not merged or modified beyond Filigree metadata.

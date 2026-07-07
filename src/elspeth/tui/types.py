@@ -27,16 +27,40 @@ class SourceInfo(TypedDict):
     node_id: str | None
 
 
-class TokenDisplayInfo(TypedDict):
+class TuiArtifactInfo(TypedDict):
+    """Artifact evidence attached to a focused token outcome."""
+
+    artifact_id: str
+    artifact_type: str
+    path_or_uri: str
+    content_hash: str
+    size_bytes: int
+    sink_node_id: str
+    produced_by_state_id: str
+
+
+class TokenOutcomeDisplayInfo(TypedDict, total=False):
+    """Terminal outcome evidence attached to a focused token."""
+
+    outcome: Required[str]
+    path: Required[str]
+    completed: Required[bool]
+    sink: str
+    error_hash: str
+    artifact: TuiArtifactInfo
+
+
+class TokenDisplayInfo(TypedDict, total=False):
     """Token information formatted for TUI display.
 
     Note: This is a DISPLAY type, not the canonical TokenInfo from contracts.
     It contains presentation-specific fields like 'path' for breadcrumb display.
     """
 
-    token_id: str
-    row_id: str
-    path: list[str]
+    token_id: Required[str]
+    row_id: Required[str]
+    path: Required[list[str]]
+    outcome: TokenOutcomeDisplayInfo
 
 
 class LineageData(TypedDict):
@@ -89,6 +113,15 @@ class TreeSelection(TypedDict, total=False):
     from_node_id: str
     to_node_id: str
     edge_label: str
+    outcome: str
+    outcome_path: str
+    completed: bool
+    error_hash: str
+    artifact_id: str
+    artifact_type: str
+    artifact_path_or_uri: str
+    artifact_hash: str
+    artifact_size_bytes: int
     message: str
 
 
@@ -152,6 +185,15 @@ class SelectionDetailInfo(TypedDict, total=False):
     to_node_id: str
     edge_label: str
     state_id: str
+    outcome: str
+    outcome_path: str
+    completed: bool
+    error_hash: str
+    artifact_id: str
+    artifact_type: str
+    artifact_path_or_uri: str
+    artifact_hash: str
+    artifact_size_bytes: int
     message: str
 
 

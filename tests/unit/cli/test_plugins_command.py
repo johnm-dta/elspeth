@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 
+import pytest
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -31,6 +32,20 @@ class TestCliPluginCatalogAdapter:
 
         assert set(payload) == {"source"}
         assert all(plugin["plugin_type"] == "source" for plugin in payload["source"])
+
+    def test_text_list_payload_does_not_build_schema_catalog(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Text listing stays available even if full schema lowering is broken."""
+        import elspeth.cli_plugins as cli_plugins
+
+        def fail_catalog_build(*args: object, **kwargs: object) -> object:
+            raise AssertionError("text list should not lower full catalog schemas")
+
+        monkeypatch.setattr(cli_plugins, "CatalogServiceImpl", fail_catalog_build)
+
+        payload = cli_plugins.list_plugins_text_payload(None)
+
+        assert any(plugin["name"] == "csv" for plugin in payload["source"])
+        assert all(plugin["config_fields"] == [] for plugins in payload.values() for plugin in plugins)
 
     def test_inspect_plugin_payload_combines_schema_and_config_fields(self) -> None:
         """inspect payload joins schema detail with summary config fields."""

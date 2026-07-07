@@ -277,6 +277,97 @@ class TestLineageTreeWidget:
         assert "Repeated: Coalesce: merge (already shown)" in labels
         assert len(labels) < 20
 
+    def test_focused_token_uses_exact_diamond_branch_path(self) -> None:
+        """Focused token rows attach to the actual traversed branch instance."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("left", "left_map", NodeType.TRANSFORM, sequence=1),
+                _node("right", "right_map", NodeType.TRANSFORM, sequence=2),
+                _node("merge", "merge", NodeType.COALESCE, sequence=3),
+                _node("sink", "json_sink", NodeType.SINK, sequence=4),
+            ],
+            edges=[
+                _edge("edge-left", "src", "left", "left"),
+                _edge("edge-right", "src", "right", "right"),
+                _edge("edge-left-merge", "left", "merge", "continue"),
+                _edge("edge-right-merge", "right", "merge", "continue"),
+                _edge("edge-sink", "merge", "sink", "default"),
+            ],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-right",
+                    row_id="row-1",
+                    path=["src", "right", "merge", "sink"],
+                )
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+        token_index = labels.index("Token: token-right (row: row-1)")
+
+        assert labels.index("Branch: right") < token_index
+        assert labels.index("Transform: right_map") < token_index
+        assert labels.index("Branch: left") < labels.index("Transform: left_map") < labels.index("Branch: right")
+
+    def test_focused_token_outcome_renders_artifact_selection(self) -> None:
+        """Focused token outcome rows carry sink and artifact evidence."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("sink", "json_sink", NodeType.SINK, sequence=1),
+            ],
+            edges=[_edge("edge-sink", "src", "sink", "default")],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-1",
+                    row_id="row-1",
+                    path=["src", "sink"],
+                    outcome={
+                        "outcome": "success",
+                        "path": "default_flow",
+                        "completed": True,
+                        "sink": "json_sink",
+                        "artifact": {
+                            "artifact_id": "artifact-1",
+                            "artifact_type": "json",
+                            "path_or_uri": "/tmp/out.json",
+                            "content_hash": "sha256:abc",
+                            "size_bytes": 12,
+                            "sink_node_id": "sink",
+                            "produced_by_state_id": "state-sink",
+                        },
+                    },
+                )
+            ],
+        )
+
+        outcome = next(item for item in view.items if item.node_type == "outcome")
+
+        assert outcome.label == "Outcome: success / default_flow -> json_sink"
+        assert outcome.selection == {
+            "kind": "outcome",
+            "run_id": "run-1",
+            "token_id": "token-1",
+            "row_id": "row-1",
+            "outcome": "success",
+            "outcome_path": "default_flow",
+            "completed": True,
+            "sink": "json_sink",
+            "artifact_id": "artifact-1",
+            "artifact_type": "json",
+            "artifact_path_or_uri": "/tmp/out.json",
+            "artifact_hash": "sha256:abc",
+            "artifact_size_bytes": 12,
+            "state_id": "state-sink",
+        }
+
 
 class TestTreeNodeImmutability:
     """Tests for TreeNode frozen dataclass invariants."""

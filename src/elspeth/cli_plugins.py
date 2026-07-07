@@ -6,11 +6,14 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Required, TypedDict, cast
 
-from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
+from elspeth.plugins.infrastructure.discovery import get_plugin_description
+from elspeth.plugins.infrastructure.manager import PluginManager, get_shared_plugin_manager
 from elspeth.web.catalog.schemas import PluginKind, PluginSummary
 from elspeth.web.catalog.service import CatalogServiceImpl
 
 VALID_PLUGIN_TYPES: tuple[PluginKind, ...] = ("source", "transform", "sink")
+PluginClass = type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]
 
 
 class ConfigFieldPayload(TypedDict, total=False):
@@ -79,6 +82,13 @@ def list_plugins_payload(plugin_type: PluginKind | None) -> dict[PluginKind, lis
     return {kind: [_summary_payload(summary) for summary in _list_for_kind(service, kind)] for kind in kinds}
 
 
+def list_plugins_text_payload(plugin_type: PluginKind | None) -> dict[PluginKind, list[PluginSummaryPayload]]:
+    """Return lightweight plugin summaries for human text listing."""
+    manager = get_shared_plugin_manager()
+    kinds = (plugin_type,) if plugin_type is not None else VALID_PLUGIN_TYPES
+    return {kind: [_text_summary_payload(plugin_cls, kind) for plugin_cls in _classes_for_kind(manager, kind)] for kind in kinds}
+
+
 def inspect_plugin_payload(plugin_type: PluginKind, name: str) -> PluginInspectPayload:
     """Return JSON-ready plugin schema detail plus summary config fields."""
     service = build_catalog_service()
@@ -143,6 +153,25 @@ def _summary_payload(summary: PluginSummary) -> PluginSummaryPayload:
 
 def _config_field_payloads(summary: PluginSummary) -> list[ConfigFieldPayload]:
     return [cast(ConfigFieldPayload, field.model_dump(mode="json")) for field in summary.config_fields]
+
+
+def _text_summary_payload(plugin_cls: PluginClass, plugin_type: PluginKind) -> PluginSummaryPayload:
+    return {
+        "name": plugin_cls.name,
+        "description": get_plugin_description(plugin_cls),
+        "plugin_type": plugin_type,
+        "config_fields": [],
+    }
+
+
+def _classes_for_kind(manager: PluginManager, plugin_type: PluginKind) -> list[PluginClass]:
+    if plugin_type == "source":
+        return list(cast(Sequence[PluginClass], manager.get_sources()))
+    if plugin_type == "transform":
+        return list(cast(Sequence[PluginClass], manager.get_transforms()))
+    if plugin_type == "sink":
+        return list(cast(Sequence[PluginClass], manager.get_sinks()))
+    raise AssertionError(f"Unhandled plugin type: {plugin_type}")
 
 
 def _list_for_kind(service: CatalogServiceImpl, plugin_type: PluginKind) -> list[PluginSummary]:

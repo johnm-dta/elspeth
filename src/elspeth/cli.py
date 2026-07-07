@@ -1450,7 +1450,7 @@ def plugins_list(
     ),
 ) -> None:
     """List available plugins."""
-    from elspeth.cli_plugins import format_plugins_list_text, list_plugins_payload, parse_plugin_kind
+    from elspeth.cli_plugins import format_plugins_list_text, list_plugins_payload, list_plugins_text_payload, parse_plugin_kind
 
     if output_format not in {"text", "json"}:
         typer.echo(f"Error: Invalid format '{output_format}'.", err=True)
@@ -1459,7 +1459,7 @@ def plugins_list(
 
     try:
         parsed_type = parse_plugin_kind(plugin_type) if plugin_type is not None else None
-        payload = list_plugins_payload(parsed_type)
+        payload = list_plugins_payload(parsed_type) if output_format == "json" else list_plugins_text_payload(parsed_type)
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1) from None

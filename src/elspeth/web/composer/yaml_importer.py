@@ -267,6 +267,7 @@ def _outputs_from_runtime_sinks(sinks: Any) -> tuple[OutputSpec, ...]:
     suppresses=("R1", "R5"),
     invariant="raises RuntimeYamlImportError on malformed or unsupported YAML; never coerces non-mapping roots",
     test_ref="tests/unit/web/composer/test_yaml_importer.py::test_composition_state_from_runtime_yaml_rejects_non_mapping_root",
+    test_fingerprint="31da4d90277422f518daf165ce0e90aeeed106c3333a39447a848982aeedc795",
 )
 def composition_state_from_runtime_yaml(pipeline_yaml: str, *, version: int = 1) -> CompositionState:
     """Build a composer state from runtime pipeline YAML."""

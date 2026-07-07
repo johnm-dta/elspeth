@@ -4,18 +4,19 @@ Uses discriminated union pattern to represent screen states.
 Invalid state combinations are prevented at the type level.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol
 
 import structlog
 from sqlalchemy.exc import DatabaseError, OperationalError
 
-from elspeth.contracts import NodeState, NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending, NodeType
+from elspeth.contracts import Artifact, NodeState, NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending, Token, TokenOutcome
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape import explain as explain_lineage
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.tui.lineage_view import build_lineage_view_model
-from elspeth.tui.types import LineageData, NodeStateInfo, SelectionDetailInfo, TokenDisplayInfo, TreeSelection
+from elspeth.tui.lineage_view import TuiLineageView, build_lineage_view_model
+from elspeth.tui.types import NodeStateInfo, SelectionDetailInfo, TokenDisplayInfo, TokenOutcomeDisplayInfo, TreeSelection, TuiArtifactInfo
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
@@ -25,6 +26,17 @@ logger = structlog.get_logger(__name__)
 # Database errors that indicate connection/availability issues (recoverable)
 # Other exceptions indicate bugs in our code and should crash
 _RECOVERABLE_DB_ERRORS = (DatabaseError, OperationalError)
+
+
+class _LineageResultLike(Protocol):
+    @property
+    def token(self) -> Token: ...
+
+    @property
+    def node_states(self) -> Sequence[NodeState]: ...
+
+    @property
+    def outcome(self) -> TokenOutcome | None: ...
 
 
 class InvalidStateTransitionError(Exception):
@@ -68,7 +80,7 @@ class LoadedState:
 
     db: LandscapeDB
     run_id: str
-    lineage_data: LineageData
+    lineage_view: TuiLineageView
     tree: LineageTree
     focused_state_by_node_id: Mapping[str, NodeState] = field(default_factory=dict)
     latest_state_by_node_id: Mapping[str, NodeState] = field(default_factory=dict)
@@ -94,7 +106,7 @@ class ExplainScreen:
 
     State Model:
         The screen uses a discriminated union to represent its state.
-        Invalid state combinations (e.g., lineage_data without db)
+        Invalid state combinations (e.g., lineage_view without db)
         cannot exist - they're unrepresentable in the type system.
 
         - UninitializedState: No data source
@@ -183,33 +195,12 @@ class ExplainScreen:
                         run_id=run_id,
                         error="Token or row not found, or no terminal tokens exist yet",
                     )
-                focused_tokens.append(
-                    TokenDisplayInfo(
-                        token_id=lineage_result.token.token_id,
-                        row_id=lineage_result.token.row_id,
-                        path=[state.node_id for state in lineage_result.node_states],
-                    )
-                )
+                artifacts_by_state_id: dict[str, list[Artifact]] = {}
+                if lineage_result.outcome is not None:
+                    for artifact in factory.execution.get_artifacts(run_id):
+                        artifacts_by_state_id.setdefault(artifact.produced_by_state_id, []).append(artifact)
+                focused_tokens.append(self._token_display_info(lineage_result, artifacts_by_state_id))
                 focused_state_by_node_id = {state.node_id: state for state in lineage_result.node_states}
-
-            # Organize nodes by type
-            source_nodes = [n for n in nodes if n.node_type == NodeType.SOURCE]
-            # Processing nodes: transforms, gates, aggregations, coalesces
-            # All appear in the transform chain in pipeline order
-            _PROCESSING_TYPES = {NodeType.TRANSFORM, NodeType.GATE, NodeType.AGGREGATION, NodeType.COALESCE}
-            transform_nodes = [n for n in nodes if n.node_type in _PROCESSING_TYPES]
-            sink_nodes = [n for n in nodes if n.node_type == NodeType.SINK]
-
-            lineage_data: LineageData = {
-                "run_id": run_id,
-                "source": {
-                    "name": source_nodes[0].plugin_name if source_nodes else None,
-                    "node_id": source_nodes[0].node_id if source_nodes else None,
-                },
-                "transforms": [{"name": n.plugin_name, "node_id": n.node_id, "node_type": n.node_type.value} for n in transform_nodes],
-                "sinks": [{"name": n.plugin_name, "node_id": n.node_id, "node_type": n.node_type.value} for n in sink_nodes],
-                "tokens": focused_tokens,
-            }
             lineage_view = build_lineage_view_model(
                 run_id=run_id,
                 nodes=nodes,
@@ -223,7 +214,7 @@ class ExplainScreen:
             return LoadedState(
                 db=db,
                 run_id=run_id,
-                lineage_data=lineage_data,
+                lineage_view=lineage_view,
                 tree=tree,
                 focused_state_by_node_id=focused_state_by_node_id,
                 latest_state_by_node_id=latest_state_by_node_id,
@@ -239,17 +230,71 @@ class ExplainScreen:
             )
             return LoadingFailedState(db=db, run_id=run_id, error=str(e))
 
-    def get_lineage_data(self) -> LineageData | None:
-        """Get current lineage data.
+    def get_lineage_view(self) -> TuiLineageView | None:
+        """Get current graph-backed lineage view.
 
         Returns:
-            Lineage data dict or None if not in LoadedState
+            Lineage view or None if not in LoadedState.
         """
         match self._state:
-            case LoadedState(lineage_data=data):
-                return data
+            case LoadedState(lineage_view=view):
+                return view
             case _:
                 return None
+
+    def _token_display_info(
+        self,
+        lineage_result: _LineageResultLike,
+        artifacts_by_state_id: Mapping[str, Sequence[Artifact]],
+    ) -> TokenDisplayInfo:
+        """Build the focused token display row from full lineage evidence."""
+        token_info: TokenDisplayInfo = {
+            "token_id": lineage_result.token.token_id,
+            "row_id": lineage_result.token.row_id,
+            "path": [state.node_id for state in lineage_result.node_states],
+        }
+        if lineage_result.outcome is not None:
+            artifact = self._artifact_for_lineage(lineage_result.node_states, artifacts_by_state_id)
+            token_info["outcome"] = self._outcome_display_info(lineage_result.outcome, artifact)
+        return token_info
+
+    def _outcome_display_info(self, outcome: TokenOutcome, artifact: Artifact | None) -> TokenOutcomeDisplayInfo:
+        """Build JSON-ready terminal outcome display fields."""
+        outcome_info: TokenOutcomeDisplayInfo = {
+            "outcome": outcome.outcome.value if outcome.outcome is not None else "pending",
+            "path": outcome.path.value,
+            "completed": outcome.completed,
+        }
+        if outcome.sink_name is not None:
+            outcome_info["sink"] = outcome.sink_name
+        if outcome.error_hash is not None:
+            outcome_info["error_hash"] = outcome.error_hash
+        if artifact is not None:
+            outcome_info["artifact"] = self._artifact_display_info(artifact)
+        return outcome_info
+
+    def _artifact_display_info(self, artifact: Artifact) -> TuiArtifactInfo:
+        return {
+            "artifact_id": artifact.artifact_id,
+            "artifact_type": artifact.artifact_type,
+            "path_or_uri": artifact.path_or_uri,
+            "content_hash": artifact.content_hash,
+            "size_bytes": artifact.size_bytes,
+            "sink_node_id": artifact.sink_node_id,
+            "produced_by_state_id": artifact.produced_by_state_id,
+        }
+
+    def _artifact_for_lineage(
+        self,
+        node_states: Sequence[NodeState],
+        artifacts_by_state_id: Mapping[str, Sequence[Artifact]],
+    ) -> Artifact | None:
+        """Return artifact evidence from the latest visited state that produced one."""
+        for state in reversed(node_states):
+            artifacts = artifacts_by_state_id.get(state.state_id, ())
+            if artifacts:
+                return artifacts[-1]
+        return None
 
     def _get_run_id(self) -> str | None:
         """Get run ID if available."""
@@ -311,7 +356,7 @@ class ExplainScreen:
                 "run_id": selection["run_id"],
             }
         if kind == "token":
-            detail: SelectionDetailInfo = {
+            token_detail: SelectionDetailInfo = {
                 "detail_kind": "token",
                 "title": f"Token: {selection['token_id']}",
                 "run_id": selection["run_id"],
@@ -319,8 +364,8 @@ class ExplainScreen:
                 "row_id": selection["row_id"],
             }
             if "sink" in selection:
-                detail["sink"] = selection["sink"]
-            return detail
+                token_detail["sink"] = selection["sink"]
+            return token_detail
         if kind == "edge":
             return {
                 "detail_kind": "edge",
@@ -332,16 +377,35 @@ class ExplainScreen:
                 "edge_label": selection["edge_label"],
             }
         if kind == "outcome":
-            detail = {
+            outcome_detail: SelectionDetailInfo = {
                 "detail_kind": "outcome",
-                "title": "Token outcome",
+                "title": f"Outcome: {selection['outcome']}",
                 "run_id": selection["run_id"],
+                "outcome": selection["outcome"],
+                "outcome_path": selection["outcome_path"],
+                "completed": selection["completed"],
             }
             if "state_id" in selection:
-                detail["state_id"] = selection["state_id"]
+                outcome_detail["state_id"] = selection["state_id"]
             if "token_id" in selection:
-                detail["token_id"] = selection["token_id"]
-            return detail
+                outcome_detail["token_id"] = selection["token_id"]
+            if "row_id" in selection:
+                outcome_detail["row_id"] = selection["row_id"]
+            if "sink" in selection:
+                outcome_detail["sink"] = selection["sink"]
+            if "error_hash" in selection:
+                outcome_detail["error_hash"] = selection["error_hash"]
+            if "artifact_id" in selection:
+                outcome_detail["artifact_id"] = selection["artifact_id"]
+            if "artifact_type" in selection:
+                outcome_detail["artifact_type"] = selection["artifact_type"]
+            if "artifact_path_or_uri" in selection:
+                outcome_detail["artifact_path_or_uri"] = selection["artifact_path_or_uri"]
+            if "artifact_hash" in selection:
+                outcome_detail["artifact_hash"] = selection["artifact_hash"]
+            if "artifact_size_bytes" in selection:
+                outcome_detail["artifact_size_bytes"] = selection["artifact_size_bytes"]
+            return outcome_detail
         if kind == "status":
             return {
                 "detail_kind": "status",

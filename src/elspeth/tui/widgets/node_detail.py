@@ -318,10 +318,31 @@ class NodeDetailPanel:
                 lines.append(f"  Edge ID: {detail['edge_id']}")
         elif detail_kind == "outcome":
             lines.append("Outcome:")
+            lines.append(f"  Outcome:   {detail['outcome']}")
+            lines.append(f"  Path:      {detail['outcome_path']}")
+            lines.append(f"  Completed: {detail['completed']}")
             if "state_id" in detail:
                 lines.append(f"  State ID: {detail['state_id']}")
             if "token_id" in detail:
                 lines.append(f"  Token ID: {detail['token_id']}")
+            if "row_id" in detail:
+                lines.append(f"  Row ID:    {detail['row_id']}")
+            if "sink" in detail:
+                lines.append(f"  Sink:      {detail['sink']}")
+            if "error_hash" in detail:
+                lines.append(f"  Error hash: {detail['error_hash']}")
+            if "artifact_id" in detail:
+                lines.append("")
+                lines.append("Artifact:")
+                lines.append(f"  ID:   {detail['artifact_id']}")
+                if "artifact_type" in detail:
+                    lines.append(f"  Type: {detail['artifact_type']}")
+                if "artifact_path_or_uri" in detail:
+                    lines.append(f"  Path: {detail['artifact_path_or_uri']}")
+                if "artifact_hash" in detail:
+                    lines.append(f"  Hash: {detail['artifact_hash']}")
+                if "artifact_size_bytes" in detail:
+                    lines.append(f"  Size: {self._format_size(detail['artifact_size_bytes'])}")
         elif detail_kind == "status":
             lines.append("Status:")
             if "run_id" in detail:

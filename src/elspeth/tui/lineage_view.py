@@ -91,11 +91,14 @@ def build_lineage_view_model(
         outgoing_by_node[edge.from_node_id].append(edge)
         incoming_node_ids.add(edge.to_node_id)
 
-    token_nodes_by_terminal: dict[str, list[TokenDisplayInfo]] = defaultdict(list)
+    token_nodes_by_path: dict[tuple[str, ...], list[TokenDisplayInfo]] = defaultdict(list)
+    focused_token_paths: set[tuple[str, ...]] = set()
     for token in tokens:
         path = token["path"]
         if path:
-            token_nodes_by_terminal[path[-1]].append(token)
+            token_path = tuple(path)
+            token_nodes_by_path[token_path].append(token)
+            focused_token_paths.add(token_path)
 
     items: list[TuiLineageItem] = [
         TuiLineageItem(
@@ -133,8 +136,10 @@ def build_lineage_view_model(
             node=root,
             node_by_id=node_by_id,
             outgoing_by_node=outgoing_by_node,
-            token_nodes_by_terminal=token_nodes_by_terminal,
+            token_nodes_by_path=token_nodes_by_path,
+            focused_token_paths=focused_token_paths,
             expanded_node_ids=expanded_node_ids,
+            traversal_path=(),
             path_node_ids=frozenset(),
             depth=1,
         )
@@ -149,14 +154,20 @@ def _append_node(
     node: _NodeLike,
     node_by_id: dict[str, _NodeLike],
     outgoing_by_node: dict[str, list[_EdgeLike]],
-    token_nodes_by_terminal: dict[str, list[TokenDisplayInfo]],
+    token_nodes_by_path: dict[tuple[str, ...], list[TokenDisplayInfo]],
+    focused_token_paths: set[tuple[str, ...]],
     expanded_node_ids: set[str],
+    traversal_path: tuple[str, ...],
     path_node_ids: frozenset[str],
     depth: int,
 ) -> None:
     label = _node_label(node)
     selection = _node_selection(run_id, node)
-    if node.node_id in path_node_ids or node.node_id in expanded_node_ids:
+    current_path = (*traversal_path, node.node_id)
+    token_children = sorted(token_nodes_by_path.get(current_path, []), key=lambda token: (token["row_id"], token["token_id"]))
+    has_focused_path_here = _has_focused_path_at_or_below(focused_token_paths, current_path)
+    repeated_without_focused_path = node.node_id in expanded_node_ids and not has_focused_path_here
+    if node.node_id in path_node_ids or repeated_without_focused_path:
         items.append(
             TuiLineageItem(
                 label=f"Repeated: {label} (already shown)",
@@ -171,7 +182,10 @@ def _append_node(
         return
 
     outgoing_edges = _sort_edges(outgoing_by_node.get(node.node_id, []))
-    token_children = sorted(token_nodes_by_terminal.get(node.node_id, []), key=lambda token: (token["row_id"], token["token_id"]))
+    if node.node_id in expanded_node_ids:
+        outgoing_edges = [
+            edge for edge in outgoing_edges if _has_focused_path_at_or_below(focused_token_paths, (*current_path, edge.to_node_id))
+        ]
     items.append(
         TuiLineageItem(
             label=label,
@@ -206,13 +220,16 @@ def _append_node(
             node=child,
             node_by_id=node_by_id,
             outgoing_by_node=outgoing_by_node,
-            token_nodes_by_terminal=token_nodes_by_terminal,
+            token_nodes_by_path=token_nodes_by_path,
+            focused_token_paths=focused_token_paths,
             expanded_node_ids=expanded_node_ids,
+            traversal_path=current_path,
             path_node_ids=next_path_node_ids,
             depth=child_depth,
         )
 
     for token in token_children:
+        has_outcome = "outcome" in token
         items.append(
             TuiLineageItem(
                 label=f"Token: {token['token_id']} (row: {token['row_id']})",
@@ -223,12 +240,14 @@ def _append_node(
                     "row_id": token["row_id"],
                 },
                 depth=depth + 1,
-                has_children=False,
-                expanded=False,
+                has_children=has_outcome,
+                expanded=has_outcome,
                 node_type="token",
                 token_id=token["token_id"],
             )
         )
+        if has_outcome:
+            items.append(_outcome_item(run_id=run_id, token=token, depth=depth + 2))
 
 
 def _sort_nodes(nodes: Sequence[_NodeLike]) -> list[_NodeLike]:
@@ -274,3 +293,54 @@ def _edge_selection(run_id: str, edge: _EdgeLike) -> TreeSelection:
 
 def _should_show_edge_row(edge: _EdgeLike, siblings: Sequence[_EdgeLike]) -> bool:
     return len(siblings) > 1 or edge.label not in _HIDDEN_EDGE_LABELS
+
+
+def _has_focused_path_at_or_below(focused_token_paths: set[tuple[str, ...]], prefix: tuple[str, ...]) -> bool:
+    return any(len(path) >= len(prefix) and path[: len(prefix)] == prefix for path in focused_token_paths)
+
+
+def _outcome_item(*, run_id: str, token: TokenDisplayInfo, depth: int) -> TuiLineageItem:
+    outcome = token["outcome"]
+    selection: TreeSelection = {
+        "kind": "outcome",
+        "run_id": run_id,
+        "token_id": token["token_id"],
+        "row_id": token["row_id"],
+        "outcome": outcome["outcome"],
+        "outcome_path": outcome["path"],
+        "completed": outcome["completed"],
+    }
+    if "sink" in outcome:
+        selection["sink"] = outcome["sink"]
+    if "error_hash" in outcome:
+        selection["error_hash"] = outcome["error_hash"]
+    if "artifact" in outcome:
+        artifact = outcome["artifact"]
+        selection.update(
+            {
+                "artifact_id": artifact["artifact_id"],
+                "artifact_type": artifact["artifact_type"],
+                "artifact_path_or_uri": artifact["path_or_uri"],
+                "artifact_hash": artifact["content_hash"],
+                "artifact_size_bytes": artifact["size_bytes"],
+                "state_id": artifact["produced_by_state_id"],
+            }
+        )
+    return TuiLineageItem(
+        label=_outcome_label(outcome),
+        selection=selection,
+        depth=depth,
+        has_children=False,
+        expanded=False,
+        node_type="outcome",
+    )
+
+
+def _outcome_label(outcome: object) -> str:
+    if not isinstance(outcome, dict):
+        raise TypeError(f"outcome must be dict, got {type(outcome).__name__}")
+    label = f"Outcome: {outcome['outcome']} / {outcome['path']}"
+    sink = outcome["sink"] if "sink" in outcome else None
+    if sink:
+        label = f"{label} -> {sink}"
+    return label

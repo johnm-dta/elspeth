@@ -7,6 +7,7 @@ are deferred to integration tier. Uses RecorderFactory to access data_flow repos
 """
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -14,7 +15,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from elspeth.contracts import NodeStateCompleted, NodeStateStatus, NodeType
+from elspeth.contracts import Artifact, NodeStateCompleted, NodeStateStatus, NodeType, TerminalOutcome, TerminalPath, TokenOutcome
 from elspeth.core.landscape import LandscapeDB
 from elspeth.tui.screens.explain_screen import (
     ExplainScreen,
@@ -79,9 +80,18 @@ class FakeQuery:
 
 
 @dataclass(slots=True)
+class FakeExecution:
+    artifacts: list[Artifact] = field(default_factory=list)
+
+    def get_artifacts(self, run_id: str) -> list[Artifact]:
+        return self.artifacts
+
+
+@dataclass(slots=True)
 class FakeRecorderFactory:
     data_flow: FakeDataFlow
     query: FakeQuery = field(default_factory=FakeQuery)
+    execution: FakeExecution = field(default_factory=FakeExecution)
 
 
 class TestExplainScreen:
@@ -165,22 +175,21 @@ class TestExplainScreenLoading:
             self._make_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM),
             self._make_node(node_id="sink-1", plugin_name="csv_sink", node_type=NodeType.SINK),
         ]
-        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes))
+        edges = [
+            FakeEdge(edge_id="edge-src-tfm", from_node_id="src-1", to_node_id="tfm-1", label="default"),
+            FakeEdge(edge_id="edge-tfm-sink", from_node_id="tfm-1", to_node_id="sink-1", label="default"),
+        ]
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, edges=edges))
 
         with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
             screen = ExplainScreen(db=db, run_id="run-123")
 
         assert isinstance(screen.state, LoadedState)
-        data = screen.get_lineage_data()
-        assert data is not None
-        assert data["run_id"] == "run-123"
-        assert data["source"]["name"] == "csv_source"
-        assert data["source"]["node_id"] == "src-1"
-        assert len(data["transforms"]) == 1
-        assert data["transforms"][0]["name"] == "filter"
-        assert data["transforms"][0]["node_type"] == "transform"
-        assert len(data["sinks"]) == 1
-        assert data["sinks"][0]["name"] == "csv_sink"
+        view = screen.get_lineage_view()
+        assert view is not None
+        assert view.run_id == "run-123"
+        labels = [item.label for item in view.items]
+        assert labels == ["Run: run-123", "Source: csv_source", "Transform: filter", "Sink: csv_sink"]
 
     def test_load_pipeline_structure_honors_lineage_selectors(self) -> None:
         """TUI mode must focus the same row/token/sink selector as no-tui mode."""
@@ -197,8 +206,13 @@ class TestExplainScreenLoading:
                 SimpleNamespace(node_id="tfm-1"),
                 SimpleNamespace(node_id="sink-1"),
             ),
+            outcome=None,
         )
-        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes))
+        edges = [
+            FakeEdge(edge_id="edge-src-tfm", from_node_id="src-1", to_node_id="tfm-1", label="default"),
+            FakeEdge(edge_id="edge-tfm-sink", from_node_id="tfm-1", to_node_id="sink-1", label="default"),
+        ]
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, edges=edges))
 
         with (
             patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory),
@@ -221,17 +235,69 @@ class TestExplainScreenLoading:
             row_id="row-456",
             sink="main",
         )
-        data = screen.get_lineage_data()
-        assert data is not None
-        assert data["tokens"] == [
-            {
-                "token_id": "tok-123",
-                "row_id": "row-456",
-                "path": ["src-1", "tfm-1", "sink-1"],
-            }
-        ]
+        view = screen.get_lineage_view()
+        assert view is not None
+        token_items = [item for item in view.items if item.token_id == "tok-123"]
+        assert len(token_items) == 1
         labels = [node["label"] for node in screen.state.tree.get_tree_nodes()]
         assert "Token: tok-123 (row: row-456)" in labels
+
+    def test_focused_lineage_outcome_detail_shows_sink_and_artifact(self) -> None:
+        """Focused token outcome detail exposes final sink and artifact evidence."""
+        db = _fake_db()
+        nodes = [
+            self._make_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
+            self._make_node(node_id="sink-1", plugin_name="csv_sink", node_type=NodeType.SINK),
+        ]
+        edges = [FakeEdge(edge_id="edge-sink", from_node_id="src-1", to_node_id="sink-1", label="default")]
+        sink_state = SimpleNamespace(node_id="sink-1", state_id="state-sink")
+        lineage_result = SimpleNamespace(
+            token=SimpleNamespace(token_id="tok-123", row_id="row-456"),
+            node_states=(SimpleNamespace(node_id="src-1", state_id="state-src"), sink_state),
+            outcome=TokenOutcome(
+                outcome_id="outcome-1",
+                run_id="run-123",
+                token_id="tok-123",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
+                sink_name="csv_sink",
+                recorded_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        )
+        artifact = Artifact(
+            artifact_id="artifact-1",
+            run_id="run-123",
+            produced_by_state_id="state-sink",
+            sink_node_id="sink-1",
+            artifact_type="csv",
+            path_or_uri="/tmp/out.csv",
+            content_hash="sha256:abc",
+            size_bytes=1536,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        factory = FakeRecorderFactory(
+            data_flow=FakeDataFlow(nodes=nodes, edges=edges),
+            execution=FakeExecution(artifacts=[artifact]),
+        )
+
+        with (
+            patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory),
+            patch("elspeth.tui.screens.explain_screen.explain_lineage", autospec=True, return_value=lineage_result),
+        ):
+            screen = ExplainScreen(db=db, run_id="run-123", token_id="tok-123")
+
+        assert isinstance(screen.state, LoadedState)
+        outcome_selection = next(node["selection"] for node in screen.state.tree.get_tree_nodes() if node["node_type"] == "outcome")
+        screen.on_tree_select(outcome_selection)
+        content = screen.detail_panel.render_content()
+
+        assert "Outcome:   success" in content
+        assert "Path:      default_flow" in content
+        assert "Sink:      csv_sink" in content
+        assert "ID:   artifact-1" in content
+        assert "Path: /tmp/out.csv" in content
+        assert "Hash: sha256:abc" in content
 
     def test_load_pipeline_structure_tree_preserves_multi_source_graph(self) -> None:
         """Loaded TUI tree uses graph edges instead of first-source linearization."""
@@ -287,19 +353,31 @@ class TestExplainScreenLoading:
             self._make_node(node_id="coal-1", plugin_name="merge", node_type=NodeType.COALESCE),
             self._make_node(node_id="sink-1", plugin_name="output", node_type=NodeType.SINK),
         ]
-        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes))
+        edges = [
+            FakeEdge(edge_id="edge-src-tfm", from_node_id="src-1", to_node_id="tfm-1", label="default"),
+            FakeEdge(edge_id="edge-tfm-gate", from_node_id="tfm-1", to_node_id="gate-1", label="default"),
+            FakeEdge(edge_id="edge-gate-agg", from_node_id="gate-1", to_node_id="agg-1", label="default"),
+            FakeEdge(edge_id="edge-agg-coal", from_node_id="agg-1", to_node_id="coal-1", label="default"),
+            FakeEdge(edge_id="edge-coal-sink", from_node_id="coal-1", to_node_id="sink-1", label="default"),
+        ]
+        factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, edges=edges))
 
         with patch("elspeth.tui.screens.explain_screen.RecorderFactory", autospec=True, return_value=factory):
             screen = ExplainScreen(db=db, run_id="run-456")
 
         assert isinstance(screen.state, LoadedState)
-        data = screen.get_lineage_data()
-        assert data is not None
-        transform_names = [t["name"] for t in data["transforms"]]
-        assert transform_names == ["mapper", "threshold", "batch", "merge"]
-        transform_types = [t["node_type"] for t in data["transforms"]]
-        assert transform_types == ["transform", "gate", "aggregation", "coalesce"]
-        assert len(data["sinks"]) == 1
+        view = screen.get_lineage_view()
+        assert view is not None
+        labels = [item.label for item in view.items]
+        assert labels == [
+            "Run: run-456",
+            "Source: csv_source",
+            "Transform: mapper",
+            "Gate: threshold",
+            "Aggregation: batch",
+            "Coalesce: merge",
+            "Sink: output",
+        ]
 
     def test_load_empty_pipeline(self) -> None:
         """Pipeline with no nodes produces LoadedState with empty fields."""
@@ -310,12 +388,9 @@ class TestExplainScreenLoading:
             screen = ExplainScreen(db=db, run_id="run-empty")
 
         assert isinstance(screen.state, LoadedState)
-        data = screen.get_lineage_data()
-        assert data is not None
-        assert data["source"]["name"] is None
-        assert data["source"]["node_id"] is None
-        assert data["transforms"] == []
-        assert data["sinks"] == []
+        view = screen.get_lineage_view()
+        assert view is not None
+        assert [item.label for item in view.items] == ["Run: run-empty", "No recorded nodes"]
 
     def test_load_transitions_from_uninitialized(self) -> None:
         """load() from UninitializedState transitions to LoadedState."""
@@ -332,7 +407,9 @@ class TestExplainScreenLoading:
             screen.load(db, "run-789")
 
         assert isinstance(screen.state, LoadedState)  # type: ignore[unreachable]  # load() mutates state; mypy can't track cross-method mutation
-        assert screen.get_lineage_data()["run_id"] == "run-789"  # type: ignore[unreachable]
+        view = screen.get_lineage_view()  # type: ignore[unreachable]
+        assert view is not None
+        assert view.run_id == "run-789"
 
     def test_load_from_loaded_state_raises(self) -> None:
         """load() from LoadedState raises InvalidStateTransitionError."""
@@ -589,6 +666,7 @@ class TestExplainScreenNodeSelection:
         lineage_result = SimpleNamespace(
             token=SimpleNamespace(token_id="token-focused", row_id="row-focused"),
             node_states=(focused_state,),
+            outcome=None,
         )
         query = FakeQuery(node_states=[latest_other_state])
         factory = FakeRecorderFactory(data_flow=FakeDataFlow(nodes=nodes, node_by_id={"tfm-1": nodes[1]}), query=query)

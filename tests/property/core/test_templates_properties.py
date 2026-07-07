@@ -42,18 +42,16 @@ from elspeth.core.templates import (
 # =============================================================================
 
 # Valid Python-style field names (for row.field).
-# Excludes the PipelineRow API names that extract_jinja2_fields deliberately
-# skips — "get" (mapping method handled as row.get("key") Call pattern),
-# "contract" (@property exposing the SchemaContract), and "to_dict"
-# (serialization method). Must mirror src/elspeth/core/templates.py
-# ``_PIPELINE_ROW_API_NAMES`` or the property domain will produce examples
+# Excludes private attributes and PipelineRow API names that
+# extract_jinja2_fields deliberately skips. Must mirror
+# src/elspeth/core/templates.py or the property domain will produce examples
 # Hypothesis then fails to round-trip through the extractor.
-_EXCLUDED_ROW_API_NAMES = frozenset({"get", "contract", "to_dict"})
+_EXCLUDED_ROW_API_NAMES = frozenset({"get", "contract", "to_dict", "to_checkpoint_format"})
 valid_field_names = st.text(
     min_size=1,
     max_size=20,
     alphabet=string.ascii_letters + "_",
-).filter(lambda s: s.isidentifier() and s not in _EXCLUDED_ROW_API_NAMES)
+).filter(lambda s: s.isidentifier() and not s.startswith("_") and s not in _EXCLUDED_ROW_API_NAMES)
 
 # Field names that can include dashes/special chars (for row["field"])
 bracket_field_names = st.text(
@@ -144,6 +142,8 @@ class TestItemAccessProperties:
         assume(field1 != field2)
         # field1 uses dot notation (must be valid identifier)
         assume(field1.isidentifier())
+        assume(not field1.startswith("_"))
+        assume(field1 not in _EXCLUDED_ROW_API_NAMES)
 
         template = f'{{{{ row.{field1} }}}} {{{{ row["{field2}"] }}}}'
         fields = extract_jinja2_fields(template)

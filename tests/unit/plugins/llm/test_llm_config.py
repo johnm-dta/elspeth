@@ -185,6 +185,966 @@ class TestLLMConfigBase:
         assert "dynamic row field access" in message
         assert "map(attribute=expr)" in message
 
+    def test_row_derived_map_attribute_filter_rejected_even_with_declared_selector(self) -> None:
+        """Declaring the selector field is not enough when it chooses another field."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ rows | map(attribute=row.selector) | list }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
+    def test_attr_filter_pipeline_row_api_name_rejected_even_with_declared_selector(self) -> None:
+        """row|attr('get') can call row.get(expr), so it is dynamic row access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ (row | attr('get'))(row.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row|attr(expr)" in message
+
+    def test_row_alias_map_attribute_filter_rejected_even_with_declared_selector(self) -> None:
+        """A local alias for row cannot hide map(attribute=alias.field)."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set r = row %}{{ rows | map(attribute=r.selector) | list }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
+    def test_row_alias_attr_filter_api_name_rejected_even_with_declared_selector(self) -> None:
+        """A local alias for row cannot hide row.get(expr) behind attr."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set r = row %}{{ (r | attr('get'))(r.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row|attr(expr)" in message
+
+    def test_with_row_alias_map_attribute_filter_rejected_even_with_declared_selector(self) -> None:
+        """A with-block alias for row cannot hide map(attribute=alias.field)."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% with r = row %}{{ lookup.rows | map(attribute=r.selector) | list }}{% endwith %}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
+    def test_row_get_method_alias_rejected_even_with_declared_selector(self) -> None:
+        """Aliasing row.get cannot hide dynamic row-field reads."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set g = row.get %}{{ g(row.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set d = {'g': row.get} %}{{ d['g']('secret') }}",
+            "{% set ns = namespace(g=row.get) %}{{ ns.g('secret') }}",
+            "{% set g = row.get %}{% set d = {'g': g} %}{{ d['g']('secret') }}",
+        ),
+    )
+    def test_container_carried_row_get_alias_rejected(self, template: str) -> None:
+        """Dict and namespace carriers cannot hide row.get aliases."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    def test_container_carried_row_get_alias_dynamic_key_rejected_even_with_declared_selector(self) -> None:
+        """Carrier-held row.get with row-derived keys remains dynamic."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set ns = namespace(g=row.get) %}{{ ns.g(row.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set ns = namespace() %}{% set ns.g = row.get %}{{ ns.g('secret') }}",
+            "{% set d = {'inner': {'g': row.get}} %}{{ d['inner']['g']('secret') }}",
+        ),
+    )
+    def test_nested_or_assigned_carried_row_get_alias_rejected(self, template: str) -> None:
+        """Namespace assignment and nested carriers cannot hide row.get aliases."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    def test_namespace_assigned_row_alias_dynamic_get_rejected_even_with_declared_selector(self) -> None:
+        """Namespace attribute assignment can carry row itself."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set ns = namespace() %}{% set ns.r = row %}{{ ns.r.get(row.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set d = {'inner': {'r': row}} %}{{ d['inner']['r'].get(row.selector) }}",
+            "{% set xs = [row.get] %}{{ xs[0](row.selector) }}",
+        ),
+    )
+    def test_nested_or_list_carried_row_access_rejected_even_with_declared_selector(self, template: str) -> None:
+        """Nested row-object and list API carriers cannot hide row.get."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    def test_loop_target_from_row_get_alias_collection_rejected_even_with_declared_selector(self) -> None:
+        """Loop targets over row.get collections inherit API alias guards."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set xs = [row.get] %}{% for g in xs %}{{ g(row.selector) }}{% endfor %}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            ("{% set d={'xs':[row.get]} %}{% macro use(g) %}{{ g(row.selector) }}{% endmacro %}{{ use(*d['xs']) }}"),
+            ("{% set d={'kw': {'g': row.get}} %}{% macro use(g) %}{{ g(row.selector) }}{% endmacro %}{{ use(**d['kw']) }}"),
+            (
+                "{% set d={'xs':[row.get]} %}"
+                "{% macro wrap() %}{{ caller(*d['xs']) }}{% endmacro %}"
+                "{% call(g) wrap() %}{{ g(row.selector) }}{% endcall %}"
+            ),
+            (
+                "{% set d={'kw': {'g': row.get}} %}"
+                "{% macro wrap() %}{{ caller(**d['kw']) }}{% endmacro %}"
+                "{% call(g) wrap() %}{{ g(row.selector) }}{% endcall %}"
+            ),
+        ),
+    )
+    def test_macro_or_callblock_row_get_splats_rejected_even_with_declared_selector(self, template: str) -> None:
+        """Macro and callblock splats can carry row.get aliases."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            ("{% set d={'kw': {'g': row.get}} %}{% set kw=d['kw'] %}{% macro use(g) %}{{ g(row.selector) }}{% endmacro %}{{ use(**kw) }}"),
+            (
+                "{% set d={'kw': {'g': row.get}} %}{% set kw=d['kw'] %}"
+                "{% macro wrap() %}{{ caller(**kw) }}{% endmacro %}"
+                "{% call(g) wrap() %}{{ g(row.selector) }}{% endcall %}"
+            ),
+        ),
+    )
+    def test_realiased_row_get_mapping_splats_rejected_even_with_declared_selector(self, template: str) -> None:
+        """Assigning a carrier slice locally must preserve row.get aliases."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        ("template", "required_fields"),
+        (
+            ("{% macro use(g) %}{{ g('secret') }}{% endmacro %}{{ use(**{row.selector: row.get}) }}", ["selector"]),
+            (
+                "{% macro wrap() %}{{ caller(**{row.selector: row.get}) }}{% endmacro %}{% call(g) wrap() %}{{ g('secret') }}{% endcall %}",
+                ["selector"],
+            ),
+            ("{% set d={'g': row.get} %}{% set g=d[row.selector] %}{{ g('secret') }}", ["selector"]),
+            ("{% set xs=[row.get] %}{% set g=xs[row.idx] %}{{ g('secret') }}", ["idx"]),
+            ("{% set d={'kw': {'g': row.get}} %}{% set g=d[row.selector]['g'] %}{{ g('secret') }}", ["selector"]),
+            ("{% set d={'kw': {'g': row.get}} %}{{ d[row.selector].g('secret') }}", ["selector"]),
+            (
+                "{% set d={'kw': {'g': row.get}} %}{% macro use(g) %}{{ g('secret') }}{% endmacro %}{{ use(**d[row.selector]) }}",
+                ["selector"],
+            ),
+            (
+                "{% set d={'xs': [row.get]} %}{% for g in d[row.selector] %}{{ g('secret') }}{% endfor %}",
+                ["selector"],
+            ),
+            (
+                "{% set d={'xs': [row.get]} %}{% macro use(g) %}{{ g('secret') }}{% endmacro %}{{ use(*d[row.selector]) }}",
+                ["selector"],
+            ),
+        ),
+    )
+    def test_dynamic_key_row_get_carriers_rejected_even_with_declared_selector(self, template: str, required_fields: list[str]) -> None:
+        """Dynamic carrier keys can select row.get aliases at render time."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=required_fields,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        ("template", "required_fields"),
+        (
+            ("{% set d = {'xs': [row]} %}{% for r in d['xs'] %}{{ r.to_dict() }}{% endfor %}", None),
+            ("{% set ns = namespace(xs=[row]) %}{% for r in ns.xs %}{{ r.to_dict() }}{% endfor %}", None),
+            ("{% set xs = [row] %}{% set d = {'xs': xs} %}{% for r in d['xs'] %}{{ r.to_dict() }}{% endfor %}", None),
+            ("{% set d = {'xs': [row]} %}{% set xs = d['xs'] %}{% for r in xs %}{{ r.to_dict() }}{% endfor %}", None),
+            (
+                "{% set d = {'xs': [row]} %}{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(*d['xs']) }}",
+                None,
+            ),
+            (
+                "{% set d = {'xs': [row]} %}{% for r in d[row.selector] %}{{ r.to_dict() }}{% endfor %}",
+                ["selector"],
+            ),
+            (
+                "{% set d = {'xs': [row]} %}{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(*d[row.selector]) }}",
+                ["selector"],
+            ),
+        ),
+    )
+    def test_carried_row_collection_iterable_rejected(self, template: str, required_fields: list[str] | None) -> None:
+        """Row collections carried by dict/namespace paths still yield row aliases."""
+        kwargs = {"required_input_fields": required_fields} if required_fields is not None else {}
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                **kwargs,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set d = {'kw': {'r': row}} %}{{ d[row.selector]['r'].to_dict() }}",
+            "{% set d = {'kw': {'r': row}} %}{{ d[row.selector].r.to_dict() }}",
+        ),
+    )
+    def test_dynamic_key_row_object_carriers_rejected(self, template: str) -> None:
+        """Dynamic carrier keys can select containers that carry row objects."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_scalar_row_value_collection_alias_allowed_when_declared(self) -> None:
+        """A list of declared row values is not a list of row objects."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="{% set xs = [row.text] %}{{ xs[0] }}",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["text"],
+        )
+
+        assert config.required_input_fields == ["text"]
+
+    def test_container_sibling_local_dict_lookup_allowed_when_declared(self) -> None:
+        """A non-row sibling inside a namespace remains an ordinary local value."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="{% set ns=namespace(r=row, params={'a': 'A'}) %}{{ ns.params.get(row.selector) }}",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["selector"],
+        )
+
+        assert config.required_input_fields == ["selector"]
+
+    def test_row_to_dict_rejected_without_required_input_fields(self) -> None:
+        """row.to_dict() exposes the full row and must fail closed."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ row.to_dict() }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize("template", ("{{ row._data }}", "{{ row.__class__ }}", "{{ row.contract }}"))
+    def test_pipeline_row_private_or_api_attr_rejected(self, template: str) -> None:
+        """Private/API row attributes are not auditable data fields."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_row_scalar_alias_map_attribute_filter_rejected_even_with_declared_selector(self) -> None:
+        """A row-derived scalar alias cannot choose map(attribute=...)."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set attr_name = row.selector %}{{ rows | map(attribute=attr_name) | list }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
+    def test_for_loop_row_alias_private_attr_rejected(self) -> None:
+        """A loop target bound to row cannot expose private row state."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% for r in [row] %}{{ r._data }}{% endfor %}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_macro_row_arg_to_dict_rejected(self) -> None:
+        """A macro parameter called with row cannot expose the full row."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(row) }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_macro_row_arg_map_attribute_rejected_even_with_declared_selector(self) -> None:
+        """A macro parameter called with row cannot hide map(attribute=alias.field)."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% macro leak(r) %}{{ rows | map(attribute=r.selector) | list }}{% endmacro %}{{ leak(row) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
+    @pytest.mark.parametrize("template", ("{{ ([row]|first)._data }}", "{{ ([row]|first).to_dict() }}"))
+    def test_row_expression_private_or_api_attr_rejected(self, template: str) -> None:
+        """Row-valued expressions cannot expose private/API row state."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_row_expression_dynamic_get_rejected_even_with_declared_selector(self) -> None:
+        """A row-valued expression cannot hide row.get(expr)."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ ([row]|first).get(row.selector) }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{{ ([row] | map(attribute='to_dict') | first)() }}",
+            "{{ ([row] | map(attribute='get') | first)(row.selector) }}",
+            "{{ [row] | map(attribute='_data') | first }}",
+        ),
+    )
+    def test_static_map_attribute_api_or_private_name_rejected(self, template: str) -> None:
+        """Static map(attribute=...) cannot expose private/API row attributes."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_for_loop_row_collection_alias_rejected(self) -> None:
+        """A collection alias containing row cannot hide a row loop target."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% set xs = [row] %}{% for r in xs %}{{ r.to_dict() }}{% endfor %}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_macro_default_row_arg_rejected(self) -> None:
+        """A macro default bound to row cannot hide full-row access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% macro leak(r=row) %}{{ r.to_dict() }}{% endmacro %}{{ leak() }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_macro_alias_row_arg_rejected(self) -> None:
+        """Calling a macro through an alias cannot hide full-row access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{% set fn = leak %}{{ fn(row) }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_callblock_caller_row_arg_rejected(self) -> None:
+        """A caller parameter passed row by a macro cannot hide full-row access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{% macro wrap() %}{{ caller(row) }}{% endmacro %}{% call(r) wrap() %}{{ r.to_dict() }}{% endcall %}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize(
+        ("template", "required_fields"),
+        (
+            (
+                "{{ row.visible }}{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{% set ns=namespace(fn=leak) %}{{ ns.fn(row) }}",
+                ["visible"],
+            ),
+            (
+                "{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{% set d={'fn': leak} %}{{ d[row.selector](row) }}",
+                ["selector"],
+            ),
+            (
+                "{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{% macro run(fn) %}{{ fn(row) }}{% endmacro %}{{ run(leak) }}",
+                None,
+            ),
+        ),
+    )
+    def test_carried_or_parameter_macro_alias_rejected(self, template: str, required_fields: list[str] | None) -> None:
+        """Macro aliases carried through containers or parameters cannot hide full-row access."""
+        kwargs = {"required_input_fields": required_fields} if required_fields is not None else {}
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                **kwargs,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_carried_callblock_macro_alias_rejected(self) -> None:
+        """Callblock macros invoked through carriers cannot hide full-row access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=(
+                    "{% macro wrap() %}{{ caller(row) }}{% endmacro %}"
+                    "{% set ns=namespace(fn=wrap) %}{% call(r) ns.fn() %}{{ r.to_dict() }}{% endcall %}"
+                ),
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    def test_row_to_checkpoint_format_rejected_without_required_input_fields(self) -> None:
+        """row.to_checkpoint_format() exposes serialized row data and must fail closed."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ row.to_checkpoint_format() }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set xs = [row] %}{{ xs[0].get(row.selector) }}",
+            "{{ [row][0].to_dict() }}",
+            "{{ [row][0]._data }}",
+        ),
+    )
+    def test_indexed_row_collection_receiver_rejected(self, template: str) -> None:
+        """Indexing a known row collection cannot hide row API or dynamic access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{{ [row] | join(',', attribute=row.selector) }}",
+            "{{ rows | selectattr(row.selector) | list }}",
+            "{{ rows | rejectattr(row.selector) | list }}",
+            "{{ rows | sort(attribute=row.selector) | list }}",
+            "{{ rows | groupby(row.selector) | list }}",
+            "{{ rows | unique(attribute=row.selector) | list }}",
+            "{{ rows | sum(attribute=row.selector) }}",
+            "{{ rows | min(attribute=row.selector) }}",
+            "{{ rows | max(attribute=row.selector) }}",
+        ),
+    )
+    def test_attribute_resolving_filter_dynamic_argument_rejected_even_with_declared_selector(self, template: str) -> None:
+        """Attribute-resolving filters cannot use row-derived attribute names."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "map(attribute=expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{{ row | attr(name=row.selector) }}",
+            "{{ [row] | join(',', row.selector) }}",
+            "{{ [row] | map('attr', row.selector) | first }}",
+        ),
+    )
+    def test_dynamic_filter_argument_forms_rejected_even_with_declared_selector(self, template: str) -> None:
+        """Keyword/positional filter variants cannot use row-derived attribute names."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(*[row]) }}",
+            "{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(**{'r': row}) }}",
+            "{% macro wrap() %}{{ caller(*[row]) }}{% endmacro %}{% call(r) wrap() %}{{ r.to_dict() }}{% endcall %}",
+        ),
+    )
+    def test_macro_or_callblock_splat_row_arg_rejected(self, template: str) -> None:
+        """Literal splats cannot hide passing row into macro parameters."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set r, x = row, 1 %}{{ r.to_dict() }}",
+            "{% set d = {'r': row} %}{{ d['r'].to_dict() }}",
+            "{% set ns = namespace(r=row) %}{{ ns.r.to_dict() }}",
+        ),
+    )
+    def test_destructured_or_carried_row_alias_rejected(self, template: str) -> None:
+        """Tuple destructuring and row carrier containers cannot hide full-row access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{{ (row if true else row).to_dict() }}",
+            "{{ (row or {}).get(row.selector) }}",
+            "{{ (row|default({})).to_dict() }}",
+        ),
+    )
+    def test_generic_row_expression_receiver_rejected(self, template: str) -> None:
+        """Generic expressions that may yield row cannot hide row API access."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{{ row.get(key=row.selector) }}",
+            "{{ row.get(*[row.selector]) }}",
+            "{{ row.get(**{'key': row.selector}) }}",
+        ),
+    )
+    def test_row_get_keyword_or_splat_key_rejected_even_with_declared_selector(self, template: str) -> None:
+        """row.get keyword/splat key forms cannot use row-derived keys."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set args = lookup.args %}{{ row.get(*args) }}",
+            "{% set kwargs = lookup.kwargs %}{{ row.get(**kwargs) }}",
+        ),
+    )
+    def test_row_get_unknown_splats_rejected(self, template: str) -> None:
+        """Unknown row.get splats can supply a dynamic key at render time."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row.get(expr)" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set args = [row] %}{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(*args) }}",
+            "{% set kwargs = {'r': row} %}{% macro leak(r) %}{{ r.to_dict() }}{% endmacro %}{{ leak(**kwargs) }}",
+        ),
+    )
+    def test_macro_aliased_splat_row_arg_rejected(self, template: str) -> None:
+        """Aliased macro splats cannot hide passing row into macro parameters."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "dynamic row field access" in message
+        assert "row API" in message
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{{ (row | attr(**{'name': 'get'}))(row.selector) }}",
+            "{{ row | attr(*['get']) }}",
+            "{{ ([row] | map(**{'attribute': 'to_dict'}) | first)() }}",
+        ),
+    )
+    def test_attribute_filter_literal_splats_rejected(self, template: str) -> None:
+        """Literal filter splats must fold into attr/map guard analysis."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            "{% set opts = lookup.opts %}{{ row | attr(**opts) }}",
+            "{% set opts = lookup.opts %}{{ [row] | map(**opts) | list }}",
+            "{% set opts = lookup.opts %}{{ [row] | join(',', **opts) }}",
+            "{% set args = lookup.args %}{{ [row] | selectattr(*args) | list }}",
+        ),
+    )
+    def test_attribute_filter_unknown_splats_rejected(self, template: str) -> None:
+        """Unknown splats on attribute filters can carry attribute names."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    def test_groupby_attribute_keyword_rejected_when_row_derived(self) -> None:
+        """groupby(attribute=...) with a row-derived attribute name is dynamic."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="{{ [row] | groupby(attribute=row.selector) | list }}",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    def test_groupby_attribute_keyword_allows_declared_literal_field(self) -> None:
+        """Static groupby(attribute=...) field names remain declarable."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="{{ [row] | groupby(attribute='text') | list }}",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["text"],
+        )
+
+        assert config.required_input_fields == ["text"]
+
+    @pytest.mark.parametrize(
+        "template",
+        (
+            (
+                "{% set args = [row.selector] %}"
+                "{% macro leak(attr) %}{{ [row] | map(attribute=attr) | list }}{% endmacro %}"
+                "{{ leak(*args) }}"
+            ),
+            (
+                "{% set kwargs = {'attr': row.selector} %}"
+                "{% macro leak(attr) %}{{ [row] | map(attribute=attr) | list }}{% endmacro %}"
+                "{{ leak(**kwargs) }}"
+            ),
+            (
+                "{% set args = [row.selector] %}"
+                "{% macro leak() %}{{ caller(*args) }}{% endmacro %}"
+                "{% call(attr) leak() %}{{ [row] | map(attribute=attr) | list }}{% endcall %}"
+            ),
+            (
+                "{% set kwargs = {'attr': row.selector} %}"
+                "{% macro leak() %}{{ caller(**kwargs) }}{% endmacro %}"
+                "{% call(attr) leak() %}{{ [row] | map(attribute=attr) | list }}{% endcall %}"
+            ),
+        ),
+    )
+    def test_macro_or_callblock_row_value_splats_rejected(self, template: str) -> None:
+        """Row-derived scalar aliases passed through macro splats stay dynamic."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template=template,
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["selector"],
+            )
+
+        assert "dynamic row field access" in str(exc_info.value)
+
+    def test_non_attribute_filter_splat_row_values_allowed_when_declared(self) -> None:
+        """Ordinary filters may use declared row values as non-attribute args."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="{{ row.text | replace(*[row.selector, 'x']) }}",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["text", "selector"],
+        )
+
+        assert config.required_input_fields == ["text", "selector"]
+
     def test_dynamic_row_access_rejected_even_with_declared_fields(self) -> None:
         """A declared field list is not a dynamic-key allowlist."""
         with pytest.raises(ValidationError, match="dynamic row field access"):

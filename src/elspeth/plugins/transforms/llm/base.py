@@ -205,6 +205,7 @@ class LLMConfig(TransformDataConfig):
             "get": "row.get(expr)",
             "item": "row[expr]",
             "map(attribute)": "map(attribute=expr)",
+            "row-api": "row API",
         }
         access_examples = ", ".join(access_examples_by_kind.get(kind, kind) for kind in access_kinds)
         raise ValueError(

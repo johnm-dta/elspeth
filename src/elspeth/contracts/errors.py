@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required,
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import DeclarationContractViolation
 from elspeth.contracts.freeze import deep_freeze, freeze_fields
-from elspeth.contracts.secret_scrub import scrub_text_for_audit
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 
 # Re-export FrameworkBugError which lives in tier_registry to break the import
 # cycle between the registry primitive and the public exception module. Apply
@@ -181,6 +181,7 @@ class ExecutionError:
                 raise TypeError(f"ExecutionError.context must be a mapping, got {type(self.context).__name__}") from exc
             if any(type(key) is not str for key in context_keys):
                 raise TypeError("ExecutionError.context keys must be strings")
+            object.__setattr__(self, "context", scrub_payload_for_audit(self.context))
             freeze_fields(self, "context")
 
     def to_dict(self) -> dict[str, Any]:

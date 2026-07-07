@@ -8,6 +8,7 @@ Tests for:
 """
 
 import dataclasses
+from collections.abc import Mapping
 
 import pytest
 
@@ -81,6 +82,32 @@ class TestExecutionError:
         )
 
         assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_scrubs_context_payload_for_audit(self) -> None:
+        """Structured context must be self-scrubbed by the DTO."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            context={
+                "password": secret,
+                "nested": {"api_key": secret},
+                "tokens": [secret],
+                "safe": "operator diagnostic",
+            },
+        )
+
+        assert error.context is not None
+        nested = error.context["nested"]
+        assert isinstance(nested, Mapping)
+        assert error.context["password"] == "<redacted-secret>"
+        assert nested["api_key"] == "<redacted-secret>"
+        assert error.context["tokens"] == ("<redacted-secret>",)
+        assert error.context["safe"] == "operator diagnostic"
+        assert secret not in repr(error.context)
         assert secret not in str(error.to_dict())
 
     def test_execution_error_traceback_redacts_only_secret_lines(self) -> None:

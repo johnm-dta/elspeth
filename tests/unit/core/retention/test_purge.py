@@ -251,6 +251,7 @@ def _create_routing_event(
     event_id: str,
     state_id: str,
     edge_id: str,
+    run_id: str,
     reason_ref: str | None,
 ) -> None:
     conn.execute(
@@ -258,6 +259,7 @@ def _create_routing_event(
             event_id=event_id,
             state_id=state_id,
             edge_id=edge_id,
+            run_id=run_id,
             routing_group_id=f"rg-{uuid4().hex[:12]}",
             ordinal=0,
             mode=RoutingMode.MOVE,
@@ -565,6 +567,7 @@ class TestFindExpiredPayloadRefs:
                 event_id="route-expired",
                 state_id="state-expired",
                 edge_id="edge-expired",
+                run_id="expired-run",
                 reason_ref="ref-routing-expired",
             )
 
@@ -745,6 +748,7 @@ class TestFindExpiredPayloadRefs:
                 event_id="event-routing",
                 state_id="state-routing",
                 edge_id="edge-routing",
+                run_id="run-routing",
                 reason_ref="ref-routing",
             )
 
@@ -818,9 +822,9 @@ class TestPurgePayloads:
         assert result.failed_refs == ()
         assert store.exists(response_ref) is False
         with db.connection() as conn:
-            grade = (
-                conn.execute(runs_table.select().where(runs_table.c.run_id == "run-replay-critical-purge")).fetchone().reproducibility_grade
-            )
+            run_record = conn.execute(runs_table.select().where(runs_table.c.run_id == "run-replay-critical-purge")).fetchone()
+            assert run_record is not None
+            grade = run_record.reproducibility_grade
         assert grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY
 
     def test_purge_payloads_counts_delete_false_as_skipped_not_failed(

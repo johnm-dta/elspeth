@@ -12,7 +12,6 @@ from typing import Any
 from sqlalchemy.engine import Row as SARow
 
 from elspeth.contracts.audit import (
-    _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
     Batch,
     BatchMember,
@@ -33,9 +32,9 @@ from elspeth.contracts.audit import (
     TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
+    validate_token_outcome_persisted_fields,
 )
 from elspeth.contracts.enums import (
-    _LEGAL_TERMINAL_PAIRS,
     BatchStatus,
     CallStatus,
     CallType,
@@ -594,51 +593,21 @@ class TokenOutcomeLoader:
                 f"TokenOutcome {oid}: invalid path={row.path!r} not in TerminalPath — audit integrity violation"
             ) from exc
 
-        if completed != (outcome is not None):
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid}: completed={completed} but outcome={outcome!r} — "
-                "completed must be true iff outcome is non-NULL (ADR-019 invariant)"
+        try:
+            validate_token_outcome_persisted_fields(
+                oid,
+                outcome,
+                path,
+                completed,
+                sink_name=row.sink_name,
+                batch_id=row.batch_id,
+                fork_group_id=row.fork_group_id,
+                join_group_id=row.join_group_id,
+                expand_group_id=row.expand_group_id,
+                error_hash=row.error_hash,
             )
-
-        if completed:
-            assert outcome is not None
-            if (outcome, path) not in _LEGAL_TERMINAL_PAIRS:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) not in _LEGAL_TERMINAL_PAIRS — audit integrity violation"
-                )
-        elif path != TerminalPath.BUFFERED:
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid}: completed=False requires path=BUFFERED, got {path!r} — audit integrity violation"
-            )
-
-        pair: tuple[TerminalOutcome | None, TerminalPath] = (outcome, path)
-        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
-        field_values = {
-            "sink_name": row.sink_name,
-            "batch_id": row.batch_id,
-            "fork_group_id": row.fork_group_id,
-            "join_group_id": row.join_group_id,
-            "expand_group_id": row.expand_group_id,
-            "error_hash": row.error_hash,
-        }
-        for field_name in constraints.required:
-            if field_values[field_name] is None:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires {field_name} but DB has NULL — audit integrity violation"
-                )
-        for field_name, expected in constraints.exact.items():
-            if field_values[field_name] != expected:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires "
-                    f"{field_name}={expected!r}, got {field_values[field_name]!r} — "
-                    "audit integrity violation"
-                )
-        for field_name in constraints.forbidden:
-            if field_values[field_name] is not None:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) forbids {field_name}, "
-                    f"got {field_values[field_name]!r} — audit integrity violation"
-                )
+        except ValueError as exc:
+            raise AuditIntegrityError(str(exc)) from exc
 
         return TokenOutcome(
             outcome_id=oid,

@@ -903,6 +903,63 @@ _TERMINAL_PAIR_FIELD_CONSTRAINTS: dict[
 }
 
 
+def validate_token_outcome_persisted_fields(
+    outcome_id: str,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
+    completed: bool,
+    *,
+    sink_name: str | None,
+    batch_id: str | None,
+    fork_group_id: str | None,
+    join_group_id: str | None,
+    expand_group_id: str | None,
+    error_hash: str | None,
+) -> None:
+    """Validate ADR-019 persisted discriminator fields for a token outcome."""
+    if completed != (outcome is not None):
+        raise ValueError(
+            f"TokenOutcome {outcome_id}: completed={completed} but outcome={outcome!r} — "
+            "completed must be true iff outcome is non-NULL (ADR-019 invariant)"
+        )
+
+    if completed:
+        assert outcome is not None
+        if (outcome, path) not in _LEGAL_TERMINAL_PAIRS:
+            raise ValueError(f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) not in _LEGAL_TERMINAL_PAIRS — audit integrity violation")
+    elif path != TerminalPath.BUFFERED:
+        raise ValueError(f"TokenOutcome {outcome_id}: completed=False requires path=BUFFERED, got {path!r} — audit integrity violation")
+
+    pair: tuple[TerminalOutcome | None, TerminalPath] = (outcome, path)
+    constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+    field_values = {
+        "sink_name": sink_name,
+        "batch_id": batch_id,
+        "fork_group_id": fork_group_id,
+        "join_group_id": join_group_id,
+        "expand_group_id": expand_group_id,
+        "error_hash": error_hash,
+    }
+    for field_name in constraints.required:
+        if field_values[field_name] is None:
+            raise ValueError(
+                f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) requires {field_name} but DB has NULL — audit integrity violation"
+            )
+    for field_name, expected in constraints.exact.items():
+        if field_values[field_name] != expected:
+            raise ValueError(
+                f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) requires "
+                f"{field_name}={expected!r}, got {field_values[field_name]!r} — "
+                "audit integrity violation"
+            )
+    for field_name in constraints.forbidden:
+        if field_values[field_name] is not None:
+            raise ValueError(
+                f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) forbids {field_name}, "
+                f"got {field_values[field_name]!r} — audit integrity violation"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class Operation:
     """Represents a source/sink I/O operation in the audit trail.

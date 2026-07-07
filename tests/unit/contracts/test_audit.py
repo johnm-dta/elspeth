@@ -42,6 +42,7 @@ from elspeth.contracts import (
     TriggerType,
     ValidationErrorRecord,
 )
+from elspeth.contracts.audit import validate_token_outcome_persisted_fields
 from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 
 
@@ -1017,6 +1018,37 @@ class TestTokenOutcomeTwoAxis:
             completed=True,
             recorded_at=datetime.now(UTC),
         )
+
+    def test_persisted_field_validator_accepts_valid_default_flow(self) -> None:
+        """The public persisted-row validator owns ADR-019 discriminator shape."""
+        validate_token_outcome_persisted_fields(
+            "out_public_valid",
+            TerminalOutcome.SUCCESS,
+            TerminalPath.DEFAULT_FLOW,
+            True,
+            sink_name="primary",
+            batch_id=None,
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id=None,
+            error_hash=None,
+        )
+
+    def test_persisted_field_validator_rejects_missing_required_field(self) -> None:
+        """Persisted rows missing pair-required fields are contract violations."""
+        with pytest.raises(ValueError, match="requires sink_name"):
+            validate_token_outcome_persisted_fields(
+                "out_public_invalid",
+                TerminalOutcome.SUCCESS,
+                TerminalPath.DEFAULT_FLOW,
+                True,
+                sink_name=None,
+                batch_id=None,
+                fork_group_id=None,
+                join_group_id=None,
+                expand_group_id=None,
+                error_hash=None,
+            )
 
 
 class TestNonCanonicalMetadata:

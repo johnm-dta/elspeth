@@ -9,6 +9,7 @@ raises AttributeError on missing attributes, matching real Row behavior and
 catching field-name typos that bare Mock() would silently accept.
 """
 
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.engine import Row as SARow
 
+from elspeth.contracts import audit as audit_contracts
 from elspeth.contracts.audit import (
     _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
@@ -1430,6 +1432,16 @@ class TestTokenOutcomeLoaderTwoAxis:
         row_overrides.update(self._valid_fields(pair))
         row_overrides.update(overrides)
         return self._make_outcome_row(**row_overrides)
+
+    def test_loader_uses_public_contract_validator_for_persisted_field_shape(self) -> None:
+        """Loader should translate rows, not own ADR-019 discriminator policy."""
+        assert hasattr(audit_contracts, "validate_token_outcome_persisted_fields")
+
+        load_source = inspect.getsource(TokenOutcomeLoader.load)
+
+        assert "validate_token_outcome_persisted_fields" in load_source
+        assert "_LEGAL_TERMINAL_PAIRS" not in load_source
+        assert "_TERMINAL_PAIR_FIELD_CONSTRAINTS" not in load_source
 
     def test_loads_completed_default_flow(self) -> None:
         result = TokenOutcomeLoader().load(self._row_for_pair((TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)))

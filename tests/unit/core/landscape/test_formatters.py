@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -347,6 +348,27 @@ class TestCSVFormatter:
         # Empty dict is preserved as JSON "{}" — an empty object is a
         # distinct datum from absence.
         assert flat["empty"] == "{}"
+
+    def test_csv_formatter_flattens_non_dict_mapping(self) -> None:
+        """Mapping values should flatten the same way as concrete dict values."""
+        formatter = CSVFormatter()
+
+        record = {
+            "record_type": "test",
+            "metadata": MappingProxyType(
+                {
+                    "attempt": 2,
+                    "context": MappingProxyType({"reason": "retry"}),
+                }
+            ),
+        }
+
+        flat = formatter.flatten(record)
+
+        assert flat["record_type"] == "test"
+        assert flat["metadata.attempt"] == 2
+        assert flat["metadata.context.reason"] == "retry"
+        assert "metadata" not in flat
 
     def test_csv_formatter_empty_dict_nested(self) -> None:
         """Empty dict inside a nested path is preserved."""

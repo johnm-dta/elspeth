@@ -239,33 +239,33 @@ class CSVFormatter:
     Flattens nested structures using dot notation.
     """
 
-    def flatten(self, record: dict[str, Any], prefix: str = "") -> dict[str, Any]:
-        """Flatten nested dict to dot-notation keys.
+    def flatten(self, record: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+        """Flatten nested mappings to dot-notation keys.
 
         Raises:
             ValueError: If flattened keys collide (e.g., dotted source keys
-                vs nested dict keys produce identical paths).
+                vs nested mapping keys produce identical paths).
         """
         result: dict[str, Any] = {}
 
         for key, value in record.items():
             full_key = f"{prefix}.{key}" if prefix else key
 
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 if not value:
-                    # Preserve empty dicts as JSON "{}" — an empty object is a
+                    # Preserve empty mappings as JSON "{}" — an empty object is a
                     # distinct datum from absence. Auditors must be able to tell
                     # "config was explicitly empty" from "config was not present".
                     if full_key in result:
                         raise ValueError(f"CSV flatten key collision: '{full_key}' already exists. Audit export would lose data.")
                     result[full_key] = "{}"
                     continue
-                nested = self.flatten(value, full_key)
+                nested = self.flatten(dict(value.items()), full_key)
                 for nested_key, nested_val in nested.items():
                     if nested_key in result:
                         raise ValueError(
-                            f"CSV flatten key collision: '{nested_key}' produced by both "
-                            f"a nested dict and a prior key. Audit export would lose data."
+                            f"CSV flatten key collision: '{nested_key}' produced by both a nested mapping and a prior key. "
+                            "Audit export would lose data."
                         )
                     result[nested_key] = nested_val
             elif isinstance(value, list):

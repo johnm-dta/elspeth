@@ -374,7 +374,7 @@ class TestPayloadStoreCleanup:
 
         store = FilesystemPayloadStore(tmp_path / "payloads")
 
-        def failing_replace(src: str, dst: str) -> None:
+        def failing_replace(src: str, dst: str, **_kwargs: object) -> None:
             raise OSError("rename failed")
 
         monkeypatch.setattr(os, "replace", failing_replace)
@@ -396,7 +396,7 @@ class TestPayloadStoreCleanup:
 
         store = FilesystemPayloadStore(tmp_path / "payloads")
 
-        def interrupted_replace(src: str, dst: str) -> None:
+        def interrupted_replace(src: str, dst: str, **_kwargs: object) -> None:
             raise KeyboardInterrupt()
 
         monkeypatch.setattr(os, "replace", interrupted_replace)
@@ -595,3 +595,260 @@ class TestPayloadStoreSecurityValidation:
 
         with pytest.raises(ValueError, match="Invalid content_hash"):
             store.exists(traversal_hash)
+
+    def test_store_rejects_shard_symlink_swap_after_validation(self, tmp_path: Path) -> None:
+        """A shard directory swapped after hash validation must not receive writes."""
+        import hashlib
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        content = b"payload redirected by a post-validation symlink swap"
+        content_hash = hashlib.sha256(content).hexdigest()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        class SwappingStore(FilesystemPayloadStore):
+            swapped = False
+
+            def _path_for_hash(self, content_hash: str) -> Path:
+                path = super()._path_for_hash(content_hash)
+                if not self.swapped:
+                    self.swapped = True
+                    path.parent.mkdir(parents=True)
+                    path.parent.rmdir()
+                    path.parent.symlink_to(outside, target_is_directory=True)
+                return path
+
+        store = SwappingStore(base_path=tmp_path / "payloads")
+
+        with pytest.raises(ValueError, match="payload store directory"):
+            store.store(content)
+
+        assert not (outside / content_hash).exists()
+
+    def test_rejects_symlinked_base_directory(self, tmp_path: Path) -> None:
+        """The payload-store root itself must be a real directory."""
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        target = tmp_path / "target"
+        target.mkdir()
+        symlink_base = tmp_path / "payloads"
+        symlink_base.symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="payload store directory"):
+            FilesystemPayloadStore(base_path=symlink_base)
+
+    def test_rejects_group_or_world_writable_base_directory(self, tmp_path: Path) -> None:
+        """Existing payload-store roots must not be shared writable directories."""
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        base = tmp_path / "payloads"
+        base.mkdir()
+        base.chmod(0o777)
+        try:
+            with pytest.raises(ValueError, match="group/world-writable"):
+                FilesystemPayloadStore(base_path=base)
+        finally:
+            base.chmod(0o700)
+
+    def test_store_rejects_group_or_world_writable_shard_directory(self, tmp_path: Path) -> None:
+        """Existing hash-prefix directories must not be shared writable directories."""
+        import hashlib
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        content = b"payload must not enter a shared writable shard"
+        content_hash = hashlib.sha256(content).hexdigest()
+        store = FilesystemPayloadStore(base_path=tmp_path / "payloads")
+        shard = store.base_path / content_hash[:2]
+        shard.mkdir()
+        shard.chmod(0o777)
+        try:
+            with pytest.raises(ValueError, match="group/world-writable"):
+                store.store(content)
+        finally:
+            shard.chmod(0o700)
+
+    def test_store_rejects_shard_symlink_swap_before_idempotent_read(self, tmp_path: Path) -> None:
+        """A swapped shard directory must not be accepted by store's early read path."""
+        import hashlib
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        content = b"existing outside payload must not be accepted as in-store"
+        content_hash = hashlib.sha256(content).hexdigest()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / content_hash).write_bytes(content)
+
+        class SwappingStore(FilesystemPayloadStore):
+            swapped = False
+
+            def _path_for_hash(self, content_hash: str) -> Path:
+                path = super()._path_for_hash(content_hash)
+                if not self.swapped:
+                    self.swapped = True
+                    path.parent.mkdir(parents=True)
+                    path.parent.rmdir()
+                    path.parent.symlink_to(outside, target_is_directory=True)
+                return path
+
+        store = SwappingStore(base_path=tmp_path / "payloads")
+
+        with pytest.raises(ValueError, match="payload store directory"):
+            store.store(content)
+
+    def test_store_binds_rename_to_validated_shard_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A shard swap after final validation must not redirect the final rename."""
+        import hashlib
+        import os
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        content = b"payload whose final rename must stay in the validated shard"
+        content_hash = hashlib.sha256(content).hexdigest()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        store = FilesystemPayloadStore(base_path=tmp_path / "payloads")
+        target_parent = store.base_path / content_hash[:2]
+        backup = tmp_path / "original-shard-with-temp"
+        real_replace = os.replace
+        swapped = False
+
+        def swapping_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                (outside / Path(src).name).write_bytes(b"attacker controlled temp")
+                target_parent.rename(backup)
+                target_parent.symlink_to(outside, target_is_directory=True)
+            real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", swapping_replace)
+
+        assert store.store(content) == content_hash
+
+        assert not (outside / content_hash).exists()
+        assert (backup / content_hash).read_bytes() == content
+
+    def test_retrieve_rejects_shard_symlink_swap_after_validation(self, tmp_path: Path) -> None:
+        """A shard directory swapped after hash validation must not receive reads."""
+        import hashlib
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        content = b"outside payload must not be read through a swapped shard"
+        content_hash = hashlib.sha256(content).hexdigest()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / content_hash).write_bytes(content)
+
+        class SwappingStore(FilesystemPayloadStore):
+            swapped = False
+
+            def _path_for_hash(self, content_hash: str) -> Path:
+                path = super()._path_for_hash(content_hash)
+                if not self.swapped:
+                    self.swapped = True
+                    path.parent.mkdir(parents=True)
+                    path.parent.rmdir()
+                    path.parent.symlink_to(outside, target_is_directory=True)
+                return path
+
+        store = SwappingStore(base_path=tmp_path / "payloads")
+
+        with pytest.raises(ValueError, match="payload store directory"):
+            store.retrieve(content_hash)
+
+    def test_exists_rejects_shard_symlink_swap_after_validation(self, tmp_path: Path) -> None:
+        """A shard directory swapped after hash validation must not satisfy exists()."""
+        import hashlib
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        content = b"outside payload must not satisfy exists"
+        content_hash = hashlib.sha256(content).hexdigest()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / content_hash).write_bytes(content)
+
+        class SwappingStore(FilesystemPayloadStore):
+            swapped = False
+
+            def _path_for_hash(self, content_hash: str) -> Path:
+                path = super()._path_for_hash(content_hash)
+                if not self.swapped:
+                    self.swapped = True
+                    path.parent.mkdir(parents=True)
+                    path.parent.rmdir()
+                    path.parent.symlink_to(outside, target_is_directory=True)
+                return path
+
+        store = SwappingStore(base_path=tmp_path / "payloads")
+
+        with pytest.raises(ValueError, match="payload store directory"):
+            store.exists(content_hash)
+
+    def test_delete_rejects_shard_symlink_swap_after_validation(self, tmp_path: Path) -> None:
+        """A shard directory swapped after hash validation must not receive deletes."""
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        store = FilesystemPayloadStore(base_path=tmp_path / "payloads")
+        content = b"payload protected from post-validation symlink delete"
+        content_hash = store.store(content)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        protected = outside / content_hash
+        protected.write_bytes(b"must not be deleted")
+
+        class SwappingStore(FilesystemPayloadStore):
+            swapped = False
+
+            def _path_for_hash(self, content_hash: str) -> Path:
+                path = super()._path_for_hash(content_hash)
+                if not self.swapped:
+                    self.swapped = True
+                    backup = tmp_path / "original-shard"
+                    path.parent.rename(backup)
+                    path.parent.symlink_to(outside, target_is_directory=True)
+                return path
+
+        swapping_store = SwappingStore(base_path=tmp_path / "payloads")
+
+        with pytest.raises(ValueError, match="payload store directory"):
+            swapping_store.delete(content_hash)
+
+        assert protected.read_bytes() == b"must not be deleted"
+
+    def test_delete_binds_unlink_to_validated_shard_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A shard swap after delete validation must not unlink an outside file."""
+        import os
+
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        store = FilesystemPayloadStore(base_path=tmp_path / "payloads")
+        content = b"payload whose delete must stay in the validated shard"
+        content_hash = store.store(content)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        protected = outside / content_hash
+        protected.write_bytes(b"must not be deleted")
+        target_parent = store.base_path / content_hash[:2]
+        backup = tmp_path / "original-delete-shard"
+        real_unlink = os.unlink
+        swapped = False
+
+        def swapping_unlink(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], *args: object, **kwargs: object) -> None:
+            nonlocal swapped
+            if not swapped and Path(path).name == content_hash:
+                swapped = True
+                target_parent.rename(backup)
+                target_parent.symlink_to(outside, target_is_directory=True)
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", swapping_unlink)
+
+        assert store.delete(content_hash) is True
+
+        assert protected.read_bytes() == b"must not be deleted"
+        assert not (backup / content_hash).exists()

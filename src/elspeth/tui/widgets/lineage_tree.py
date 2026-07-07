@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.tui.types import LineageData, TreeNodeDict
+from elspeth.tui.lineage_view import TuiLineageView
+from elspeth.tui.types import LineageData, TreeNodeDict, TreeSelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +18,7 @@ class TreeNode:
     label: str
     node_id: str | None = None
     node_type: str = ""
+    selection: TreeSelection | None = None
     children: tuple["TreeNode", ...] = ()
     expanded: bool = True
 
@@ -55,15 +57,21 @@ class LineageTree:
         or malformed fields will raise KeyError, not silently degrade.
     """
 
-    def __init__(self, lineage_data: LineageData) -> None:
+    def __init__(self, lineage_data: LineageData | TuiLineageView) -> None:
         """Initialize with lineage data.
 
         Args:
             lineage_data: LineageData containing run_id, source, transforms,
                           sinks, tokens. All fields are required.
         """
-        self._data = lineage_data
-        self._root = self._build_tree()
+        if isinstance(lineage_data, TuiLineageView):
+            self._data: LineageData | None = None
+            self._view: TuiLineageView | None = lineage_data
+            self._root: TreeNode | None = None
+        else:
+            self._data = lineage_data
+            self._view = None
+            self._root = self._build_tree()
 
     def _build_tree(self) -> TreeNode:
         """Build tree structure from lineage data.
@@ -74,6 +82,9 @@ class LineageTree:
         Returns:
             Root TreeNode
         """
+        if self._data is None:
+            raise TypeError("Legacy tree construction requires LineageData")
+
         # Label map for processing node types
         _TYPE_LABELS = {
             "transform": "Transform",
@@ -81,6 +92,29 @@ class LineageTree:
             "aggregation": "Aggregation",
             "coalesce": "Coalesce",
         }
+
+        run_id = self._data["run_id"]
+
+        has_recorded_nodes = (
+            self._data["source"]["node_id"] is not None
+            or self._data["source"]["name"] is not None
+            or bool(self._data["transforms"])
+            or bool(self._data["sinks"])
+        )
+        if not has_recorded_nodes:
+            return TreeNode(
+                label=f"Run: {run_id}",
+                node_type="run",
+                selection={"kind": "run", "run_id": run_id},
+                children=(
+                    TreeNode(
+                        label="No recorded nodes",
+                        node_type="status",
+                        selection={"kind": "status", "run_id": run_id, "message": "No recorded nodes"},
+                        expanded=False,
+                    ),
+                ),
+            )
 
         # Step 1: Group tokens by their terminal sink
         tokens_by_sink: dict[str, list[TreeNode]] = {}
@@ -90,8 +124,14 @@ class LineageTree:
             path = token["path"]
             token_node = TreeNode(
                 label=f"Token: {token_id} (row: {row_id})",
-                node_id=token_id,
+                node_id=None,
                 node_type="token",
+                selection={
+                    "kind": "token",
+                    "run_id": run_id,
+                    "token_id": token_id,
+                    "row_id": row_id,
+                },
             )
             if path:
                 terminal_node_id = path[-1]
@@ -110,6 +150,7 @@ class LineageTree:
                 label=f"Sink: {sink_name}",
                 node_id=sink_node_id,
                 node_type="sink",
+                selection=self._node_selection(run_id, sink_node_id, "sink"),
                 children=token_children,
             )
             sink_nodes.append(sink_node)
@@ -143,6 +184,7 @@ class LineageTree:
                 label=f"{type_label}: {transform_name}",
                 node_id=transform_node_id,
                 node_type=raw_type,
+                selection=self._node_selection(run_id, transform_node_id, raw_type),
                 children=current_children,
             )
             # This transform becomes the child of the previous one
@@ -156,16 +198,28 @@ class LineageTree:
             label=f"Source: {source_name or '(unknown)'}",
             node_id=source_node_id,
             node_type="source",
+            selection=self._node_selection(run_id, source_node_id, "source"),
             children=current_children,
         )
 
         # Step 5: Build root
-        run_id = self._data["run_id"]
         return TreeNode(
             label=f"Run: {run_id}",
             node_type="run",
+            selection={"kind": "run", "run_id": run_id},
             children=(source_node,),
         )
+
+    def _node_selection(self, run_id: str, node_id: str | None, node_type: str) -> TreeSelection | None:
+        """Build a node selection payload when a real node ID exists."""
+        if node_id is None:
+            return None
+        return {
+            "kind": "node",
+            "run_id": run_id,
+            "node_id": node_id,
+            "node_type": node_type,
+        }
 
     def get_tree_nodes(self) -> list[TreeNodeDict]:
         """Get flat list of tree nodes for rendering.
@@ -174,6 +228,22 @@ class LineageTree:
             List of TreeNodeDict with label, node_id, node_type, depth,
             has_children, expanded.
         """
+        if self._view is not None:
+            return [
+                TreeNodeDict(
+                    label=item.label,
+                    node_id=item.node_id,
+                    node_type=item.node_type,
+                    selection=item.selection,
+                    depth=item.depth,
+                    has_children=item.has_children,
+                    expanded=item.expanded,
+                )
+                for item in self._view.items
+            ]
+
+        if self._root is None:
+            raise TypeError("LineageTree has neither graph view nor legacy root")
         nodes: list[TreeNodeDict] = []
         self._flatten_tree(self._root, 0, nodes)
         return nodes
@@ -191,6 +261,7 @@ class LineageTree:
                 label=node.label,
                 node_id=node.node_id,
                 node_type=node.node_type,
+                selection=node.selection,
                 depth=depth,
                 has_children=len(node.children) > 0,
                 expanded=node.expanded,
@@ -210,6 +281,20 @@ class LineageTree:
         Returns:
             TreeNode if found, None otherwise
         """
+        if self._view is not None:
+            for item in self._view.items:
+                if item.node_id == node_id:
+                    return TreeNode(
+                        label=item.label,
+                        node_id=item.node_id,
+                        node_type=item.node_type,
+                        selection=item.selection,
+                        expanded=item.expanded,
+                    )
+            return None
+
+        if self._root is None:
+            return None
         return self._find_node(self._root, node_id)
 
     def _find_node(self, node: TreeNode, node_id: str) -> TreeNode | None:

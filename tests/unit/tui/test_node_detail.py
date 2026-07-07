@@ -244,6 +244,40 @@ class TestNodeDetailPanel:
         content = panel.render_content()
         assert "1.5 KB" in content
 
+    def test_outcome_detail_shows_sink_and_artifact_evidence(self) -> None:
+        """Outcome detail rows show final destination and artifact hash/path."""
+        from elspeth.tui.widgets.node_detail import NodeDetailPanel
+
+        panel = NodeDetailPanel(
+            {
+                "detail_kind": "outcome",
+                "title": "Outcome: success",
+                "run_id": "run-1",
+                "token_id": "token-1",
+                "row_id": "row-1",
+                "state_id": "state-sink",
+                "outcome": "success",
+                "outcome_path": "default_flow",
+                "completed": True,
+                "sink": "json_sink",
+                "artifact_id": "artifact-1",
+                "artifact_type": "json",
+                "artifact_path_or_uri": "/tmp/out.json",
+                "artifact_hash": "sha256:abc",
+                "artifact_size_bytes": 1536,
+            }
+        )
+
+        content = panel.render_content()
+
+        assert "Outcome:   success" in content
+        assert "Path:      default_flow" in content
+        assert "Sink:      json_sink" in content
+        assert "ID:   artifact-1" in content
+        assert "Path: /tmp/out.json" in content
+        assert "Hash: sha256:abc" in content
+        assert "Size: 1.5 KB" in content
+
     def test_zero_duration_displayed_not_masked(self) -> None:
         """Duration of 0 ms should be displayed, not treated as missing.
 

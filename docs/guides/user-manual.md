@@ -176,6 +176,18 @@ elspeth plugins list --type transform
 elspeth plugins list --type sink
 ```
 
+### Machine-Readable Catalog
+
+```bash
+elspeth plugins list --format json
+elspeth plugins list --type source --format json
+elspeth plugins inspect source csv
+elspeth plugins inspect source csv --format json
+```
+
+`plugins inspect` shows the catalog description, config fields, JSON Schema,
+and composer knob schema for one plugin.
+
 ---
 
 ## Explaining Pipeline Results
@@ -215,6 +227,12 @@ elspeth explain --run latest --json --database <path/to/audit.db>
 # Disambiguate when a row has multiple terminal tokens (e.g., forked rows)
 elspeth explain --run latest --row 42 --sink high_values --database <path/to/audit.db>
 ```
+
+The interactive TUI shows a selectable lineage tree and detail panel. Use arrow
+keys to move through run, branch, node, token, and status rows; press Enter to
+update the detail panel; press `r` to refresh and `q` to quit. Use `--row`,
+`--token`, and `--sink` to focus the initial lineage view. In non-interactive
+terminals or CI, prefer `--no-tui` or `--json`.
 
 ---
 

@@ -105,6 +105,15 @@ def _get_keyvault_client(vault_url: str) -> SecretClient:
     return SecretClient(vault_url=vault_url, credential=credential)
 
 
+def _is_azure_resource_not_found(exc: Exception) -> bool:
+    """Return whether an exception is Azure's 404 type without eager Azure imports."""
+    try:
+        from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
+    except ImportError:
+        return False
+    return isinstance(exc, AzureResourceNotFoundError)
+
+
 class EnvSecretLoader:
     """Load secrets from environment variables.
 
@@ -245,21 +254,21 @@ class KeyVaultSecretLoader:
         """Fetch a Key Vault secret without cache lookup or storage."""
         with self._client_lock:
             # _get_client() raises the helpful ImportError when the Azure SDK is
-            # absent, before any API call. Once it returns, azure-keyvault-secrets
-            # (and its azure-core dependency) are installed, so importing the Azure
-            # exception type here cannot fail in any real environment.
+            # absent, before any API call. Tests may patch _get_client() without
+            # installing azure-core, so classify Azure 404s lazily by helper.
             client = self._get_client()
-            from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
 
             try:
                 secret = client.get_secret(name)
-            except AzureResourceNotFoundError as e:
+            except Exception as e:
                 # HTTP 404 - secret genuinely doesn't exist in Key Vault.
                 # This is the ONLY Azure exception that triggers fallback; all
                 # other Azure exceptions (auth errors, rate limits, network issues)
-                # propagate. Do NOT catch Exception - operational failures must
-                # fail fast, not silently fall back.
-                raise SecretNotFoundError(f"Secret '{name}' not found in Key Vault ({self._vault_url})") from e
+                # propagate unchanged. Operational failures must fail fast, not
+                # silently fall back.
+                if _is_azure_resource_not_found(e):
+                    raise SecretNotFoundError(f"Secret '{name}' not found in Key Vault ({self._vault_url})") from e
+                raise
 
             value: str | None = secret.value
             if value is None:

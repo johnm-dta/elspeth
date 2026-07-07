@@ -147,7 +147,7 @@ class BlobCSVExpand(BaseTransform):
     name = "blob_csv_expand"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2fb6d93cf842f0a1"
+    source_file_hash: str | None = "sha256:83d598380cb107aa"
     config_model = BlobCSVExpandConfig
     creates_tokens = True
     passes_through_input = True

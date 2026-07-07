@@ -23,7 +23,7 @@ This guide covers running ELSPETH in Docker containers for development and produ
 ELSPETH containers follow a **CLI-first design** - arguments are passed directly to the `elspeth` CLI:
 
 ```bash
-IMAGE_TAG=v0.6.0
+IMAGE_TAG=v0.7.0
 
 # Show help
 docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} --help
@@ -35,7 +35,7 @@ docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} --version
 docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} plugins list
 ```
 
-Replace `v0.6.0` with the exact release or immutable `sha-<commit>` tag that
+Replace `v0.7.0` with the exact release or immutable `sha-<commit>` tag that
 matches the deployment you are operating.
 
 ---
@@ -129,18 +129,18 @@ docker run -it --rm \
   explain --run latest --row 42 --database /app/state/landscape.db
 ```
 
-For non-interactive environments (CI/CD), query the audit database directly:
+For non-interactive environments (CI/CD), use text or JSON explain output:
 
 ```bash
 docker run --rm \
   -v $(pwd)/state:/app/state:ro \
-  --entrypoint sqlite3 \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
-  /app/state/landscape.db \
-  "SELECT ns.node_id, ns.status FROM node_states ns
-   JOIN tokens t ON ns.token_id = t.token_id
-   JOIN rows r ON t.row_id = r.row_id
-   WHERE r.row_index = 42 ORDER BY ns.step_index;"
+  explain --run latest --row 42 --no-tui --database /app/state/landscape.db
+
+docker run --rm \
+  -v $(pwd)/state:/app/state:ro \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
+  explain --run latest --row 42 --json --database /app/state/landscape.db
 ```
 
 ### Resume an Interrupted Run
@@ -250,11 +250,11 @@ docker run --rm ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} health --json
 ```json
 {
   "status": "healthy",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "commit": "abc123f",
   "checks": {
-    "version": {"status": "ok", "value": "0.6.0"},
-    "python": {"status": "ok", "value": "3.11.9"},
+    "version": {"status": "ok", "value": "0.7.0"},
+    "python": {"status": "ok", "value": "3.13.1"},
     "database": {"status": "ok", "value": "connected"},
     "plugins": {"status": "ok", "value": "4 sources, 11 transforms, 4 sinks"}
   }
@@ -278,7 +278,7 @@ livenessProbe:
 | Tag Pattern | Example | Use Case |
 |-------------|---------|----------|
 | `sha-<commit>` | `sha-abc123f` | CI/CD deployments (immutable, recommended) |
-| `v<version>` | `v0.6.0` | Release versions |
+| `v<version>` | `v0.7.0` | Release versions |
 
 Use `sha-<commit>` tags for immutable deployments. The build workflow does not
 publish `latest`.

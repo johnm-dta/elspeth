@@ -618,6 +618,10 @@ elspeth resume abc123 --execute
 
 # List available plugins
 elspeth plugins list
+
+# Machine-readable catalog and schema details
+elspeth plugins list --format json
+elspeth plugins inspect source csv --format json
 ```
 
 ### Explaining Decisions
@@ -634,7 +638,12 @@ Elspeth records complete lineage for every row. The audit database captures:
 elspeth explain --run <run_id> --row <row_id> --database <path/to/audit.db>
 ```
 
-For programmatic access, query the Landscape database directly using the `LandscapeRecorder` API.
+The TUI renders the recorded graph, including branch labels and repeated DAG
+joins, as a selectable tree. Arrow keys move through run, branch, node, token,
+and status rows; Enter updates the detail panel; `r` refreshes; `q` exits.
+
+For programmatic access, use `elspeth explain --no-tui` or
+`elspeth explain --json`.
 
 ## Landscape MCP Server
 
@@ -929,7 +938,7 @@ elspeth/
 | Component | Technology | Purpose |
 | --------- | ---------- | ------- |
 | CLI | Typer | Commands: run, join, explain, validate, resume, purge |
-| TUI | Textual | Interactive lineage explorer |
+| TUI | Textual | Interactive graph-backed lineage explorer |
 | Config | Dynaconf + Pydantic | Multi-source with env var expansion |
 | Plugins | pluggy | Dynamic discovery, extensible components |
 | Audit | SQLAlchemy Core | SQLite/SQLCipher (dev) / PostgreSQL (prod) |

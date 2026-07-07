@@ -14,6 +14,7 @@ import sqlalchemy as sa
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordNotFoundError
 
 
 @pytest.fixture
@@ -211,7 +212,7 @@ class TestExecuteUpdate:
         assert row.value == "after"
 
     def test_update_nonexistent_raises(self, ops: DatabaseOps, test_table: sa.Table) -> None:
-        with pytest.raises(AuditIntegrityError, match="zero rows affected"):
+        with pytest.raises(LandscapeRecordNotFoundError, match="zero rows affected"):
             ops.execute_update(
                 test_table.update().where(test_table.c.id == "nonexistent").values(value="new"),
             )

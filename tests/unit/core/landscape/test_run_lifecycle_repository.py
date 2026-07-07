@@ -626,7 +626,7 @@ class TestRecordSourceFieldResolutionNonexistentRun:
         The error comes from execute_update() detecting zero affected rows.
         """
         _, repo = _make_repo()
-        with pytest.raises(AuditIntegrityError):
+        with pytest.raises(AuditIntegrityError, match="Cannot record source field resolution for run 'ghost-run'"):
             repo.record_source_field_resolution(
                 "ghost-run",
                 {"header": "field"},

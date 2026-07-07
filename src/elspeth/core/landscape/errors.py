@@ -24,6 +24,14 @@ class LandscapeRecordError(AuditIntegrityError):
 
 
 @tier_1_error(
+    reason="ADR-010: narrow recorder failure marker for update targets missing their required audit row",
+    caller_module=__name__,
+)
+class LandscapeRecordNotFoundError(LandscapeRecordError):
+    """Recorder update found no target audit row to mutate."""
+
+
+@tier_1_error(
     reason="ADR-010: terminal audit row persisted, but post-commit materialization failed",
     caller_module=__name__,
 )

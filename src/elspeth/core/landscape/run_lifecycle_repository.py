@@ -42,7 +42,7 @@ from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.errors import LandscapeRecordError, LandscapeRecordNotFoundError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.run_coordination_repository import (
@@ -711,12 +711,15 @@ class RunLifecycleRepository:
         }
         resolution_json = canonical_json(resolution_data)
 
+        stmt = (
+            runs_table.update()
+            .where(runs_table.c.run_id == run_id)
+            .values(source_field_resolution_json=resolution_json)
+        )
         try:
-            self._ops.execute_update(
-                runs_table.update().where(runs_table.c.run_id == run_id).values(source_field_resolution_json=resolution_json)
-            )
-        except AuditIntegrityError:
-            raise  # Preserve original error message from execute_update
+            self._ops.execute_update(stmt, context=f"record_source_field_resolution run_id={run_id}")
+        except LandscapeRecordNotFoundError as exc:
+            raise AuditIntegrityError(f"Cannot record source field resolution for run {run_id!r}: run not found") from exc
 
     def record_run_source(
         self,
@@ -1446,9 +1449,10 @@ class RunLifecycleRepository:
         if export_sink is not None:
             updates["export_sink"] = export_sink
 
+        stmt = runs_table.update().where(runs_table.c.run_id == run_id).values(**updates)
         try:
-            self._ops.execute_update(runs_table.update().where(runs_table.c.run_id == run_id).values(**updates))
-        except AuditIntegrityError as exc:
+            self._ops.execute_update(stmt, context=f"set_export_status run_id={run_id} status={status.value}")
+        except LandscapeRecordNotFoundError as exc:
             raise AuditIntegrityError(f"Cannot set export status to {status.value!r}: run {run_id} not found") from exc
 
     def finalize_run(self, run_id: str, status: RunStatus, *, token: CoordinationToken | None = None) -> Run:

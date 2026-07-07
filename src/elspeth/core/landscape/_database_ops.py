@@ -10,7 +10,7 @@ from sqlalchemy import Executable
 from sqlalchemy.engine import Connection, Row
 from sqlalchemy.exc import SQLAlchemyError
 
-from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.errors import LandscapeRecordError, LandscapeRecordNotFoundError
 
 
 def _safe_database_error_message(
@@ -122,4 +122,6 @@ class DatabaseOps(ReadOnlyDatabaseOps):
                 _safe_database_error_message(operation="execute_update", action="update", exc=exc, context=context)
             ) from exc
         if result.rowcount == 0:
-            raise LandscapeRecordError(f"execute_update: zero rows affected{detail} — target row does not exist (audit data corruption)")
+            raise LandscapeRecordNotFoundError(
+                f"execute_update: zero rows affected{detail} — target row does not exist (audit data corruption)"
+            )

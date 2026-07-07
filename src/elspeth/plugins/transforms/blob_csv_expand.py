@@ -28,6 +28,8 @@ from elspeth.plugins.sources.field_normalization import ExternalHeaderError, res
 
 DEFAULT_MAX_OUTPUT_ROWS = 100_000
 DEFAULT_MAX_BLOB_BYTES = 100 * 1024 * 1024
+_SHA256_HEX_CHARS = frozenset("0123456789abcdef")
+_INVARIANT_PROBE_BLOB_REF = "0" * 64
 
 
 class BlobCSVExpandConfig(TransformDataConfig):
@@ -112,6 +114,10 @@ def _csv_error_reason(reason: str, **details: object) -> TransformErrorReason:
     return cast(TransformErrorReason, {"reason": reason, **details})
 
 
+def _is_payload_hash(value: str) -> bool:
+    return len(value) == 64 and all(char in _SHA256_HEX_CHARS for char in value)
+
+
 def _blob_csv_added_output_fields(cfg: BlobCSVExpandConfig) -> tuple[FieldDefinition, ...]:
     fields: list[FieldDefinition] = []
     if cfg.columns is not None:
@@ -147,7 +153,7 @@ class BlobCSVExpand(BaseTransform):
     name = "blob_csv_expand"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a5b479e532054a34"
+    source_file_hash: str | None = "sha256:d6599a611da7e1ea"
     config_model = BlobCSVExpandConfig
     creates_tokens = True
     passes_through_input = True
@@ -203,7 +209,7 @@ class BlobCSVExpand(BaseTransform):
             self._augment_invariant_probe_row(
                 probe,
                 field_name=self._blob_ref_field,
-                value="blob-csv-expand-probe-ref",
+                value=_INVARIANT_PROBE_BLOB_REF,
             )
         ]
 
@@ -216,7 +222,7 @@ class BlobCSVExpand(BaseTransform):
 
         class _InvariantPayloadStore:
             def retrieve(self, ref: str) -> bytes:
-                if ref != "blob-csv-expand-probe-ref":
+                if ref != _INVARIANT_PROBE_BLOB_REF:
                     raise PayloadNotFoundError(ref)
                 return b"blob_csv_expand_probe_value\nprobe\n"
 
@@ -246,6 +252,17 @@ class BlobCSVExpand(BaseTransform):
             raise TypeError(
                 f"Field '{self._blob_ref_field}' must be a string payload-store hash, got {type(blob_ref).__name__}. "
                 "This indicates an upstream validation bug."
+            )
+        if not _is_payload_hash(blob_ref):
+            return TransformResult.error(
+                {
+                    "reason": "invalid_input",
+                    "field": self._blob_ref_field,
+                    "blob_ref": blob_ref,
+                    "error_type": "invalid_blob_ref",
+                    "error": "payload-store hash must be 64 lowercase hex characters",
+                },
+                retryable=False,
             )
 
         try:

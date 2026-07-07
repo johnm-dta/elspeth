@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+from typing import Any
 
+from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.plugins.transforms.blob_csv_expand import BlobCSVExpand
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
 
@@ -14,17 +18,26 @@ class _PayloadStoreFake:
     def __init__(self, content_by_hash: dict[str, bytes]) -> None:
         self.content_by_hash = content_by_hash
 
+    def store(self, content: bytes) -> str:
+        content_hash = _hash(content)
+        self.content_by_hash[content_hash] = content
+        return content_hash
+
     def retrieve(self, content_hash: str) -> bytes:
         return self.content_by_hash[content_hash]
+
+    def exists(self, content_hash: str) -> bool:
+        return content_hash in self.content_by_hash
+
+    def delete(self, content_hash: str) -> bool:
+        return self.content_by_hash.pop(content_hash, None) is not None
 
 
 def _hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _build_transform(**overrides):
-    from elspeth.plugins.transforms.blob_csv_expand import BlobCSVExpand
-
+def _build_transform(**overrides: Any) -> BlobCSVExpand:
     config = {
         "schema": DYNAMIC_SCHEMA,
         "blob_ref_field": "blob_ref",
@@ -122,6 +135,30 @@ def test_blob_csv_expand_enforces_max_output_rows() -> None:
     assert result.reason is not None
     assert result.reason["reason"] == "too_many_rows"
     assert result.reason["max_output_rows"] == 1
+
+
+def test_blob_csv_expand_routes_malformed_manifest_blob_ref_as_row_error(tmp_path: Path) -> None:
+    transform = _build_transform()
+    transform._payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+
+    result = transform.process(
+        make_pipeline_row(
+            {
+                "url": "https://example.test/manifest-row.json",
+                "blob_ref": "not-a-sha256",
+                "manifest_index": 0,
+            }
+        ),
+        make_context(),
+    )
+
+    assert result.status == "error"
+    assert result.retryable is False
+    assert result.reason is not None
+    assert result.reason["reason"] == "invalid_input"
+    assert result.reason["error_type"] == "invalid_blob_ref"
+    assert result.reason["field"] == "blob_ref"
+    assert result.reason["blob_ref"] == "not-a-sha256"
 
 
 def test_discovery_registers_blob_csv_expand() -> None:

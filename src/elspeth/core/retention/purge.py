@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import RunStatus
 from elspeth.contracts.payload_store import PayloadStore
+from elspeth.core.landscape.model_loaders import validate_run_lifecycle_row
 from elspeth.core.landscape.reproducibility import update_grade_after_purge
 from elspeth.core.landscape.schema import (
     calls_table,
@@ -98,16 +99,7 @@ class PurgeManager:
                     f"Invalid run status '{row.status}' for run {row.run_id} — expected one of {[status.value for status in RunStatus]}"
                 ) from exc
 
-            if status == RunStatus.RUNNING and row.completed_at is not None:
-                raise contract_errors.AuditIntegrityError(
-                    f"Run {row.run_id} has status='running' but completed_at is set — "
-                    f"audit integrity violation (running runs must not have completed_at)"
-                )
-            if status == RunStatus.COMPLETED and row.completed_at is None:
-                raise contract_errors.AuditIntegrityError(
-                    f"Run {row.run_id} has status='completed' but completed_at is NULL — "
-                    f"audit integrity violation (completed runs must have completed_at)"
-                )
+            validate_run_lifecycle_row(row.run_id, status, row.completed_at)
 
     def _build_ref_union_query(
         self,

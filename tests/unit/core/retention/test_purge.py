@@ -347,6 +347,12 @@ class TestFindExpiredPayloadRefs:
         ("status", "completed_at", "match"),
         (
             ("completed", None, "status='completed' but completed_at is NULL"),
+            (
+                "completed_with_failures",
+                None,
+                "status='completed_with_failures' but completed_at is NULL",
+            ),
+            ("empty", None, "status='empty' but completed_at is NULL"),
             ("running", datetime(2026, 2, 8, tzinfo=UTC), "status='running' but completed_at is set"),
             ("not-a-run-status", None, "Invalid run status 'not-a-run-status'"),
         ),

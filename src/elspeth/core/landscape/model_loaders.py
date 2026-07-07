@@ -62,6 +62,21 @@ _COMPLETED_AT_REQUIRED_RUN_STATUSES = frozenset(
 )
 
 
+def validate_run_lifecycle_row(run_id: str, status: RunStatus, completed_at: object | None) -> None:
+    """Validate status-dependent run lifecycle invariants for persisted rows."""
+    if status == RunStatus.RUNNING:
+        if completed_at is not None:
+            raise AuditIntegrityError(
+                f"Run {run_id} has status='running' but completed_at is set — "
+                f"audit integrity violation (running runs must not have completed_at)"
+            )
+    elif status in _COMPLETED_AT_REQUIRED_RUN_STATUSES and completed_at is None:
+        raise AuditIntegrityError(
+            f"Run {run_id} has status={status.value!r} but completed_at is NULL — "
+            f"audit integrity violation ({status.value!r} runs must have completed_at)"
+        )
+
+
 class RunLoader:
     """Loader for Run records."""
 
@@ -77,17 +92,7 @@ class RunLoader:
         status = RunStatus(row.status)
 
         # Tier 1: status-dependent lifecycle invariants
-        if status == RunStatus.RUNNING:
-            if row.completed_at is not None:
-                raise AuditIntegrityError(
-                    f"Run {row.run_id} has status='running' but completed_at is set — "
-                    f"audit integrity violation (running runs must not have completed_at)"
-                )
-        elif status in _COMPLETED_AT_REQUIRED_RUN_STATUSES and row.completed_at is None:
-            raise AuditIntegrityError(
-                f"Run {row.run_id} has status={status.value!r} but completed_at is NULL — "
-                f"audit integrity violation ({status.value!r} runs must have completed_at)"
-            )
+        validate_run_lifecycle_row(row.run_id, status, row.completed_at)
         # FAILED and INTERRUPTED: completed_at may or may not be set.
         # complete_run() sets it; update_run_status() (recovery path) does not.
 

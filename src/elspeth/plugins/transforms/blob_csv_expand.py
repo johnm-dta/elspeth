@@ -147,7 +147,7 @@ class BlobCSVExpand(BaseTransform):
     name = "blob_csv_expand"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:83d598380cb107aa"
+    source_file_hash: str | None = "sha256:a5b479e532054a34"
     config_model = BlobCSVExpandConfig
     creates_tokens = True
     passes_through_input = True
@@ -196,6 +196,42 @@ class BlobCSVExpand(BaseTransform):
                 ),
             )
         return None
+
+    def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Inject a deterministic payload-store reference for invariant probing."""
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name=self._blob_ref_field,
+                value="blob-csv-expand-probe-ref",
+            )
+        ]
+
+    def execute_forward_invariant_probe(
+        self,
+        probe_rows: list[PipelineRow],
+        ctx: TransformContext,
+    ) -> TransformResult:
+        """Drive the real process path with a hermetic CSV payload seam."""
+
+        class _InvariantPayloadStore:
+            def retrieve(self, ref: str) -> bytes:
+                if ref != "blob-csv-expand-probe-ref":
+                    raise PayloadNotFoundError(ref)
+                return b"blob_csv_expand_probe_value\nprobe\n"
+
+        had_payload_store = "_payload_store" in self.__dict__
+        original_payload_store: Any = None
+        if had_payload_store:
+            original_payload_store = self.__dict__["_payload_store"]
+        try:
+            self.__dict__["_payload_store"] = _InvariantPayloadStore()
+            return super().execute_forward_invariant_probe(probe_rows, ctx)
+        finally:
+            if had_payload_store:
+                self.__dict__["_payload_store"] = original_payload_store
+            else:
+                delattr(self, "_payload_store")
 
     def on_start(self, ctx: LifecycleContext) -> None:
         super().on_start(ctx)

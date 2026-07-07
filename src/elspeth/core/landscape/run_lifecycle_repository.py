@@ -334,9 +334,7 @@ class RunLifecycleRepository:
                     )
                 # Composes into THIS transaction (connection-accepting form):
                 # the runs row above satisfies the run_coordination FK.
-                # Private-by-underscore but designed for exactly this
-                # composition (see _register_run_leader_on's docstring).
-                coordination._register_run_leader_on(
+                coordination.register_run_leader_on(
                     conn,
                     run_id=run.run_id,
                     worker_id=worker_id,

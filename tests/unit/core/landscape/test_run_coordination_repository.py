@@ -202,6 +202,22 @@ class TestSeatMint:
         assert all(e["worker_id"] == wid for e in events)
         assert all(e["leader_epoch"] == 1 for e in events)
 
+    def test_register_on_connection_is_public_composition_surface(self, engine: Tier1Engine, repo: RunCoordinationRepository) -> None:
+        _seed_run(engine, run_id="run-coord-on-conn")
+        wid = mint_worker_id("run-coord-on-conn")
+
+        with begin_write(engine) as conn:
+            token = repo.register_run_leader_on(
+                conn,
+                run_id="run-coord-on-conn",
+                worker_id=wid,
+                now=NOW,
+                window_seconds=WINDOW,
+            )
+
+        assert token == CoordinationToken(run_id="run-coord-on-conn", worker_id=wid, leader_epoch=1)
+        assert _seat_row(engine, "run-coord-on-conn")["leader_worker_id"] == wid
+
 
 class TestAcquireRunLeadershipCAS:
     """§B.4: exactly one of two racers wins; the loser is side-effect-free."""

@@ -32,6 +32,7 @@ from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.run_lifecycle_repository import (
     RunLifecycleRepository,
     is_valid_sha256_hex,
@@ -134,6 +135,37 @@ class TestBeginRunDirect:
         assert worker.entry_point == "run"
         assert worker.pid is not None
         assert event_types == ["worker_register", "leader_acquire"]
+
+    def test_begin_run_uses_public_leader_registration_composition_surface(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        observed_run_ids: list[str] = []
+
+        def spy_register_run_leader_on(self: RunCoordinationRepository, *args: object, **kwargs: object) -> CoordinationToken:
+            del self, args
+            observed_run_ids.append(str(kwargs["run_id"]))
+            return CoordinationToken(
+                run_id=str(kwargs["run_id"]),
+                worker_id=str(kwargs["worker_id"]),
+                leader_epoch=1,
+            )
+
+        monkeypatch.setattr(
+            RunCoordinationRepository,
+            "register_run_leader_on",
+            spy_register_run_leader_on,
+            raising=False,
+        )
+
+        repo.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="public-composition-run",
+            leader_worker_id="worker:public-composition-run:abc123",
+        )
+
+        assert observed_run_ids == ["public-composition-run"]
 
     def test_begin_run_self_mints_worker_identity_when_omitted(self) -> None:
         """Uniformity-for-free: callers that pass no identity still get a seat."""

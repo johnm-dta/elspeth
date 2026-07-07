@@ -322,12 +322,12 @@ class RunCoordinationRepository:
         """Mint the run's seat at epoch 1 (uniformity rule: N=1 = leader-of-its-own-run).
 
         Standalone-transaction form for repository-level callers and test
-        fixtures; ``begin_run`` composes :meth:`_register_run_leader_on` into
+        fixtures; ``begin_run`` composes :meth:`register_run_leader_on` into
         ITS transaction instead so the runs INSERT and the seat mint commit
         atomically (design §B.4 closing line).
         """
         with begin_write(self._engine) as conn:
-            return self._register_run_leader_on(
+            return self.register_run_leader_on(
                 conn,
                 run_id=run_id,
                 worker_id=worker_id,
@@ -336,7 +336,7 @@ class RunCoordinationRepository:
                 entry_point=entry_point,
             )
 
-    def _register_run_leader_on(
+    def register_run_leader_on(
         self,
         conn: Connection,
         *,

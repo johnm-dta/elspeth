@@ -138,6 +138,23 @@ class TestExportLandscapeJSON:
     def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
         return _make_settings(fmt=fmt, sign=sign, sink=sink, include_raw_error_rows=include_raw_error_rows)
 
+    def test_jsonl_export_helpers_do_not_probe_sink_shape_with_getattr(self) -> None:
+        import inspect
+
+        from elspeth.engine.orchestrator import export as export_module
+
+        helper_sources = "\n".join(
+            inspect.getsource(helper)
+            for helper in (
+                export_module._jsonl_export_staging_target,
+                export_module._jsonl_filesystem_sink_path,
+                export_module._close_sink_file_if_open,
+                export_module._sink_supports_incremental_json_export_writes,
+            )
+        )
+
+        assert "getattr(" not in helper_sources
+
     def test_json_export_writes_records_to_sink(self) -> None:
         """JSON format exports all records through sink.write()."""
         db = object()

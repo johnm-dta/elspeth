@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
@@ -50,6 +50,22 @@ from elspeth.engine.orchestrator.schema_reconstruction import (
 _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 _CSV_FORMULA_ESCAPE_PREFIX = "'"
 _JSON_EXPORT_BATCH_SIZE = 1000
+_PATH_TYPE = type(Path())
+
+
+class _FlushableFile(Protocol):
+    def flush(self) -> None: ...
+
+    def fileno(self) -> int: ...
+
+    def close(self) -> None: ...
+
+
+class _FilesystemJsonlExportSink(Protocol):
+    _path: Path
+    _file: _FlushableFile | None
+
+    def _claim_write_target(self) -> None: ...
 
 
 def _neutralize_csv_formula_cell(value: Any) -> Any:
@@ -173,19 +189,18 @@ def _jsonl_export_staging_target(sink: SinkProtocol) -> Iterator[None]:
         yield
         return
 
-    claim_write_target = getattr(sink, "_claim_write_target", None)
-    if callable(claim_write_target):
-        claim_write_target()
-        final_path = _jsonl_filesystem_sink_path(sink)
-        if final_path is None:
-            yield
-            return
+    filesystem_sink = cast("_FilesystemJsonlExportSink", sink)
+    filesystem_sink._claim_write_target()
+    final_path = _jsonl_filesystem_sink_path(sink)
+    if final_path is None:
+        yield
+        return
 
     temp_path = final_path.with_suffix(final_path.suffix + ".tmp")
     if temp_path.exists():
         temp_path.unlink()
 
-    sink._path = temp_path  # type: ignore[attr-defined]
+    filesystem_sink._path = temp_path
     try:
         yield
         _close_sink_file_if_open(sink)
@@ -198,28 +213,35 @@ def _jsonl_export_staging_target(sink: SinkProtocol) -> Iterator[None]:
             temp_path.unlink()
         raise
     finally:
-        sink._path = final_path  # type: ignore[attr-defined]
+        filesystem_sink._path = final_path
 
 
 def _jsonl_filesystem_sink_path(sink: SinkProtocol) -> Path | None:
     if not _sink_supports_incremental_json_export_writes(sink):
         return None
-    if getattr(sink, "_mode", None) == "append":
+    sink_attrs = vars(sink)
+    if "_mode" in sink_attrs and sink_attrs["_mode"] == "append":
         return None
-    path = getattr(sink, "_path", None)
-    if not isinstance(path, Path):
+    if "_path" not in sink_attrs:
+        return None
+    path = sink_attrs["_path"]
+    if type(path) is not _PATH_TYPE:
         return None
     return path
 
 
 def _close_sink_file_if_open(sink: SinkProtocol) -> None:
-    file_obj = getattr(sink, "_file", None)
+    sink_attrs = vars(sink)
+    if "_file" not in sink_attrs:
+        return
+    file_obj = sink_attrs["_file"]
     if file_obj is None:
         return
-    file_obj.flush()
-    os.fsync(file_obj.fileno())
-    file_obj.close()
-    sink._file = None  # type: ignore[attr-defined]
+    open_file = cast("_FlushableFile", file_obj)
+    open_file.flush()
+    os.fsync(open_file.fileno())
+    open_file.close()
+    cast("_FilesystemJsonlExportSink", sink)._file = None
 
 
 def _fsync_parent_directory(path: Path) -> None:
@@ -232,24 +254,27 @@ def _fsync_parent_directory(path: Path) -> None:
 
 def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:
     """Return whether a JSON export sink can publish incrementally without rewriting cumulative content."""
-    sink_format = getattr(sink, "_format", None)
-    if isinstance(sink_format, str):
+    sink_attrs = vars(sink)
+    if "_format" in sink_attrs:
+        sink_format = sink_attrs["_format"]
+        if type(sink_format) is not str:
+            return False
         return sink_format == "jsonl"
-    if sink_format is not None:
+
+    config = sink.config
+    if type(config) is not dict:
         return False
 
-    config = getattr(sink, "config", {})
-    if not isinstance(config, Mapping):
-        return False
-
-    configured_format = config.get("format")
-    if isinstance(configured_format, str):
+    if "format" in config:
+        configured_format = config["format"]
+        if type(configured_format) is not str:
+            return False
         return configured_format == "jsonl"
-    if configured_format is not None:
-        return False
 
-    path = config.get("path")
-    if not isinstance(path, str):
+    if "path" not in config:
+        return False
+    path = config["path"]
+    if type(path) is not str:
         return False
     return Path(path).suffix == ".jsonl"
 

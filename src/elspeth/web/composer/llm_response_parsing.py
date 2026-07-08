@@ -99,9 +99,20 @@ def _provider_field_map(value: Any) -> Mapping[str, Any] | None:
         fields = vars(value)
     except TypeError:
         return None
-    if isinstance(fields, Mapping):
+    if not isinstance(fields, Mapping):
+        return None
+    # Pydantic v2 models with ``extra="allow"`` (LiteLLM response objects)
+    # store undeclared provider fields in the ``__pydantic_extra__`` slot,
+    # not ``__dict__`` — ``usage`` on a real ModelResponse lives there.
+    # Reading the slot is still a data-only read: no provider-named
+    # property is ever invoked.
+    try:
+        extra = object.__getattribute__(value, "__pydantic_extra__")
+    except AttributeError:
         return fields
-    return None
+    if isinstance(extra, dict) and extra:
+        return {**extra, **fields}
+    return fields
 
 
 def _provider_field(value: Any, field: str) -> Any:

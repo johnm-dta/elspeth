@@ -117,7 +117,7 @@ class FieldMapper(BaseTransform):
     name = "field_mapper"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9920962925e0e6df"
+    source_file_hash: str | None = "sha256:3e400605d93e05c8"
     config_model = FieldMapperConfig
 
     @classmethod
@@ -328,11 +328,18 @@ class FieldMapper(BaseTransform):
             else:
                 fields_added.append(target)
 
-        # Update contract to reflect field mapping (renames and removals)
+        # Update contract to reflect field mapping (renames and removals).
+        # Dotted sources are nested extractions, not renames: the root field
+        # survives in the output and the extracted value's type is unrelated
+        # to the root's contract, so those targets must be inferred from the
+        # output value. Contracts are flat — presenting "meta.source" as a
+        # rename source would (correctly) fail narrow_contract_to_output's
+        # unknown-source invariant.
+        renamed_fields = {source: target for source, target in applied_mappings.items() if "." not in source}
         output_contract = narrow_contract_to_output(
             input_contract=row.contract,
             output_row=output,
-            renamed_fields=applied_mappings,
+            renamed_fields=renamed_fields,
         )
         output_contract = self._align_output_contract(output_contract)
 

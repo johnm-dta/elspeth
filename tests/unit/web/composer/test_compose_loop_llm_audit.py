@@ -194,6 +194,41 @@ def test_token_usage_ignores_provider_properties_and_reads_own_fields() -> None:
     assert usage.completion_tokens == 7
 
 
+def test_token_usage_reads_real_litellm_pydantic_extra_fields() -> None:
+    """LiteLLM ModelResponse keeps ``usage`` in ``__pydantic_extra__``, not ``__dict__``.
+
+    Pydantic v2 models with ``extra="allow"`` store undeclared fields outside
+    ``vars()``; the parser must still see them or every real provider response
+    audits as unknown token counts with no provider cost.
+    """
+    from litellm.types.utils import ModelResponse, Usage
+
+    usage_obj = Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+    usage_obj.cost = 0.0123
+    response = ModelResponse(usage=usage_obj)
+    assert "usage" not in vars(response)  # the storage split this test pins
+
+    usage = token_usage_from_response(response)
+
+    assert usage.prompt_tokens == 11
+    assert usage.completion_tokens == 7
+    assert usage.reported_total == 18
+
+    record = build_llm_call_record(
+        model_requested="openrouter/openai/gpt-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        status=ComposerLLMCallStatus.SUCCESS,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        temperature=None,
+        seed=None,
+        response=response,
+    )
+    assert record.prompt_tokens == 11
+    assert record.provider_cost == 0.0123
+
+
 def test_llm_call_record_redacts_raw_provider_error_detail() -> None:
     openai_key = "sk-" + ("A" * 48)
     bearer_token = "Bearer " + ("x" * 32)

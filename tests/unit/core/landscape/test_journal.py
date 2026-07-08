@@ -17,6 +17,7 @@ import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -518,6 +519,12 @@ class TestAfterRollback:
 class TestAppendRecordsFailureHandling:
     """Tests for _append_records — circuit breaker after consecutive failures."""
 
+    def test_owner_only_open_does_not_probe_os_flags_with_hasattr(self) -> None:
+        import inspect
+
+        assert "hasattr(" not in inspect.getsource(LandscapeJournal._open_owner_only_append)
+        assert "hasattr(" not in inspect.getsource(LandscapeJournal._verify_owner_only_file)
+
     def test_creates_journal_file_owner_only(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path, fail_on_error=True)
         record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
@@ -801,6 +808,27 @@ class TestLoadPayload:
 
 class TestEnrichWithPayloads:
     """Tests for _enrich_with_payloads — adds payload data to call records."""
+
+    def test_malformed_sqlalchemy_context_crashes_when_payload_columns_requested(self, tmp_path: Path) -> None:
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+
+        with pytest.raises(AuditIntegrityError, match="compiled metadata"):
+            journal._payload_ref_columns_from_context(object(), {})
+
+    def test_raw_sql_compiled_context_without_structured_table_is_skipped(self, tmp_path: Path) -> None:
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        compiled = SimpleNamespace(statement=object(), positiontup=("request_ref",), params={"request_ref": "req"})
+        context = SimpleNamespace(compiled=compiled)
+
+        assert journal._payload_ref_columns_from_context(context, {}) is None
 
     def test_records_without_structured_payload_columns_skipped(self, tmp_path: Path) -> None:
         journal = _make_journal(

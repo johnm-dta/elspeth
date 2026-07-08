@@ -33,15 +33,16 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import Lock
-from typing import Any, NotRequired, TextIO, TypedDict, cast
+from typing import Any, NotRequired, Protocol, TextIO, TypedDict, cast
 
 import structlog
 from sqlalchemy import event
 from sqlalchemy.engine import Connection, Engine
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.payload_store import IntegrityError, PayloadNotFoundError
 from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.serialization import serialize_datetime
@@ -53,6 +54,25 @@ _BUFFER_STACK_KEY = "landscape_journal_buffer_stack"
 _JOURNAL_DIRECTORY_MODE = 0o700
 _JOURNAL_FILE_MODE = 0o600
 _NON_OWNER_PERMISSION_BITS = stat.S_IRWXG | stat.S_IRWXO
+_JOURNAL_OPEN_SECURITY_FLAGS = 0 if os.name == "nt" else os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+class _NamedSqlTable(Protocol):
+    name: str
+
+
+class _TableBearingStatement(Protocol):
+    table: _NamedSqlTable
+
+
+class _JournalCompiledContext(Protocol):
+    statement: object
+    positiontup: Sequence[object] | None
+    params: Mapping[str, object]
+
+
+class _JournalExecutionContext(Protocol):
+    compiled: _JournalCompiledContext | None
 
 
 class PayloadInfo(TypedDict, total=False):
@@ -153,7 +173,7 @@ class LandscapeJournal:
         cursor: object,
         statement: str,
         parameters: Any,
-        context: object,
+        context: _JournalExecutionContext,
         executemany: bool,
     ) -> None:
         if not self._is_write_statement(statement):
@@ -297,11 +317,7 @@ class LandscapeJournal:
             directory.chmod(_JOURNAL_DIRECTORY_MODE)
 
     def _open_owner_only_append(self) -> TextIO:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | _JOURNAL_OPEN_SECURITY_FLAGS
 
         fd = os.open(self._path, flags, _JOURNAL_FILE_MODE)
         try:
@@ -320,7 +336,7 @@ class LandscapeJournal:
         mode = stat.S_IMODE(info.st_mode)
         if not stat.S_ISREG(info.st_mode):
             raise OSError("Landscape journal path must be a regular file")
-        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        if info.st_uid != os.getuid():
             raise PermissionError("Landscape journal file must be owned by the current user")
         if mode & _NON_OWNER_PERMISSION_BITS:
             raise PermissionError("Landscape journal file must be owner-only before appending")
@@ -332,8 +348,6 @@ class LandscapeJournal:
         try:
             return json.dumps(safe, allow_nan=False)
         except TypeError as exc:
-            from elspeth.contracts.errors import AuditIntegrityError
-
             raise AuditIntegrityError(
                 f"Journal record failed to serialize — non-JSON-serializable type in "
                 f"SQL parameters (Tier 1 violation). Statement: "
@@ -355,22 +369,26 @@ class LandscapeJournal:
         sql = statement.lstrip().upper()
         return sql.startswith("INSERT") or sql.startswith("UPDATE") or sql.startswith("DELETE") or sql.startswith("REPLACE")
 
-    def _payload_ref_columns_from_context(self, context: object, parameters: Any) -> list[str] | None:
-        compiled = getattr(context, "compiled", None)
-        statement = getattr(compiled, "statement", None)
-        table = getattr(statement, "table", None)
-        table_name = getattr(table, "name", None)
-        if table_name != "calls":
+    def _payload_ref_columns_from_context(self, context: _JournalExecutionContext, parameters: Any) -> list[str] | None:
+        try:
+            compiled = context.compiled
+        except AttributeError as exc:
+            raise AuditIntegrityError("Landscape journal SQLAlchemy execution context is missing compiled metadata") from exc
+        if compiled is None:
             return None
-        positiontup = getattr(compiled, "positiontup", None)
+        statement = compiled.statement
+        try:
+            table = cast("_TableBearingStatement", statement).table
+        except AttributeError:
+            return None
+        if table.name != "calls":
+            return None
+        positiontup = compiled.positiontup
         if positiontup:
             return [str(column) for column in positiontup]
         if isinstance(parameters, Mapping):
             return [str(column) for column in parameters]
-        params = getattr(compiled, "params", None)
-        if isinstance(params, Mapping):
-            return [str(column) for column in params]
-        return None
+        return [str(column) for column in compiled.params]
 
     def _enrich_with_payloads(self, record: JournalRecord) -> None:
         columns = record.get("_payload_ref_columns")
@@ -435,8 +453,6 @@ class LandscapeJournal:
             # Hash mismatch = corruption or tampering — Tier 1 violation.
             # Always crash regardless of _fail_on_error: payload integrity
             # failures are not operational issues, they are audit violations.
-            from elspeth.contracts.errors import AuditIntegrityError
-
             raise AuditIntegrityError(
                 f"Payload integrity check failed for ref={ref!r}: {exc}. This indicates data corruption or tampering in the payload store."
             ) from exc

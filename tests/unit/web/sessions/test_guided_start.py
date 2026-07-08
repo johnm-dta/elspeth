@@ -97,6 +97,9 @@ def _make_app(tmp_path, user_id="alice"):
     app.state.payload_store = FilesystemPayloadStore(app.state.settings.get_payload_store_path())
     app.state.blob_service = _BlobServiceFake()
     app.state.composer_service = None
+    # Guided routes resolve shield availability via app.state; a configured
+    # None resolver means "shield unavailable" (a missing key is a wiring error).
+    app.state.scoped_secret_resolver = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.include_router(create_session_router())

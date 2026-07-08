@@ -9,12 +9,12 @@ recipe-build path itself is provider-free: building the set_pipeline args and
 validating the slots calls the LLM zero times. The llm node IS present in the
 COMPOSED pipeline (it runs at RUN time, never at compose time).
 
-_SLOTS carries provider + rating_template explicitly because
-``_build_web_scrape_recipe`` reads ``slots["provider"]`` / ``slots["rating_template"]``
-directly; those keys are only injected by ``validate_slots`` when the build is
-reached through ``apply_recipe``. Passing them explicitly keeps the direct-build
-test honest while remaining valid input to ``apply_recipe`` (both are declared
-slots).
+_SLOTS carries provider + rating_template + allowed_hosts explicitly because
+``_build_web_scrape_recipe`` reads ``slots["provider"]`` /
+``slots["rating_template"]`` / ``slots["allowed_hosts"]`` directly; those keys
+are only injected by ``validate_slots`` when the build is reached through
+``apply_recipe``. Passing them explicitly keeps the direct-build test honest
+while remaining valid input to ``apply_recipe`` (all are declared slots).
 """
 
 from __future__ import annotations
@@ -34,6 +34,9 @@ _SLOTS = {
     "abuse_contact": "web-scrape-contact@dta.gov.au",
     "scraping_reason": "Tutorial exercise: fetch public pages for rating",
     "output_path": "outputs/ratings.jsonl",
+    # Empty tuple = the slot's declared default: the http.allowed_hosts key is
+    # omitted so the web_scrape field default 'public_only' applies.
+    "allowed_hosts": (),
 }
 
 

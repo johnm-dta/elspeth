@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Enforce method-count budget on PluginAuditWriterAdapter.
+"""Ratchet the public method count of PluginAuditWriterAdapter.
 
-Prevents the adapter from growing back into a facade. The budget is 20 methods.
+Prevents the adapter from growing back into a facade. This is a ratchet,
+not a budget: the ceiling tracks the current method count exactly. Growth
+fails; slack also fails, with instructions to lower the ratchet so every
+reduction is locked in.
 Run as: python scripts/cicd/enforce_adapter_budget.py
 """
 
@@ -12,7 +15,7 @@ import sys
 
 from elspeth.core.landscape.plugin_audit_writer import PluginAuditWriterAdapter
 
-BUDGET = 20
+RATCHET = 13
 
 
 def main() -> int:
@@ -21,14 +24,19 @@ def main() -> int:
     ]
 
     count = len(public_methods)
-    if count > BUDGET:
-        print(f"FAIL: PluginAuditWriterAdapter has {count} public methods (budget: {BUDGET})")
+    if count > RATCHET:
+        print(f"FAIL: PluginAuditWriterAdapter has {count} public methods (ratchet: {RATCHET})")
         print(f"Methods: {', '.join(sorted(public_methods))}")
         print("\nIf a new method is genuinely needed, consider whether the caller")
         print("should inject the specific repository directly instead.")
         return 1
 
-    print(f"OK: PluginAuditWriterAdapter has {count}/{BUDGET} public methods")
+    if count < RATCHET:
+        print(f"FAIL: ratchet has slack — PluginAuditWriterAdapter has {count} public methods but the ratchet allows {RATCHET}.")
+        print(f"Lower RATCHET to {count} in scripts/cicd/enforce_adapter_budget.py to lock the reduction in.")
+        return 1
+
+    print(f"OK: PluginAuditWriterAdapter has exactly {count} public methods (ratchet tight)")
     return 0
 
 

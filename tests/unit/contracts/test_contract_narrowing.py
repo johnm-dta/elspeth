@@ -98,6 +98,22 @@ def test_narrow_contract_rename_over_existing_target_preserves_source_metadata()
     assert result.validate(output_row) == []
 
 
+def test_narrow_contract_rename_unknown_source_fails_closed():
+    """A rename map is engine-owned evidence and must resolve to a source field."""
+    input_contract = SchemaContract(
+        mode="FLEXIBLE",
+        fields=(make_field("name", str, original_name="Name", required=True, source="declared"),),
+        locked=True,
+    )
+
+    with pytest.raises(ValueError, match="unknown source field"):
+        narrow_contract_to_output(
+            input_contract,
+            {"target": "Alice"},
+            renamed_fields={"missing": "target"},
+        )
+
+
 def test_narrow_contract_mixed_operations():
     """Test mixed: input has [a, old, c], output has [a, new, d]."""
     input_contract = SchemaContract(

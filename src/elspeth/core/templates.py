@@ -975,9 +975,7 @@ def _macro_argument_bindings(
     bindings: list[tuple[Name, Node]] = []
     for node in ast.find_all(Call):
         for macro_name in _macro_names_for_callee(node.node, macros, macro_aliases, macro_container_aliases):
-            macro = macros.get(macro_name)
-            if macro is None:
-                continue
+            macro = macros[macro_name]
             explicit_kwargs: dict[str, Node] = {keyword.key: keyword.value for keyword in node.kwargs}
             if isinstance(node.dyn_kwargs, DictNode):
                 explicit_kwargs.update(_literal_kwarg_values(node.dyn_kwargs))
@@ -1011,9 +1009,7 @@ def _macro_row_splat_targets(
     targets: list[str] = []
     for node in ast.find_all(Call):
         for macro_name in _macro_names_for_callee(node.node, macros, macro_aliases, macro_container_aliases):
-            macro = macros.get(macro_name)
-            if macro is None:
-                continue
+            macro = macros[macro_name]
             if _iter_may_yield_row_object(node.dyn_args, frozenset(), row_collection_aliases, row_container_aliases):
                 targets.extend(target.name for target in macro.args[len(node.args) :] if isinstance(target, Name))
             if _node_references_name(node.dyn_kwargs, frozenset(row_container_aliases)):
@@ -1035,9 +1031,7 @@ def _macro_api_splat_targets(
     targets: list[tuple[str, str]] = []
     for node in ast.find_all(Call):
         for macro_name in _macro_names_for_callee(node.node, macros, macro_aliases, macro_container_aliases):
-            macro = macros.get(macro_name)
-            if macro is None:
-                continue
+            macro = macros[macro_name]
             star_kind = _iter_may_yield_row_api_kind(node.dyn_args, api_aliases, row_api_container_aliases)
             if star_kind is not None:
                 targets.extend((target.name, star_kind) for target in macro.args[len(node.args) :] if isinstance(target, Name))
@@ -1065,9 +1059,7 @@ def _callblock_argument_bindings(
     bindings: list[tuple[Name, Node]] = []
     for node in ast.find_all(CallBlock):
         for macro_name in _macro_names_for_callee(node.call.node, macros, macro_aliases, macro_container_aliases):
-            macro = macros.get(macro_name)
-            if macro is None:
-                continue
+            macro = macros[macro_name]
             for caller_call in macro.find_all(Call):
                 if not isinstance(caller_call.node, Name) or caller_call.node.name != "caller":
                     continue
@@ -1143,9 +1135,7 @@ def _callblock_row_splat_targets(
     targets: list[str] = []
     for node in ast.find_all(CallBlock):
         for macro_name in _macro_names_for_callee(node.call.node, macros, macro_aliases, macro_container_aliases):
-            macro = macros.get(macro_name)
-            if macro is None:
-                continue
+            macro = macros[macro_name]
             for caller_call in macro.find_all(Call):
                 if not isinstance(caller_call.node, Name) or caller_call.node.name != "caller":
                     continue
@@ -1171,9 +1161,7 @@ def _callblock_api_splat_targets(
     targets: list[tuple[str, str]] = []
     for node in ast.find_all(CallBlock):
         for macro_name in _macro_names_for_callee(node.call.node, macros, macro_aliases, macro_container_aliases):
-            macro = macros.get(macro_name)
-            if macro is None:
-                continue
+            macro = macros[macro_name]
             for caller_call in macro.find_all(Call):
                 if not isinstance(caller_call.node, Name) or caller_call.node.name != "caller":
                     continue

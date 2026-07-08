@@ -8,7 +8,6 @@ from typing import Protocol
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.core.config import GateSettings
 
 
 class WorkItemNavigation(Protocol):
@@ -19,6 +18,7 @@ class WorkItemNavigation(Protocol):
     def resolve_plugin_for_node(self, node_id: NodeID) -> object | None: ...
     def resolve_next_node(self, node_id: NodeID) -> NodeID | None: ...
     def resolve_branch_first_node(self, branch_name: str) -> NodeID: ...
+    def is_fork_gate_node(self, node_id: NodeID) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +87,7 @@ class WorkItemFactory:
 
             # Fork children route to the first processing node in their branch.
             # Non-fork continuations are already mid-branch and advance normally.
-            plugin = self.navigation.resolve_plugin_for_node(current_node_id)
-            if isinstance(plugin, GateSettings):
+            if self.navigation.is_fork_gate_node(current_node_id):
                 branch_name = token.branch_name
                 if branch_name is None:
                     raise OrchestrationInvariantError(

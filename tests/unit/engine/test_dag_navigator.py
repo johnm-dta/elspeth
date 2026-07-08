@@ -757,6 +757,40 @@ class TestContinuationCoalesceNonForkRegression:
         assert item.current_node_id == NodeID("branch-t1")
         assert item.coalesce_name == CoalesceName("merge")
 
+    def test_structural_node_with_coalesce_name_fails_closed(self) -> None:
+        """Coalesce-aware continuations must originate from plugin topology."""
+        coalesce_node = NodeID("coalesce::merge")
+        nav = _make_nav(
+            node_to_plugin={},
+            node_to_next={coalesce_node: None},
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="structural"):
+            WorkItemFactory(nav).create_continuation(
+                token=make_token_info(data={"v": 1}, branch_name="path_a"),
+                current_node_id=coalesce_node,
+                coalesce_name=CoalesceName("merge"),
+            )
+
+    def test_unknown_node_with_coalesce_name_fails_closed(self) -> None:
+        """Missing topology cannot be silently treated as a non-fork path."""
+        coalesce_node = NodeID("coalesce::merge")
+        nav = _make_nav(
+            node_to_plugin={},
+            node_to_next={NodeID("ghost"): coalesce_node, coalesce_node: None},
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="ghost"):
+            WorkItemFactory(nav).create_continuation(
+                token=make_token_info(data={"v": 1}, branch_name="path_a"),
+                current_node_id=NodeID("ghost"),
+                coalesce_name=CoalesceName("merge"),
+            )
+
     def test_non_fork_continuation_preserves_on_success_sink(self) -> None:
         """Non-fork continuation with coalesce_name must preserve on_success_sink.
 

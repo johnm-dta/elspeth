@@ -66,6 +66,9 @@ class DAGNavigator:
     ) -> None:
         # Wrap all mappings in MappingProxyType for true immutability
         self._node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings] = MappingProxyType(dict(node_to_plugin))
+        self._fork_gate_node_ids = frozenset(
+            node_id for node_id, plugin in self._node_to_plugin.items() if isinstance(plugin, GateSettings)
+        )
         self._node_to_next: Mapping[NodeID, NodeID | None] = MappingProxyType(dict(node_to_next))
         self._coalesce_node_ids: Mapping[CoalesceName, NodeID] = MappingProxyType(dict(coalesce_node_ids))
         self._structural_node_ids = structural_node_ids
@@ -128,6 +131,20 @@ class DAGNavigator:
             f"Plugin nodes: {sorted(self._node_to_plugin.keys())}, "
             f"structural nodes: {sorted(self._structural_node_ids)}"
         )
+
+    def is_fork_gate_node(self, node_id: NodeID) -> bool:
+        """Return whether ``node_id`` is a configured fork gate node.
+
+        Continuation routing depends on a reified topology predicate, not on
+        local plugin type probing in the work-item factory. A structural or
+        unknown node cannot be a valid fork-origin cursor and fails here.
+        """
+        if node_id in self._node_to_plugin:
+            return node_id in self._fork_gate_node_ids
+        if node_id in self._structural_node_ids:
+            raise OrchestrationInvariantError(f"Node ID '{node_id}' is structural and cannot be used as a fork-origin continuation cursor")
+        self.resolve_plugin_for_node(node_id)
+        raise AssertionError("resolve_plugin_for_node returned for an unknown non-plugin node")
 
     def resolve_next_node(self, node_id: NodeID) -> NodeID | None:
         """Resolve the next processing node from traversal metadata."""

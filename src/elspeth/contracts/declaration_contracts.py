@@ -100,8 +100,7 @@ type DispatchSiteName = Literal[
 
 
 class DispatchSite(StrEnum):
-    """Named dispatch site. StrEnum so members are directly usable as method
-    names via ``getattr(contract, site.value)``."""
+    """Named dispatch site. Values are the concrete contract method names."""
 
     # Keep in sync with DispatchSiteName above; the Literal serves static tools.
     PRE_EMISSION = "pre_emission_check"
@@ -167,6 +166,17 @@ def implements_dispatch_site(site_name: DispatchSiteName) -> Callable[[F], F]:
         return method
 
     return wrap
+
+
+def _dispatch_site_marker(candidate: object) -> object | None:
+    """Return the dispatch-site marker from a decorated Python method."""
+    if not callable(candidate):
+        return None
+    candidate_attrs = vars(candidate)
+    if _DISPATCH_SITE_MARKER_ATTR not in candidate_attrs:
+        return None
+    marker: object = candidate_attrs[_DISPATCH_SITE_MARKER_ATTR]
+    return marker
 
 
 def _normalise_row_tuple(
@@ -398,8 +408,7 @@ class ExampleBundle:
     dispatch per site:
 
         bundle = type(contract).negative_example()
-        method = getattr(contract, bundle.site.value)
-        method(*bundle.args)
+        contract.pre_emission_check(*bundle.args)  # when bundle.site is PRE_EMISSION
 
     ``args`` shape by site:
       * PRE_EMISSION: ``(PreEmissionInputs,)``
@@ -571,8 +580,8 @@ def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset
     not get reclassified by the most-derived class's ``__total__``.
     """
     total_required_default: bool = schema.__total__  # type: ignore[attr-defined]
-    native_required = frozenset(getattr(schema, "__required_keys__", frozenset()))
-    native_optional = frozenset(getattr(schema, "__optional_keys__", frozenset()))
+    native_required = frozenset(schema.__required_keys__)  # type: ignore[attr-defined]
+    native_optional = frozenset(schema.__optional_keys__)  # type: ignore[attr-defined]
     hints = get_type_hints(schema, include_extras=True)
     required: set[str] = set()
     optional: set[str] = set()
@@ -1123,12 +1132,12 @@ def _collect_contract_sites(contract: DeclarationContract) -> frozenset[Dispatch
     same per-contract site set.
     """
     sites: set[DispatchSiteName] = set()
-    first_definitions: dict[str, tuple[type[object], object, str | None]] = {}
+    first_definitions: dict[str, tuple[type[object], object, object | None]] = {}
     for klass in type(contract).__mro__:
         if klass is object or klass is DeclarationContract:
             continue
         for attr_name, candidate in vars(klass).items():
-            site_name = getattr(candidate, _DISPATCH_SITE_MARKER_ATTR, None)
+            site_name = _dispatch_site_marker(candidate)
             if attr_name in first_definitions:
                 _overriding_class, _, overriding_site_name = first_definitions[attr_name]
                 if site_name is not None and overriding_site_name is None:
@@ -1142,10 +1151,9 @@ def _collect_contract_sites(contract: DeclarationContract) -> frozenset[Dispatch
                         f"runtime dispatch cannot disagree."
                     )
                 continue
-            first_definitions[attr_name] = (klass, candidate, cast(str | None, site_name))
-            # Only functions carry the marker; non-callables and dataclass
-            # fields are skipped naturally because getattr returns the
-            # unwrapped value.
+            first_definitions[attr_name] = (klass, candidate, site_name)
+            # Only decorated Python methods carry the marker; non-callables and
+            # undecorated callables are skipped naturally by _dispatch_site_marker().
             if site_name is None:
                 continue
             if site_name not in _DISPATCH_SITE_VALUES:
@@ -1229,13 +1237,11 @@ def register_declaration_contract(contract: DeclarationContract) -> None:
         # Example-classmethod callability — N2 Layer A / B harnesses require both.
         for method_name in ("negative_example", "positive_example_does_not_apply"):
             try:
-                method = getattr(type(contract), method_name)
+                _resolve_contract_example_method(type(contract), method_name)
             except AttributeError as exc:
                 raise TypeError(
                     f"Contract {contract.name!r} missing required {method_name!r} classmethod (ADR-010 §Decision 3 + N2 Layer A/B harness)."
                 ) from exc
-            if not callable(method):
-                raise TypeError(f"Contract {contract.name!r}.{method_name} must be callable")
 
         # Claimed-sites validation (H2 §Fix direction + N1 MC3).
         sites = _collect_contract_sites(contract)

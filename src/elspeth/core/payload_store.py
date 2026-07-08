@@ -33,6 +33,13 @@ __all__ = ["FilesystemPayloadStore"]
 _SHA256_HEX_PATTERN = re.compile(r"[a-f0-9]{64}")
 
 
+try:
+    _O_DIRECTORY: int = os.O_DIRECTORY
+    _O_NOFOLLOW: int = os.O_NOFOLLOW
+except AttributeError as exc:
+    raise RuntimeError("FilesystemPayloadStore requires O_DIRECTORY and O_NOFOLLOW support for symlink-safe access") from exc
+
+
 class FilesystemPayloadStore:
     """Filesystem-based payload store.
 
@@ -79,7 +86,7 @@ class FilesystemPayloadStore:
     def _open_validated_directory(self, directory: Path) -> int:
         """Open a validated directory and bind later operations to its fd."""
         self._validate_store_directory(directory)
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW
         try:
             dir_fd = os.open(directory, flags)
         except OSError as exc:
@@ -118,7 +125,7 @@ class FilesystemPayloadStore:
     def _read_payload_file(self, dir_fd: int, filename: str) -> bytes:
         """Read a payload file through a validated parent directory fd."""
         try:
-            file_fd = os.open(filename, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+            file_fd = os.open(filename, os.O_RDONLY | _O_NOFOLLOW, dir_fd=dir_fd)
         except FileNotFoundError:
             raise
         except OSError as exc:
@@ -139,7 +146,7 @@ class FilesystemPayloadStore:
 
     def _write_temp_payload_file(self, dir_fd: int, filename: str, content: bytes) -> str:
         """Write content to a temporary file in an already-open shard directory."""
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
         for _ in range(100):
             temp_name = f".{filename}.{secrets.token_hex(8)}.tmp"
             try:

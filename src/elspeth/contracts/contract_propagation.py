@@ -123,15 +123,15 @@ def narrow_contract_to_output(
     existing_fields = {f.normalized_name: f for f in input_contract.fields}
 
     def renamed_field_from_source(name: str) -> FieldContract | None:
-        source_name = source_by_target.get(name)
-        if source_name is None:
+        if name not in source_by_target:
             return None
+        source_name = source_by_target[name]
         normalized_source_name = input_contract.find_name(source_name)
         if normalized_source_name is None:
-            return None
+            raise ValueError(f"Renamed field target {name!r} refers to unknown source field {source_name!r}")
         source_contract = input_contract.find_field(normalized_source_name)
         if source_contract is None:
-            return None
+            raise ValueError(f"Renamed field target {name!r} refers to unresolved source field {source_name!r}")
         return FieldContract(
             normalized_name=name,
             original_name=source_contract.original_name,

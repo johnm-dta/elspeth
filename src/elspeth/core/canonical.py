@@ -91,19 +91,13 @@ def _normalize_value(obj: Any) -> Any:
     if isinstance(obj, np.bool_):
         return bool(obj)
     if isinstance(obj, np.ndarray):
-        # BUG-CANON-01 fix: Reject NaN/Infinity in arrays
-        # Multi-dimensional arrays need element-wise validation
-        if obj.size > 0:  # Only check non-empty arrays
-            try:
-                # np.any() works on all dtypes, returns False for non-numeric
-                if np.any(np.isnan(obj)) or np.any(np.isinf(obj)):
-                    raise ValueError(
-                        "NaN/Infinity found in NumPy array. Audit trail requires finite values only. Use None for missing values, not NaN."
-                    )
-            except TypeError:
-                # np.isnan/isinf raise TypeError for non-numeric dtypes (e.g., strings)
-                # This is expected and safe - non-numeric arrays can't contain NaN/Inf
-                pass
+        # Numeric arrays can be checked vectorially; object/string arrays are
+        # normalized element-by-element below so embedded Python floats still
+        # use the scalar non-finite checks.
+        if obj.size > 0 and np.issubdtype(obj.dtype, np.number) and not np.all(np.isfinite(obj)):
+            raise ValueError(
+                "NaN/Infinity found in NumPy array. Audit trail requires finite values only. Use None for missing values, not NaN."
+            )
         # 0-D arrays convert to scalars via tolist()/item(); normalize that scalar directly.
         if obj.ndim == 0:
             return _normalize_value(obj.item())

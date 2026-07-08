@@ -804,6 +804,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory of per-module allowlist YAML files to repair in place",
     )
     sign_bundle.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "Dotenv file containing signing-relevant keys. Existing environment "
+            "values win; unrelated keys are ignored and secret values are not printed."
+        ),
+    )
+    sign_bundle.add_argument(
         "--owner",
         type=_non_empty_string,
         required=True,
@@ -3732,6 +3741,12 @@ def _run_sign_bundle(args: argparse.Namespace) -> int:
     from elspeth_lints.core.allowlist import _judge_metadata_hmac_key
     from elspeth_lints.core.bundle_verify import verify_bundle_against_tree
     from elspeth_lints.core.review_bundle import read_bundle
+
+    try:
+        _load_judge_signing_env_file(args.env_file)
+    except ValueError as exc:
+        sys.stderr.write(f"sign-bundle: {exc}\n")
+        return 2
 
     # Fail-closed key hoist (mirrors migrate-judge-scope): even --dry-run must
     # hold the operator HMAC key, so a keyless run aborts before any tree read

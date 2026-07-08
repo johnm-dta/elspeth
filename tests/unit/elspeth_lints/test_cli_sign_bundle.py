@@ -24,6 +24,7 @@ Fixtures are replicated locally (rather than imported from
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -344,6 +345,33 @@ def test_sign_bundle_fails_closed_without_key(tmp_path: Path, monkeypatch: pytes
     monkeypatch.delenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", raising=False)
     assert main(_argv(bundle_path, root, allowlist_dir, extra=("--yes",))) == 2
     assert "ELSPETH_JUDGE_METADATA_HMAC_KEY" in capsys.readouterr().err
+
+
+def test_sign_bundle_loads_hmac_key_from_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--env-file supplies the operator key with the same loader as sign-judge-signatures."""
+    root = _build_root(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_source(root, "plugins/widget.py", "widget")
+    finding = _live_finding(root, "plugins/widget.py")
+    key = _write_signed_v2_entry(allowlist_dir, "widget.yaml", finding=finding)
+    _write_source(root, "plugins/widget.py", "widget", active=False)  # orphan the entry so stale_delete verifies
+    bundle = _bundle(root, allowlist_dir, (BundleAction(lane="resign", kind="stale_delete", key=key, source_file="widget.yaml"),))
+    bundle_path = _write_bundle_file(tmp_path, bundle)
+
+    env_file = tmp_path / "operator.env"
+    env_file.write_text(f'ELSPETH_JUDGE_METADATA_HMAC_KEY="{_HMAC_KEY}"\nUNRELATED_KEY="ignored"\n', encoding="utf-8")
+    monkeypatch.delenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", raising=False)
+    assert main(_argv(bundle_path, root, allowlist_dir, extra=("--yes", "--env-file", str(env_file)))) == 0
+    assert "UNRELATED_KEY" not in os.environ
+
+
+def test_sign_bundle_rejects_missing_env_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A bad --env-file path aborts before the key hoist and before any tree read."""
+    root = _build_root(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    bundle_path = tmp_path / "unread.json"  # never read: env-file rejection comes first
+    assert main(_argv(bundle_path, root, allowlist_dir, extra=("--yes", "--env-file", str(tmp_path / "absent.env")))) == 2
+    assert "--env-file" in capsys.readouterr().err
 
 
 def test_sign_bundle_rejects_malformed_bundle(tmp_path: Path) -> None:

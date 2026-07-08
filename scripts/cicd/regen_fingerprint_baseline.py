@@ -196,6 +196,20 @@ def _git_status_and_maybe_commit(*, commit: bool) -> None:
     print("✓ Committed the regenerated baseline.")
 
 
+def _load_env_file(env_file: Path | None) -> None:
+    """Load signing-relevant keys from a dotenv file via the shared lints loader.
+
+    Same semantics as ``sign-judge-signatures --env-file``: existing environment
+    values win, unrelated keys are ignored, secret values are never printed.
+    """
+    if env_file is None:
+        return
+    sys.path.insert(0, str(ELSPETH_LINTS_SRC))
+    from elspeth_lints.core.cli import _load_judge_signing_env_file
+
+    _load_judge_signing_env_file(env_file)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -203,8 +217,17 @@ def main() -> None:
         action="store_true",
         help="git-commit the regenerated fixture (default: leave uncommitted for review).",
     )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            f"Dotenv file containing signing-relevant keys such as {HMAC_ENV}. Existing environment values win; unrelated keys are ignored."
+        ),
+    )
     args = parser.parse_args()
 
+    _load_env_file(args.env_file)
     _check_preconditions()
     _verify_signed_gate()  # refuses (exit 1) if the signed gate is not green
     _regenerate()

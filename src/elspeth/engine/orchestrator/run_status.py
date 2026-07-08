@@ -170,7 +170,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
         pair = (outcome_record.outcome, outcome_record.path)
         effect = TERMINAL_PAIR_COUNTER_EFFECTS.get(pair)
         if effect is None:
-            raise AssertionError(
+            raise OrchestrationInvariantError(
                 f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
                 "Add it to TERMINAL_PAIR_COUNTER_EFFECTS; see ADR-019 mapping table."
             )

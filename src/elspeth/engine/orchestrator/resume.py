@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.exc import OperationalError
+
 from elspeth.contracts import PipelineRow, ResumedRow, RunStatus
 from elspeth.contracts.config import RuntimeRetryConfig
 from elspeth.contracts.coordination import (
@@ -452,7 +454,13 @@ def _derive_resume_failure_counter_baseline(factory: RecorderFactory, run_id: st
     """Best-effort counter baseline for FAILED resume ceremony enrichment."""
     try:
         _terminal_status, counters = derive_resume_terminal_status_from_audit(factory, run_id)
-    except Exception:
+    except OperationalError:
+        # Transient DB contention while reading the audit-cumulative baseline:
+        # degrade to resume-local partial counters (the caller treats None as
+        # partial-only). Corruption/invariant signals from the derive
+        # (AuditIntegrityError, OrchestrationInvariantError) must propagate —
+        # substituting partial counters for them would report a
+        # wrong-but-plausible FAILED result over an untrustworthy audit trail.
         return None
     return counters
 

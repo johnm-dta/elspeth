@@ -202,8 +202,14 @@ def _merge_with_original_names(
         if fc.normalized_name in field_origins:
             winning_branch = field_origins[fc.normalized_name]
             original_name = branch_original_names[(fc.normalized_name, winning_branch)]
+        elif fc.normalized_name in fallback_original_names:
+            original_name = fallback_original_names[fc.normalized_name]
         else:
-            original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
+            # Field carried by no arrived branch (its only source branch was
+            # lost in a partial coalesce): no original-name provenance exists,
+            # so the canonical normalized name is the declared fallback
+            # identifier.
+            original_name = fc.normalized_name
         merged_fields.append(
             FieldContract(
                 normalized_name=fc.normalized_name,

@@ -3998,8 +3998,11 @@ async def _dispatch_guided_respond(
         acknowledged_unavailable = (
             guided.advisor_signoff_escape_offered
             and guided.advisor_checkpoint_passes_used >= advisor_checkpoint_max_passes
-            and tuple(turn_response.get("chosen") or ()) == ("complete_without_signoff",)
-            and turn_response.get("custom_inputs") is None
+            # Direct access on both required TurnResponse keys: presence is
+            # enforced by the shape guard above, so schema drift crashes
+            # (KeyError) instead of silently computing False.
+            and tuple(turn_response["chosen"]) == ("complete_without_signoff",)
+            and turn_response["custom_inputs"] is None
         )
         max_passes = advisor_checkpoint_max_passes  # P5.4 dispatcher param
         guided, decision = await run_wire_signoff(

@@ -778,7 +778,14 @@ class SchedulerDrainCoordinator:
             [scheduled.token_id],
             step_index=self._processor.resolve_sink_step(),
         )
-        attempt_offset = max_attempts.get(scheduled.token_id, -1) + 1
+        if scheduled.token_id in max_attempts:
+            attempt_offset = max_attempts[scheduled.token_id] + 1
+        else:
+            # No sink node_state exists yet: pending sinks are routinely parked
+            # before their sink write ever opens attempt 0, so absence is the
+            # normal first-attempt case, not corruption. The provenance guard
+            # below still rejects offset > 0 without a resume checkpoint.
+            attempt_offset = 0
         if attempt_offset > 0 and self._resume_checkpoint_id is None:
             raise AuditIntegrityError(
                 f"Scheduler pending sink token {scheduled.token_id!r} (run {self._run_id!r}) already has "

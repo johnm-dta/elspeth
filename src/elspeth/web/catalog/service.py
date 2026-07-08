@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 from elspeth.contracts.enums import AuditCharacteristic, DerivedAuditCharacteristics, Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
@@ -17,6 +17,21 @@ from elspeth.web.catalog.knob_schema import (
     lower_discriminated_to_knob_schema,
     lower_model_to_knob_schema,
     validate_knob_schema,
+)
+from elspeth.web.catalog.schema_parse import (
+    DEFS_REF_PREFIX as _DEFS_REF_PREFIX,
+)
+from elspeth.web.catalog.schema_parse import (
+    OneOfEntry as _OneOfEntry,
+)
+from elspeth.web.catalog.schema_parse import (
+    SchemaObject as _SchemaObject,
+)
+from elspeth.web.catalog.schema_parse import (
+    SchemaProperty as _SchemaProperty,
+)
+from elspeth.web.catalog.schema_parse import (
+    required_secret_fields_from_json_schema,
 )
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
@@ -34,61 +49,16 @@ PluginClass = type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol
 # Valid singular plugin type identifiers
 _VALID_TYPES = frozenset({"source", "transform", "sink"})
 
-# JSON-Schema $ref prefix for local $defs used by Pydantic discriminated unions.
-_DEFS_REF_PREFIX = "#/$defs/"
-
 # ADR-013 declared-input-field checks currently dispatch only for non-batch
 # transforms. Batch-aware transform schemas must not advertise this option
 # until a batch pre-emission dispatch site exists.
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 
 
-# Typed views over the JSON-Schema documents that Pydantic's
-# ``model_json_schema()`` emits for plugin config models. The *values* in
-# these documents are first-party (our own plugin config models produced
-# them — system code), but the *presence* of individual keys is governed by
-# the JSON Schema specification, which we do not author: ``required`` is
-# omitted when no field is mandatory, ``default`` is omitted when a field has
-# none, top-level ``type`` is absent for ``anyOf`` properties, ``$ref`` is
-# absent for inline ``oneOf`` entries. Parsing each fragment into one of
-# these permissive models makes the spec-optional keys explicit typed fields
-# with honest defaults (absent ``required`` -> empty list, absent ``default``
-# -> ``None``) so the traversal accesses typed attributes directly instead of
-# guessing with ``.get(key, default)``. A ``ValidationError`` here would mean
-# our own schema generation produced a structurally impossible document — a
-# first-party bug — so it is intentionally left to propagate (crash), never
-# swallowed.
-class _SchemaProperty(BaseModel):
-    """One entry under a JSON-Schema ``properties`` map."""
-
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    type: str | None = None
-    description: str | None = None
-    default: Any = None
-    any_of: list[_SchemaProperty] = Field(default_factory=list, alias="anyOf")
-
-
-class _SchemaObject(BaseModel):
-    """A JSON-Schema object document (top-level model or ``$defs`` variant)."""
-
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    properties: dict[str, _SchemaProperty] = Field(default_factory=dict)
-    required: list[str] = Field(default_factory=list)
-
-
-class _OneOfEntry(BaseModel):
-    """One entry of a discriminated-union ``oneOf`` list.
-
-    JSON Schema permits each entry to be either a ``$ref`` into ``$defs`` or
-    an inline object schema; an inline entry simply omits ``$ref``, so the
-    field defaults to the empty string and the caller skips it.
-    """
-
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    ref: str = Field(default="", alias="$ref")
+# The typed JSON-Schema views (_SchemaProperty/_SchemaObject/_OneOfEntry) and
+# the required-secret-field derivation live in
+# elspeth.web.catalog.schema_parse, shared with the composer discovery
+# availability gates so both surfaces reify plugin schemas identically.
 
 
 # Map Determinism enum values to the AuditCharacteristic flag they
@@ -518,39 +488,13 @@ class CatalogServiceImpl:
         )
         declared_fields = {req.field for req in declared}
         if config_fields is None:
-            required_secret_fields = self._required_secret_fields_from_schema(schema)
+            required_secret_fields = required_secret_fields_from_json_schema(schema)
         else:
             required_secret_fields = tuple(field.name for field in config_fields if field.required and is_secret_field(field.name))
         inferred = tuple(
             PluginSecretRequirement(field=field_name) for field_name in required_secret_fields if field_name not in declared_fields
         )
         return (*declared, *inferred)
-
-    def _required_secret_fields_from_schema(self, schema: dict[str, Any]) -> tuple[str, ...]:
-        if "oneOf" in schema and "$defs" in schema:
-            return self._common_required_secret_fields_from_discriminated(schema)
-
-        parsed = _SchemaObject.model_validate(schema)
-        return tuple(field_name for field_name in parsed.required if is_secret_field(field_name))
-
-    def _common_required_secret_fields_from_discriminated(self, schema: dict[str, Any]) -> tuple[str, ...]:
-        defs: dict[str, dict[str, Any]] = schema["$defs"]
-        variant_required_secret_fields: list[set[str]] = []
-        ordered_first_variant: list[str] = []
-        for raw_entry in schema["oneOf"]:
-            entry = _OneOfEntry.model_validate(raw_entry)
-            if not entry.ref.startswith(_DEFS_REF_PREFIX):
-                continue
-            variant = _SchemaObject.model_validate(defs[entry.ref[len(_DEFS_REF_PREFIX) :]])
-            fields = {field_name for field_name in variant.required if is_secret_field(field_name)}
-            if not variant_required_secret_fields:
-                ordered_first_variant = [field_name for field_name in variant.required if field_name in fields]
-            variant_required_secret_fields.append(fields)
-
-        if not variant_required_secret_fields:
-            return ()
-        common = set.intersection(*variant_required_secret_fields)
-        return tuple(field_name for field_name in ordered_first_variant if field_name in common)
 
     def _fields_from_discriminated(self, schema: dict[str, Any]) -> list[ConfigFieldSummary]:
         """Union fields across ``$defs`` variants referenced by ``oneOf``.

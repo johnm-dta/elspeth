@@ -313,8 +313,15 @@ class LandscapeJournal:
             try:
                 directory.mkdir(mode=_JOURNAL_DIRECTORY_MODE)
             except FileExistsError:
-                continue
-            directory.chmod(_JOURNAL_DIRECTORY_MODE)
+                # Created concurrently between the exists() probe and mkdir.
+                # Fall through: the owner-only invariant is verified below on
+                # the create and race paths alike — a race-created ancestor
+                # with lax permissions would let another user unlink/rename
+                # the open journal file.
+                pass
+            else:
+                directory.chmod(_JOURNAL_DIRECTORY_MODE)
+            LandscapeJournal._verify_owner_only_dir(directory)
 
     def _open_owner_only_append(self) -> TextIO:
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | _JOURNAL_OPEN_SECURITY_FLAGS
@@ -340,6 +347,21 @@ class LandscapeJournal:
             raise PermissionError("Landscape journal file must be owned by the current user")
         if mode & _NON_OWNER_PERMISSION_BITS:
             raise PermissionError("Landscape journal file must be owner-only before appending")
+
+    @staticmethod
+    def _verify_owner_only_dir(directory: Path) -> None:
+        if os.name == "nt":
+            return
+
+        # lstat, not stat: a symlink planted at an ancestor position in the
+        # mkdir race window must be rejected outright, never followed.
+        info = os.lstat(directory)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError("Landscape journal parent must be a directory")
+        if info.st_uid != os.getuid():
+            raise PermissionError("Landscape journal parent directory must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) & _NON_OWNER_PERMISSION_BITS:
+            raise PermissionError("Landscape journal parent directory must be owner-only")
 
     @staticmethod
     def _serialize_record(record: JournalRecord) -> str:

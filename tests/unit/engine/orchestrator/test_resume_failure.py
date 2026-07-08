@@ -130,15 +130,17 @@ def _admit_resume_point(orch: Orchestrator, resume_point: ResumePoint) -> Any:
 
 
 # Protocol-specced plugin doubles. ``SourceProtocol``/``SinkProtocol``/
-# ``TransformProtocol`` declare ``name``/``on_success``/``config`` only by
-# annotation, so they are absent from ``dir()`` and a bare ``MagicMock(spec=...)``
-# rejects reads of them — and ``name`` cannot be seeded via the ``MagicMock``
-# constructor (it is the reserved repr-name kwarg). These factories spec against
-# the real protocol (so ``isinstance`` holds and method typos are caught) and
-# seed the ``name`` the orchestrator's cleanup hooks read back.
+# ``TransformProtocol`` declare ``name``/``node_id``/``on_success``/``config``
+# only by annotation, so they are absent from ``dir()`` and a bare
+# ``MagicMock(spec=...)`` rejects reads of them — and ``name`` cannot be seeded
+# via the ``MagicMock`` constructor (it is the reserved repr-name kwarg). These
+# factories spec against the real protocol (so ``isinstance`` holds and method
+# typos are caught) and seed the ``name`` and ``node_id`` the orchestrator's
+# cleanup hooks read back (lifecycle attribution requires ``node_id``).
 def _specced_source(*, name: str = "source", **attrs: object) -> MagicMock:
     mock = MagicMock(spec=SourceProtocol)
     mock.name = name
+    mock.node_id = name
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock
@@ -147,6 +149,7 @@ def _specced_source(*, name: str = "source", **attrs: object) -> MagicMock:
 def _specced_sink(*, name: str = "sink", **attrs: object) -> MagicMock:
     mock = MagicMock(spec=SinkProtocol)
     mock.name = name
+    mock.node_id = name
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock
@@ -155,6 +158,7 @@ def _specced_sink(*, name: str = "sink", **attrs: object) -> MagicMock:
 def _specced_transform(*, name: str = "transform", **attrs: object) -> MagicMock:
     mock = MagicMock(spec=TransformProtocol)
     mock.name = name
+    mock.node_id = name
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock
@@ -286,6 +290,13 @@ class TestResumeFinalizesAsFailed:
             NodeID("source-node"): SimpleNamespace(source_name="source", lifecycle_state="loaded"),
         }
         mock_factory.execution.get_incomplete_batches.return_value = []
+        # FAILED finalization derives its counter baseline from the audit
+        # projections; stub them with real zeros (mirroring the sibling tests
+        # below) — the derive no longer swallows arbitrary mock errors, so an
+        # unstubbed projection would propagate instead of degrading to None.
+        mock_factory.query.get_all_token_outcomes_for_run.return_value = []
+        mock_factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        mock_factory.run_status_projection.count_failed_coalesce_barrier_rows.return_value = 0
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
 
@@ -1934,6 +1945,9 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
         ctx = PluginContext(run_id="test", config={}, landscape=None)
         sink_without_node_id = _specced_sink(name="sink-without-node-id")
+        # The factory seeds node_id (lifecycle attribution requires it); this
+        # test pins the missing-attribute invariant, so remove it explicitly.
+        del sink_without_node_id.node_id
         config = MagicMock(spec=PipelineConfig)
         config.sources = {}
         config.transforms = []

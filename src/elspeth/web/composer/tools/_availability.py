@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from elspeth.core.secrets import is_secret_field
+from elspeth.web.catalog.schema_parse import required_secret_fields_from_json_schema
 from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSecretRequirement, PluginSummary
 from elspeth.web.composer.tools._common import ToolContext
 
@@ -80,38 +81,11 @@ def _requirements_from_schema(schema: PluginSchemaInfo) -> tuple[PluginSecretReq
 
 
 def _requirements_from_json_schema(schema: dict[str, Any]) -> tuple[PluginSecretRequirement, ...]:
-    if "oneOf" in schema and "$defs" in schema:
-        fields = _common_required_secret_fields_from_discriminated(schema)
-    else:
-        fields = tuple(
-            field_name for field_name in schema.get("required", ()) if isinstance(field_name, str) and is_secret_field(field_name)
-        )
-    return tuple(PluginSecretRequirement(field=field_name) for field_name in fields)
-
-
-def _common_required_secret_fields_from_discriminated(schema: dict[str, Any]) -> tuple[str, ...]:
-    defs = schema["$defs"]
-    required_by_variant: list[set[str]] = []
-    ordered_first_variant: list[str] = []
-    for entry in schema["oneOf"]:
-        if not isinstance(entry, dict):
-            continue
-        raw_ref = entry.get("$ref")
-        if not isinstance(raw_ref, str) or not raw_ref.startswith("#/$defs/"):
-            continue
-        variant = defs[raw_ref[len("#/$defs/") :]]
-        raw_required = variant.get("required", ())
-        if not isinstance(raw_required, list):
-            continue
-        fields = {field_name for field_name in raw_required if isinstance(field_name, str) and is_secret_field(field_name)}
-        if not required_by_variant:
-            ordered_first_variant = [field_name for field_name in raw_required if isinstance(field_name, str) and field_name in fields]
-        required_by_variant.append(fields)
-
-    if not required_by_variant:
-        return ()
-    common = set.intersection(*required_by_variant)
-    return tuple(field_name for field_name in ordered_first_variant if field_name in common)
+    # Secret-requirement computation is a security gate: reify through the
+    # shared typed schema models (crash on a structurally impossible schema)
+    # rather than probing the raw dict, which would silently under-detect
+    # required secret fields on a malformed document.
+    return tuple(PluginSecretRequirement(field=field_name) for field_name in required_secret_fields_from_json_schema(schema))
 
 
 def _requirement_satisfied(

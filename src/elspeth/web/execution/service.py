@@ -1876,6 +1876,13 @@ class ExecutionServiceImpl:
             )
             run_event = run_event.with_event_sequence(record.sequence)
         except (OSError, SQLAlchemyError) as exc:
+            # Transport/IO fault on the run_events write only. run_events is a
+            # secondary websocket-replay/inspection stream — authoritative run
+            # lifecycle state persists on the separate must-succeed
+            # update_run_status path — so a transient disk/DB fault degrades to
+            # broadcast-without-sequence rather than aborting live progress.
+            # Tier-1 breaches (AuditIntegrityError, ValueError "Run not found")
+            # are NOT in this tuple and propagate.
             slog.error(
                 "run_event_persist_failed",
                 run_id=run_id,

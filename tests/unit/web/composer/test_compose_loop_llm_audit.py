@@ -19,7 +19,8 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCal
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
-from elspeth.web.composer.llm_response_parsing import build_llm_call_record
+from elspeth.web.composer import llm_response_parsing as llm_response_parsing_module
+from elspeth.web.composer.llm_response_parsing import build_llm_call_record, token_usage_from_response
 from elspeth.web.composer.protocol import ComposerConvergenceError, ComposerServiceError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
@@ -170,6 +171,27 @@ def _captured_llm_calls(exc: BaseException) -> Sequence[ComposerLLMCall]:
     calls = exc.__dict__["llm_calls"]
     assert isinstance(calls, tuple)
     return cast(tuple[ComposerLLMCall, ...], calls)
+
+
+def test_llm_response_parser_does_not_call_dynamic_getattr() -> None:
+    import inspect
+
+    assert "getattr(" not in inspect.getsource(llm_response_parsing_module)
+
+
+def test_token_usage_ignores_provider_properties_and_reads_own_fields() -> None:
+    class _ProviderUsage:
+        def __init__(self) -> None:
+            self.completion_tokens = 7
+
+        @property
+        def prompt_tokens(self) -> int:
+            raise AssertionError("provider property should not be invoked")
+
+    usage = token_usage_from_response(SimpleNamespace(usage=_ProviderUsage()))
+
+    assert usage.prompt_tokens is None
+    assert usage.completion_tokens == 7
 
 
 def test_llm_call_record_redacts_raw_provider_error_detail() -> None:

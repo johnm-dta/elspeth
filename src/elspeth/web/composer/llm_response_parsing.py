@@ -16,8 +16,8 @@ SDK wrappers. The helpers:
 
 Tier 3 boundary discipline (per ELSPETH CLAUDE.md):
 
-- ``getattr(...)`` and ``dict.get(...)`` are appropriate at this boundary —
-  LiteLLM response objects are external data, not internal contracts.
+- Provider values are read from Mapping keys or object-owned fields only.
+  Hidden/dynamic provider properties are treated as absent rather than invoked.
 - ``isinstance(...)`` guards distinguish provider-Mapping shapes from
   attribute-style provider response objects.
 - Missing fields surface as ``None`` (absence), not as fabricated zeros.
@@ -90,12 +90,44 @@ class _ReasoningMetadata(TypedDict):
     thinking_blocks: Any | None
 
 
-def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping[str, Any] | None:
+def _provider_field_map(value: Any) -> Mapping[str, Any] | None:
     if isinstance(value, Mapping):
         return value
     if value is None:
         return None
-    return {field: getattr(value, field, None) for field in fields}
+    try:
+        fields = vars(value)
+    except TypeError:
+        return None
+    if isinstance(fields, Mapping):
+        return fields
+    return None
+
+
+def _provider_field(value: Any, field: str) -> Any:
+    fields = _provider_field_map(value)
+    if fields is None or field not in fields:
+        return None
+    return fields[field]
+
+
+def _provider_method(value: Any, method_name: str) -> Any | None:
+    try:
+        method = object.__getattribute__(value, method_name)
+    except AttributeError:
+        return None
+    if callable(method):
+        return method
+    return None
+
+
+def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping[str, Any] | None:
+    value_fields = _provider_field_map(value)
+    if value_fields is None:
+        return None
+    if isinstance(value, Mapping):
+        return value
+    return {field: value_fields[field] if field in value_fields else None for field in fields}
 
 
 def token_usage_from_response(response: Any | None) -> TokenUsage:
@@ -135,7 +167,7 @@ def token_usage_from_response(response: Any | None) -> TokenUsage:
     """
     if response is None:
         return TokenUsage.unknown()
-    usage = getattr(response, "usage", None)
+    usage = _provider_field(response, "usage")
     if isinstance(usage, Mapping):
         details = usage.get("prompt_tokens_details")
         completion_details = usage.get("completion_tokens_details")
@@ -152,26 +184,26 @@ def token_usage_from_response(response: Any | None) -> TokenUsage:
             "reasoning_tokens": usage.get("reasoning_tokens"),
         }
     else:
-        details_attr = getattr(usage, "prompt_tokens_details", None)
+        details_attr = _provider_field(usage, "prompt_tokens_details")
         details_payload = _provider_details_payload(details_attr, fields=("cached_tokens",))
         completion_details_payload = _provider_details_payload(
-            getattr(usage, "completion_tokens_details", None),
+            _provider_field(usage, "completion_tokens_details"),
             fields=("reasoning_tokens",),
         )
         output_details_payload = _provider_details_payload(
-            getattr(usage, "output_tokens_details", None),
+            _provider_field(usage, "output_tokens_details"),
             fields=("reasoning_tokens",),
         )
         usage_data = {
-            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "completion_tokens", None),
-            "total_tokens": getattr(usage, "total_tokens", None),
+            "prompt_tokens": _provider_field(usage, "prompt_tokens"),
+            "completion_tokens": _provider_field(usage, "completion_tokens"),
+            "total_tokens": _provider_field(usage, "total_tokens"),
             "prompt_tokens_details": details_payload,
             "completion_tokens_details": completion_details_payload,
             "output_tokens_details": output_details_payload,
-            "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
-            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
-            "reasoning_tokens": getattr(usage, "reasoning_tokens", None),
+            "cache_creation_input_tokens": _provider_field(usage, "cache_creation_input_tokens"),
+            "cache_read_input_tokens": _provider_field(usage, "cache_read_input_tokens"),
+            "reasoning_tokens": _provider_field(usage, "reasoning_tokens"),
         }
     if usage_data["cache_read_input_tokens"] is not None or usage_data["cache_creation_input_tokens"] is not None:
         usage_data["prompt_tokens_details"] = None
@@ -188,11 +220,11 @@ def _provider_cost_from_response(response: Any | None) -> tuple[float | None, Co
     """
     if response is None:
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
-    usage = getattr(response, "usage", None)
+    usage = _provider_field(response, "usage")
     if isinstance(usage, Mapping):
         raw_cost = usage["cost"] if "cost" in usage else None
     else:
-        raw_cost = getattr(usage, "cost", None)
+        raw_cost = _provider_field(usage, "cost")
     if type(raw_cost) is bool or type(raw_cost) not in (int, float):
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
     cost = float(cast(int | float, raw_cost))
@@ -204,7 +236,7 @@ def _provider_cost_from_response(response: Any | None) -> tuple[float | None, Co
 def safe_response_model(response: Any | None) -> str | None:
     if response is None:
         return None
-    model = getattr(response, "model", None)
+    model = _provider_field(response, "model")
     if isinstance(model, str) and model.strip():
         return model
     return None
@@ -214,16 +246,14 @@ def _safe_provider_request_id(response: Any | None) -> str | None:
     if response is None:
         return None
     for attr in ("id", "request_id"):
-        value = getattr(response, attr, None)
+        value = _provider_field(response, attr)
         if isinstance(value, str) and value and len(value) <= 256:
             return value
     return None
 
 
 def _response_field(value: Any, field: str) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(field)
-    return getattr(value, field, None)
+    return _provider_field(value, field)
 
 
 def _first_response_message(response: Any | None) -> Any | None:
@@ -244,16 +274,16 @@ def _json_safe_provider_artifact(value: Any) -> Any:
         return [_json_safe_provider_artifact(item) for item in value]
     if isinstance(value, set | frozenset):
         return [_json_safe_provider_artifact(item) for item in value]
-    model_dump = getattr(value, "model_dump", None)
+    model_dump = _provider_method(value, "model_dump")
     if callable(model_dump):
         try:
             return _json_safe_provider_artifact(model_dump(mode="json"))
         except TypeError:
             return _json_safe_provider_artifact(model_dump())
-    to_dict = getattr(value, "to_dict", None)
+    to_dict = _provider_method(value, "to_dict")
     if callable(to_dict):
         return _json_safe_provider_artifact(to_dict())
-    dict_method = getattr(value, "dict", None)
+    dict_method = _provider_method(value, "dict")
     if callable(dict_method):
         return _json_safe_provider_artifact(dict_method())
     return repr(value)

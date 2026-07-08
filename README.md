@@ -6,18 +6,24 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 ![Status: 0.7.0](https://img.shields.io/badge/status-0.7.0-green.svg)
 
-Elspeth is a high-assurance pipeline substrate for consequential workflows:
-systems where the wrong output can cause operational, legal, safety, financial,
-or security harm. It supports two authoring surfaces over one runtime assurance
-model: operators can hand-edit reviewable, version-controlled YAML, while
-knowledge workers can use authenticated Web Composer authoring driven by an LLM
-tool loop. Both surfaces target the same primitives, plugin contracts, runtime
-assembly, graph-validation contracts, executor, Landscape audit trail, and
-run-accounting model. Validation and audit are core product properties, not
-after-the-fact diagnostics. Composer-authored pipelines converge through
-runtime-shaped validation and production execution setup; the longer-term
-compiler direction is to seal YAML and composer input into one compiled
-artifact that the executor runs directly.
+Elspeth is a pipeline engine for building, validating, running, and auditing
+workflows where outputs need to be reviewed, explained, and reproduced. It
+supports two authoring surfaces over one runtime model: operators can hand-edit
+version-controlled YAML, while knowledge workers can use authenticated Web
+Composer authoring driven by an LLM tool loop. Both surfaces target the same
+primitives, plugin contracts, runtime assembly, graph-validation contracts,
+executor, Landscape audit trail, and run-accounting model.
+
+Validation and audit are part of the workflow, not after-the-fact diagnostics.
+Composer-authored pipelines use the same validation and execution setup as
+YAML-authored pipelines; the longer-term compiler direction is to seal both
+inputs into one compiled artifact that the executor runs directly.
+
+**Short walkthrough:** [Watch the Elspeth demo video](docs/video/elspeth.mp4)
+
+The video gives a quick view of what Elspeth is and what it does: the Web
+Composer building and validating a pipeline over the same runtime, validation,
+and audit model used by YAML-authored pipelines.
 
 ---
 
@@ -25,6 +31,7 @@ artifact that the executor runs directly.
 
 - [Why Elspeth Exists](#why-elspeth-exists)
 - [Architecture At A Glance](#architecture-at-a-glance)
+- [What Changed In 0.7.0](#what-changed-in-070)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -40,6 +47,7 @@ artifact that the executor runs directly.
   - [JSONL Change Journal](#jsonl-change-journal-optional)
 - [Status And Direction](#status-and-direction)
 - [Sense/Decide/Act Model](#sensedecideact-model)
+- [Example Use Cases](#example-use-cases)
 - [Usage](#usage)
   - [Running Pipelines](#running-pipelines)
   - [Explaining Decisions](#explaining-decisions)
@@ -590,7 +598,7 @@ Every edge in the DAG is explicitly declared — no implicit routing conventions
 | **Financial Compliance** | Transaction feed | Rules engine + ML fraud detection | Approved, flagged, blocked |
 | **Content Moderation** | User submissions | Safety classifier | Published, human review, rejected |
 
-Same framework. Different plugins. Full audit trail.
+Same framework. Different plugins. Audit evidence recorded with each run.
 
 ---
 
@@ -1029,4 +1037,4 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ---
 
-Built for systems where decisions must be **traceable, reliable, and defensible**.
+Built for workflows where decisions need to be **traceable and reviewable**.

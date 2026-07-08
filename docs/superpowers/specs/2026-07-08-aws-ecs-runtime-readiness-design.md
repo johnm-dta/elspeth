@@ -234,8 +234,15 @@ dependency-touching endpoint cannot become a latency tax or a DoS surface:
 - Aurora connection pools must be explicitly sized rather than left at
   driver defaults: a small fixed pool (for example `pool_size=5`,
   `max_overflow=5`) with connection pre-ping enabled.
-- Validate-only startup, including one Aurora cold start, must complete
-  within 60 seconds.
+- Validate-only startup budgets per dependency, not per process: each
+  schema probe (session, then landscape) carries an independent 45-second
+  connection-retry budget. With a single shared Aurora cluster — one cold
+  start — startup completes within roughly 60 seconds. The worst case, two
+  independently paused clusters cold-starting serially, is bounded at
+  roughly 90 seconds plus probe time. The ECS container
+  `healthCheck.startPeriod` (Terraform-owned, outside this repository) must
+  be sized to the ~90-second worst case, not the nominal single-cluster
+  figure.
 
 ### Aurora Serverless v2 Considerations
 
@@ -244,9 +251,14 @@ which pauses the cluster and adds a cold-start delay to the next connection.
 The design tolerates that possibility without depending on it:
 
 - The startup validate path uses a 10-second connection timeout and a
-  bounded retry with backoff, up to 45 seconds total, before failing. The
-  ceiling is deliberately below the 60-second startup budget so schema
-  validation retains headroom after worst-case connection acquisition.
+  bounded retry with backoff, up to 45 seconds total per probe, before
+  failing. The budget is deliberately per-probe rather than shared across
+  the session and landscape probes: a shared window would let a
+  slow-but-healthy first probe starve the second probe's
+  genuinely-recoverable retry, turning a survivable two-cluster cold start
+  into a false hard failure and an ECS restart loop. Per-probe budgets
+  never false-fail a healthy deployment; they only take longer, which the
+  startup budget above absorbs.
 - The readiness probe cannot absorb a multi-second scale-from-zero cold
   start: with a 2-second per-check timeout, `/api/ready` reports not-ready
   while the cluster wakes. Cold-start tolerance therefore rests on ALB

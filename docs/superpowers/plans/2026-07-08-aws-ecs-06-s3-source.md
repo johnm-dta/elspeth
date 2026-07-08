@@ -15,7 +15,7 @@
 - Config: `bucket`, `key`, `format`, CSV/JSON options equivalent to Azure source, optional `region_name`/`endpoint_url`. "must not include AWS access-key, secret-key, or session-token fields."
 - Audit: "provider `aws_s3`... operation, bucket, key, byte count, content hash where available... latency, and sanitized error class... not record credentials, presigned URLs, raw secret-bearing endpoint strings, or unbounded provider error bodies."
 - Packaging: `aws` extra for boto3/botocore.
-- Known gap, intentionally left alone: `chat_solver.py:444`'s guided-mode valid-source list omits `aws_s3`. Do not add it here — that would steer web authors to a source this plan's header says isn't web-safe yet. Follow-up: update alongside plan 08.
+- Known gap, intentionally left alone: `composer/guided/chat_solver.py:444`'s guided-mode valid-source prompt list omits `aws_s3`. Do not add it here — that would steer web authors to a source this plan's header says isn't web-safe yet. **Owned by plan 08 Task 4** (guided-mode parity), which lands the prompt update only after both this plugin and the `endpoint_url` gate exist.
 
 ### Task 1: `aws` packaging extra + shared `build_s3_client` helper
 

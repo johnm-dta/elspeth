@@ -173,9 +173,14 @@ class _RetrievalProviderFake:
 @dataclass
 class _FailingCredential:
     error: Exception
+    close_calls: int = 0
 
     def get_token(self, *_scopes: str) -> object:
         raise self.error
+
+    def close(self) -> None:
+        # provider.close() releases the credential unconditionally (4a3e4ebe2).
+        self.close_calls += 1
 
 
 def _mock_ctx(state_id: str | None = "state-1", token_id: str = "token-1") -> _TransformContextFake:

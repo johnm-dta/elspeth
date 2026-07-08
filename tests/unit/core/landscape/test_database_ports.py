@@ -26,8 +26,12 @@ def test_broad_landscape_connection_provider_lives_in_ports_module() -> None:
 
 
 def test_database_ops_uses_narrow_connection_provider_protocol() -> None:
-    """DatabaseOps should depend only on the methods it calls."""
+    """DatabaseOps should depend only on the members it calls.
+
+    is_read_only joined the surface when the getattr probe in
+    execute_fetchall_many was reified into a protocol property (c125ef343).
+    """
     from elspeth.core.landscape import _database_ops
 
     methods = _protocol_methods(Path(_database_ops.__file__), "DatabaseOpsConnectionProvider")
-    assert methods == {"read_only_connection", "write_connection"}
+    assert methods == {"is_read_only", "read_only_connection", "write_connection"}

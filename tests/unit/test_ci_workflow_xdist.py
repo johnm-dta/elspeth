@@ -187,12 +187,17 @@ def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
 
 
 def test_codeql_security_suites_do_not_filter_by_problem_severity() -> None:
-    """Security suites must not drop security queries whose problem severity is warning."""
+    """Security suites must not drop security queries whose problem severity is warning.
+
+    security-extended carries the complete security query set, including
+    warning-severity queries; security-and-quality only adds non-security
+    quality queries on top of it, so dropping that suite (1a524d260) does
+    not filter security coverage by problem severity.
+    """
     workflow = _workflow(CODEQL_WORKFLOW)
     init_step = _step(workflow["jobs"]["analyze"], "Initialize CodeQL")
     queries = init_step["with"]["queries"]
     assert "security-extended" in queries
-    assert "security-and-quality" in queries
 
     config = _workflow(CODEQL_CONFIG)
     for query_filter in config.get("query-filters", ()):

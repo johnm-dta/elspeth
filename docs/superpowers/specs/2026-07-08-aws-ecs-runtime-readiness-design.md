@@ -169,6 +169,13 @@ explicit pre-1.0 operator instructions: drop or recreate the affected Aurora
 database/schema through the environment's normal procedures, then rerun
 `elspeth doctor aws-ecs --init-schema`.
 
+Known limitation: on PostgreSQL, staleness detection is structural only
+(tables, columns, foreign keys, checks, indexes). The schema-epoch mechanism
+rides SQLite's `PRAGMA user_version` and has no Aurora equivalent, so a
+future semantics-only schema revision — an epoch bump without structural
+change — would validate as current against Aurora. Every epoch bump to date
+has also been structural; a PostgreSQL schema-version table is future work.
+
 The web app must use validate-only schema behavior in `aws-ecs` mode. If the
 schema is missing, stale, or only partially present, web startup fails closed
 and points the operator at the doctor command rather than racing the
@@ -239,10 +246,22 @@ dependency-touching endpoint cannot become a latency tax or a DoS surface:
   connection-retry budget. With a single shared Aurora cluster — one cold
   start — startup completes within roughly 60 seconds. The worst case, two
   independently paused clusters cold-starting serially, is bounded at
-  roughly 90 seconds plus probe time. The ECS container
-  `healthCheck.startPeriod` (Terraform-owned, outside this repository) must
-  be sized to the ~90-second worst case, not the nominal single-cluster
-  figure.
+  roughly 90 seconds plus probe time.
+- The validation gate runs inside `create_app()`, which uvicorn's factory
+  protocol invokes **before binding the listening socket**. For the whole
+  validation window the port is therefore closed — health checks see
+  connection-refused, not a 503 — and `/api/health`'s liveness independence
+  only holds once startup completes. Two ECS knobs (both Terraform-owned,
+  outside this repository) must be sized to the worst case **plus margin,
+  never equal to it** (the ~90-second figure excludes probe time; 150
+  seconds is a reasonable setting): the container `healthCheck.startPeriod`,
+  which suppresses container health-check failures during startup, and the
+  ECS **service** `healthCheckGracePeriodSeconds`, which suppresses ALB
+  target-group health-check failures — the check that actually drives task
+  replacement. Sizing only `startPeriod` leaves a cold-starting task exposed
+  to ALB-driven replacement mid-validation: with the default (zero) grace
+  period, a two-cold-cluster deploy is killed and relaunched into the same
+  cold start — a restart loop that never converges.
 
 ### Aurora Serverless v2 Considerations
 

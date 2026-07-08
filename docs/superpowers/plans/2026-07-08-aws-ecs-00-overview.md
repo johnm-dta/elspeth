@@ -27,13 +27,13 @@ extras `postgres` and `aws`.
 | 01 | `…-01-deployment-contract.md` | `deployment_target` setting; pure aws-ecs contract validator; placeholder predicates extracted from existing validators | — |
 | 02 | `…-02-postgres-schema-support.md` | `postgres` extra; schema-shape probes on the owning modules; `schema_probe.py` with `pg_advisory_lock`-serialized init; pool kwargs passthrough | — |
 | 03 | `…-03-doctor-cli.md` | `elspeth doctor aws-ecs [--init-schema] --json`; read-only by default (incl. filesystem — probes never mkdir outside `--init-schema`, and never the `data_dir` root); never opens `auth.db`; sanitized error classes | Tasks 1–2: 01, 02 · **Task 3 (integration proof): also 06, 07, 09** |
-| 04 | `…-04-validate-only-startup.md` | Fail-closed startup schema validation in aws-ecs mode (incl. the hidden orphan-reconciliation `create_tables` path); 10 s/45 s/60 s budgets | 01, 02 |
+| 04 | `…-04-validate-only-startup.md` | Fail-closed startup schema validation in aws-ecs mode (incl. the hidden orphan-reconciliation `create_tables` path); 10 s connect/45 s per-probe budgets (~60 s nominal, ~90 s worst case); aws-ecs startup never creates `data_dir` — missing root fails closed as an unmounted EFS volume | 01, 02 |
 | 05 | `…-05-readiness-endpoint.md` | `GET /api/ready` (2 s/check, 5 s ceiling, 2 s TTL cache, redacted); liveness-independence proof for `/api/health`; probe-wiring doc | 01, 02 |
 | 06 | `…-06-s3-source.md` | `aws_s3` source; `max_object_bytes` (256 MiB default) enforced pre-read; `aws` extra; `aws_s3_common.build_s3_client` | build: — · **deploy: 08 gate must land first** (security ordering) |
 | 07 | `…-07-s3-sink.md` | `aws_s3` sink; Jinja keys; `overwrite=False` via `put_object(IfNoneMatch="*")` (verified against botocore 1.43.42); catalog/determinism parity registrations | build: 06 · **deploy: 08 gate must land first** (security ordering) |
 | 08 | `…-08-s3-endpoint-gate.md` | Web-authorship rejection of `aws_s3` `endpoint_url` (design review's Critical): `provider_config_policy` + `validate_pipeline` source/output adjudication + composer mutation paths + guided-mode prompt parity (Task 4) | build: — (Tasks 1–2 wave 1) · Task 3 composer paths (wave 2) · Task 4 needs 06 + Tasks 1–3 (wave 2, last) |
 | 09 | `…-09-bedrock-provider.md` | LiteLLM-backed `bedrock` pipeline provider in `_PROVIDERS`; composer Bedrock-response parsing tests; opt-in live smoke | — |
-| 10 | `…-10-packaging-docker.md` | Production install with extras `web,llm,aws,postgres` (no `--extra all`); Docker build; operator deployment docs | 02, 06, 09 |
+| 10 | `…-10-packaging-docker.md` | Production install with extras `webui,llm,aws,postgres` (no `--extra all`); Docker build; operator deployment docs incl. `startPeriod` **and** `healthCheckGracePeriodSeconds` sizing (the port is closed, not 503, during startup validation) and the first-deploy Aurora cold-start precondition | 02, 06, 09 |
 | 11 | `…-11-landscape-write-gate.md` | `open_landscape_db(settings)` factory gating `create_tables` on deployment target; migrates the per-run, tutorial-projection, and four auth-audit landscape writers; AST guard banning ungated `LandscapeDB` construction under `web/` | 01, 02, 04 |
 
 ## Execution order
@@ -48,17 +48,25 @@ extras `postgres` and `aws`.
 - **Wave 2:** 03 Tasks 1–2, 04, 05 (need 01+02); 07 (needs 06; merge after
   08 Tasks 1–2, same hardening); 08 Task 3 (composer mutation paths), then
   08 Task 4 (guided-mode prompt parity — needs 06 landed and 08 Tasks 1–3
-  in the tree; never before the gate).
+  in the tree; never before the gate). **Within-wave order:** merge 04
+  before 05 — both edit the same `app.py:293-294` lifespan orphan call, and
+  05's wrapper instructions assume 04's `create_tables` kwarg is already
+  present at that site.
 - **Wave 3:** 03 Task 3 (integration proof — needs 06, 07, 09 all
   registered); 10 (needs 02, 06, 09); 11 (needs 01, 02, 04).
 
 **Security ordering constraint:** the plan-08 gate must be in the tree
 before (never merely "in the same merge as") the first web-reachable
-`aws_s3` registration from 06/07 — see the within-wave order above, which
-makes this structural rather than a deploy-time discipline. A tree with
-06/07 merged but not 08 carries the exact web-authorable
-exfiltration/SSRF surface the design review rated Critical. Do not deploy
-the web app from such a tree. Likewise, do not call the tree aws-ecs-safe
+`aws_s3` registration from 06/07 — see the within-wave order above.
+**Round 3 — this is now mechanically enforced, not a merge discipline:**
+plan 06 Task 2 and plan 07 Task 1 each land a guard test in their
+registration commits (`test_registered_aws_s3_source_is_endpoint_url_gated`
+/ `test_registered_aws_s3_sink_is_endpoint_url_gated`) that drives
+`validate_pipeline` and is deliberately red on any tree carrying an
+`aws_s3` registration without plan 08 Tasks 1–2 — a tree that merges 06/07
+ahead of the gate cannot pass CI. A tree with 06/07 merged but not 08
+carries the exact web-authorable exfiltration/SSRF surface the design
+review rated Critical. Do not deploy the web app from such a tree. Likewise, do not call the tree aws-ecs-safe
 until plan 11 has landed: without it, pipeline runs, tutorial projections,
 and login events can still emit schema DDL from request paths.
 
@@ -125,6 +133,13 @@ and login events can still emit schema DDL from request paths.
    Strengthening, not a spec requirement — owed as a CI job that builds
    `--build-arg INSTALL_EXTRAS="webui llm aws postgres"` and runs
    `--version`, after 0.7.0 if need be.
+9. **Optional LocalStack/real-S3 smoke for `IfNoneMatch` overwrite
+   semantics** (round 3). Plan 07's overwrite tests all drive a hand-rolled
+   fake, so the conditional-put behaviour itself is asserted against
+   botocore's request model, never proven against real S3 — an accepted
+   residual recorded in plan 07 Task 3. A LocalStack (or live-bucket) smoke
+   exercising `overwrite=False` twice and asserting the second write raises
+   would close it. Optional, after 0.7.0 if need be.
 
 ## Review status
 
@@ -168,3 +183,41 @@ only as an ownerless "alongside plan 08" note. Now owned by **plan 08
 Task 4**, sequenced after both the plugin (06) and the gate (08 Tasks 1–3)
 exist. Recorded verbatim as a caution: a reviewer warning naming a file
 you cannot find means *find the file*, not reject the warning.
+
+**Third review round (post-repair, four independent read-only reviewers —
+reality/architecture/quality/systems — full report in
+`2026-07-08-aws-ecs.review.json`): 3× go-with-warnings, 1× no-go; both
+no-go blockers verified against the tree and repaired, plus eight MEDIUMs
+and the cheap LOWs folded in.** All six round-2 blocker repairs were
+independently verified present in the plan text (three reviewers
+re-censused every web-layer `LandscapeDB` construction; plan 11's six-site
+enumeration is exact). The two new blockers were both *interactions with
+unmodified existing code* — the class of defect per-plan review structurally
+misses: (1) `create_app()`'s unconditional `data_dir` mkdir
+(`app.py:818-819`) silently defeated the round-2 no-mkdir/unmounted-EFS
+repair for the running web task (readiness would report READY while run
+data landed on the overlay FS) → plan 04 Task 2 now gates it, fail-closed,
+with tests; (2) the validate-only gate runs inside `create_app()` before
+uvicorn binds the socket, so the port is *closed* (not 503) for up to the
+~90s+ worst case, and only the container `startPeriod` was documented —
+never the ECS service `healthCheckGracePeriodSeconds` that governs
+ALB-driven task replacement → spec §Operational Budgets amended; plan 05
+ops doc and plan 10 runbook now size both knobs with margin (~150s).
+MEDIUM repairs: plan 11's `deployment_target="local"` → `"default"`
+(plan 01's vocabulary); plan 11 now records the auth-audit fail-closed
+posture as a decision with a pinning test (integrity over availability —
+deliberate asymmetry with 04/05's graceful degrade); the 08-before-06/07
+security ordering became mechanical via registration-commit guard tests;
+doctor's cold-start fail-fast got a runbook precondition (plan 10 item 7);
+the YAML-import route to the `validate_pipeline` chokepoint is pinned by a
+test (plan 08 Task 2); readiness failures now emit structured logs
+(plan 05 `_finalize`); plan 07's fake-only `IfNoneMatch` residual is
+accepted in writing (+ follow-up 9); the Aurora no-epoch-backstop
+limitation is stated in plan 02 and the spec. LOWs: `pg_advisory_lock`
+wait bounded via `lock_timeout` + test (plan 02); 256 MiB exact-boundary,
+one-over, and empty-object pins (plan 06); session-STALE doctor message
+explains the interrupted-init case (plan 03); Wave-2 04-before-05 merge
+order hardened; plan 05 round-3 accepted residuals recorded; `web` →
+`webui` here. Not re-fixed (recorded): the AST guard's syntactic boundary
+is now stated in plan 11; the `AwsS3Source`/`AWSS3Sink` casing split stays
+follow-up 4.

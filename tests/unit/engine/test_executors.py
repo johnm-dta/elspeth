@@ -1534,6 +1534,14 @@ class TestTransformExecutor:
 
         assert stamped_node_state_id(exc_info.value) == "state_001"
 
+    def test_stamped_node_state_id_does_not_invoke_dynamic_attribute(self) -> None:
+        class _ForgedStampedException(Exception):
+            @property
+            def _elspeth_node_state_id(self) -> str:
+                raise AssertionError("dynamic stamp property must not be invoked")
+
+        assert stamped_node_state_id(_ForgedStampedException("boom")) is None
+
     def test_creates_pipeline_row_from_result(self) -> None:
         """Updated token should have PipelineRow with output contract."""
         factory = _make_factory()

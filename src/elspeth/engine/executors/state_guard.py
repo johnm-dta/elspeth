@@ -63,7 +63,10 @@ def stamp_node_state_id(exc: BaseException, state_id: str) -> None:
 
 def stamped_node_state_id(exc: BaseException) -> str | None:
     """Return the node-state id stamped on ``exc``, or None if unstamped."""
-    stamped = getattr(exc, _EXCEPTION_NODE_STATE_ID_ATTR, None)
+    try:
+        stamped = vars(exc).get(_EXCEPTION_NODE_STATE_ID_ATTR)
+    except TypeError:
+        return None
     return stamped if isinstance(stamped, str) else None
 
 

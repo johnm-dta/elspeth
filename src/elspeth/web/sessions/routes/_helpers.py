@@ -140,7 +140,7 @@ from elspeth.web.composer.telemetry_phase8 import (
     record_session_completed,
     record_session_switched,
 )
-from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
+from elspeth.web.composer.tools import _DATA_ERROR_KEY, ToolResult, execute_tool
 from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
@@ -233,8 +233,10 @@ _GUIDED_SOURCE_PATH_ALLOWLIST_DETAIL = (
 )
 
 
-def _guided_source_commit_failure_detail(tool_result: Any) -> str:
-    raw_data = getattr(tool_result, "data", None)
+def _guided_source_commit_failure_detail(tool_result: object) -> str:
+    if type(tool_result) is not ToolResult:
+        raise TypeError(f"guided source commit failure detail requires ToolResult, got {type(tool_result).__name__}")
+    raw_data = tool_result.data
     if isinstance(raw_data, Mapping):
         error = raw_data.get(_DATA_ERROR_KEY)
         if isinstance(error, str) and error.startswith("Path violation (S2):") and "Source file paths" in error:
@@ -508,7 +510,11 @@ def _litellm_error_detail(
         raw_status_code: int | None = exc.provider_status_code
     else:
         raw_provider_detail = str(exc).strip() or None
-        natural_status_code = getattr(exc, "status_code", None)
+        try:
+            exc_attrs = vars(exc)
+        except TypeError:
+            exc_attrs = {}
+        natural_status_code = exc_attrs.get("status_code")
         raw_status_code = natural_status_code if type(natural_status_code) is int else None
 
     if raw_provider_detail:

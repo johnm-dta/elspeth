@@ -55,7 +55,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BatchFlushInputs,
@@ -92,15 +91,15 @@ def _serialize_plugin_name(plugin: Any) -> str:
     return "".join((name,))
 
 
-def _violation_message_label(violation: AuditEvidenceBase) -> str:
+def _violation_message_label(violation: DeclarationContractViolation) -> str:
     """Return a non-secret child label for aggregate error text."""
-    contract_name = getattr(violation, "contract_name", None)
+    contract_name = violation.contract_name
     if contract_name:
         return f"{type(violation).__name__}:{contract_name}"
     return type(violation).__name__
 
 
-def _build_aggregate_message(violations: Sequence[AuditEvidenceBase]) -> str:
+def _build_aggregate_message(violations: Sequence[DeclarationContractViolation]) -> str:
     """Compose the aggregate's human-readable message without child text.
 
     Structured per-child data travels in ``to_audit_dict()``'s ``violations``
@@ -132,7 +131,7 @@ def _dispatch(
     been invoked exactly once (or skipped via ``applies_to=False``). A
     raised exception from one contract does NOT short-circuit the loop.
     """
-    violations: list[AuditEvidenceBase] = []
+    violations: list[DeclarationContractViolation] = []
     for contract in registered_declaration_contracts_for_site(site):
         if not contract.applies_to(plugin):
             continue
@@ -152,10 +151,7 @@ def _dispatch(
         # id(raised) == id(violations[0]) — i.e. no aggregation-of-one
         # wrapper that would break triage SQL filtering by exception_type.
         #
-        # AuditEvidenceBase is an ABC that DCV children mix with RuntimeError.
-        # Every collected violation is a BaseException subclass by construction;
-        # mypy cannot narrow this through the ABC, so annotate at the raise site.
-        raise violations[0]  # type: ignore[misc]  # AuditEvidenceBase children are RuntimeError subclasses
+        raise violations[0]
 
     aggregate = AggregateDeclarationContractViolation(
         plugin=_serialize_plugin_name(plugin),

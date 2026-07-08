@@ -3680,6 +3680,24 @@ class TestLiteLLMErrorRedaction:
         assert detail["provider_status_code"] == 402
         assert detail["provider_detail"] == ("litellm.APIError: OpenRouter upstream rejected request: insufficient credits")
 
+    def test_api_error_debug_detail_does_not_invoke_dynamic_status_code(self) -> None:
+        """Third-party error status extraction must not invoke synthetic attributes."""
+        from elspeth.web.sessions.routes import _litellm_error_detail
+
+        class _DynamicStatusCodeError(Exception):
+            @property
+            def status_code(self) -> int:
+                raise AssertionError("status_code property must not be invoked")
+
+        detail = _litellm_error_detail(
+            "llm_unavailable",
+            _DynamicStatusCodeError("provider unavailable"),
+            expose_provider_error=True,
+        )
+
+        assert detail["provider_detail"] == "provider unavailable"
+        assert "provider_status_code" not in detail
+
     def test_api_error_debug_detail_scrubs_secret_values(self) -> None:
         """Debug detail must not turn provider errors into a secret leak channel."""
         from litellm.exceptions import APIError as LiteLLMAPIError
@@ -3752,6 +3770,17 @@ class TestLiteLLMErrorRedaction:
 
         assert secret not in str(detail)
         assert detail["provider_detail"] == "Provider detail redacted because it may contain secrets."
+
+    def test_guided_source_commit_failure_requires_tool_result_contract(self) -> None:
+        """The commit-failure helper must not inspect forged dynamic result shapes."""
+        from elspeth.web.sessions.routes._helpers import _guided_source_commit_failure_detail
+
+        class _ForgedToolResult:
+            def __getattr__(self, name: str) -> object:
+                raise AssertionError(f"dynamic attribute {name!r} must not be invoked")
+
+        with pytest.raises(TypeError, match="ToolResult"):
+            _guided_source_commit_failure_detail(_ForgedToolResult())
 
     def test_bad_request_llm_error_without_detail_yields_no_provider_fields(self) -> None:
         """When the carrier has no provider text, omit the optional fields rather than fabricating."""

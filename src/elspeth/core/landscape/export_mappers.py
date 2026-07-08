@@ -90,5 +90,4 @@ def node_state_to_export_record(run_id: str, state: object) -> NodeStateExportRe
             "success_reason_json": None,
         }
 
-    state_id = getattr(state, "state_id", "<missing>")
-    raise AuditIntegrityError(f"Unknown NodeState variant for export: {type(state).__name__} state_id={state_id!r}")
+    raise AuditIntegrityError(f"Unknown NodeState variant for export: {type(state).__name__}")

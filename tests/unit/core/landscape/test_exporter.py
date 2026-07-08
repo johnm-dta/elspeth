@@ -1253,6 +1253,17 @@ class TestNodeStateRecords:
         with pytest.raises(AuditIntegrityError, match="Unknown NodeState variant"):
             list(exporter.export_run("run-1"))
 
+    def test_unknown_state_variant_does_not_probe_state_id(self) -> None:
+        from elspeth.core.landscape.export_mappers import node_state_to_export_record
+
+        class _ForgedStateVariant:
+            @property
+            def state_id(self) -> str:
+                raise AssertionError("state_id property must not be invoked")
+
+        with pytest.raises(AuditIntegrityError, match="Unknown NodeState variant"):
+            node_state_to_export_record("run-1", _ForgedStateVariant())
+
 
 # ===========================================================================
 # Routing events and state-parented calls

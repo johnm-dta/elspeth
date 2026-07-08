@@ -38,7 +38,7 @@ from elspeth.contracts.declaration_contracts import (
     register_declaration_contract,
 )
 from elspeth.contracts.errors import ExecutionError
-from elspeth.engine.executors.declaration_dispatch import _serialize_plugin_name, run_post_emission_checks
+from elspeth.engine.executors.declaration_dispatch import _serialize_plugin_name, _violation_message_label, run_post_emission_checks
 
 
 class _Payload(TypedDict):
@@ -403,8 +403,30 @@ def test_multiple_violations_wrapped_in_aggregate() -> None:
             assert child.contract_name in {"raises_violation", "raises_second_violation"}
 
 
+def test_violation_message_label_does_not_treat_attribute_error_as_absence() -> None:
+    """Aggregate labels must read authoritative contract names, not fallback on forged absence."""
+
+    class _AttributeErrorContractNameViolation(_TestViolationA):
+        @property
+        def contract_name(self) -> str:
+            raise AttributeError("contract_name lookup forged absence")
+
+    violation = _AttributeErrorContractNameViolation(
+        plugin="P",
+        node_id="n",
+        run_id="r",
+        row_id="rw",
+        token_id="t",
+        payload={"note": "payload is structured"},
+        message="child violation",
+    )
+
+    with pytest.raises(AttributeError, match="forged absence"):
+        _violation_message_label(violation)
+
+
 def test_aggregate_message_does_not_embed_raw_child_secret_text() -> None:
-    secret = "sk-or-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret = "sk-or-v1-" + ("a" * 32)
 
     class _RaisesSecretViolationContract(DeclarationContract):
         name = "raises_secret_violation"

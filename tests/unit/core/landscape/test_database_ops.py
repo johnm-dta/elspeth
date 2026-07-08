@@ -160,6 +160,19 @@ class TestExecuteFetchall:
             assert conn.execute(table.select().where(table.c.id == "second")).one().value == "after"
         writable.close()
 
+    def test_fetchall_many_requires_read_only_flag_on_provider(self, ldb: LandscapeDB, test_table: sa.Table) -> None:
+        """Snapshot setup must not default a malformed provider to writable semantics."""
+
+        class _MissingReadOnlyFlagProvider:
+            def read_only_connection(self):  # type: ignore[no-untyped-def]
+                return ldb.read_only_connection()
+
+            def write_connection(self):  # type: ignore[no-untyped-def]
+                return ldb.write_connection()
+
+        with pytest.raises(AttributeError, match="is_read_only"):
+            ReadOnlyDatabaseOps(_MissingReadOnlyFlagProvider()).execute_fetchall_many([test_table.select()])
+
 
 class TestDatabaseOpsErrorScrubbing:
     """DatabaseOps errors must not echo SQLAlchemy statement text or bound values."""

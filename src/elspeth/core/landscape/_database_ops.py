@@ -28,6 +28,10 @@ def _safe_database_error_message(
 class DatabaseOpsConnectionProvider(Protocol):
     """Connection surface required by database operation helpers."""
 
+    @property
+    def is_read_only(self) -> bool:
+        raise NotImplementedError
+
     def read_only_connection(self) -> AbstractContextManager[Connection]:
         raise NotImplementedError
 
@@ -77,7 +81,7 @@ class ReadOnlyDatabaseOps:
         """Execute read-only queries through one read snapshot."""
         try:
             with self._db.read_only_connection() as conn:
-                if conn.dialect.name == "sqlite" and getattr(self._db, "is_read_only", False):
+                if conn.dialect.name == "sqlite" and self._db.is_read_only:
                     # Read-only engines keep stock pysqlite autocommit for ordinary
                     # inspectors; this multi-query boundary needs one stable snapshot.
                     conn.exec_driver_sql("BEGIN")

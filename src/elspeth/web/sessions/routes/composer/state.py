@@ -205,7 +205,7 @@ async def _state_with_imported_source_blobs(
             raise HTTPException(status_code=400, detail=f"source_blob_ids.{source_name} must be a UUID") from exc
         requested_blobs.append((source_name, blob_id))
 
-    blob_service = getattr(request.app.state, "blob_service", None)
+    blob_service = request.app.state.blob_service
     if blob_service is None:
         raise HTTPException(status_code=409, detail="Blob service unavailable for YAML import")
 
@@ -220,7 +220,8 @@ async def _state_with_imported_source_blobs(
         source = sources[source_name]
         options = dict(source.options)
         for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
-            options.pop(key, None)
+            if key in options:
+                del options[key]
         options["path"] = blob.storage_path
         options["blob_ref"] = str(blob.id)
         sources[source_name] = SourceSpec(

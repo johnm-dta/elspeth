@@ -157,7 +157,6 @@ tests/unit/web/composer/test_no_sampling_inference.py::not hasattr(svc, '_compos
 tests/unit/web/composer/test_no_sampling_inference.py::not hasattr(svc, '_litellm_completion_supports_param')
 tests/unit/web/composer/test_state.py::not hasattr(state, 'source')
 tests/unit/web/composer/test_state.py::not hasattr(state, 'source')
-tests/unit/web/execution/test_routes.py::not hasattr(app.state, 'websocket_ticket_store')
 tests/unit/web/secrets/test_service.py::not hasattr(result, 'available')
 """.strip().splitlines()
 )

@@ -88,6 +88,7 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
     app.state.session_engine = engine  # for guided step-2.5 recipe application
     app.state.blob_service = blob_service
     app.state.payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+    app.state.scoped_secret_resolver = None
     app.state.settings = WebSettings(
         data_dir=tmp_path,
         composer_max_composition_turns=15,

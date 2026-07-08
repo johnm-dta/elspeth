@@ -193,11 +193,13 @@ def _create_test_app(
     from elspeth.web.auth.middleware import get_current_user
     from elspeth.web.auth.models import UserIdentity
     from elspeth.web.execution.routes import create_execution_router
+    from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 
     app = FastAPI()
     app.state.execution_service = execution_service if execution_service is not None else _execution_service()
     app.state.broadcaster = broadcaster if broadcaster is not None else _progress_broadcaster()
     app.state.auth_provider = object()
+    app.state.websocket_ticket_store = WebSocketTicketStore()
 
     # Mock session_service for ownership checks
     mock_session_service = _session_service()
@@ -309,7 +311,7 @@ class TestWebSocketTicketEndpoint:
 
         assert response.status_code == 404
         assert response.json() == {"detail": "Run not found"}
-        assert not hasattr(app.state, "websocket_ticket_store")
+        assert app.state.websocket_ticket_store.consume(ticket="not-issued", run_id=str(run_id)) is None
 
 
 class TestValidateEndpoint:

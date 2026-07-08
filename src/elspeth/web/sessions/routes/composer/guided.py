@@ -114,14 +114,15 @@ def _resolve_shield_available(request: Request, user_id: str) -> bool:
     """Resolve whether the authorized prompt-injection shield is available for this user.
 
     Delegates to :func:`azure_prompt_shield_available` via the request's
-    ``scoped_secret_resolver``.  Fail-safe: returns ``False`` (State C) when
-    the resolver is absent (no secret service configured) — see
+    configured ``scoped_secret_resolver``.  A configured ``None`` resolver still
+    returns ``False`` (State C); a missing app-state dependency is a wiring
+    error — see
     :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`.
     """
     return azure_prompt_shield_available(
         ToolContext(
             catalog=request.app.state.catalog_service,
-            secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
+            secret_service=request.app.state.scoped_secret_resolver,
             user_id=user_id,
         )
     )
@@ -175,7 +176,7 @@ def _turn_payload_response(
     payload = dict(turn["payload"])
     if turn["type"] == TurnType.CONFIRM_WIRING.value:
         payload["warnings"] = refine_prompt_shield_warnings_for_availability(
-            payload.get("warnings") or [],
+            payload["warnings"],
             shield_available=shield_available,
         )
     return TurnPayloadResponse(
@@ -523,7 +524,7 @@ async def get_guided(
                     raise InvariantError(
                         "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
                     )
-                payload_payload_id = _store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn["payload"])
+                payload_payload_id = _store_guided_audit_payload(request.app.state.payload_store, turn["payload"])
                 new_guided, _new_record, turn_type, payload_hash = _append_server_turn_record(
                     guided,
                     current_step=current_step,
@@ -1417,7 +1418,7 @@ async def post_guided_respond(
                     step=current_step,
                     turn_type=current_turn_type,
                     payload_hash=emitted_payload_hash,
-                    payload_payload_id=_store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn["payload"]),
+                    payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, turn["payload"]),
                     emitter="server",
                     composition_version=state.version,
                     actor=user.user_id,
@@ -1473,7 +1474,7 @@ async def post_guided_respond(
                 step=current_step,
                 turn_type=current_turn_type,
                 response_hash=response_hash,
-                response_payload_id=_store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn_response),
+                response_payload_id=_store_guided_audit_payload(request.app.state.payload_store, turn_response),
                 control_signal=body.control_signal,
                 composition_version=state.version,
                 actor=user.user_id,
@@ -1598,7 +1599,7 @@ async def post_guided_respond(
                         session_engine=session_engine,
                         session_id=str(session_id),
                         blob_service=request.app.state.blob_service,
-                        payload_store=getattr(request.app.state, "payload_store", None),
+                        payload_store=request.app.state.payload_store,
                         model=settings.composer_model,
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
@@ -2253,9 +2254,7 @@ async def post_guided_chat(
                             step=GuidedStep.STEP_1_SOURCE,
                             turn_type=TurnType.SCHEMA_FORM,
                             response_hash=response_hash,
-                            response_payload_id=_store_guided_audit_payload(
-                                getattr(request.app.state, "payload_store", None), turn_response
-                            ),
+                            response_payload_id=_store_guided_audit_payload(request.app.state.payload_store, turn_response),
                             control_signal=None,
                             composition_version=state.version,
                             actor=user.user_id,
@@ -2308,9 +2307,7 @@ async def post_guided_chat(
                         step=GuidedStep.STEP_1_SOURCE,
                         turn_type=next_turn_type,
                         payload_hash=next_payload_hash,
-                        payload_payload_id=_store_guided_audit_payload(
-                            getattr(request.app.state, "payload_store", None), next_turn["payload"]
-                        ),
+                        payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
                         emitter="server",
                         composition_version=state.version,
                         actor=user.user_id,
@@ -2384,7 +2381,7 @@ async def post_guided_chat(
                     # list_sinks / get_plugin_schema before it resolves.
                     state=state,
                     catalog=catalog,
-                    secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
+                    secret_service=request.app.state.scoped_secret_resolver,
                     max_discovery_iters=settings.composer_max_discovery_turns,
                     timeout_seconds=settings.composer_timeout_seconds,
                     context_block=chat_context_block,
@@ -2462,9 +2459,7 @@ async def post_guided_chat(
                             step=GuidedStep.STEP_2_SINK,
                             turn_type=TurnType.SCHEMA_FORM,
                             response_hash=sink_response_hash,
-                            response_payload_id=_store_guided_audit_payload(
-                                getattr(request.app.state, "payload_store", None), sink_turn_response
-                            ),
+                            response_payload_id=_store_guided_audit_payload(request.app.state.payload_store, sink_turn_response),
                             control_signal=None,
                             composition_version=state.version,
                             actor=user.user_id,
@@ -2506,9 +2501,7 @@ async def post_guided_chat(
                         step=GuidedStep.STEP_2_SINK,
                         turn_type=next_turn_type,
                         payload_hash=next_payload_hash,
-                        payload_payload_id=_store_guided_audit_payload(
-                            getattr(request.app.state, "payload_store", None), next_turn["payload"]
-                        ),
+                        payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
                         emitter="server",
                         composition_version=state.version,
                         actor=user.user_id,
@@ -2632,7 +2625,7 @@ async def post_guided_chat(
                             # transform plugins + schemas before re-proposing.
                             state=state,
                             catalog=catalog,
-                            secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
+                            secret_service=request.app.state.scoped_secret_resolver,
                             user_id=user.user_id,
                             max_discovery_iters=settings.composer_max_discovery_turns,
                             timeout_seconds=settings.composer_timeout_seconds,
@@ -2691,9 +2684,7 @@ async def post_guided_chat(
                             step=GuidedStep.STEP_3_TRANSFORMS,
                             turn_type=next_turn_type,
                             payload_hash=next_payload_hash,
-                            payload_payload_id=_store_guided_audit_payload(
-                                getattr(request.app.state, "payload_store", None), next_turn["payload"]
-                            ),
+                            payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
                             emitter="server",
                             composition_version=state.version,
                             actor=user.user_id,

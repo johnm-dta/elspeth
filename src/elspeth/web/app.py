@@ -67,6 +67,7 @@ from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.routes import create_execution_router
 from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
 from elspeth.web.execution.service import ExecutionServiceImpl
+from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
@@ -927,6 +928,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     )
     app.state.composer_availability = app.state.composer_service.get_availability()
     app.state.composer_progress_registry = ComposerProgressRegistry()
+    app.state.websocket_ticket_store = WebSocketTicketStore()
 
     # --- Rate limiter (per-process in-memory) ---
     # ComposerRateLimiter is safe to construct in sync context because

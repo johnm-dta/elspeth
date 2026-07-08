@@ -105,11 +105,7 @@ async def _get_session_service(request: Request) -> SessionServiceProtocol:
 
 
 def _get_websocket_ticket_store(app: Any) -> WebSocketTicketStore:
-    store = getattr(app.state, "websocket_ticket_store", None)
-    if store is None:
-        store = WebSocketTicketStore()
-        app.state.websocket_ticket_store = store
-    return cast(WebSocketTicketStore, store)
+    return cast(WebSocketTicketStore, app.state.websocket_ticket_store)
 
 
 @dataclass(frozen=True)

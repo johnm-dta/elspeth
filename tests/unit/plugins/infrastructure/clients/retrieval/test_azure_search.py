@@ -988,6 +988,13 @@ class TestExecuteSearchHTTP:
         assert len(credential.scopes) == 2
         assert credential.close_calls == 1
 
+    def test_managed_identity_credential_without_close_fails_loudly(self) -> None:
+        provider = self._make_managed_identity_provider()
+        provider._managed_identity_credential = object()
+
+        with pytest.raises(AttributeError, match="close"):
+            provider.close()
+
     def test_execute_search_updates_audit_context_with_token(self) -> None:
         provider = self._make_provider()
         response_body = {

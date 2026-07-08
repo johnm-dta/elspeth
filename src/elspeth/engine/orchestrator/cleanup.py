@@ -47,6 +47,22 @@ def plugin_node_scope(ctx: PluginContext, node_id: str | None) -> Iterator[None]
         ctx.node_id = previous_node_id
 
 
+def plugin_lifecycle_node_id(
+    plugin: SourceProtocol | TransformProtocol | SinkProtocol,
+    *,
+    plugin_name: str,
+    hook_label: str,
+) -> str | None:
+    """Return the plugin node_id required for lifecycle attribution."""
+    try:
+        return plugin.node_id
+    except AttributeError as exc:
+        raise contract_errors.OrchestrationInvariantError(
+            f"{hook_label} plugin {plugin_name!r} is missing required node_id attribute; "
+            "lifecycle attribution requires SourceProtocol/TransformProtocol/SinkProtocol.node_id."
+        ) from exc
+
+
 def _safe_cleanup_error_text(error: Exception) -> tuple[str, str, int]:
     """Return public-safe plugin exception text, digest, and raw length."""
     try:
@@ -155,14 +171,14 @@ def cleanup_plugins(
         run_hook(
             "transform.on_complete",
             transform.name,
-            getattr(transform, "node_id", None),
+            plugin_lifecycle_node_id(transform, plugin_name=transform.name, hook_label="transform.on_complete"),
             partial(transform.on_complete, ctx),
         )
     for sink in sinks_for_cleanup.values():
         run_hook(
             "sink.on_complete",
             sink.name,
-            getattr(sink, "node_id", None),
+            plugin_lifecycle_node_id(sink, plugin_name=sink.name, hook_label="sink.on_complete"),
             partial(sink.on_complete, ctx),
         )
     if include_source:
@@ -170,22 +186,37 @@ def cleanup_plugins(
             run_hook(
                 "source.on_complete",
                 source.name,
-                getattr(source, "node_id", None),
+                plugin_lifecycle_node_id(source, plugin_name=source.name, hook_label="source.on_complete"),
                 partial(source.on_complete, ctx),
             )
 
     # Close source (if included) and all sinks
     if include_source:
         for source in sources_for_cleanup.values():
-            run_hook("source.close", source.name, getattr(source, "node_id", None), source.close)
+            run_hook(
+                "source.close",
+                source.name,
+                plugin_lifecycle_node_id(source, plugin_name=source.name, hook_label="source.close"),
+                source.close,
+            )
 
     # Close all transforms (release resources - file handles, connections, etc.)
     for transform in transforms_for_cleanup:
-        run_hook("transform.close", transform.name, getattr(transform, "node_id", None), transform.close)
+        run_hook(
+            "transform.close",
+            transform.name,
+            plugin_lifecycle_node_id(transform, plugin_name=transform.name, hook_label="transform.close"),
+            transform.close,
+        )
 
     # Close all sinks
     for sink in sinks_for_cleanup.values():
-        run_hook("sink.close", sink.name, getattr(sink, "node_id", None), sink.close)
+        run_hook(
+            "sink.close",
+            sink.name,
+            plugin_lifecycle_node_id(sink, plugin_name=sink.name, hook_label="sink.close"),
+            sink.close,
+        )
 
     if cleanup_errors:
         error_summary = "; ".join(cleanup_errors)

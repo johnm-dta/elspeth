@@ -1588,11 +1588,11 @@ class TestBuildProcessorCallsCleanupOnFailure:
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         config = MagicMock(spec=PipelineConfig)
-        tracked_transform = _specced_transform()
+        tracked_transform = _specced_transform(node_id="transform-1")
         tracked_transform.name = "tracked"
         config.transforms = [tracked_transform]
         config.sinks = {}
-        primary_source = _specced_source()
+        primary_source = _specced_source(node_id="source-1")
         config.sources = {"primary": primary_source}
 
         cleanup_plugins(config, ctx)
@@ -1928,6 +1928,20 @@ class TestBuildProcessorCallsCleanupOnFailure:
         ]
         assert ctx.node_id == "source-1"
 
+    def test_cleanup_requires_protocol_node_id_attribute_for_lifecycle_scope(self) -> None:
+        """Cleanup must fail loudly when a plugin lacks the protocol node_id attribute."""
+        from elspeth.contracts.plugin_context import PluginContext
+
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+        sink_without_node_id = _specced_sink(name="sink-without-node-id")
+        config = MagicMock(spec=PipelineConfig)
+        config.sources = {}
+        config.transforms = []
+        config.sinks = {"sink": sink_without_node_id}
+
+        with pytest.raises(OrchestrationInvariantError, match="node_id"):
+            cleanup_plugins(config, ctx, include_source=False)
+
 
 class TestCleanupPluginsReRaisesSystemExceptions:
     """Regression test: _cleanup_plugins must re-raise FrameworkBugError/AuditIntegrityError.
@@ -1984,12 +1998,12 @@ class TestCleanupPluginsReRaisesSystemExceptions:
 
         # Create a mock config with a transform that raises FrameworkBugError
         config = MagicMock(spec=PipelineConfig)
-        bad_transform = _specced_transform()
+        bad_transform = _specced_transform(node_id="transform-1")
         bad_transform.on_complete.side_effect = FrameworkBugError("internal corruption")
         bad_transform.name = "bad_transform"
         config.transforms = [bad_transform]
         config.sinks = {}
-        config.sources["primary"] = _specced_source()
+        config.sources["primary"] = _specced_source(node_id="source-1")
 
         with pytest.raises(FrameworkBugError, match="internal corruption"):
             cleanup_plugins(config, ctx)
@@ -2004,11 +2018,11 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         # Create a mock config with a sink that raises AuditIntegrityError on close
         config = MagicMock(spec=PipelineConfig)
         config.transforms = []
-        bad_sink = _specced_sink()
+        bad_sink = _specced_sink(node_id="sink-1")
         bad_sink.close.side_effect = AuditIntegrityError("audit DB corrupted")
         bad_sink.name = "bad_sink"
         config.sinks = {"output": bad_sink}
-        config.sources["primary"] = _specced_source()
+        config.sources["primary"] = _specced_source(node_id="source-1")
 
         with pytest.raises(AuditIntegrityError, match="audit DB corrupted"):
             cleanup_plugins(config, ctx)
@@ -2021,12 +2035,12 @@ class TestCleanupPluginsReRaisesSystemExceptions:
 
         # Create a mock config with a transform that raises a regular error
         config = MagicMock(spec=PipelineConfig)
-        bad_transform = _specced_transform()
+        bad_transform = _specced_transform(node_id="transform-1")
         bad_transform.on_complete.side_effect = RuntimeError("connection refused")
         bad_transform.name = "flaky_transform"
         config.transforms = [bad_transform]
         config.sinks = {}
-        config.sources["primary"] = _specced_source()
+        config.sources["primary"] = _specced_source(node_id="source-1")
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
             cleanup_plugins(config, ctx)

@@ -687,6 +687,7 @@ class TestJoinCommand:
 
         failing_sink = SimpleNamespace(
             name="failing_sink",
+            node_id="sink-failing",
             on_start=_CallRecorder(side_effect=RuntimeError("sink startup failed")),
             on_complete=_CallRecorder(),
             close=_CallRecorder(),

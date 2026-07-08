@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 import urllib.parse
-from typing import TYPE_CHECKING, Any, Literal, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
 
 import httpx
 from pydantic import BaseModel, field_validator, model_validator
@@ -30,6 +30,16 @@ if TYPE_CHECKING:
 
 _AZURE_SEARCH_MANAGED_IDENTITY_SUFFIX = ".search.windows.net"
 _AZURE_SEARCH_TOKEN_SCOPE = "https://search.azure.com/.default"
+
+
+class _ManagedIdentityCredential(Protocol):
+    def get_token(self, *scopes: str) -> Any:
+        """Return an Azure access token for the requested scopes."""
+        ...
+
+    def close(self) -> None:
+        """Release credential-owned resources."""
+        ...
 
 
 def _is_azure_search_managed_identity_hostname(hostname: str) -> bool:
@@ -164,7 +174,7 @@ class AzureSearchProvider:
         # skip counts in audit records without changing the protocol.
         self.last_skipped_count: int = 0
         self.last_skipped_reasons: list[dict[str, Any]] = []
-        self._managed_identity_credential: Any | None = None
+        self._managed_identity_credential: _ManagedIdentityCredential | None = None
 
         # Shared HTTP client for connection pooling. Created once, reused
         # across all search() calls. state_id is updated per-call.
@@ -198,7 +208,7 @@ class AzureSearchProvider:
             return {"Authorization": f"Bearer {token.token}"}
         return {}
 
-    def _get_managed_identity_credential(self) -> Any:
+    def _get_managed_identity_credential(self) -> _ManagedIdentityCredential:
         if self._managed_identity_credential is None:
             try:
                 from azure.identity import DefaultAzureCredential
@@ -208,7 +218,7 @@ class AzureSearchProvider:
                     "Install elspeth with the 'azure' extra or use api_key authentication.",
                     retryable=False,
                 ) from exc
-            self._managed_identity_credential = DefaultAzureCredential()
+            self._managed_identity_credential = cast(_ManagedIdentityCredential, DefaultAzureCredential())
         return self._managed_identity_credential
 
     def search(
@@ -528,6 +538,4 @@ class AzureSearchProvider:
             credential = self._managed_identity_credential
             self._managed_identity_credential = None
             if credential is not None:
-                close = getattr(credential, "close", None)
-                if callable(close):
-                    close()
+                credential.close()

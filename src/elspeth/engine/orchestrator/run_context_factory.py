@@ -149,16 +149,16 @@ class RunContextFactory:
         try:
             if include_source_on_start:
                 for source_name, source in config.sources.items():
-                    with plugin_node_scope(ctx, getattr(source, "node_id", None)):
+                    with plugin_node_scope(ctx, source.node_id):
                         source.on_start(ctx)
                     started_sources[source_name] = source
                 ctx.node_id = source_id
             for transform in config.transforms:
-                with plugin_node_scope(ctx, getattr(transform, "node_id", None)):
+                with plugin_node_scope(ctx, transform.node_id):
                     transform.on_start(ctx)
                 started_transforms.append(transform)
             for sink_name, sink in config.sinks.items():
-                with plugin_node_scope(ctx, getattr(sink, "node_id", None)):
+                with plugin_node_scope(ctx, sink.node_id):
                     sink.on_start(ctx)
                 started_sinks[sink_name] = sink
 

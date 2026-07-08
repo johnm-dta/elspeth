@@ -22,6 +22,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
@@ -1058,10 +1059,12 @@ class ComposerServiceImpl:
             node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
             if node is None:
                 continue
-            options = node.options if isinstance(node.options, Mapping) else {}
-            prompt_template = options.get("prompt_template")
-            if not isinstance(prompt_template, str) or not prompt_template:
-                continue
+            options = node.options
+            prompt_template = options["prompt_template"]
+            if type(prompt_template) is not str or not prompt_template:
+                raise InvariantError(
+                    "_auto_surface_prompt_template_reviews: prompt-template interpretation site lost its non-empty prompt_template"
+                )
             # Draft-aware dedup (Task 7 HIGH-2): skip the node only when a pending
             # PT event already carries the node's CURRENT prompt_template. A stale
             # pending event from a prior turn whose draft is an OLDER skeleton must
@@ -1114,21 +1117,26 @@ class ComposerServiceImpl:
         helper aligned with that writer-boundary gate.
         """
 
-        raw = options.get(INTERPRETATION_REQUIREMENTS_KEY)
-        # NodeSpec freezes nested lists into tuples, so accept any non-string
-        # sequence (list from raw dicts, tuple from a frozen NodeSpec).
-        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        if INTERPRETATION_REQUIREMENTS_KEY not in options:
             return False
+        raw = options[INTERPRETATION_REQUIREMENTS_KEY]
+        # NodeSpec freezes nested lists into tuples; pre-freeze test fixtures may
+        # still exercise the list form. Any other present shape is internal drift.
+        if type(raw) not in (list, tuple):
+            raise InvariantError("_has_pending_prompt_template_requirement: interpretation requirements must be a list or tuple")
         matches = 0
         for requirement in raw:
-            if not isinstance(requirement, Mapping):
+            if type(requirement) not in (dict, MappingProxyType):
+                raise InvariantError("_has_pending_prompt_template_requirement: interpretation requirement entries must be dict-shaped")
+            requirement_map = cast(Mapping[str, Any], requirement)
+            if requirement_map["kind"] != InterpretationKind.LLM_PROMPT_TEMPLATE.value:
                 continue
-            if requirement.get("kind") != InterpretationKind.LLM_PROMPT_TEMPLATE.value:
+            if requirement_map["status"] != "pending":
                 continue
-            if requirement.get("status") != "pending":
-                continue
-            requirement_term = requirement.get("user_term")
-            if isinstance(requirement_term, str) and requirement_term.strip() == user_term.strip():
+            requirement_term = requirement_map["user_term"]
+            if type(requirement_term) is not str:
+                raise InvariantError("_has_pending_prompt_template_requirement: prompt-template requirement user_term must be a string")
+            if requirement_term.strip() == user_term.strip():
                 matches += 1
         # (Task 7 LOW-a) Mirror _matching_pending_requirement_index's EXACTLY-ONE
         # multiplicity: create_pending raises on 0 or >1 matching pending PT
@@ -4962,17 +4970,30 @@ def _node_required_input_fields(node: NodeSpec) -> list[str]:
     """Extract a node's declared ``required_input_fields`` as plain strings.
 
     Reads the option in either the flat or nested ``options`` shape (mirroring
-    state.py's declared-input lookup) and coerces only string entries — a
-    malformed value never raises here, it just yields no contract detail.
+    state.py's declared-input lookup). Absence yields no contract detail; a
+    present malformed value is internal composer-state drift and raises.
     """
-    raw: Any = node.options.get("required_input_fields")
-    if raw is None:
-        nested = node.options.get("options")
-        if isinstance(nested, Mapping):
-            raw = nested.get("required_input_fields")
-    if isinstance(raw, (list, tuple)):
-        return [str(field) for field in raw if isinstance(field, str)]
-    return []
+    raw: Any
+    if "required_input_fields" in node.options:
+        raw = node.options["required_input_fields"]
+    elif "options" in node.options:
+        nested = node.options["options"]
+        if type(nested) not in (dict, MappingProxyType):
+            raise InvariantError("_node_required_input_fields: nested options must be dict-shaped when present")
+        nested_options = cast(Mapping[str, Any], nested)
+        if "required_input_fields" not in nested_options:
+            return []
+        raw = nested_options["required_input_fields"]
+    else:
+        return []
+    if type(raw) not in (list, tuple):
+        raise InvariantError("_node_required_input_fields: required_input_fields must be a list or tuple when present")
+    fields: list[str] = []
+    for field in raw:
+        if type(field) is not str:
+            raise InvariantError("_node_required_input_fields: required_input_fields entries must be strings")
+        fields.append(field)
+    return fields
 
 
 def _node_prompt_template(node: NodeSpec) -> str | None:

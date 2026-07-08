@@ -51,6 +51,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationKind,
     InterpretationSource,
 )
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
@@ -1420,6 +1421,21 @@ def test_has_pending_prompt_template_requirement_false_on_duplicate() -> None:
         )
         is False
     )
+
+
+def test_has_pending_prompt_template_requirement_rejects_malformed_present_requirements() -> None:
+    """Present requirement state is internal composer data, not optional input."""
+
+    options = {
+        "prompt_template": "Rate {{ row.html }}.",
+        INTERPRETATION_REQUIREMENTS_KEY: [{"kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value, "status": "pending", "user_term": 123}],
+    }
+
+    with pytest.raises(InvariantError, match="user_term"):
+        ComposerServiceImpl._has_pending_prompt_template_requirement(
+            options,
+            user_term="llm_prompt_template:rate_node",
+        )
 
 
 @pytest.mark.asyncio

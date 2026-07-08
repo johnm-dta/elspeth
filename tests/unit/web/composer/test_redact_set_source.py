@@ -248,6 +248,27 @@ def test_redact_guided_snapshot_noop_for_freeform_state() -> None:
     assert m2 == {"repair_turns_used": 0}
 
 
+def test_redact_guided_snapshot_rejects_malformed_present_guided_session() -> None:
+    sources = {"source": {"options": {"path": "/some/path.csv"}}}
+    with pytest.raises(ValueError, match="guided_session must be a dict"):
+        redact_guided_snapshot_storage_paths(sources, {"guided_session": "not-a-session"})
+
+
+def test_redact_guided_snapshot_rejects_malformed_present_snapshot_options() -> None:
+    sources = {"source": {"options": {"path": "/some/path.csv"}}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": "not-options"}}}
+    with pytest.raises(ValueError, match=r"step_1_result\.options must be a dict"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+def test_redact_guided_snapshot_rejects_malformed_source_when_blob_redaction_active() -> None:
+    real_path = "/home/u/elspeth/data/blobs/sess/abc_data.csv"
+    sources = {"source": {"options": "not-options"}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": {"path": real_path, "blob_ref": "abc"}}}}
+    with pytest.raises(ValueError, match=r"source\.options must be a dict"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
 def test_redact_guided_snapshot_masks_file_carrier() -> None:
     """``file`` is an equivalent storage-path carrier to ``path`` (elspeth-a7aa07b7ce);
     the guided snapshot helper masks it on both channels too."""

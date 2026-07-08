@@ -492,6 +492,7 @@ class TestGuidedSession:
             ("step_3_edit_index", "0", "step_3_edit_index"),
             ("step_3_edit_index", True, "step_3_edit_index"),
             ("step_3_edit_index", -1, "step_3_edit_index"),
+            ("chat_history", (), "chat_history"),
             ("chat_turn_seq", "0", "chat_turn_seq"),
             ("chat_turn_seq", True, "chat_turn_seq"),
             ("chat_turn_seq", -1, "chat_turn_seq"),

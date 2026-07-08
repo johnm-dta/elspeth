@@ -385,7 +385,7 @@ _ALL_MUTATION_TOOL_NAMES: Final[frozenset[str]] = _MUTATION_TOOL_NAMES | _BLOB_M
 def _closed_root_schema(tool_name: str) -> dict[str, Any]:
     """Return the tool's argument schema with a fail-closed root object."""
     schema = cast(dict[str, Any], deep_thaw(_TOOL_DEFS_BY_NAME[tool_name]["parameters"]))
-    if isinstance(schema, dict) and schema.get("type") == "object" and "additionalProperties" not in schema:
+    if schema["type"] == "object" and "additionalProperties" not in schema:
         schema = {**schema, "additionalProperties": False}
     return schema
 

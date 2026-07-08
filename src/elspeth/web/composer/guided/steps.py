@@ -16,6 +16,7 @@ import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 
 from sqlalchemy import Engine
@@ -247,17 +248,23 @@ def _observed_columns_from_blob(blob: Mapping[str, Any]) -> tuple[str, ...]:
     keeps whatever columns it had) rather than failing the commit — column
     backfill is best-effort enrichment, never a gate on committing the source.
     """
-    storage_path = blob.get("storage_path")
-    if not storage_path:
-        return ()
+    storage_path = blob["storage_path"]
+    filename = blob["filename"]
+    mime_type = blob["mime_type"]
+    if type(storage_path) is not str or not storage_path:
+        raise InvariantError("handle_step_1_source: blob.storage_path must be a non-empty string")
+    if type(filename) is not str:
+        raise InvariantError("handle_step_1_source: blob.filename must be a string")
+    if type(mime_type) is not str:
+        raise InvariantError("handle_step_1_source: blob.mime_type must be a string")
     # observed_columns_from_path reads only the bounded prefix the inspector
     # actually scans (the whole-file read here could allocate hundreds of MB for
     # a large blob just to recover a header) and degrades a missing/unreadable
     # file to () itself — so no separate existence pre-check is needed.
     return observed_columns_from_path(
-        path=Path(str(storage_path)),
-        filename=str(blob.get("filename") or ""),
-        mime_type=str(blob.get("mime_type") or ""),
+        path=Path(storage_path),
+        filename=filename,
+        mime_type=mime_type,
     )
 
 
@@ -265,15 +272,19 @@ def _sink_options_with_step_2_schema_contract(output: SinkOutputResolved) -> dic
     """Merge Step-2 field selection into the sink's schema config."""
     options = dict(output.options)
     schema_key = "schema" if "schema" in options else "schema_config" if "schema_config" in options else "schema"
-    raw_schema = options.get(schema_key)
-    if raw_schema is not None and not isinstance(raw_schema, Mapping):
-        return options
-
-    schema = dict(raw_schema) if isinstance(raw_schema, Mapping) else {}
+    if schema_key in options:
+        raw_schema = options[schema_key]
+        if type(raw_schema) not in (dict, MappingProxyType):
+            raise InvariantError("handle_step_2_sink: sink schema options must be dict-shaped when present")
+        schema = dict(cast(Mapping[str, Any], raw_schema))
+    else:
+        schema = {}
     schema["mode"] = output.schema_mode
     schema["required_fields"] = list(output.required_fields)
-    options.pop("schema", None)
-    options.pop("schema_config", None)
+    if "schema" in options:
+        del options["schema"]
+    if "schema_config" in options:
+        del options["schema_config"]
     options["schema"] = schema
     return options
 

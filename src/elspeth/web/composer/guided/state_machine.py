@@ -71,15 +71,15 @@ def _require_guided_optional_str(value: Any, field_name: str) -> str | None:
     return value
 
 
-def _require_guided_sequence(value: Any, field_name: str) -> Sequence[Any]:
-    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
-        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a sequence")
-    return cast(Sequence[Any], value)
+def _require_guided_sequence(value: Any, field_name: str) -> list[Any]:
+    if type(value) is not list:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a list")
+    return value
 
 
 def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
-    if not isinstance(entry, Mapping):
-        raise InvariantError("GuidedSession.from_dict: chat_history entries must be mappings")
+    if type(entry) is not dict:
+        raise InvariantError("GuidedSession.from_dict: chat_history entries must be dicts")
     role_raw = entry["role"]
     content_raw = entry["content"]
     seq_raw = entry["seq"]
@@ -101,10 +101,10 @@ def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
     # data; ChatTurn's own __post_init__ enforces the closed value sets and
     # the cross-field/role invariants (surfacing as ValueError, caught by the
     # broad except below like every other malformed-record case).
-    assistant_message_kind_raw = entry.get("assistant_message_kind")
+    assistant_message_kind_raw = entry["assistant_message_kind"] if "assistant_message_kind" in entry else None
     if assistant_message_kind_raw is not None and type(assistant_message_kind_raw) is not str:
         raise InvariantError("GuidedSession.from_dict: chat_history.assistant_message_kind must be str or None")
-    synthetic_failure_reason_raw = entry.get("synthetic_failure_reason")
+    synthetic_failure_reason_raw = entry["synthetic_failure_reason"] if "synthetic_failure_reason" in entry else None
     if synthetic_failure_reason_raw is not None and type(synthetic_failure_reason_raw) is not str:
         raise InvariantError("GuidedSession.from_dict: chat_history.synthetic_failure_reason must be str or None")
     return ChatTurn(

@@ -22,6 +22,8 @@ from elspeth.web.composer.guided.state_machine import (
 )
 from elspeth.web.composer.guided.steps import (
     StepHandlerResult,
+    _observed_columns_from_blob,
+    _sink_options_with_step_2_schema_contract,
     handle_step_1_source,
     handle_step_2_sink,
 )
@@ -260,6 +262,17 @@ class TestStep2Handler:
                 resolved=SinkResolved(outputs=()),
                 catalog=catalog,
             )
+
+    def test_sink_options_rejects_malformed_present_schema(self) -> None:
+        output = SinkOutputResolved(
+            plugin="json",
+            options={"path": "out.jsonl", "schema_config": "observed"},
+            required_fields=("a",),
+            schema_mode="observed",
+        )
+
+        with pytest.raises(InvariantError, match="schema options"):
+            _sink_options_with_step_2_schema_contract(output)
 
 
 class TestStep3Handler:
@@ -733,4 +746,14 @@ class TestStep1ObservedColumnsDerivation:
                 data_dir=None,
                 session_engine=engine,
                 session_id=session_id,
+            )
+
+    def test_observed_columns_from_blob_rejects_malformed_blob_record(self) -> None:
+        with pytest.raises(InvariantError, match="storage_path"):
+            _observed_columns_from_blob(
+                {
+                    "storage_path": 42,
+                    "filename": "rows.json",
+                    "mime_type": "application/json",
+                }
             )

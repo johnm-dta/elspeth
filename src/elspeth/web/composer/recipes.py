@@ -730,7 +730,7 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
             "scraping_reason": slots["scraping_reason"],
         },
     }
-    allowed_hosts = slots.get("allowed_hosts") or []
+    allowed_hosts = slots["allowed_hosts"]
     if allowed_hosts:
         # SSRF allowlist supplied by the deterministic seam (tutorial loopback
         # CIDR). Empty -> omitted -> the web_scrape field default public_only.

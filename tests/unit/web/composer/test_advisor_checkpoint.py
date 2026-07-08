@@ -25,10 +25,12 @@ import pytest
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.service import (
     _ADVISOR_UNAVAILABLE_USER_DETAIL,
     AdvisorCheckpointVerdict,
     ComposerServiceImpl,
+    _node_required_input_fields,
 )
 from elspeth.web.composer.state import (
     CompositionState,
@@ -1013,6 +1015,17 @@ def test_summarize_reads_prompt_from_nested_options(simple_state):
     summary = _summarize_pipeline_for_advisor(state)
     annotation_line = next(line for line in summary.splitlines() if "interpolates row fields:" in line)
     assert "title" in annotation_line
+
+
+def test_node_required_input_fields_rejects_malformed_present_entries() -> None:
+    node = _llm_node(
+        "rate",
+        prompt_template="Rate {{ row.title }}.",
+        options_extra={"required_input_fields": ["title", 42]},
+    )
+
+    with pytest.raises(InvariantError, match="entries must be strings"):
+        _node_required_input_fields(node)
 
 
 def test_summary_with_many_large_prompts_stays_under_char_cap():

@@ -63,7 +63,10 @@ export function FilterChipStrip({
   );
 
   return (
-    <div className="filter-chip-strip" aria-label="Catalog filters">
+    // role="group" so "Catalog filters" is exposed as the strip's accessible
+    // name — aria-label on a role-less div (role=generic) is ignored by AT
+    // (WCAG 1.3.1, elspeth-37293a3b7c).
+    <div className="filter-chip-strip" role="group" aria-label="Catalog filters">
       {availableCapabilityTags.length > 0 && (
         <ChipGroup label="Capability">
           {availableCapabilityTags.map((tag) => (

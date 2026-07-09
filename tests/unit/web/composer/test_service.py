@@ -57,7 +57,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import chat_messages_table, sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -230,6 +230,42 @@ def _test_sessions_service(engine: Any, data_dir: Path | None = None) -> Session
         telemetry=build_sessions_telemetry(),
         log=structlog.get_logger("test.composer.sessions"),
     )
+
+
+def _create_session_blob_for_test(
+    *,
+    engine: Any,
+    session_id: str,
+    data_dir: Path,
+    filename: str = "seed.txt",
+    content: str = "original content",
+) -> str:
+    provenance_context = _verbatim_blob_context(engine, session_id, content)
+    result = _execute_tool(
+        "create_blob",
+        {
+            "filename": filename,
+            "mime_type": "text/plain",
+            "content": content,
+        },
+        _empty_state(),
+        _mock_catalog(),
+        data_dir=str(data_dir),
+        session_engine=engine,
+        session_id=session_id,
+        user_message_id=provenance_context["user_message_id"],
+        user_message_content=provenance_context["user_message_content"],
+    )
+    assert result.success is True, result.data
+    return str(result.data["blob_id"])
+
+
+def _blob_content_for_test(engine: Any, blob_id: str) -> str | None:
+    with engine.connect() as conn:
+        row = conn.execute(select(blobs_table.c.storage_path).where(blobs_table.c.id == blob_id)).first()
+    if row is None:
+        return None
+    return Path(row.storage_path).read_text(encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -712,6 +748,112 @@ class TestComposerSingleToolCall:
         assert "set_pipeline" in proposal_tools
 
     @pytest.mark.asyncio
+    async def test_explicit_approve_intercepts_update_blob_without_mutating_blob(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """update_blob is a destructive blob-store mutation and must require approval."""
+        engine, session_id = _session_engine_with_session()
+        sessions_service = _test_sessions_service(engine, tmp_path)
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(data_dir=tmp_path),
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
+        session_uuid = UUID(session_id)
+        blob_id = _create_session_blob_for_test(
+            engine=engine,
+            session_id=session_id,
+            data_dir=tmp_path,
+            content="original content",
+        )
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_update_blob",
+                    "name": "update_blob",
+                    "arguments": {"blob_id": blob_id, "content": "mutated content"},
+                }
+            ],
+        )
+        done = _make_llm_response(content="Update is pending approval.")
+        responses = [turn, done]
+
+        async def _llm(_messages: Any, _tools: Any) -> Any:
+            return responses.pop(0)
+
+        await service._run_one_turn_for_test(
+            llm=_llm,
+            session_id=session_id,
+            initial_state=_empty_state(),
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert [proposal.tool_name for proposal in proposals] == ["update_blob"]
+        assert proposals[0].status == "pending"
+        assert _blob_content_for_test(engine, blob_id) == "original content"
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_intercepts_delete_blob_without_deleting_blob(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """delete_blob is a destructive blob-store mutation and must require approval."""
+        engine, session_id = _session_engine_with_session()
+        sessions_service = _test_sessions_service(engine, tmp_path)
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(data_dir=tmp_path),
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
+        session_uuid = UUID(session_id)
+        blob_id = _create_session_blob_for_test(
+            engine=engine,
+            session_id=session_id,
+            data_dir=tmp_path,
+            content="original content",
+        )
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_delete_blob",
+                    "name": "delete_blob",
+                    "arguments": {"blob_id": blob_id},
+                }
+            ],
+        )
+        done = _make_llm_response(content="Delete is pending approval.")
+        responses = [turn, done]
+
+        async def _llm(_messages: Any, _tools: Any) -> Any:
+            return responses.pop(0)
+
+        await service._run_one_turn_for_test(
+            llm=_llm,
+            session_id=session_id,
+            initial_state=_empty_state(),
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert [proposal.tool_name for proposal in proposals] == ["delete_blob"]
+        assert proposals[0].status == "pending"
+        assert _blob_content_for_test(engine, blob_id) == "original content"
+
+    @pytest.mark.asyncio
     async def test_explicit_approve_invalid_arguments_do_not_crash_compose_loop(
         self,
         composer_service_with_real_sessions: ComposerServiceImpl,
@@ -894,13 +1036,15 @@ class TestComposerSingleToolCall:
             sessions_service=_test_sessions_service(engine, tmp_path),
             session_engine=engine,
         )
+
         # Stub the EARLY advisory checkpoint (fires on the empty->non-empty
         # transition this test drives) so it makes no advisor LLM call — this
         # test is about the atomic tool shape and its `llm_calls == 3`
         # bookkeeping, not the advisor pass.
-        service._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
-            return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
-        )
+        async def _clean_advisor_checkpoint(*_args: object, **_kwargs: object) -> AdvisorCheckpointVerdict:
+            return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
+
+        service._run_advisor_checkpoint = _clean_advisor_checkpoint  # type: ignore[method-assign]
         state = _empty_state()
         user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
@@ -4426,6 +4570,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
         with patch.object(service, "_runtime_preflight", return_value=preflight) as mock_preflight:
             first = await service._cached_runtime_preflight(
                 state,
+                session_id=None,
                 user_id="user-1",
                 cache=cache,
                 initial_version=state.version,
@@ -4433,6 +4578,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
             )
             second = await service._cached_runtime_preflight(
                 state,
+                session_id=None,
                 user_id="user-1",
                 cache=cache,
                 initial_version=state.version,
@@ -4441,7 +4587,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
 
         assert first is preflight
         assert second is preflight
-        mock_preflight.assert_called_once_with(state, "user-1")
+        mock_preflight.assert_called_once_with(state, "user-1", None)
 
     @pytest.mark.asyncio
     async def test_runtime_preflight_timeout_is_cached_for_compose_call(self) -> None:
@@ -4452,7 +4598,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
         started = threading.Event()
         release = threading.Event()
 
-        def slow_preflight(candidate: CompositionState, user_id: str | None) -> ValidationResult:
+        def slow_preflight(candidate: CompositionState, user_id: str | None, session_id: str | None) -> ValidationResult:
             started.set()
             release.wait(timeout=30)
             return ValidationResult(is_valid=True, checks=[], errors=[])
@@ -4462,6 +4608,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
                 with pytest.raises(ComposerRuntimePreflightError) as first:
                     await service._cached_runtime_preflight(
                         state,
+                        session_id=None,
                         user_id="user-1",
                         cache=cache,
                         initial_version=state.version - 1,
@@ -4473,6 +4620,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
                 with pytest.raises(ComposerRuntimePreflightError) as second:
                     await service._cached_runtime_preflight(
                         state,
+                        session_id=None,
                         user_id="user-1",
                         cache=cache,
                         initial_version=state.version - 1,
@@ -4578,6 +4726,7 @@ class TestComposerRuntimePreflightFinalGate:
                     state=changed_state,
                     initial_version=state.version,
                     user_id="user-1",
+                    session_id=None,
                     last_runtime_preflight=None,
                     runtime_preflight_cache=service._new_runtime_preflight_cache(),
                     session_scope="session:test",
@@ -4586,7 +4735,7 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.message != "The pipeline is complete and valid."
         assert result.raw_assistant_content == "The pipeline is complete and valid."
         assert result.runtime_preflight is failed_preflight
-        mock_preflight.assert_called_once_with(changed_state, "user-1")
+        mock_preflight.assert_called_once_with(changed_state, "user-1", None)
 
     @pytest.mark.asyncio
     async def test_pending_interpretation_handoff_is_not_augmented_as_invalid_config(self) -> None:
@@ -4632,6 +4781,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=changed_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4641,7 +4791,7 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.message == model_prose
         assert result.raw_assistant_content is None
         assert result.runtime_preflight is pending_preflight
-        mock_preflight.assert_called_once_with(changed_state, "user-1")
+        mock_preflight.assert_called_once_with(changed_state, "user-1", None)
 
     @pytest.mark.asyncio
     async def test_unchanged_text_without_preview_does_not_run_preflight(self) -> None:
@@ -4656,6 +4806,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4700,6 +4851,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=preview_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4731,6 +4883,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=passing_preview_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4756,6 +4909,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=changed_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -4782,6 +4936,7 @@ class TestComposerRuntimePreflightFinalGate:
                 state=changed_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5106,6 +5261,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5164,6 +5320,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=invalid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5213,6 +5370,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5281,6 +5439,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5358,6 +5517,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5392,6 +5552,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5449,6 +5610,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5507,6 +5669,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,  # unchanged → no mutation
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5559,6 +5722,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=valid_preflight,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5616,6 +5780,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,  # unchanged → no mutation
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,  # no preview was called
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5674,6 +5839,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5717,6 +5883,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",
@@ -5755,6 +5922,7 @@ class TestEmptyStateFinalizePassthrough:
                 state=state,
                 initial_version=state.version,
                 user_id="user-1",
+                session_id=None,
                 last_runtime_preflight=None,
                 runtime_preflight_cache=service._new_runtime_preflight_cache(),
                 session_scope="session:test",

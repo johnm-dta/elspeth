@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from elspeth.core.config import load_settings
-from elspeth.core.dag import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.plugins.infrastructure.base import BaseSink, BaseSource, BaseTransform
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 
@@ -386,22 +386,42 @@ def test_aggregation_rejects_transform_without_is_batch_aware_attribute():
     system-owned code, so the attribute always exists). This tests the
     rejection of non-batch-aware transforms via the mock path.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from pydantic import TypeAdapter
 
     from elspeth.core.config import ElspethSettings
 
-    # Create a mock transform that explicitly declares is_batch_aware=False
-    mock_transform = MagicMock()
-    mock_transform.is_batch_aware = False
-    mock_transform.name = "mock_transform"
+    class SourceDouble:
+        def __init__(self, config: dict[str, object]) -> None:
+            self.config = config
+            self.on_success: str | None = None
 
-    # Mock the plugin manager to return our broken transform
-    mock_manager = MagicMock()
-    mock_manager.get_source_by_name.return_value = MagicMock(return_value=MagicMock())
-    mock_manager.get_transform_by_name.return_value = MagicMock(return_value=mock_transform)
-    mock_manager.get_sink_by_name.return_value = MagicMock(return_value=MagicMock())
+    class NonBatchTransformDouble:
+        is_batch_aware = False
+        name = "mock_transform"
+
+        def __init__(self, config: dict[str, object]) -> None:
+            self.config = config
+            self.on_success: str | None = None
+            self.on_error: str | None = None
+
+    class SinkDouble:
+        def __init__(self, config: dict[str, object]) -> None:
+            self.config = config
+            self._on_write_failure: str | None = None
+
+    class PluginManagerDouble:
+        def get_source_by_name(self, _name: str) -> type[SourceDouble]:
+            return SourceDouble
+
+        def get_transform_by_name(self, _name: str) -> type[NonBatchTransformDouble]:
+            return NonBatchTransformDouble
+
+        def get_sink_by_name(self, _name: str) -> type[SinkDouble]:
+            return SinkDouble
+
+    manager = PluginManagerDouble()
 
     config_dict = {
         "sources": {
@@ -425,7 +445,7 @@ def test_aggregation_rejects_transform_without_is_batch_aware_attribute():
     config = adapter.validate_python(config_dict)
 
     with (
-        patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=mock_manager),
+        patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager),
         pytest.raises(ValueError) as exc_info,
     ):
         instantiate_plugins_from_config(config)

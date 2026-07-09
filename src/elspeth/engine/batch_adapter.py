@@ -36,6 +36,7 @@ __all__ = ["ExceptionResult", "RowWaiter", "SharedBatchAdapter", "WaiterKey", "_
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -88,21 +89,18 @@ class RowWaiter:
         self,
         key: WaiterKey,
         entry: _WaiterEntry,
-        entries: dict[WaiterKey, _WaiterEntry],
-        lock: threading.Lock,
+        wait_for: Callable[[WaiterKey, threading.Event, float, threading.Event | None], TransformResult],
     ):
         """Initialize waiter for a specific token and attempt.
 
         Args:
             key: (token_id, state_id) tuple identifying this waiter
             entry: The waiter entry containing event and result slot
-            entries: Shared entries dict (owned by SharedBatchAdapter)
-            lock: Shared lock for thread-safe access
+            wait_for: Adapter-owned wait operation for this waiter key
         """
         self._key = key
         self._event = entry.event
-        self._entries = entries
-        self._lock = lock
+        self._wait_for = wait_for
 
     def wait(self, timeout: float = 300.0, shutdown_event: threading.Event | None = None) -> TransformResult:
         """Block until this row's result arrives.
@@ -110,64 +108,24 @@ class RowWaiter:
         Args:
             timeout: Maximum seconds to wait
             shutdown_event: Optional run-cancellation signal. When set, the
-                waiter returns a row-scoped shutdown_requested result instead
-                of waiting for the full transform timeout.
+                waiter stops waiting immediately instead of sleeping out the
+                full transform timeout.
 
         Returns:
             TransformResult for this row
 
         Raises:
             TimeoutError: If result not received within timeout
+            InterruptedError: Run cancellation observed while waiting. The
+                waiter is a delivery primitive — it signals cancellation with
+                the same typed exception the sync path uses (retry.py) and the
+                processor translates it into the row-scoped
+                ``shutdown_requested`` error result
+                (``_convert_retryable_to_error_result``), so shutdown policy
+                lives in one layer (filigree elspeth-14571961a6).
             Exception: Re-raised from worker thread if plugin bug occurred
         """
-        token_id, state_id = self._key
-        deadline = time.monotonic() + timeout
-        while not self._event.is_set():
-            if shutdown_event is not None and shutdown_event.is_set():
-                with self._lock:
-                    if self._key in self._entries:
-                        del self._entries[self._key]
-                from elspeth.contracts import TransformResult
-
-                return TransformResult.error(
-                    {
-                        "reason": "shutdown_requested",
-                        "error": f"Shutdown requested while waiting for token {token_id} (state {state_id})",
-                    },
-                    retryable=False,
-                )
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                # Clean up entry on timeout to prevent memory leak.
-                # Guarded delete: clear() can race with timeout during shutdown — the
-                # only path that removes entries we did not pop ourselves. Explicit
-                # membership check expresses the cleanup intent without R9's pop-default.
-                with self._lock:
-                    if self._key in self._entries:
-                        del self._entries[self._key]
-                raise TimeoutError(
-                    f"No result received for token {token_id} (state {state_id}) within {timeout}s. "
-                    f"This may indicate a hung transform, rate limit exhaustion, or "
-                    f"insufficient timeout."
-                )
-
-            self._event.wait(timeout=min(remaining, 0.05))
-
-        with self._lock:
-            entry = self._entries.pop(self._key)
-
-            # Check for wrapped exception from worker thread
-            # Plugin bugs should crash - re-raise the original exception
-            if isinstance(entry.result, ExceptionResult):
-                raise entry.result.exception
-
-            # result is guaranteed non-None here: emit() sets it before signaling event
-            if entry.result is None:
-                raise OrchestrationInvariantError(
-                    "BatchAdapter waiter signaled but result is None — emit() must set result before event.set()"
-                )
-            return entry.result
+        return self._wait_for(self._key, self._event, timeout, shutdown_event)
 
 
 class SharedBatchAdapter:
@@ -226,9 +184,69 @@ class SharedBatchAdapter:
         """
         key: WaiterKey = (token_id, state_id)
         with self._lock:
+            if key in self._entries:
+                raise OrchestrationInvariantError(
+                    "SharedBatchAdapter.register() called for an already registered waiter "
+                    f"with token_id={token_id!r}, state_id={state_id!r}. The existing waiter "
+                    "must receive a result, time out, or be cancelled before the same attempt "
+                    "can be registered again."
+                )
             entry = _WaiterEntry()
             self._entries[key] = entry
-            return RowWaiter(key, entry, self._entries, self._lock)
+            return RowWaiter(key, entry, self._wait_for)
+
+    def _wait_for(
+        self,
+        key: WaiterKey,
+        event: threading.Event,
+        timeout: float,
+        shutdown_event: threading.Event | None,
+    ) -> TransformResult:
+        """Wait for a registered key and own all registry lifecycle operations."""
+        token_id, state_id = key
+        deadline = time.monotonic() + timeout
+        while not event.is_set():
+            if shutdown_event is not None and shutdown_event.is_set():
+                self._discard_waiter(key)
+                raise InterruptedError(f"Shutdown requested while waiting for token {token_id} (state {state_id})")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Clean up entry on timeout to prevent memory leak.
+                # Guarded delete: clear() can race with timeout during shutdown — the
+                # only path that removes entries we did not pop ourselves. Explicit
+                # membership check expresses the cleanup intent without R9's pop-default.
+                self._discard_waiter(key)
+                raise TimeoutError(
+                    f"No result received for token {token_id} (state {state_id}) within {timeout}s. "
+                    f"This may indicate a hung transform, rate limit exhaustion, or "
+                    f"insufficient timeout."
+                )
+
+            event.wait(timeout=min(remaining, 0.05))
+
+        entry = self._pop_waiter_result(key)
+
+        # Check for wrapped exception from worker thread
+        # Plugin bugs should crash - re-raise the original exception
+        if isinstance(entry.result, ExceptionResult):
+            raise entry.result.exception
+
+        # result is guaranteed non-None here: emit() sets it before signaling event
+        if entry.result is None:
+            raise OrchestrationInvariantError("BatchAdapter waiter signaled but result is None — emit() must set result before event.set()")
+        return entry.result
+
+    def _discard_waiter(self, key: WaiterKey) -> None:
+        """Remove a waiter entry when cancellation or timeout ends the wait."""
+        with self._lock:
+            if key in self._entries:
+                del self._entries[key]
+
+    def _pop_waiter_result(self, key: WaiterKey) -> _WaiterEntry:
+        """Remove and return the completed waiter entry."""
+        with self._lock:
+            return self._entries.pop(key)
 
     def emit(self, token: TokenInfo, result: TransformResult | ExceptionResult, state_id: str | None) -> None:
         """Receive result from batch transform's release thread.

@@ -7,6 +7,7 @@ Skills are split per step:
   skills/step_2_sink.md           Step-2 playbook.
   skills/step_2_5_recipe_match.md Step-2.5 playbook.
   skills/step_3_transforms.md     Step-3 playbook + sample-value eyeballing.
+  skills/step_4_wire.md           Step-4 wiring constraints.
 
 ``load_guided_skill()`` composes all five (base + every step) and is consumed
 by the chain solver, which serves Step 3 but historically receives the full
@@ -22,15 +23,16 @@ effect.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from elspeth.web.composer.guided.protocol import GuidedStep
 
 if TYPE_CHECKING:
-    from elspeth.web.composer.guided.recipe_match import RecipeMatch
     from elspeth.web.composer.guided.state_machine import (
         SinkResolved,
         SourceResolved,
@@ -45,6 +47,7 @@ _STEP_FILE_NAMES: dict[GuidedStep, str] = {
     GuidedStep.STEP_2_SINK: "step_2_sink.md",
     GuidedStep.STEP_2_5_RECIPE_MATCH: "step_2_5_recipe_match.md",
     GuidedStep.STEP_3_TRANSFORMS: "step_3_transforms.md",
+    GuidedStep.STEP_4_WIRE: "step_4_wire.md",
 }
 
 # Playbook order — the order steps appear when composing the full skill.
@@ -55,6 +58,7 @@ _STEP_PLAYBOOK_ORDER: tuple[GuidedStep, ...] = (
     GuidedStep.STEP_2_SINK,
     GuidedStep.STEP_2_5_RECIPE_MATCH,
     GuidedStep.STEP_3_TRANSFORMS,
+    GuidedStep.STEP_4_WIRE,
 )
 
 # Discoverability invariant: the per-step file map and the playbook order
@@ -154,17 +158,82 @@ def build_repair_addendum(*, validation_error: str) -> str:
     )
 
 
+def build_revise_addendum(*, revise_instruction: str) -> str:
+    """Render the REVISE REQUEST addendum appended to a revise solve_chain call.
+
+    Distinct from :func:`build_repair_addendum`: a revise is a user instruction
+    to CHANGE the current proposal, not a report that the proposal failed
+    validation. Framing it as the latter (the repair addendum) misleads the
+    model into "correcting errors" that do not exist.
+
+    Args:
+        revise_instruction: The user's revise message, verbatim; Tier 1 audit
+            data, no paraphrasing.
+    """
+    return (
+        "REVISE REQUEST — the user wants to change the current proposal as "
+        "follows:\n"
+        f"{revise_instruction}\n\n"
+        "Propose an updated chain that applies this change."
+    )
+
+
+def _looks_secret_like_sample(value: str) -> bool:
+    lowered = value.lower()
+    secret_markers = (
+        "api_key",
+        "apikey",
+        "access_token",
+        "auth_token",
+        "bearer ",
+        "client_secret",
+        "password",
+        "secret",
+        "token",
+    )
+    return lowered.startswith(("sk-", "pk_", "rk_", "xoxb-")) or any(marker in lowered for marker in secret_markers)
+
+
+def _summarize_sample_value(value: Any) -> str:
+    if value is None:
+        return "<sample:null>"
+    if isinstance(value, bool):
+        return "<sample:boolean>"
+    if isinstance(value, int | float):
+        return "<sample:number>"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "<sample:empty-string>"
+        lowered = stripped.lower()
+        if lowered.startswith(("http://", "https://")):
+            return "<sample:url>"
+        if "@" in stripped and "." in stripped.rsplit("@", 1)[-1]:
+            return "<sample:email-like>"
+        if _looks_secret_like_sample(stripped):
+            return "<sample:secret-like>"
+        return f"<sample:string:{len(stripped)}-chars>"
+    if isinstance(value, Mapping):
+        return f"<sample:object:{len(value)}-keys>"
+    if isinstance(value, (list, tuple)):
+        return f"<sample:array:{len(value)}-items>"
+    return f"<sample:{type(value).__name__}>"
+
+
+def _summarize_sample_row(row: Mapping[str, Any]) -> dict[str, str]:
+    return {str(key): _summarize_sample_value(value) for key, value in row.items()}
+
+
 def build_step_3_context_block(
     *,
     source: SourceResolved,
     sink: SinkResolved,
-    recipe_match: RecipeMatch | None,
 ) -> str:
     """Render the GUIDED CONTEXT block for the Step 3 LLM prompt."""
     src_payload = {
         "plugin": source.plugin,
         "columns": list(source.observed_columns),
-        "sample": [dict(r) for r in source.sample_rows[:3]],
+        "sample": [_summarize_sample_row(r) for r in source.sample_rows[:3]],
     }
     sink_payload = {
         "outputs": [
@@ -176,10 +245,22 @@ def build_step_3_context_block(
             for o in sink.outputs
         ],
     }
-    match_repr = "null" if recipe_match is None else json.dumps({"recipe_name": recipe_match.recipe_name})
-    return (
-        "GUIDED CONTEXT (server-resolved):\n"
-        f"source: {json.dumps(src_payload)}\n"
-        f"sink: {json.dumps(sink_payload)}\n"
-        f"recipe_match: {match_repr}\n"
-    )
+    return f"GUIDED CONTEXT (server-resolved):\nsource: {json.dumps(src_payload)}\nsink: {json.dumps(sink_payload)}\n"
+
+
+@lru_cache(maxsize=1)
+def guided_staged_skill_hash() -> str:
+    """Hex SHA-256 over base.md + every step playbook in _STEP_PLAYBOOK_ORDER.
+
+    Enumerating the playbook order means appending a GuidedStep member (and
+    its skill file) automatically extends the hashed input set — the
+    step_4_wire.md add (P1) shifts this hash with no edit needed here.
+
+    Cached per process; restart elspeth-web.service after editing skill
+    markdown (same lifecycle caveat as the other loaders in this module).
+    """
+    digest = hashlib.sha256()
+    digest.update((_SKILLS_DIR / "base.md").read_bytes())
+    for step in _STEP_PLAYBOOK_ORDER:
+        digest.update((_SKILLS_DIR / _STEP_FILE_NAMES[step]).read_bytes())
+    return digest.hexdigest()

@@ -28,9 +28,11 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -70,6 +72,68 @@ _OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
 _OVERRIDE_TEST_TOKEN = "test-operator-override-token-2026-05-24"
 
 
+@dataclass
+class _CompletionMessageDouble:
+    content: str
+
+
+@dataclass
+class _CompletionChoiceDouble:
+    message: _CompletionMessageDouble
+    finish_reason: str = "stop"
+
+
+@dataclass
+class _UsageDetailsDouble:
+    cached_tokens: int
+
+
+@dataclass
+class _UsageDouble:
+    prompt_tokens: int
+    prompt_tokens_details: _UsageDetailsDouble | None
+
+
+class _CompletionDouble:
+    def __init__(self, *, content: str, prompt_tokens: int, cached_tokens: int | None, served_model: str) -> None:
+        self.choices = [
+            _CompletionChoiceDouble(
+                message=_CompletionMessageDouble(content),
+            )
+        ]
+        self.model = served_model
+        details = None if cached_tokens is None else _UsageDetailsDouble(cached_tokens)
+        self.usage = _UsageDouble(prompt_tokens=prompt_tokens, prompt_tokens_details=details)
+
+
+class _CompletionCreateDouble:
+    def __init__(self, completion: _CompletionDouble) -> None:
+        self._completion = completion
+
+    def __call__(self, *args: Any, **kwargs: Any) -> _CompletionDouble:
+        return self._completion
+
+
+class _OpenAIClientDouble:
+    def __init__(self, completion: _CompletionDouble) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CompletionCreateDouble(completion)))
+
+
+class _OpenAIClientFactoryDouble:
+    def __init__(self, client: _OpenAIClientDouble | None = None) -> None:
+        self._client = client
+        self._calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> _OpenAIClientDouble:
+        self._calls.append((args, kwargs))
+        if self._client is None:
+            raise AssertionError("OpenAI client should not have been constructed")
+        return self._client
+
+    def assert_not_called(self) -> None:
+        assert self._calls == []
+
+
 def _build_source_tree(tmp_path: Path) -> tuple[Path, Path]:
     """Lay out a minimal source root with one boundary-shaped finding."""
     root = tmp_path / "src_root"
@@ -100,8 +164,8 @@ def _mock_openrouter_completion(
     verdict: str,
     rationale: str,
     should_use_decorator: Any = None,
-) -> MagicMock:
-    """Build a mock OpenAI-SDK chat-completion result.
+) -> _CompletionDouble:
+    """Build a fake OpenAI-SDK chat-completion result.
 
     Mirrors ``test_justify._mock_openrouter_completion``; duplicated
     here so this test file is self-contained and can drive
@@ -111,8 +175,7 @@ def _mock_openrouter_completion(
     string; ``.usage.prompt_tokens`` + optional
     ``.prompt_tokens_details.cached_tokens`` carry token accounting).
     """
-    message = MagicMock()
-    message.content = json.dumps(
+    content = json.dumps(
         {
             "verdict": verdict,
             "rationale": rationale,
@@ -120,21 +183,12 @@ def _mock_openrouter_completion(
             "should_use_decorator": should_use_decorator,
         }
     )
-    choice = MagicMock()
-    choice.message = message
-    completion = MagicMock()
-    completion.choices = [choice]
-    # Explicit ``completion.model`` is required now that ``call_judge``
-    # records the served model id (per C1-1, elspeth-0e1d0978fa). Without
-    # this, MagicMock auto-attributes a non-JSON-serialisable Mock object
-    # to ``completion.model``, which then flows into JudgeResponse.model_id
-    # and breaks JSON serialisation in --format json tests.
-    completion.model = DEFAULT_JUDGE_MODEL
-    completion.usage = MagicMock(
+    return _CompletionDouble(
+        content=content,
         prompt_tokens=4000,
-        prompt_tokens_details=MagicMock(cached_tokens=0),
+        cached_tokens=0,
+        served_model=DEFAULT_JUDGE_MODEL,
     )
-    return completion
 
 
 @contextmanager
@@ -143,15 +197,15 @@ def _mock_judge_call(
     verdict: str,
     rationale: str,
     should_use_decorator: Any = None,
-) -> Iterator[MagicMock]:
+) -> Iterator[_OpenAIClientFactoryDouble]:
     """Patch ``openai.OpenAI`` to a fake client emitting one completion."""
     fake_completion = _mock_openrouter_completion(
         verdict=verdict,
         rationale=rationale,
         should_use_decorator=should_use_decorator,
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
+    fake_client_factory = _OpenAIClientFactoryDouble(fake_client)
     with (
         patch.dict(
             os.environ,
@@ -161,9 +215,9 @@ def _mock_judge_call(
             },
             clear=False,
         ),
-        patch("openai.OpenAI", return_value=fake_client) as client_class,
+        patch("openai.OpenAI", new=fake_client_factory),
     ):
-        yield client_class
+        yield fake_client_factory
 
 
 # ---------- call_judge: parsing ----------
@@ -450,7 +504,7 @@ def test_justify_rejects_file_path_outside_root_before_judge_call(
     outside = tmp_path / "outside.py"
     outside.write_text("secret = 'do not send to judge'\n", encoding="utf-8")
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    client_class = MagicMock()
+    client_class = _OpenAIClientFactoryDouble()
 
     with patch("openai.OpenAI", client_class):
         exit_code = main(

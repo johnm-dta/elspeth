@@ -1,24 +1,24 @@
 # tests/plugins/clients/test_audited_http_client.py
 """Tests for AuditedHTTPClient."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, NonCallableMagicMock, create_autospec, patch
 
 import httpx
 import pytest
 
 from elspeth.contracts import CallStatus, CallType
+from elspeth.contracts.audit_protocols import CallRecorder
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
 
 class TestAuditedHTTPClient:
     """Tests for AuditedHTTPClient."""
 
-    def _create_mock_execution(self) -> MagicMock:
-        """Create a mock ExecutionRepository."""
+    def _create_mock_execution(self) -> NonCallableMagicMock:
+        """Create an autospecced CallRecorder."""
         import itertools
 
-        mock_execution = MagicMock()
-        mock_execution.record_call = MagicMock()
+        mock_execution = create_autospec(CallRecorder, instance=True)
         counter = itertools.count()
         mock_execution.allocate_call_index.side_effect = lambda _: next(counter)
         return mock_execution
@@ -1183,12 +1183,11 @@ class TestAuditedHTTPClient:
 class TestAuditedHTTPClientGet:
     """Tests for AuditedHTTPClient.get() method."""
 
-    def _create_mock_execution(self) -> MagicMock:
-        """Create a mock ExecutionRepository."""
+    def _create_mock_execution(self) -> NonCallableMagicMock:
+        """Create an autospecced CallRecorder."""
         import itertools
 
-        mock_execution = MagicMock()
-        mock_execution.record_call = MagicMock()
+        mock_execution = create_autospec(CallRecorder, instance=True)
         counter = itertools.count()
         mock_execution.allocate_call_index.side_effect = lambda _: next(counter)
         return mock_execution
@@ -1597,9 +1596,9 @@ class TestAuditedHTTPClientGet:
             bare_hostname="api.example.com",
         )
 
-        shared_client = MagicMock()
-        ssrf_context = MagicMock()
-        ssrf_client = MagicMock()
+        shared_client = create_autospec(httpx.Client, instance=True)
+        ssrf_context = create_autospec(httpx.Client, instance=True)
+        ssrf_client = create_autospec(httpx.Client, instance=True)
         ssrf_context.__enter__.return_value = ssrf_client
         ssrf_client.get.return_value = mock_response
 
@@ -1666,9 +1665,9 @@ class TestAuditedHTTPClientGet:
         def _telemetry_bug(event: object) -> None:
             raise TypeError("telemetry bug")
 
-        shared_client = MagicMock()
-        ssrf_context = MagicMock()
-        ssrf_client = MagicMock()
+        shared_client = create_autospec(httpx.Client, instance=True)
+        ssrf_context = create_autospec(httpx.Client, instance=True)
+        ssrf_client = create_autospec(httpx.Client, instance=True)
         ssrf_context.__enter__.return_value = ssrf_client
         ssrf_client.get.return_value = mock_response
 
@@ -1712,9 +1711,9 @@ class TestAuditedHTTPClientGet:
             bare_hostname="api.example.com",
         )
 
-        shared_client = MagicMock()
-        ssrf_context = MagicMock()
-        ssrf_client = MagicMock()
+        shared_client = create_autospec(httpx.Client, instance=True)
+        ssrf_context = create_autospec(httpx.Client, instance=True)
+        ssrf_client = create_autospec(httpx.Client, instance=True)
         ssrf_context.__enter__.return_value = ssrf_client
         ssrf_client.post.return_value = mock_response
 
@@ -1749,13 +1748,13 @@ class TestAuditedHTTPClientGet:
         redirect_response = MagicMock(spec=httpx.Response)
         redirect_response.is_redirect = True
         redirect_response.headers = {"location": "/next?signature=REDIRECT_SECRET&q=ok"}
-        redirect_response.request = MagicMock()
+        redirect_response.request = httpx.Request("GET", "https://api.example.com/start?api_key=FROM_SECRET")
 
         final_response = MagicMock(spec=httpx.Response)
         final_response.is_redirect = False
         final_response.status_code = 200
         final_response.headers = {}
-        final_response.request = MagicMock()
+        final_response.request = httpx.Request("GET", "https://api.example.com/next?signature=REDIRECT_SECRET&q=ok")
 
         redirect_request = SSRFSafeRequest(
             original_url="https://api.example.com/next?signature=REDIRECT_SECRET&q=ok",
@@ -1767,9 +1766,9 @@ class TestAuditedHTTPClientGet:
             bare_hostname="api.example.com",
         )
 
-        shared_client = MagicMock()
-        hop_context = MagicMock()
-        hop_client = MagicMock()
+        shared_client = create_autospec(httpx.Client, instance=True)
+        hop_context = create_autospec(httpx.Client, instance=True)
+        hop_client = create_autospec(httpx.Client, instance=True)
         hop_context.__enter__.return_value = hop_client
         hop_client.get.return_value = final_response
 

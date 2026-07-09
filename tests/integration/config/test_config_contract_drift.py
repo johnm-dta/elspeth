@@ -13,8 +13,10 @@ that class of bug by verifying end-to-end value propagation.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 from types import MappingProxyType
 
+import pytest
 from pydantic import BaseModel
 
 from elspeth.contracts.config.alignment import FIELD_MAPPINGS, SETTINGS_TO_RUNTIME
@@ -90,7 +92,7 @@ class TestRateLimitConfigPropagation:
         settings = RateLimitSettings(
             enabled=True,
             default_requests_per_minute=120,
-            persistence_path="/tmp/rate_limits.db",
+            persistence_path="rate_limits.db",
             services={"openai": service},
         )
 
@@ -98,9 +100,77 @@ class TestRateLimitConfigPropagation:
 
         assert runtime_config.enabled is True
         assert runtime_config.default_requests_per_minute == 120
-        assert runtime_config.persistence_path == "/tmp/rate_limits.db"
+        assert runtime_config.persistence_path == str((Path("data") / "rate_limits.db").resolve())
         assert "openai" in runtime_config.services
         assert runtime_config.services["openai"].requests_per_minute == 200
+
+    def test_persistence_path_resolves_relative_under_state_dir(self) -> None:
+        """Relative rate-limit SQLite paths must be pinned under the state dir."""
+        settings = RateLimitSettings(
+            enabled=True,
+            persistence_path="rate_limit/limits.db",
+        )
+
+        runtime_config = RuntimeRateLimitConfig.from_settings(settings)
+
+        assert runtime_config.persistence_path == str((Path("data") / "rate_limit" / "limits.db").resolve())
+
+    def test_persistence_path_rejects_parent_traversal(self) -> None:
+        """Parent traversal must not escape the application state directory."""
+        settings = RateLimitSettings(
+            enabled=True,
+            persistence_path="../outside.db",
+        )
+
+        with pytest.raises(ValueError, match=r"rate_limit\.persistence_path"):
+            RuntimeRateLimitConfig.from_settings(settings)
+
+    def test_persistence_path_rejects_absolute_outside_state_dir(self, tmp_path: Path) -> None:
+        """Absolute paths outside the state directory must fail closed."""
+        settings = RateLimitSettings(
+            enabled=True,
+            persistence_path=str(tmp_path / "outside.db"),
+        )
+
+        with pytest.raises(ValueError, match=r"rate_limit\.persistence_path"):
+            RuntimeRateLimitConfig.from_settings(settings)
+
+    def test_persistence_path_uses_supplied_state_dir(self, tmp_path: Path) -> None:
+        """Web runtime callers can bind rate-limit state to WebSettings.data_dir."""
+        settings = RateLimitSettings(
+            enabled=True,
+            persistence_path="rate_limit/limits.db",
+        )
+
+        runtime_config = RuntimeRateLimitConfig.from_settings(settings, state_dir=tmp_path)
+
+        assert runtime_config.persistence_path == str((tmp_path / "rate_limit" / "limits.db").resolve())
+
+    def test_persistence_path_rejects_symlink_escape(self, tmp_path: Path) -> None:
+        """Symlinks inside the state directory must not tunnel writes outside it."""
+        state_dir = tmp_path / "state"
+        outside_dir = tmp_path / "outside"
+        state_dir.mkdir()
+        outside_dir.mkdir()
+        (state_dir / "link").symlink_to(outside_dir, target_is_directory=True)
+        settings = RateLimitSettings(
+            enabled=True,
+            persistence_path="link/limits.db",
+        )
+
+        with pytest.raises(ValueError, match=r"rate_limit\.persistence_path"):
+            RuntimeRateLimitConfig.from_settings(settings, state_dir=state_dir)
+
+    @pytest.mark.parametrize("uri", ["file:rate_limits.db?mode=rwc", "FILE:rate_limits.db?mode=rwc"])
+    def test_persistence_path_rejects_sqlite_uri(self, uri: str) -> None:
+        """SQLite URI values must not reach sqlite3.connect from config."""
+        settings = RateLimitSettings(
+            enabled=True,
+            persistence_path=uri,
+        )
+
+        with pytest.raises(ValueError, match=r"rate_limit\.persistence_path"):
+            RuntimeRateLimitConfig.from_settings(settings)
 
     def test_disabled_rate_limit_propagates(self) -> None:
         """enabled=False must reach RuntimeRateLimitConfig unchanged.
@@ -120,16 +190,15 @@ class TestCheckpointConfigPropagation:
     def test_non_default_values_reach_config(self) -> None:
         """Non-default CheckpointSettings values must survive from_settings().
 
-        Invariant: enabled, frequency, checkpoint_interval, and
-        aggregation_boundaries must all be faithfully transferred. The
-        frequency field undergoes a type transformation (str -> int) but
-        the semantic meaning must be preserved.
+        Invariant: enabled, frequency, and checkpoint_interval must all be
+        faithfully transferred. The frequency field undergoes a type
+        transformation (str -> int) but the semantic meaning must be
+        preserved.
         """
         settings = CheckpointSettings(
             enabled=True,
             frequency="every_n",
             checkpoint_interval=50,
-            aggregation_boundaries=False,
         )
 
         runtime_config = RuntimeCheckpointConfig.from_settings(settings)
@@ -137,7 +206,6 @@ class TestCheckpointConfigPropagation:
         assert runtime_config.enabled is True
         assert runtime_config.frequency == 50
         assert runtime_config.checkpoint_interval == 50
-        assert runtime_config.aggregation_boundaries is False
 
     def test_frequency_value_preserved(self) -> None:
         """The frequency field's semantic value must survive type transformation.

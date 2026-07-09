@@ -73,6 +73,7 @@ from tests.fixtures.base_classes import (
 )
 from tests.fixtures.factories import wire_transforms
 from tests.fixtures.landscape import make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -170,6 +171,8 @@ def _build_linear_graph(config: PipelineConfig) -> ExecutionGraph:
     graph.set_transform_id_map(transform_ids)
     graph.set_route_resolution_map({})
     graph.set_config_gate_id_map({})
+    graph.set_pipeline_nodes(list(transform_ids.values()))
+    graph.set_node_step_map(graph.build_step_map())
 
     return graph
 
@@ -869,6 +872,8 @@ class TestResumeIdempotence:
         graph_b.set_transform_id_map({0: NodeID("transform_0")})
         graph_b.set_route_resolution_map({})
         graph_b.set_config_gate_id_map({})
+        graph_b.set_pipeline_nodes([NodeID("transform_0")])
+        graph_b.set_node_step_map(graph_b.build_step_map())
 
         # Simulate that first 3 rows were processed (doubled)
         pre_crash_output = [{"id": i, "value": (i + 1) * 10 * 2} for i in range(3)]
@@ -883,7 +888,8 @@ class TestResumeIdempotence:
             )
 
         # Create checkpoint at row 2 (0-indexed, so rows 0-2 processed)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=3,
             barrier_scalars=None,
@@ -1247,7 +1253,8 @@ class TestCheckpointRecovery:
             conn.commit()
 
         # Checkpoint at row 2 (token tok-002)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -1371,7 +1378,8 @@ class TestCheckpointRecovery:
             aggregation={"test_agg": AggregationNodeScalars(count_fire_offset=2.0, condition_fire_offset=None)},
             coalesce={},
         )
-        original_checkpoint = checkpoint_mgr1.create_checkpoint(
+        original_checkpoint = create_checkpoint(
+            checkpoint_mgr1,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=_scalars,
@@ -1547,7 +1555,8 @@ class TestAggregationRecovery:
         )
 
         # Create checkpoint with barrier scalars
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=2,
             barrier_scalars=scalars,

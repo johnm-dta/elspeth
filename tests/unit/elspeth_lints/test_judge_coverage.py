@@ -39,14 +39,17 @@ from __future__ import annotations
 import inspect
 import subprocess
 import textwrap
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict, compute_judge_metadata_signature
 from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.judge_coverage import (
     JUDGE_METADATA_MUTATED,
     PER_FILE_RULE_REQUIRES_JUDGE,
+    UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,
     JudgeCoverageError,
     JudgeCoverageReport,
     _discriminator,
@@ -59,6 +62,53 @@ from elspeth_lints.core.judge_coverage import (
 )
 
 _FAKE_JUDGE_METADATA_SIGNATURE = "hmac-sha256:v1:" + "0" * 64
+_TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
+
+
+def _valid_v1_judge_signature(
+    *,
+    key: str,
+    file_fingerprint: str,
+    ast_path: str,
+    recorded_at: datetime,
+    rationale: str,
+) -> str:
+    return compute_judge_metadata_signature(
+        key=key,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=recorded_at,
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_rationale=rationale,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        signature_version=1,
+        file_fingerprint=file_fingerprint,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+
+
+def _valid_v2_judge_signature(
+    *,
+    key: str,
+    scope_fingerprint: str,
+    ast_path: str,
+    recorded_at: datetime,
+    rationale: str,
+    judge_transport: str = "openrouter",
+) -> str:
+    return compute_judge_metadata_signature(
+        key=key,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=recorded_at,
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_rationale=rationale,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
+        judge_transport=judge_transport,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
 
 
 def test_judge_gates_do_not_reintroduce_private_yaml_loaders() -> None:
@@ -568,31 +618,134 @@ def test_e2e_renewal_by_expires_edit_requires_judge(tmp_path: Path) -> None:
     assert not report.passes
 
 
-def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field_name", "head_value"),
+    [
+        ("owner", "bob"),
+        ("reason", "renewed boundary rationale"),
+        ("expires", "2026-11-01"),
+    ],
+)
+def test_e2e_judged_unsigned_discriminator_edit_requires_fresh_judge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    head_value: str,
+) -> None:
+    """A judged entry cannot reuse a stale signature after unsigned identity edits."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    key = "web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa"
+    file_fingerprint = "0" * 64
+    recorded_at = datetime(2026, 5, 23, 12, tzinfo=UTC)
+    rationale = "judge accepted the original bounded suppression."
+    signature = _valid_v1_judge_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path="body[0]",
+        recorded_at=recorded_at,
+        rationale=rationale,
+    )
+    baseline_fields = {
+        "owner": "alice",
+        "reason": "legitimate boundary",
+        "expires": "2026-08-01",
+    }
+    head_fields = baseline_fields | {field_name: head_value}
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {key}
+          owner: {baseline_fields["owner"]}
+          reason: {baseline_fields["reason"]}
+          safety: contained
+          expires: {baseline_fields["expires"]}
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {rationale}
+          file_fingerprint: '{file_fingerprint}'
+          ast_path: body[0]
+          judge_metadata_signature: '{signature}'
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial: judged bounded entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {key}
+          owner: {head_fields["owner"]}
+          reason: {head_fields["reason"]}
+          safety: contained
+          expires: {head_fields["expires"]}
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {rationale}
+          file_fingerprint: '{file_fingerprint}'
+          ast_path: body[0]
+          judge_metadata_signature: '{signature}'
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, f"PR: edit judged entry {field_name} without fresh signature")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
+
+
+def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A new entry that records signed judge metadata satisfies the gate."""
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     yaml_path.write_text("allow_hits: []\n")
     baseline = _commit(tmp_path, "initial: empty allowlist")
+    key = "web/x.py:R5:judged:fp=dddddddddddddddd"
+    file_fingerprint = "0" * 64
+    recorded_at = datetime(2026, 5, 23, 12, tzinfo=UTC)
+    rationale = "model reasoned that this boundary is legitimate."
+    signature = _valid_v1_judge_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path="body[0]",
+        recorded_at=recorded_at,
+        rationale=rationale,
+    )
 
     yaml_path.write_text(
         textwrap.dedent(f"""\
         allow_hits:
-        - key: web/x.py:R5:judged:fp=dddddddddddddddd
+        - key: {key}
           owner: alice
           reason: new judged entry
           safety: contained
           judge_verdict: ACCEPTED
-          judge_recorded_at: '2026-05-23T12:00:00+00:00'
-          judge_model: anthropic/claude-opus-4-7
+          judge_recorded_at: '{recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
           judge_policy_hash: '{JUDGE_POLICY_HASH}'
-          judge_rationale: model reasoned that this boundary is legitimate.
-          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          judge_rationale: {rationale}
+          file_fingerprint: '{file_fingerprint}'
           ast_path: body[0]
-          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+          judge_metadata_signature: '{signature}'
     """)
     )
     _commit(tmp_path, "PR: judged new entry")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
 
     report = check_one_directory(
         allowlist_dir=enforce_dir,
@@ -604,6 +757,167 @@ def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
     assert report.new_entry_count == 1
     assert report.violations == ()
     assert report.passes
+
+
+def test_e2e_new_entry_with_forged_judge_signature_is_flagged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signature-shaped judge quartet is not proof of review."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:forged:fp=dddddddddddddddd
+          owner: alice
+          reason: forged judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: fabricated rationale from PR YAML
+          file_fingerprint: '{"0" * 64}'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "PR: forged judged new entry")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,)
+    assert not report.passes
+
+
+def test_e2e_keyless_fork_mode_rejects_new_signed_entry(tmp_path: Path) -> None:
+    """Fork PRs cannot prove a newly-signed entry is authentic without the HMAC key."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:forged:fp=dddddddddddddddd
+          owner: fork-contributor
+          reason: forged signed entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: fake rationale from fork PR
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "fork PR: add forged judged entry")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        forbid_unverified_judge_metadata=True,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,)
+    assert not report.passes
+
+
+def test_e2e_keyless_fork_mode_grandfathers_unchanged_signed_entry(tmp_path: Path) -> None:
+    """Fork PRs can inspect an existing signed entry without accepting new signatures."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:existing:fp=dddddddddddddddd
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: previously accepted rationale
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: signed allowlist entry")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        forbid_unverified_judge_metadata=True,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 0
+    assert report.violations == ()
+    assert report.passes
+
+
+def test_check_judge_coverage_accepts_single_enforce_directory_root(tmp_path: Path) -> None:
+    """CI can point the fork-only gate at one signed allowlist directory."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:forged:fp=dddddddddddddddd
+          owner: fork-contributor
+          reason: forged signed entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: fake rationale from fork PR
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "fork PR: add forged judged entry")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        forbid_unverified_judge_metadata=True,
+    )
+
+    assert set(reports) == {"enforce_tier_model"}
+    report = reports["enforce_tier_model"]
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,)
 
 
 def test_e2e_grandfathered_judge_metadata_mutation_is_flagged(tmp_path: Path) -> None:
@@ -662,8 +976,78 @@ def test_e2e_grandfathered_judge_metadata_mutation_is_flagged(tmp_path: Path) ->
     assert not report.passes
 
 
-def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Path) -> None:
+def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A fresh judge record can replace an old one after source/fingerprint drift."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    new_key = "web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb"
+    new_file_fingerprint = "1" * 64
+    new_recorded_at = datetime(2026, 5, 24, 12, tzinfo=UTC)
+    new_rationale = "same accepted rationale"
+    new_signature = _valid_v1_judge_signature(
+        key=new_key,
+        file_fingerprint=new_file_fingerprint,
+        ast_path="body[1]",
+        recorded_at=new_recorded_at,
+        rationale=new_rationale,
+    )
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          file_fingerprint: '{"0" * 64}'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {new_key}
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{new_recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {new_rationale}
+          file_fingerprint: '{new_file_fingerprint}'
+          ast_path: body[1]
+          judge_metadata_signature: '{new_signature}'
+    """)
+    )
+    _commit(tmp_path, "PR: rejudge after fingerprint drift")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert report.violations == ()
+    assert report.passes
+
+
+def test_e2e_rejudge_with_forged_signature_is_metadata_mutation(tmp_path: Path) -> None:
+    """A binding drift is not a fresh rejudge unless the new signature verifies."""
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     yaml_path.write_text(
@@ -696,13 +1080,13 @@ def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Pa
           judge_recorded_at: '2026-05-24T12:00:00+00:00'
           judge_model: anthropic/claude-opus-4-7
           judge_policy_hash: '{JUDGE_POLICY_HASH}'
-          judge_rationale: same accepted rationale
+          judge_rationale: forged fresh rationale
           file_fingerprint: '{"1" * 64}'
           ast_path: body[1]
           judge_metadata_signature: '{"hmac-sha256:v1:" + "1" * 64}'
     """)
     )
-    _commit(tmp_path, "PR: rejudge after fingerprint drift")
+    _commit(tmp_path, "PR: forged rejudge after fingerprint drift")
 
     report = check_one_directory(
         allowlist_dir=enforce_dir,
@@ -712,9 +1096,140 @@ def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Pa
 
     assert report.head_entry_count == 1
     assert report.grandfathered_count == 0
+    assert report.new_entry_count == 0
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
+
+
+def test_e2e_v2_rejudged_after_scope_drift_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v2 fresh judge record can replace an old v2 record after scope drift."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    new_key = "web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb"
+    new_scope_fingerprint = "b" * 64
+    new_recorded_at = datetime(2026, 5, 24, 12, tzinfo=UTC)
+    new_rationale = "same accepted rationale"
+    new_signature = _valid_v2_judge_signature(
+        key=new_key,
+        scope_fingerprint=new_scope_fingerprint,
+        ast_path="body[1]",
+        recorded_at=new_recorded_at,
+        rationale=new_rationale,
+    )
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          judge_signature_version: 2
+          scope_fingerprint: '{"a" * 64}'
+          ast_path: body[0]
+          judge_transport: openrouter
+          judge_metadata_signature: '{"hmac-sha256:v2:" + "0" * 64}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: v2 judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {new_key}
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{new_recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {new_rationale}
+          judge_signature_version: 2
+          scope_fingerprint: '{new_scope_fingerprint}'
+          ast_path: body[1]
+          judge_transport: openrouter
+          judge_metadata_signature: '{new_signature}'
+    """)
+    )
+    _commit(tmp_path, "PR: v2 rejudge after scope drift")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
     assert report.new_entry_count == 1
     assert report.violations == ()
     assert report.passes
+
+
+def test_e2e_v2_rejudge_with_forged_signature_is_metadata_mutation(tmp_path: Path) -> None:
+    """A v2 HMAC-shaped signature string is not enough to prove rejudge."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          judge_signature_version: 2
+          scope_fingerprint: '{"a" * 64}'
+          ast_path: body[0]
+          judge_transport: openrouter
+          judge_metadata_signature: '{"hmac-sha256:v2:" + "0" * 64}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: v2 judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-24T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: forged fresh rationale
+          judge_signature_version: 2
+          scope_fingerprint: '{"b" * 64}'
+          ast_path: body[1]
+          judge_transport: openrouter
+          judge_metadata_signature: '{"hmac-sha256:v2:" + "1" * 64}'
+    """)
+    )
+    _commit(tmp_path, "PR: forged v2 rejudge after scope drift")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.new_entry_count == 0
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
 
 
 def test_e2e_baseline_absent_directory_treats_all_entries_as_new(tmp_path: Path) -> None:
@@ -766,6 +1281,77 @@ def test_check_judge_coverage_rejects_bad_baseline_ref(tmp_path: Path) -> None:
             repo_root=tmp_path,
         )
     assert "baseline-ref" in str(exc_info.value)
+
+
+def test_check_judge_coverage_leniently_loads_historical_baseline_without_safety(tmp_path: Path) -> None:
+    """Historical baseline entries missing later-required fields still grandfather.
+
+    The baseline ref is read-only diff context. It must remain parseable when a
+    newer HEAD schema adds fields such as ``safety``; otherwise C1 crashes before
+    it can compare the current strict HEAD entries against their baseline
+    counterpart.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial: historical pre-safety entry")
+
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "PR: preserve entry under current schema")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 0
+    assert report.violations == ()
+
+
+def test_check_judge_coverage_keeps_head_safety_required(tmp_path: Path) -> None:
+    """Lenient baseline loading must not weaken current HEAD validation."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n", encoding="utf-8")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "PR: add current entry without safety")
+
+    with pytest.raises(JudgeCoverageError, match="safety"):
+        check_one_directory(
+            allowlist_dir=enforce_dir,
+            baseline_ref=baseline,
+            repo_root=tmp_path,
+        )
 
 
 def test_check_judge_coverage_skips_standalone_legacy_allow_classes_shape(tmp_path: Path) -> None:
@@ -1342,7 +1928,7 @@ def test_git_commands_force_c_locale(tmp_path: Path, monkeypatch: pytest.MonkeyP
     """Git subprocesses run with ``LC_ALL=C`` and do not depend on localized stderr."""
     calls: list[dict[str, str]] = []
 
-    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_run(*args, **kwargs):
         calls.append(kwargs.get("env", {}))
         return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
 

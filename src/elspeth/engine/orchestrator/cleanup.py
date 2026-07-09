@@ -14,20 +14,67 @@ operates only on the parameters passed in.
 
 from __future__ import annotations
 
+import hashlib
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING
 
 import structlog
 
 import elspeth.contracts.errors as contract_errors
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
+    from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
     from elspeth.engine.orchestrator.types import PipelineConfig
 
 slog = structlog.get_logger(__name__)
+
+_CLEANUP_ERROR_PREVIEW_CHARS = 160
+
+
+@contextmanager
+def plugin_node_scope(ctx: PluginContext, node_id: str | None) -> Iterator[None]:
+    """Temporarily scope lifecycle hooks to a plugin node."""
+    previous_node_id = ctx.node_id
+    ctx.node_id = node_id
+    try:
+        yield
+    finally:
+        ctx.node_id = previous_node_id
+
+
+def plugin_lifecycle_node_id(
+    plugin: SourceProtocol | TransformProtocol | SinkProtocol,
+    *,
+    plugin_name: str,
+    hook_label: str,
+) -> str | None:
+    """Return the plugin node_id required for lifecycle attribution."""
+    try:
+        return plugin.node_id
+    except AttributeError as exc:
+        raise contract_errors.OrchestrationInvariantError(
+            f"{hook_label} plugin {plugin_name!r} is missing required node_id attribute; "
+            "lifecycle attribution requires SourceProtocol/TransformProtocol/SinkProtocol.node_id."
+        ) from exc
+
+
+def _safe_cleanup_error_text(error: Exception) -> tuple[str, str, int]:
+    """Return public-safe plugin exception text, digest, and raw length."""
+    try:
+        raw_text = str(error)
+    except Exception:
+        raw_text = f"<unrepresentable {type(error).__name__}>"
+
+    digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    public_text = scrub_text_for_audit(raw_text)
+    if len(public_text) > _CLEANUP_ERROR_PREVIEW_CHARS:
+        public_text = public_text[:_CLEANUP_ERROR_PREVIEW_CHARS] + "..."
+    return public_text, digest, len(raw_text)
 
 
 def cleanup_plugins(
@@ -35,6 +82,9 @@ def cleanup_plugins(
     ctx: PluginContext,
     *,
     include_source: bool = True,
+    started_sources: Mapping[str, SourceProtocol] | None = None,
+    started_transforms: Sequence[TransformProtocol] | None = None,
+    started_sinks: Mapping[str, SinkProtocol] | None = None,
 ) -> None:
     """Clean up all plugins in the finally block.
 
@@ -61,6 +111,13 @@ def cleanup_plugins(
         ctx: Plugin context
         include_source: If True (default), calls on_complete() and close()
             on the source. Set to False for resume path where source wasn't opened.
+        started_sources: Optional subset of sources whose on_start() completed.
+            Defaults to all configured sources for steady-state run cleanup.
+        started_transforms: Optional subset of transforms whose on_start()
+            completed. Defaults to all configured transforms for steady-state
+            run cleanup.
+        started_sinks: Optional subset of sinks whose on_start() completed.
+            Defaults to all configured sinks for steady-state run cleanup.
 
     Raises:
         RuntimeError: If any plugin cleanup hook fails and no exception is
@@ -70,19 +127,26 @@ def cleanup_plugins(
     logger = slog
     pending_exc = sys.exc_info()[1]
     cleanup_errors: list[str] = []
+    sources_for_cleanup = started_sources if started_sources is not None else config.sources
+    transforms_for_cleanup = started_transforms if started_transforms is not None else config.transforms
+    sinks_for_cleanup = started_sinks if started_sinks is not None else config.sinks
 
     def record_cleanup_error(hook: str, plugin_name: str, error: Exception) -> None:
+        public_error, error_digest, error_length = _safe_cleanup_error_text(error)
         logger.warning(
             "Plugin cleanup hook failed",
             hook=hook,
             plugin=plugin_name,
-            error=str(error),
+            error=public_error,
             error_type=type(error).__name__,
-            exc_info=error,
+            error_sha256=error_digest,
+            error_length=error_length,
         )
-        cleanup_errors.append(f"{hook}({plugin_name}): {type(error).__name__}: {error}")
+        cleanup_errors.append(
+            f"{hook}({plugin_name}): {type(error).__name__}: {public_error} [message_sha256={error_digest}, message_length={error_length}]"
+        )
 
-    def run_hook(hook_label: str, plugin_name: str, fn: Callable[[], None]) -> None:
+    def run_hook(hook_label: str, plugin_name: str, node_id: str | None, fn: Callable[[], None]) -> None:
         # Plugin cleanup MUST attempt every hook even when one fails — broad
         # catch is required by the best-effort lifecycle contract documented
         # above. FrameworkBugError / AuditIntegrityError (TIER_1_ERRORS) signal
@@ -91,7 +155,8 @@ def cleanup_plugins(
         # downgrade them to a cleanup warning. Everything else is recorded and
         # folded into the RuntimeError raised after all hooks finish.
         try:
-            fn()
+            with plugin_node_scope(ctx, node_id):
+                fn()
         except contract_errors.TIER_1_ERRORS:
             raise
         except Exception as exc:
@@ -102,26 +167,56 @@ def cleanup_plugins(
     # functools.partial preserves the bound-method type for mypy and avoids
     # the loop-variable closure trap that lambdas would otherwise need
     # default-argument workarounds for.
-    for transform in config.transforms:
-        run_hook("transform.on_complete", transform.name, partial(transform.on_complete, ctx))
-    for sink in config.sinks.values():
-        run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
+    for transform in transforms_for_cleanup:
+        run_hook(
+            "transform.on_complete",
+            transform.name,
+            plugin_lifecycle_node_id(transform, plugin_name=transform.name, hook_label="transform.on_complete"),
+            partial(transform.on_complete, ctx),
+        )
+    for sink in sinks_for_cleanup.values():
+        run_hook(
+            "sink.on_complete",
+            sink.name,
+            plugin_lifecycle_node_id(sink, plugin_name=sink.name, hook_label="sink.on_complete"),
+            partial(sink.on_complete, ctx),
+        )
     if include_source:
-        for source in config.sources.values():
-            run_hook("source.on_complete", source.name, partial(source.on_complete, ctx))
+        for source in sources_for_cleanup.values():
+            run_hook(
+                "source.on_complete",
+                source.name,
+                plugin_lifecycle_node_id(source, plugin_name=source.name, hook_label="source.on_complete"),
+                partial(source.on_complete, ctx),
+            )
 
     # Close source (if included) and all sinks
     if include_source:
-        for source in config.sources.values():
-            run_hook("source.close", source.name, source.close)
+        for source in sources_for_cleanup.values():
+            run_hook(
+                "source.close",
+                source.name,
+                plugin_lifecycle_node_id(source, plugin_name=source.name, hook_label="source.close"),
+                source.close,
+            )
 
     # Close all transforms (release resources - file handles, connections, etc.)
-    for transform in config.transforms:
-        run_hook("transform.close", transform.name, transform.close)
+    for transform in transforms_for_cleanup:
+        run_hook(
+            "transform.close",
+            transform.name,
+            plugin_lifecycle_node_id(transform, plugin_name=transform.name, hook_label="transform.close"),
+            transform.close,
+        )
 
     # Close all sinks
-    for sink in config.sinks.values():
-        run_hook("sink.close", sink.name, sink.close)
+    for sink in sinks_for_cleanup.values():
+        run_hook(
+            "sink.close",
+            sink.name,
+            plugin_lifecycle_node_id(sink, plugin_name=sink.name, hook_label="sink.close"),
+            sink.close,
+        )
 
     if cleanup_errors:
         error_summary = "; ".join(cleanup_errors)

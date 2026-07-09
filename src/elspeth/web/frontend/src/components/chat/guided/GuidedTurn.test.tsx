@@ -2,7 +2,7 @@
 // GuidedTurn dispatcher -- routing contract regression coverage.
 //
 // Pins THREE contracts:
-//   1. Six-turn-type routing correctness: each TurnPayload.type routes to
+//   1. Turn-type routing correctness: each TurnPayload.type routes to
 //      exactly the matching leaf widget, identifiable by a widget-specific
 //      rendered element.
 //   2. onSubmit forwarding: the dispatcher passes onSubmit through unchanged;
@@ -20,6 +20,7 @@
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
 //   propose_chain         -- "Accept proposal" button
 //   recipe_offer          -- SchemaFormTurn recipe-decision renderer
+//   confirm_wiring        -- WireStageTurn review heading + "Confirm wiring" button
 // ============================================================================
 
 import { describe, it, expect, vi } from "vitest";
@@ -34,6 +35,7 @@ import type {
   MultiSelectWithCustomPayload,
   SchemaFormPayload,
   ProposeChainPayload,
+  WireStageData,
 } from "@/types/guided";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -104,6 +106,84 @@ const RECIPE_OFFER_PAYLOAD: SchemaFormPayload = {
   },
 };
 
+const WIRE_STAGE_PAYLOAD: WireStageData = {
+  topology: {
+    sources: {
+      source: {
+        id: "source",
+        plugin: "inline_blob",
+        on_success: "chain_in",
+        on_validation_failure: "discard",
+      },
+    },
+    nodes: [
+      {
+        id: "scrape",
+        node_type: "transform",
+        plugin: "web_scrape",
+        input: "chain_in",
+        on_success: "scraped",
+        on_error: "scrape_error",
+        routes: null,
+        fork_to: null,
+        branches: null,
+      },
+      {
+        id: "mapper",
+        node_type: "transform",
+        plugin: "field_mapper",
+        input: "scraped",
+        on_success: "jsonl_out",
+        on_error: null,
+        routes: null,
+        fork_to: null,
+        branches: null,
+      },
+      {
+        id: "error_handler",
+        node_type: "transform",
+        plugin: "dead_letter",
+        input: "scrape_error",
+        on_success: null,
+        on_error: null,
+        routes: null,
+        fork_to: null,
+        branches: null,
+      },
+    ],
+    outputs: [
+      {
+        id: "output:jsonl_out",
+        sink_name: "jsonl_out",
+        plugin: "json",
+        on_write_failure: "discard",
+      },
+    ],
+  },
+  edge_contracts: [
+    {
+      from: "scrape",
+      to: "mapper",
+      producer_guarantees: ["body", "status"],
+      consumer_requires: ["body"],
+      missing_fields: [],
+      satisfied: true,
+    },
+    {
+      from: "mapper",
+      to: "output:jsonl_out",
+      producer_guarantees: ["mapped"],
+      consumer_requires: ["mapped"],
+      missing_fields: [],
+      satisfied: true,
+    },
+  ],
+  semantic_contracts: [],
+  warnings: [],
+  // Initial confirm_wiring turn shape: no advisor pass has run, so signoff_outcome
+  // is absent and the dispatcher routes to the actionable "Confirm wiring" action.
+};
+
 /** Build a TurnPayload with the given type and typed payload. */
 function makeTurn(
   type: "single_select",
@@ -129,11 +209,15 @@ function makeTurn(
   type: "recipe_offer",
   payload: SchemaFormPayload,
 ): TurnPayload;
+function makeTurn(
+  type: "confirm_wiring",
+  payload: WireStageData,
+): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
   return { type, step_index: 0, payload };
 }
 
-// ── Suite 1: Six-turn-type routing correctness ────────────────────────────────
+// ── Suite 1: Turn-type routing correctness ───────────────────────────────────
 
 describe("GuidedTurn dispatcher — routing", () => {
   it("single_select: renders SingleSelectTurn (question legend)", () => {
@@ -146,6 +230,24 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(
       screen.getByText("Which data source should we use?"),
     ).toBeTruthy();
+  });
+
+  it("single_select + isTutorial: suppresses the pick widget entirely", () => {
+    // The chip menu is a live, submit-on-click RIVAL to the one action a passive
+    // learner has (Send). Its options don't even include the scripted source, so
+    // clicking any chip derails the tutorial into an unscripted build. In
+    // tutorial mode the pick widget is omitted; the decision collapses to its
+    // heading + "press Send" caption (rendered by ChatPanel, not here).
+    const { container } = render(
+      <GuidedTurn
+        turn={makeTurn("single_select", SINGLE_SELECT_PAYLOAD)}
+        onSubmit={vi.fn()}
+        isTutorial
+      />,
+    );
+    expect(screen.queryByText("Which data source should we use?")).toBeNull();
+    expect(screen.queryByRole("button", { name: "CSV File" })).toBeNull();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("inspect_and_confirm: renders InspectAndConfirmTurn ('Looks right' button)", () => {
@@ -205,6 +307,22 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("heading", { level: 3, name: "csv_to_json" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
   });
+
+  it("confirm_wiring: renders WireStageTurn UI", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Review wiring" })).toBeTruthy();
+    // Wiring rows carry human step names, not internal ids (elspeth-016f463ff0).
+    expect(screen.getByRole("listitem", { name: /Source to Fetch step/ })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Confirm wiring" }),
+    ).toBeTruthy();
+  });
 });
 
 // ── Suite 2: onSubmit forwarding ──────────────────────────────────────────────
@@ -228,6 +346,139 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: ["csv"],
       custom_inputs: null,
     });
+  });
+
+  it("confirm_wiring click forwards the exact confirm body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Confirm wiring" }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: ["confirm"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  });
+
+  it("confirm_wiring Ask advisor forwards the request_advisor body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", {
+          ...WIRE_STAGE_PAYLOAD,
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: review",
+          passes_remaining: 2,
+        })}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 2)" }),
+    );
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "request_advisor",
+    });
+  });
+
+  it("confirm_wiring Exit to freeform forwards the exit_to_freeform body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", {
+          ...WIRE_STAGE_PAYLOAD,
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: review",
+          passes_remaining: 2,
+        })}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Exit to freeform" }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "exit_to_freeform",
+    });
+  });
+
+  it("confirm_wiring Complete without sign-off forwards chosen=['complete_without_signoff']", async () => {
+    // Governance-critical: chosen is string[], so this literal is NOT
+    // type-checked. The forwarded body must match the backend escape guard
+    // (_helpers.py: chosen in (['confirm'], ['complete_without_signoff'])); a
+    // typo here would silently 400 the only sanctioned advisor-unreachable exit.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", {
+          ...WIRE_STAGE_PAYLOAD,
+          signoff_outcome: "escape_unavailable",
+          advisor_findings: "Advisor unreachable.",
+          passes_remaining: 0,
+        })}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Complete without sign-off" }),
+    );
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: ["complete_without_signoff"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  });
+
+  it("confirm_wiring disabled mode does not submit", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
+        onSubmit={onSubmit}
+        disabled
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Confirm wiring" });
+    expect(button).toBeDisabled();
+    await user.click(button);
+
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });
 

@@ -10,7 +10,8 @@ Bug 5: JSONSink append mode lacks schema validation (P2-2026-02-14)
 import csv
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -28,6 +29,34 @@ OBSERVED_SCHEMA = {"mode": "observed"}
 TEST_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key"
 TEST_CONTAINER = "output-container"
 TEST_BLOB_PATH = "results/output.csv"
+
+
+class _UploadRecorder:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    @property
+    def called(self) -> bool:
+        return self.call_count > 0
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> None:
+        self.call_count += 1
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _BlobClientFake:
+    def __init__(self) -> None:
+        self.upload_blob = _UploadRecorder()
+
+
+class _ContainerClientFake:
+    def __init__(self, blob_client: _BlobClientFake) -> None:
+        self._blob_client = blob_client
+
+    def get_blob_client(self, *_args: Any, **_kwargs: Any) -> _BlobClientFake:
+        return self._blob_client
 
 
 @pytest.fixture
@@ -706,7 +735,7 @@ class TestAzureBlobSinkFieldValidation:
         with patch("elspeth.plugins.sinks.azure_blob_sink.AzureBlobSink._get_container_client") as mock:
             yield mock
 
-    def test_csv_extra_fields_in_fixed_mode_divert_only_bad_row(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_extra_fields_in_fixed_mode_divert_only_bad_row(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """A fixed-mode row carrying a field outside the column lock is diverted, not raised.
 
         B3.2-azure: AzureBlobSink mirrors CSVSink (see
@@ -717,10 +746,8 @@ class TestAzureBlobSinkFieldValidation:
         """
         from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
 
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        blob_client = _BlobClientFake()
+        mock_container_client.return_value = _ContainerClientFake(blob_client)
 
         sink = inject_write_failure(
             AzureBlobSink(
@@ -746,16 +773,14 @@ class TestAzureBlobSinkFieldValidation:
         assert len(result.diversions) == 1
         assert result.diversions[0].row_index == 1
         assert result.diversions[0].row_data == {"id": 2, "name": "bob", "extra": "bad"}
-        assert mock_blob_client.upload_blob.called
+        assert blob_client.upload_blob.called
 
-    def test_csv_valid_rows_still_upload(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_valid_rows_still_upload(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Valid rows in fixed mode still upload successfully."""
         from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
 
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        blob_client = _BlobClientFake()
+        mock_container_client.return_value = _ContainerClientFake(blob_client)
 
         sink = inject_write_failure(
             AzureBlobSink(
@@ -770,7 +795,7 @@ class TestAzureBlobSinkFieldValidation:
         )
 
         sink.write([{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}], ctx)
-        mock_blob_client.upload_blob.assert_called_once()
+        blob_client.upload_blob.assert_called_once()
 
     def test_declared_required_fields_populated(self) -> None:
         """AzureBlobSink populates declared_required_fields from schema."""

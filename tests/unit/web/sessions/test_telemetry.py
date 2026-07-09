@@ -42,7 +42,9 @@ EXPECTED_METRIC_NAMES = {
     "composer.mode.opted_in_total",
     "composer.session.switched_total",
     "composer.tutorial.started_total",
-    "composer.tutorial.completed_total",
+    # composer.tutorial.completed_total — registered only by
+    # composer/tutorial_telemetry.py; a second sessions-meter slot
+    # double-counted completions and was removed.
     "composer.session.completed_total",
     "composer.share.token_verify_failure_total",
     "composer.share.link_expiry_hit_total",
@@ -80,7 +82,6 @@ def test_telemetry_field_names_match_spec_exactly():
         "mode_opted_in_total",
         "session_switched_total",
         "tutorial_started_total",
-        "tutorial_completed_total",
         "session_completed_total",
         "share_token_verify_failure_total",
         "share_link_expiry_hit_total",

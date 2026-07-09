@@ -145,6 +145,16 @@ def test_applies_to_uses_direct_attribute() -> None:
     assert c.applies_to(t) is False
 
 
+@pytest.mark.parametrize("value", ["yes", 0])
+def test_applies_to_rejects_non_bool_passes_through_input(value: object) -> None:
+    c = PassThroughDeclarationContract()
+    t = _FakeTransform()
+    t.passes_through_input = value
+
+    with pytest.raises(TypeError, match="passes_through_input must be bool"):
+        c.applies_to(t)
+
+
 def test_applies_to_on_plugin_missing_attribute_crashes() -> None:
     """CLAUDE.md offensive programming: plugin missing passes_through_input is
     a framework bug; must crash loudly, not silently return False."""
@@ -209,6 +219,27 @@ def test_post_emission_check_empty_emission_is_noop_when_can_drop_rows_true() ->
         effective_input_fields=derive_effective_input_fields(input_row),
     )
     c.post_emission_check(inputs, PostEmissionOutputs(emitted_rows=()))
+
+
+@pytest.mark.parametrize("value", ["yes", 0])
+def test_post_emission_check_rejects_non_bool_can_drop_rows(value: object) -> None:
+    c = PassThroughDeclarationContract()
+    input_row = _row(("a",))
+    plugin = _FakeTransform()
+    plugin.can_drop_rows = value
+    inputs = PostEmissionInputs(
+        plugin=plugin,
+        node_id="n-1",
+        run_id="r",
+        row_id="rw",
+        token_id="t",
+        input_row=input_row,
+        static_contract=frozenset(),
+        effective_input_fields=derive_effective_input_fields(input_row),
+    )
+
+    with pytest.raises(TypeError, match="can_drop_rows must be bool"):
+        c.post_emission_check(inputs, PostEmissionOutputs(emitted_rows=()))
 
 
 def test_verify_pass_through_empty_emission_is_noop_when_effective_input_fields_empty() -> None:
@@ -337,6 +368,27 @@ def test_batch_flush_check_raises_on_divergence() -> None:
     with pytest.raises(PassThroughContractViolation) as exc_info:
         c.batch_flush_check(inputs, outputs)
     assert exc_info.value.divergence_set == frozenset({"b"})
+
+
+@pytest.mark.parametrize("value", ["yes", 0])
+def test_batch_flush_check_rejects_non_bool_can_drop_rows(value: object) -> None:
+    c = PassThroughDeclarationContract()
+    token_row = _row(("a",))
+    plugin = _FakeTransform()
+    plugin.can_drop_rows = value
+    inputs = BatchFlushInputs(
+        plugin=plugin,
+        node_id="n-1",
+        run_id="r",
+        row_id="rw",
+        token_id="t",
+        buffered_tokens=(token_row,),
+        static_contract=frozenset({"a"}),
+        effective_input_fields=frozenset({"a"}),
+    )
+
+    with pytest.raises(TypeError, match="can_drop_rows must be bool"):
+        c.batch_flush_check(inputs, BatchFlushOutputs(emitted_rows=()))
 
 
 def test_dispatcher_zero_emission_with_empty_effective_input_fields_raises_only_can_drop_rows(

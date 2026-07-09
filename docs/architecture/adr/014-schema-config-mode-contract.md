@@ -177,4 +177,5 @@ No row snapshots, arbitrary config dicts, or options payloads are recorded.
 - `src/elspeth/engine/executors/schema_config_mode.py`
 - `src/elspeth/contracts/errors.py`
 - `src/elspeth/plugins/infrastructure/base.py`
-- `docs/plans/2026-04-20-phase-2b-declaration-trust.md`
+- Historical Phase 2B declaration-trust plan: preserved in git history or
+  maintainer-local archives

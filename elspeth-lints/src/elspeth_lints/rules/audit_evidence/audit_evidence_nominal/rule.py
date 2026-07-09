@@ -19,7 +19,13 @@ from elspeth_lints.rules.audit_evidence.audit_evidence_nominal.metadata import (
     RULE_METADATA,
     SUGGESTION,
 )
-from elspeth_lints.rules.audit_evidence.shared import allowlist_path_for_root, display_path, iter_python_paths, load_class_allowlist
+from elspeth_lints.rules.audit_evidence.shared import (
+    allowlist_path_for_root,
+    class_allowlist_governance_findings_for_root,
+    display_path,
+    iter_python_paths,
+    load_class_allowlist,
+)
 
 # ADR-010 requires nominal inheritance from THIS class specifically; a base merely
 # named ``AuditEvidenceBase`` (a local or wrongly-imported class) does not satisfy it.
@@ -63,7 +69,16 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
             # between enumeration and parse — be loud, don't paper over.
             raise OSError(f"{parsed.path}: {parsed.message}")
         findings.extend(_scan_parsed(parsed, root))
-    return [finding for finding in findings if allowlist.match_key(finding.fingerprint) is None]
+    active = [finding for finding in findings if allowlist.match_key(finding.fingerprint) is None]
+    return [
+        *active,
+        *class_allowlist_governance_findings_for_root(
+            allowlist,
+            allowlist_dir,
+            root=root,
+            allowlist_dir_override=allowlist_dir_override,
+        ),
+    ]
 
 
 def scan_tree(tree: ast.AST, file_path: str) -> list[Finding]:

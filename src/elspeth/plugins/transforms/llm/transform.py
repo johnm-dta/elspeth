@@ -139,6 +139,27 @@ def _shutdown_requested_result(
     return TransformResult.error(cast(TransformErrorReason, reason), retryable=False)
 
 
+def _blank_required_input_result(row: PipelineRow, required_fields: frozenset[str]) -> TransformResult | None:
+    """Return a row error when declared LLM input content is blank at runtime."""
+    for field_name in sorted(required_fields):
+        if field_name not in row:
+            continue
+        value = row[field_name]
+        if value is None or (type(value) is str and not value.strip()):
+            return TransformResult.error(
+                cast(
+                    TransformErrorReason,
+                    {
+                        "reason": "required_input_field_blank",
+                        "field": field_name,
+                        "message": "Declared required_input_fields must contain non-blank row content before LLM dispatch.",
+                    },
+                ),
+                retryable=False,
+            )
+    return None
+
+
 def _finish_reason_error(
     finish_reason: ParsedFinishReason,
     *,
@@ -1124,7 +1145,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:87b5d3934bea79c9"
+    source_file_hash: str | None = "sha256:3fc088bae7b9cbd0"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1627,6 +1648,10 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             raise RuntimeError("Provider not initialized — _process_row called before on_start()")
         self._shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
+        blank_required_input = _blank_required_input_result(row, self.declared_input_fields)
+        if blank_required_input is not None:
+            return blank_required_input
+
         return self._strategy.execute(
             row,
             ctx,
@@ -1711,10 +1736,11 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     "If downstream cleanup, sink, mapper, or transform needs the LLM response, guarantee the response_field by name in the LLM node schema. If downstream also needs source or scrape fields that pass through the LLM, also guarantee pass-through fields such as URL or identifier fields.",
                     "Single-query LLM output is written to response_field. Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them; preserve response_field through cleanup instead of invented prompt-internal keys.",
                     "The LLM transform preserves upstream row fields while adding response_field; it does not remove raw scrape fields. If a web_scrape-to-LLM workflow must save results without raw HTML or fingerprints, put a field_mapper cleanup node between the LLM and the sink.",
-                    "If internet content, public web content, search results, crawled pages, or other untrusted remote text will flow into this LLM, prompt-injection shielding is important: surface this to the user as a strong recommendation.",
-                    "Recommend azure_prompt_shield or the deployment's equivalent before the LLM; recommendation is not permission to add a node, so do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
-                    "If the workflow proceeds without an authorized prompt shield, stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation.",
-                    "Its draft should recommend azure_prompt_shield while stating that internet-controlled text will otherwise flow directly to the LLM.",
+                    "Prompt-injection shielding is reviewed for EVERY LLM node, not only when untrusted web content is upstream: an unshielded LLM is always surfaced as an advisory (never blocking).",
+                    "Recommend an available authorized prompt-injection shield before the LLM; use azure_prompt_shield only when discovery lists it.",
+                    "Use the deployment's equivalent when available; recommendation is not permission to add a node, so do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
+                    "Stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation whenever no authorized shield is upstream (State B/C). Skip it only when an authorized shield is already wired upstream (State A).",
+                    "Pick the state-appropriate draft: State B (an authorized shield is available in this deployment) recommends wiring it in; State C (no shield available) is the high-risk reconsider advisory. Default to the State-C draft when availability is unknown.",
                     "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and prompt_injection_shield_recommendation requirements on the same LLM node.",
                     "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
@@ -1733,18 +1759,23 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     ) -> tuple[str, ...]:
         hints: list[str] = []
         # Manual _usage / _model field declared by hand → tell them it's automatic.
-        if "response_field" in config_snapshot and "output_schema" in config_snapshot:
-            response_field = config_snapshot["response_field"]
-            output_schema = config_snapshot["output_schema"]
-            if isinstance(response_field, str) and isinstance(output_schema, Mapping) and "fields" in output_schema:
-                fields = output_schema["fields"]
-                if isinstance(fields, Sequence):
-                    manual_appendix = {f"{response_field}_usage", f"{response_field}_model"}
-                    declared = {field.split(":", 1)[0].strip() if isinstance(field, str) else "" for field in fields}
-                    if manual_appendix & declared:
-                        hints.append(
-                            f"You declared {sorted(manual_appendix & declared)!r} in the schema, but token-usage and model-ID fields are appended automatically. Remove them from output_schema.fields."
-                        )
+        response_field = config_snapshot.get("response_field")
+        fields: object | None = None
+        fields_location = "schema.fields"
+        for schema_key, location in (("schema", "schema.fields"), ("output_schema", "output_schema.fields")):
+            schema_snapshot = config_snapshot.get(schema_key)
+            if isinstance(schema_snapshot, Mapping) and "fields" in schema_snapshot:
+                fields = schema_snapshot["fields"]
+                fields_location = location
+                break
+
+        if isinstance(response_field, str) and isinstance(fields, Sequence) and not isinstance(fields, (str, bytes)):
+            manual_appendix = {f"{response_field}_usage", f"{response_field}_model"}
+            declared = {field.split(":", 1)[0].strip() if isinstance(field, str) else "" for field in fields}
+            if manual_appendix & declared:
+                hints.append(
+                    f"You declared {sorted(manual_appendix & declared)!r} in the schema, but token-usage and model-ID fields are appended automatically. Remove them from {fields_location}."
+                )
         return tuple(hints)
 
 

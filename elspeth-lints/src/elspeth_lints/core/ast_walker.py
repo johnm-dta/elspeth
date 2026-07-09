@@ -216,7 +216,8 @@ def iter_python_files(root: Path, files: Iterable[Path] | None = None) -> Iterat
         return
 
     for file_path in sorted(root.rglob("*.py")):
-        if not _EXCLUDED_WALK_DIRS.intersection(file_path.parts):
+        walk_parts = file_path.relative_to(root).parts
+        if not _EXCLUDED_WALK_DIRS.intersection(walk_parts):
             yield file_path
 
 

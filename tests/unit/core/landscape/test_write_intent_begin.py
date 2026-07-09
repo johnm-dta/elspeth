@@ -542,6 +542,63 @@ class TestReadOnlyEngine:
         finally:
             writable.close()
 
+    def test_recorder_factory_read_only_surface_excludes_write_repositories(self, tmp_path: Path) -> None:
+        """Read-only construction exposes only read-capable repository ports."""
+        from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
+
+        writable = _open_file_db(tmp_path)
+        writable.close()
+        ro = _open_file_db(tmp_path, read_only=True, create_tables=False)
+        try:
+            read_repos = RecorderFactory.read_only(ro)
+            assert isinstance(read_repos, LandscapeReadRepositories)
+            assert read_repos.run_lifecycle.get_run("missing-run") is None
+            assert read_repos.query.get_rows("missing-run") == []
+            for write_attr in ("auth_audit", "scheduler", "run_coordination", "plugin_audit_writer"):
+                assert not hasattr(read_repos, write_attr)
+        finally:
+            ro.close()
+
+    def test_recorder_factory_read_only_constructor_does_not_build_write_ops(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Read-only construction must not route through the writable ops helper."""
+        from elspeth.core.landscape.factory import RecorderFactory
+
+        writable = _open_file_db(tmp_path)
+        writable.close()
+        ro = _open_file_db(tmp_path, read_only=True, create_tables=False)
+
+        def fail_database_ops(*args: object, **kwargs: object) -> object:
+            raise AssertionError("read_only() must not construct DatabaseOps")
+
+        monkeypatch.setattr("elspeth.core.landscape.factory.DatabaseOps", fail_database_ops)
+        try:
+            read_repos = RecorderFactory.read_only(ro)
+            assert read_repos.query.get_rows("missing-run") == []
+        finally:
+            ro.close()
+
+    def test_recorder_factory_writable_constructor_rejects_read_only_handle(self, tmp_path: Path) -> None:
+        """Writable construction is explicit and fails before exposing write ports."""
+        from elspeth.core.landscape.factory import LandscapeWriteRepositories, RecorderFactory
+
+        writable = _open_file_db(tmp_path)
+        writable.close()
+        ro = _open_file_db(tmp_path, read_only=True, create_tables=False)
+        try:
+            with pytest.raises(RuntimeError, match="read-only"):
+                RecorderFactory.writable(ro)
+        finally:
+            ro.close()
+
+        writable = _open_file_db(tmp_path)
+        try:
+            write_repos = RecorderFactory.writable(writable)
+            assert isinstance(write_repos, LandscapeWriteRepositories)
+            assert write_repos.scheduler is not None
+            assert write_repos.run_coordination is not None
+        finally:
+            writable.close()
+
 
 # ---------------------------------------------------------------------------
 # (d) No-behavior-change checks under the isolation_level takeover

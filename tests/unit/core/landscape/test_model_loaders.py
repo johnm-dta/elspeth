@@ -9,6 +9,7 @@ raises AttributeError on missing attributes, matching real Row behavior and
 catching field-name typos that bare Mock() would silently accept.
 """
 
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.engine import Row as SARow
 
+from elspeth.contracts import audit as audit_contracts
 from elspeth.contracts.audit import (
     _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
@@ -55,6 +57,7 @@ from elspeth.contracts.enums import (
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.core.landscape.execution.node_states import NodeStateRepository
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
     BatchLoader,
@@ -847,6 +850,18 @@ class TestNodeStateLoader:
         defaults.update(overrides)
         return _make_sa_row(**defaults)
 
+    def test_read_and_write_paths_use_shared_node_state_lifecycle_contract(self) -> None:
+        """Read/write adapters should not own separate node-state field matrices."""
+        assert hasattr(audit_contracts, "validate_node_state_persisted_fields")
+        assert hasattr(audit_contracts, "validate_node_state_completion_fields")
+
+        load_source = inspect.getsource(NodeStateLoader.load)
+        complete_source = inspect.getsource(NodeStateRepository.complete_node_state)
+
+        assert "validate_node_state_persisted_fields" in load_source
+        assert "validate_node_state_completion_fields" in complete_source
+        assert "mirror" not in complete_source.lower()
+
     # === OPEN variant ===
 
     def test_open_valid(self) -> None:
@@ -1430,6 +1445,16 @@ class TestTokenOutcomeLoaderTwoAxis:
         row_overrides.update(self._valid_fields(pair))
         row_overrides.update(overrides)
         return self._make_outcome_row(**row_overrides)
+
+    def test_loader_uses_public_contract_validator_for_persisted_field_shape(self) -> None:
+        """Loader should translate rows, not own ADR-019 discriminator policy."""
+        assert hasattr(audit_contracts, "validate_token_outcome_persisted_fields")
+
+        load_source = inspect.getsource(TokenOutcomeLoader.load)
+
+        assert "validate_token_outcome_persisted_fields" in load_source
+        assert "_LEGAL_TERMINAL_PAIRS" not in load_source
+        assert "_TERMINAL_PAIR_FIELD_CONSTRAINTS" not in load_source
 
     def test_loads_completed_default_flow(self) -> None:
         result = TokenOutcomeLoader().load(self._row_for_pair((TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)))

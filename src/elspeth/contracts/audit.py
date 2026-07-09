@@ -56,6 +56,10 @@ class TokenRef:
 _SOURCE_FILE_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{16}")
 _SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 
+type OperationType = Literal["source_load", "sink_write", "runtime_preflight"]
+
+OPERATION_TYPE_VALUES: tuple[OperationType, ...] = ("source_load", "sink_write", "runtime_preflight")
+
 
 def validate_resolved_prompt_template_hash(call_type: CallType, resolved_prompt_template_hash: str | None) -> None:
     """Validate the cross-DB prompt-hash anchor invariant (Tier 1).
@@ -78,14 +82,16 @@ def validate_resolved_prompt_template_hash(call_type: CallType, resolved_prompt_
         raise ValueError("Call.resolved_prompt_template_hash must be a 64-character lowercase hex digest")
 
 
-def _validate_enum(value: object, enum_type: type, field_name: str) -> None:
+def _validate_enum(value: object, enum_type: type, field_name: str, *, optional: bool = False) -> None:
     """Validate that value is an instance of the expected enum type.
 
     Tier 1 audit data must crash on invalid types - no coercion, no defaults.
     Per Data Manifesto: If we read garbage from our own database,
     something catastrophic happened - crash immediately.
     """
-    if value is not None and not isinstance(value, enum_type):
+    if value is None and optional:
+        return
+    if not isinstance(value, enum_type):
         raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
 
 
@@ -117,10 +123,12 @@ class Run:
         """Validate enum fields - Tier 1 crash on invalid types."""
         require_int(self.llm_call_count, "llm_call_count", optional=True, min_value=0)
         _validate_enum(self.status, RunStatus, "status")
-        _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade")
-        _validate_enum(self.export_status, ExportStatus, "export_status")
+        _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade", optional=True)
+        _validate_enum(self.export_status, ExportStatus, "export_status", optional=True)
         if type(self.seeded_from_cache) is not bool:
             raise TypeError(f"seeded_from_cache must be bool, got {type(self.seeded_from_cache).__name__}: {self.seeded_from_cache!r}")
+        if self.seeded_from_cache and self.cache_key is None:
+            raise ValueError(f"seeded_from_cache=True requires cache_key for run {self.run_id!r}")
         if self.cache_key is not None and not _SHA256_HEX_PATTERN.fullmatch(self.cache_key):
             raise ValueError(f"cache_key must be 64 lowercase hex chars or None, got {self.cache_key!r} for run {self.run_id!r}")
 
@@ -364,6 +372,124 @@ NodeState = NodeStateOpen | NodeStatePending | NodeStateCompleted | NodeStateFai
 
 
 @dataclass(frozen=True, slots=True)
+class NodeStateFieldConstraints:
+    """Column-level constraints for one node-state lifecycle status."""
+
+    required: tuple[str, ...] = ()
+    forbidden: tuple[str, ...] = ()
+
+
+NODE_STATE_LIFECYCLE_FIELD_CONSTRAINTS: Mapping[NodeStateStatus, NodeStateFieldConstraints] = {
+    NodeStateStatus.OPEN: NodeStateFieldConstraints(
+        forbidden=(
+            "output_hash",
+            "completed_at",
+            "duration_ms",
+            "context_after_json",
+            "error_json",
+            "success_reason_json",
+        ),
+    ),
+    NodeStateStatus.PENDING: NodeStateFieldConstraints(
+        required=("completed_at", "duration_ms"),
+        forbidden=("output_hash", "error_json", "success_reason_json"),
+    ),
+    NodeStateStatus.COMPLETED: NodeStateFieldConstraints(
+        required=("output_hash", "completed_at", "duration_ms"),
+        forbidden=("error_json",),
+    ),
+    NodeStateStatus.FAILED: NodeStateFieldConstraints(
+        required=("completed_at", "duration_ms", "error_json"),
+        forbidden=("success_reason_json",),
+    ),
+}
+
+
+def validate_node_state_persisted_fields(
+    state_id: str,
+    status: NodeStateStatus,
+    *,
+    output_hash: object | None,
+    completed_at: object | None,
+    duration_ms: object | None,
+    context_after_json: object | None,
+    error_json: object | None,
+    success_reason_json: object | None,
+) -> None:
+    """Validate status-dependent persisted node-state fields."""
+    constraints = NODE_STATE_LIFECYCLE_FIELD_CONSTRAINTS[status]
+    field_values = {
+        "output_hash": output_hash,
+        "completed_at": completed_at,
+        "duration_ms": duration_ms,
+        "context_after_json": context_after_json,
+        "error_json": error_json,
+        "success_reason_json": success_reason_json,
+    }
+    status_name = status.name
+
+    for field_name in constraints.required:
+        if field_values[field_name] is None:
+            raise ValueError(f"{status_name} state {state_id} has NULL {field_name} - audit integrity violation")
+    for field_name in constraints.forbidden:
+        if field_values[field_name] is not None:
+            raise ValueError(f"{status_name} state {state_id} has non-NULL {field_name} - audit integrity violation")
+
+
+def validate_node_state_completion_fields(
+    status: NodeStateStatus,
+    *,
+    output_data_present: bool,
+    duration_ms: float | None,
+    error_present: bool,
+    success_reason_present: bool,
+) -> None:
+    """Validate node-state completion inputs before persisting a lifecycle transition."""
+    if status == NodeStateStatus.OPEN:
+        raise ValueError("Cannot complete a node state with status OPEN")
+
+    constraints = NODE_STATE_LIFECYCLE_FIELD_CONSTRAINTS[status]
+    completion_values = {
+        "output_hash": output_data_present,
+        "completed_at": True,
+        "duration_ms": duration_ms is not None,
+        "context_after_json": False,
+        "error_json": error_present,
+        "success_reason_json": success_reason_present,
+    }
+
+    for field_name in constraints.required:
+        if completion_values[field_name]:
+            continue
+        if field_name == "duration_ms":
+            raise ValueError("duration_ms is required when completing a node state")
+        if field_name == "output_hash":
+            raise ValueError("COMPLETED node state requires output_data (output_hash would be NULL)")
+        if field_name == "error_json":
+            raise ValueError("FAILED node state requires error details")
+
+    for field_name in constraints.forbidden:
+        if not completion_values[field_name]:
+            continue
+        if field_name == "output_hash":
+            raise ValueError(f"{status.name} node state must not have output_data")
+        if field_name == "error_json":
+            message = (
+                "COMPLETED node state must not have error (contradicts success)"
+                if status == NodeStateStatus.COMPLETED
+                else f"{status.name} node state must not have error"
+            )
+            raise ValueError(message)
+        if field_name == "success_reason_json":
+            message = (
+                "FAILED node state must not have success_reason (contradicts failure)"
+                if status == NodeStateStatus.FAILED
+                else f"{status.name} node state must not have success_reason"
+            )
+            raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
 class Call:
     """An external call made during node processing or operation.
 
@@ -483,7 +609,7 @@ class Batch:
         """Validate enum fields - Tier 1 crash on invalid types."""
         require_int(self.attempt, "attempt", min_value=0)
         _validate_enum(self.status, BatchStatus, "status")
-        _validate_enum(self.trigger_type, TriggerType, "trigger_type")
+        _validate_enum(self.trigger_type, TriggerType, "trigger_type", optional=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +684,11 @@ class Checkpoint:
         require_int(self.format_version, "format_version", optional=True, min_value=0)
         if not self.upstream_topology_hash:
             raise ValueError("upstream_topology_hash is required and cannot be empty")
+
+    @property
+    def full_topology_hash(self) -> str:
+        """Full-DAG topology hash used for checkpoint compatibility."""
+        return self.upstream_topology_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -890,6 +1021,63 @@ _TERMINAL_PAIR_FIELD_CONSTRAINTS: dict[
 }
 
 
+def validate_token_outcome_persisted_fields(
+    outcome_id: str,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
+    completed: bool,
+    *,
+    sink_name: str | None,
+    batch_id: str | None,
+    fork_group_id: str | None,
+    join_group_id: str | None,
+    expand_group_id: str | None,
+    error_hash: str | None,
+) -> None:
+    """Validate ADR-019 persisted discriminator fields for a token outcome."""
+    if completed != (outcome is not None):
+        raise ValueError(
+            f"TokenOutcome {outcome_id}: completed={completed} but outcome={outcome!r} — "
+            "completed must be true iff outcome is non-NULL (ADR-019 invariant)"
+        )
+
+    if completed:
+        assert outcome is not None
+        if (outcome, path) not in _LEGAL_TERMINAL_PAIRS:
+            raise ValueError(f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) not in _LEGAL_TERMINAL_PAIRS — audit integrity violation")
+    elif path != TerminalPath.BUFFERED:
+        raise ValueError(f"TokenOutcome {outcome_id}: completed=False requires path=BUFFERED, got {path!r} — audit integrity violation")
+
+    pair: tuple[TerminalOutcome | None, TerminalPath] = (outcome, path)
+    constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+    field_values = {
+        "sink_name": sink_name,
+        "batch_id": batch_id,
+        "fork_group_id": fork_group_id,
+        "join_group_id": join_group_id,
+        "expand_group_id": expand_group_id,
+        "error_hash": error_hash,
+    }
+    for field_name in constraints.required:
+        if field_values[field_name] is None:
+            raise ValueError(
+                f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) requires {field_name} but DB has NULL — audit integrity violation"
+            )
+    for field_name, expected in constraints.exact.items():
+        if field_values[field_name] != expected:
+            raise ValueError(
+                f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) requires "
+                f"{field_name}={expected!r}, got {field_values[field_name]!r} — "
+                "audit integrity violation"
+            )
+    for field_name in constraints.forbidden:
+        if field_values[field_name] is not None:
+            raise ValueError(
+                f"TokenOutcome {outcome_id}: ({outcome!r}, {path!r}) forbids {field_name}, "
+                f"got {field_values[field_name]!r} — audit integrity violation"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class Operation:
     """Represents a source/sink I/O operation in the audit trail.
@@ -914,7 +1102,7 @@ class Operation:
     operation_id: str
     run_id: str
     node_id: str
-    operation_type: Literal["source_load", "sink_write", "runtime_preflight"]
+    operation_type: OperationType
     started_at: datetime
     status: Literal["open", "completed", "failed", "pending"]
     completed_at: datetime | None = None
@@ -925,7 +1113,7 @@ class Operation:
     error_message: str | None = None
     duration_ms: float | None = None
 
-    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"runtime_preflight", "source_load", "sink_write"})
+    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset(OPERATION_TYPE_VALUES)
     _ALLOWED_STATUSES: ClassVar[frozenset[str]] = frozenset({"open", "completed", "failed", "pending"})
 
     def __post_init__(self) -> None:
@@ -1094,8 +1282,12 @@ class SecretResolutionInput:
         SecretResolution. These checks prevent:
         - Plaintext secrets being written as fingerprints (security)
         - Invalid source values persisting undetected (Tier 1 integrity)
+        - Key Vault rows that cannot round-trip through the read-side contract
+        - Non-finite timestamps persisting into Tier 1 audit data
         - Non-negative latency invariant (data quality)
         """
+        import math
+
         if not self.env_var_name:
             raise ValueError("SecretResolutionInput: env_var_name is required and cannot be empty")
         if not self.source or self.source not in self._ALLOWED_SOURCES:
@@ -1105,5 +1297,12 @@ class SecretResolutionInput:
                 f"SecretResolutionInput: fingerprint must be 64-char lowercase hex (HMAC-SHA256), "
                 f"got {self.fingerprint!r} (length={len(self.fingerprint)})"
             )
+        if not isinstance(self.timestamp, (int, float)) or math.isinf(self.timestamp) or math.isnan(self.timestamp):
+            raise ValueError(f"SecretResolutionInput: timestamp must be a finite number, got {self.timestamp!r}")
         if self.resolution_latency_ms < 0:
             raise ValueError(f"SecretResolutionInput: resolution_latency_ms must be non-negative, got {self.resolution_latency_ms!r}")
+        if self.source == "keyvault":
+            if not self.vault_url:
+                raise ValueError("SecretResolutionInput: vault_url is required when source='keyvault'")
+            if not self.secret_name:
+                raise ValueError("SecretResolutionInput: secret_name is required when source='keyvault'")

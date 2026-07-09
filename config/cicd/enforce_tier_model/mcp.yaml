@@ -16,140 +16,81 @@ per_file_rules:
   - R5
   reason: Tier 3 MCP protocol argument validation
   expires: null
-  max_hits: 8
+  max_hits: 14
 allow_hits:
-- key: mcp/server.py:R6:_find_audit_databases:fp=badb2efd50be18f6
+- key: mcp/server.py:R6:_find_audit_databases:fp=759699bbf39ad998
   owner: john
   reason: |-
-    At src/elspeth/mcp/server.py line 719, `except OSError` wraps `db_file.stat().st_mtime`, a filesystem call whose mtime is OS-owned state under no first-party ELSPETH contract (Tier 3). OSError between the `rglob` discovery and the `stat` is an expected TOCTOU/permission boundary condition (file deleted or unreadable since enumeration). The handler is not a silent drop: line 722 still appends the file with `mtime=0`, a deterministic sort-bucket sentinel that pushes it to the end of the recency ordering, so the boundary failure is recorded in the only form this helper consumes (a sort key). Blast radius is bounded to the interactive CLI database-picker menu — nothing flows into Landscape, audit rows, or pipeline data — so the auditability concerns R6 protects do not apply.
+    This is a legitimate Tier-3 filesystem discovery boundary, not a Tier-1 audit-data read. In `src/elspeth/mcp/server.py:729-787`, `_find_audit_databases` scans a caller-provided directory for possible `*.db` files and only uses `db_file.stat().st_mtime` as a best-effort sorting signal. The swallowed exception is narrowly scoped to external filesystem metadata at `src/elspeth/mcp/server.py:778-781`: `try: mtime = db_file.stat().st_mtime` / `except OSError: mtime = 0`. A file can disappear or become unreadable between `rglob("*.db")` and `stat()`; treating its mtime as unknown preserves discovery while avoiding a crash on an environmental TOCTOU condition. This suppression would stop applying if the handler opened, parsed, or trusted audit database contents here, or if the `except OSError:` wrapped more than the metadata read.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
+  expires: '2026-10-06'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:36:06.557478+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.72
-  judge_rationale: |-
-    PRESCRIBED FORM. The except is at a genuine Tier-3 filesystem boundary: stat() reads OS-owned mtime, and OSError between rglob() enumeration and stat() is a real TOCTOU/permission condition, not a defensive guard against a first-party invariant. The handler is not a silent swallow — it sets mtime=0 as a deterministic sort-key sentinel and still appends the file at line 722, so the boundary failure is recorded in the only channel this helper consumes (an ordering bucket that pushes the un-statable file to the end of its priority group). R6's alternative remediations (raise / quarantine) do not fit an interactive CLI database-picker whose purpose is to show all candidates; mtime=0 is a UI-ordering sentinel, not data fabricated into audit/Landscape. Blast radius is correctly bounded to the picker menu.
-  judge_signature_version: 2
-  scope_fingerprint: 26c0e569610dea7a8669e0d646c06a21668a83935a491a7a20c57f49e5f4e9a3
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[33]/body[4]/body[7]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:3073faa039f98a828b4d28ec9a6209e533cf34c743f35cf906ba228dc30d3189'
-- key: mcp/server.py:R6:_prompt_for_database:fp=250dc301eb3eda7c
-  owner: john
-  reason: |-
-    At src/elspeth/mcp/server.py line 750, `except ValueError` consumes a documented pathlib control-flow signal: `Path.relative_to()` raises ValueError by API contract when the candidate path is not relative to the search base (different mount/drive). This is EAFP handling of an expected API signal, not a masked error. The fallback assigns the absolute path string to a display-only variable used solely by `sys.stderr.write` for the interactive menu (line 752); the value returned to the caller is unchanged and the displayed path is meaning-preserving (same path, absolute form). No external Tier-3 data is coerced and no Tier-1/Tier-2 invariant is silently repaired.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:36:25.491084+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES. `Path.relative_to()` raises ValueError by documented API contract when the candidate is not under the base — this is the standard Pythonic EAFP idiom for branching on that signal, not silent suppression of an unexpected error. The except branch assigns to `display`, a local string used solely for the interactive stderr menu line at 752; the returned value (line 772) is `databases[idx]`, untouched, so there is no Tier-1/Tier-2 invariant being silently repaired and no Tier-3 value being coerced. The fallback (absolute path) is meaning-preserving relative to the alternative (`./<rel>`), so even the display itself is honest. The rationale names the API contract, the variable's display-only scope, and the meaning-preservation argument — sufficient for an auditor to reconstruct the disposition.
-  judge_signature_version: 2
-  scope_fingerprint: 1055049a6e69b140c7c6610c4ebecf3728d05d9ee6b27cf986228fe8607893a0
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[34]/body[4]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:8e19ade3ec8462bf7698fd0f7685ee679a2cd3f7cbb61704a73f492bed15ca6f'
-- key: mcp/server.py:R6:_prompt_for_database:fp=dbbeb81e161a9a1d
-  owner: john
-  reason: |-
-    At src/elspeth/mcp/server.py line 762, `except (EOFError, KeyboardInterrupt)` wraps `input()` reading interactive stdin (Tier 3 external input). EOFError (Ctrl-D / closed stdin) and KeyboardInterrupt (Ctrl-C) are the canonical Python user-cancellation signals, caught narrowly; the handler writes a 'Cancelled.' message to stderr and returns `None`, the documented contract value meaning 'user cancelled, do not open a database', which the caller (`main()`) handles by exiting cleanly. This is meaning-preserving boundary handling of an interactive cancellation, explicitly surfaced to the user and propagated through the documented return — not a silent swallow. No audit-trail data is involved.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:36:40.500295+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The except is narrow (EOFError, KeyboardInterrupt — the canonical Python signals for user cancellation of an interactive `input()` read), not a bare except. The input source is interactive stdin, genuinely Tier-3 external. The handler does not silently swallow: it surfaces 'Cancelled.' on stderr to the user and returns the function's documented sentinel (`None` = 'user cancelled') per the docstring at lines 736-738, which the caller routes into a clean exit. This is meaning-preserving boundary handling of an interactive cancellation converted to an explicit, documented return — exactly the prescribed form R6 exists to distinguish from a true silent swallow. The decorator nudge does not apply: R6 is not in the suppressible set {R1, R5}, and the cancellation arrives via `input()`, not a function parameter.
-  judge_signature_version: 2
-  scope_fingerprint: 1055049a6e69b140c7c6610c4ebecf3728d05d9ee6b27cf986228fe8607893a0
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[34]/body[6]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:25f5311650a71e6f9e2b0343a78a044e9fdaf4f6ef2d4e9fed9c8102c4bf55e8'
-- key: mcp/server.py:R6:_prompt_for_database:fp=b20406c8a83aad1b
-  owner: john
-  reason: |-
-    At src/elspeth/mcp/server.py line 774, `except ValueError` wraps `int(choice)` converting interactive stdin input (Tier 3 external text the user typed) to an index. ValueError from `int()` is the expected Python signal for an unparseable string — exactly the coerce-at-the-border step permitted for Tier-3 input. The catch is not a swallow-to-default: it writes a corrective 'Please enter a number' message and re-prompts via the enclosing `while True`, which has real exit paths (a valid index returns; EOFError/KeyboardInterrupt cancels with `return None`). The failure is surfaced to the user and the operation retries on their next input; no audit or Tier-1 data is touched.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:37:03.020189+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on shape but the catch is the textbook Tier-3 boundary coerce/validate for interactive stdin: int(choice) is the parse attempt, ValueError is the expected unparseable-input signal, and the handler writes a user-visible 'Please enter a number' message to stderr and re-prompts via the enclosing `while True`. It is neither silent (the user sees the corrective message) nor a swallow-to-default (no fabricated index is returned; the loop has real exits — valid choice returns the index, EOFError/KeyboardInterrupt returns None). No Tier-1/audit data is touched. Decorator nudge does not apply: R6 is not in the {R1,R5} suppressible set and the subject is not rooted at an external function parameter.
-  judge_signature_version: 2
-  scope_fingerprint: 1055049a6e69b140c7c6610c4ebecf3728d05d9ee6b27cf986228fe8607893a0
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[34]/body[6]/body[4]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:08e491fbe5f54a49315450dcd9bb5e530edb939ccded7bd825a86acede14408e'
-- key: mcp/analyzers/queries.py:R5:_is_collision_value_fingerprint:fp=632a27456b3ee484
-  owner: john
-  reason: |-
-    `mcp/analyzers/queries.py:739-741` passes `e[1]` from persisted coalesce collision metadata into `_collision_value_fingerprint()` before MCP response construction: `"Legacy rows may still contain raw values; those are fingerprinted"` at `mcp/analyzers/queries.py:728-730`. The reported `isinstance(value, Mapping)` at `mcp/analyzers/queries.py:613` is not hiding a missing Tier-1 audit invariant; it is the discriminator for a versioned redaction format. It only accepts the already-redacted form when the value is exactly `{"value_hash", "value_type"}` and `value_hash` is a 64-char lowercase hex digest (`mcp/analyzers/queries.py:613-618`); otherwise `mcp/analyzers/queries.py:628` fingerprints the raw legacy value before comparison or egress. This suppression is valid only for this collision-value redaction discriminator; if the accepted shape, key set, regex, or fallback-to-`_fingerprint_collision_value(value)` changes, this rationale no longer applies.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:14:42.155093+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The value being inspected is persisted collision metadata read back from the audit store whose contents may be either legacy raw values or the newer redacted fingerprint shape — a versioned-format discriminator at a Tier-3 re-read boundary (persisted data, mutable store, schema drift across versions). The isinstance(Mapping) plus key-set plus hex-regex check is precisely the boundary validation that decides whether the stored shape is the already-redacted form to pass through, or a legacy raw value that must be fingerprinted by _fingerprint_collision_value before egress. The rationale plainly names the discriminator role, the accepted shape, and the fallback path, and the visible code at 613-628 corroborates it; this is not hiding a Tier-1 invariant break.
-  judge_signature_version: 2
-  scope_fingerprint: fe3c65ad0894e33ad8914002ba6c31bbb35705bd8f0f71c0f470287a0e491cb1
-  judge_transport: openrouter
-  ast_path: 'body[27]/body[1]/value/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:47ca8e836f81be6e8ab2f2fcb7153d3fa2d607aeab466842d99bdbc76e5c4754'
-- key: mcp/analyzers/queries.py:R5:_is_collision_value_fingerprint:fp=bf2075d3edfe3aee
-  owner: john
-  reason: |-
-    This `isinstance()` is a site-specific discriminator at the MCP collision-report redaction boundary, not a Tier-1 audit-data repair. In `src/elspeth/mcp/analyzers/queries.py:728-731`, `list_collisions()` reads `union_field_collision_values` from stored coalesce context where the code explicitly says legacy rows may contain raw values: `"Legacy rows may still contain raw values; those are fingerprinted before comparison or response construction."` The helper at `src/elspeth/mcp/analyzers/queries.py:610-618` only treats a value as already-redacted metadata when the whole shape matches exactly: `isinstance(value, Mapping)`, `set(value) == {"value_hash", "value_type"}`, `isinstance(value.get("value_hash"), str)`, a 64-hex `_VALUE_HASH_RE`, and `isinstance(value.get("value_type"), str)`. Otherwise, `src/elspeth/mcp/analyzers/queries.py:621-628` deliberately sends the value to `_fingerprint_collision_value(value)`, so arbitrary legacy raw user values, including dicts that happen to use `value_hash` / `value_type` keys, are not exposed and are not misread as trusted audit fingerprints. Future drift that removes the legacy-raw-value path or changes `union_field_collision_values` into a guaranteed typed DTO would invalidate this suppression; at that point malformed fingerprint metadata should be reified or allowed to crash instead of being pattern-matched.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:14:51.075723+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM at a Tier-3 boundary. The value being inspected is `union_field_collision_values` read from stored coalesce context where legacy rows may carry raw user-authored values — i.e. persisted external-origin data re-read from our DB, which the policy explicitly treats as Tier-3 at the read site. The function is a discriminator that distinguishes already-fingerprinted metadata from legacy raw values before fingerprinting; the isinstance checks form an exact-shape match (Mapping + exact key set + str + 64-hex regex + str) and the non-matching path is sent to `_fingerprint_collision_value`, so the guard validates rather than swallows. Rationale is site-specific, names the data flow, and acknowledges the conditions under which the suppression would need to be revisited.
-  judge_signature_version: 2
-  scope_fingerprint: fe3c65ad0894e33ad8914002ba6c31bbb35705bd8f0f71c0f470287a0e491cb1
-  judge_transport: openrouter
-  ast_path: 'body[27]/body[1]/value/values[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:e78570bba1038a0088906c1f6dde849da09c87925fe7062a3cf88af65c328d56'
-- key: mcp/analyzers/queries.py:R5:_is_collision_value_fingerprint:fp=72539d5f6423bbca
-  owner: john
-  reason: |-
-    This is a legitimate boundary/redaction-shape discriminator, not a Tier-1 audit-data suppression. In `src/elspeth/mcp/analyzers/queries.py:725-731`, the analyzer reads persisted `context_after_json` and then extracts `union_field_collision_values`; the adjacent comment says legacy rows may still contain raw values. At `src/elspeth/mcp/analyzers/queries.py:739-740`, each stored entry value is sent to `_collision_value_fingerprint(e[1])`, whose contract at `src/elspeth/mcp/analyzers/queries.py:621-628` is to either pass through already-redacted metadata or fingerprint raw legacy values before response construction.
-    
-    The flagged `isinstance(value.get("value_type"), str)` at `src/elspeth/mcp/analyzers/queries.py:617` is part of `_is_collision_value_fingerprint`, which accepts `value: Any` and only returns true for the exact audit-safe fingerprint envelope: `isinstance(value, Mapping)`, `set(value) == {"value_hash", "value_type"}`, a string `value_hash` matching `^[0-9a-f]{64}$`, and a string `value_type`. If this predicate drifts away from checking the exact fingerprint envelope before pass-through, the suppression is no longer valid. Here, malformed or raw legacy values are not trusted or emitted; they fall through to `_fingerprint_collision_value(value)` at line 628.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:14:58.256607+00:00'
+  judge_recorded_at: '2026-07-08T12:30:12.093085+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.85
   judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The function `_is_collision_value_fingerprint` is a discriminator on persisted external-origin data (`context_after_json` re-read from the DB, with legacy rows that may contain raw values). It takes `value: Any` and must determine whether the stored shape is already the audit-safe fingerprint envelope or a raw legacy value needing fingerprinting — exactly the Tier-3 boundary shape-validation case. The `isinstance(value.get('value_type'), str)` check is part of a tight envelope predicate (Mapping + exact key set + hash regex + value_type str) and on negative result falls through to `_fingerprint_collision_value`, not to silent recovery or fabrication. The rationale plainly identifies the data origin, the discriminator's contract, and the consequence of a false positive.
+    RULE MISFIRES / PRESCRIBED FORM at a Tier-3 filesystem boundary. The `except OSError` is tightly scoped to `db_file.stat().st_mtime`, a best-effort sort key for filesystem discovery — a classic TOCTOU race between `rglob` and `stat`. The fallback `mtime = 0` is not fabrication of audit data; it is a sort-order default for a file whose existence is itself external state, and the file is still surfaced to the caller. Nothing here reads or trusts audit DB contents — that would happen elsewhere on actual open. The scope is narrow (single stat call), the recovery is meaning-appropriate (unknown mtime deprioritizes in sort), and this is not one of the R1/R5 rules the @trust_boundary decorator can suppress.
   judge_signature_version: 2
-  scope_fingerprint: fe3c65ad0894e33ad8914002ba6c31bbb35705bd8f0f71c0f470287a0e491cb1
+  scope_fingerprint: 5df8c374489de1f809edc65a20b92e813986f05e8612277218122cdedfbe029b
   judge_transport: openrouter
-  ast_path: 'body[27]/body[1]/value/values[4]'
-  judge_metadata_signature: 'hmac-sha256:v2:25e5d68315ea731e232ed912bf4ac8c1e3decc39c597886244e36a92b38f3464'
+  ast_path: 'body[39]/body[4]/body[7]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:3f6ed878a192fa429a5d7346f7125392ad63a32c227281b7612a7a807762e2bd'
+- key: mcp/server.py:R6:_prompt_for_database:fp=67c80913ab9ef396
+  owner: john
+  reason: |-
+    mcp/server.py:806-813 is a display-only UI boundary inside `_prompt_for_database`: it tries to render each discovered database path relative to the searched directory, and if `Path(db_path).relative_to(search_path)` raises `ValueError`, it deliberately falls back to the absolute/original path with `display = db_path`. The swallowed exception is not hiding audit-data corruption or a Tier-1 invariant failure; it is the documented alternate control path for a database path that cannot be shown relative to `search_path`. Drift would invalidate this suppression if the handler stopped assigning `display = db_path`, if the caught `ValueError` began covering validation/storage logic, or if the result influenced anything other than `sys.stderr.write(f"  [{i}] {display}\n")`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T12:30:18.607023+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a narrow, display-only fallback: `Path.relative_to` raises `ValueError` when the path isn't under `search_path`, and the except branch handles exactly that documented case by falling back to the absolute path for a stderr prompt line. No audit data, no Tier-1/Tier-2 invariant, no plugin return value is involved — the caught exception is a specific, expected control-flow signal from stdlib, and the fallback is meaning-preserving (show the original path). The rationale correctly identifies the scope and the drift conditions that would invalidate it, and the visible code matches.
+  judge_signature_version: 2
+  scope_fingerprint: 8774a215ed2f50470087b42e33b100d0a216aa8769c960e7e3208d8d3686fc2c
+  judge_transport: openrouter
+  ast_path: 'body[40]/body[4]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f494ddb63b9aa1363d4839fab98f8b589b7c00d1bc0d48ab30a797e5d1c2352b'
+- key: mcp/server.py:R6:_prompt_for_database:fp=a2b17219bdcd585b
+  owner: john
+  reason: |-
+    This is a legitimate interactive CLI/user-input boundary, not a Tier-1 audit-data read path. In `src/elspeth/mcp/server.py:790-799`, `_prompt_for_database` is explicitly a prompt helper whose contract says it returns `"Selected database path, or None if user cancelled"`. The flagged handler is only around terminal input: `src/elspeth/mcp/server.py:821-825` has `choice = input().strip()` followed by `except (EOFError, KeyboardInterrupt):`, writes `"\nCancelled.\n"`, and returns `None`. EOF and Ctrl-C are expected user cancellation signals at this Tier-3 terminal boundary; the function reifies them as the documented cancellation result rather than hiding corruption or audit failure.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T12:30:25.431711+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except catches EOFError and KeyboardInterrupt at an interactive terminal input boundary — these are expected user-cancellation signals, not swallowed errors. The function's documented contract explicitly returns None on cancellation, so reifying EOF/Ctrl-C as the None cancellation result is meaning-preserving at a Tier-3 user-input boundary, not silent corruption. The exception set is narrow and specific (not bare Exception), the user is informed via 'Cancelled.' on stderr, and the return value matches the documented contract.
+  judge_signature_version: 2
+  scope_fingerprint: 8774a215ed2f50470087b42e33b100d0a216aa8769c960e7e3208d8d3686fc2c
+  judge_transport: openrouter
+  ast_path: 'body[40]/body[6]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:1aac65f0953290272edbc7fae4c2da3366e56ded73ae94ffee990b8928287ed5'
+- key: mcp/server.py:R6:_prompt_for_database:fp=c504027435f2a4b6
+  owner: john
+  reason: |-
+    This is a genuine Tier-3 interactive user-input boundary in `src/elspeth/mcp/server.py:821-836`. `_prompt_for_database` reads operator input with `choice = input().strip()`, then parses it with `idx = int(choice) - 1`; the `except ValueError:` at `src/elspeth/mcp/server.py:835` handles malformed external input by emitting the explicit user-facing error `sys.stderr.write("Please enter a number\n")`. This is not Tier-1 audit data or an internal invariant: the only swallowed exception is an invalid console selection, and the enclosing loop keeps prompting until the user supplies a valid database index or cancels.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T12:30:32.805693+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: this is a genuine Tier-3 interactive boundary — `input()` returns operator-typed text, and `int(choice)` on malformed input raises `ValueError`. The except reports the failure to the user via stderr and the enclosing `while True` loop re-prompts until a valid selection or explicit cancellation (EOFError/KeyboardInterrupt returns None). This is not silent swallowing: the failure is surfaced to the user and the control flow explicitly retries, which is the prescribed handling for interactive Tier-3 input. R6's concern (errors vanishing without user-visible signal or retry) does not apply here.
+  judge_signature_version: 2
+  scope_fingerprint: 8774a215ed2f50470087b42e33b100d0a216aa8769c960e7e3208d8d3686fc2c
+  judge_transport: openrouter
+  ast_path: 'body[40]/body[6]/body[4]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:871b8c807a9fa39ae5ad35836154a3cc17c3f9b42d0c39a00537a148ef92529c'

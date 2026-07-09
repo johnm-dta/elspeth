@@ -11,6 +11,8 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
 from tests.fixtures.factories import make_context
 
+_REDACTED = "<redacted-secret>"
+
 
 @dataclass
 class _Operation:
@@ -83,6 +85,60 @@ def test_track_operation_records_completed_status_and_output_data() -> None:
     assert factory.begin_calls[0]["input_data"] == {"source": "csv"}
     assert factory.complete_calls[0]["status"] == "completed"
     assert factory.complete_calls[0]["output_data"] == {"rows_loaded": 3}
+
+
+def test_track_operation_scrubs_structured_input_metadata_before_persisting() -> None:
+    factory = _FakeFactory()
+    ctx = make_context()
+    secret = "sk-or-v1-" + ("B" * 24)
+
+    with track_operation(
+        recorder=cast(ExecutionRepository, factory),
+        run_id="run-001",
+        node_id="node-001",
+        operation_type="source_load",
+        ctx=ctx,
+        input_data={
+            "source": "api",
+            "headers": {"Authorization": f"Bearer {secret}"},
+            "nested": [{"password": "operator-password"}],
+        },
+    ):
+        pass
+
+    persisted_input = factory.begin_calls[0]["input_data"]
+    assert secret not in repr(persisted_input)
+    assert "operator-password" not in repr(persisted_input)
+    assert persisted_input == {
+        "source": "api",
+        "headers": {"Authorization": _REDACTED},
+        "nested": [{"password": _REDACTED}],
+    }
+
+
+def test_track_operation_scrubs_structured_output_metadata_before_persisting() -> None:
+    factory = _FakeFactory()
+    ctx = make_context()
+    token = "sk-" + ("C" * 24)
+
+    with track_operation(
+        recorder=cast(ExecutionRepository, factory),
+        run_id="run-001",
+        node_id="node-001",
+        operation_type="sink_write",
+        ctx=ctx,
+    ) as handle:
+        handle.output_data = {
+            "artifact_uri": f"https://user:{token}@storage.example.com/out.csv",
+            "rows_written": 3,
+        }
+
+    persisted_output = factory.complete_calls[0]["output_data"]
+    assert token not in repr(persisted_output)
+    assert persisted_output == {
+        "artifact_uri": _REDACTED,
+        "rows_written": 3,
+    }
 
 
 def test_track_operation_marks_failed_for_exception() -> None:
@@ -161,7 +217,7 @@ def test_track_operation_renders_informative_error_for_blank_base_exception_stri
     assert ctx.operation_id is None
 
 
-def test_track_operation_ignores_broken_exception_str_override() -> None:
+def test_track_operation_falls_back_for_broken_exception_str_override() -> None:
     class _BrokenStrError(Exception):
         def __str__(self) -> str:
             raise RuntimeError("boom")
@@ -182,8 +238,49 @@ def test_track_operation_ignores_broken_exception_str_override() -> None:
         raise _BrokenStrError("original message")
 
     assert factory.complete_calls[0]["status"] == "failed"
-    assert factory.complete_calls[0]["error"] == "original message"
+    assert factory.complete_calls[0]["error"] == "_BrokenStrError"
     assert ctx.operation_id is None
+
+
+def test_track_operation_scrubs_secret_bearing_error_before_persisting() -> None:
+    """A provider exception that embeds an API key must not reach the audit trail.
+
+    ``track_operation`` persists ``operations.error_message`` from the string it
+    hands to ``complete_operation``. Runtime-preflight failures interpolate the
+    underlying client error (which can carry a bearer/API key) into their
+    message, so that string MUST pass through the audit scrubber here — at the
+    single ``_render_exception`` chokepoint — not merely in the structured
+    ``to_audit_dict()`` payload (which this persistence path never consults).
+    """
+    from elspeth.contracts.errors import RuntimePreflightFailedError
+
+    factory = _FakeFactory()
+    ctx = make_context()
+    # Build the key-shaped value at runtime so the source carries no literal
+    # secret for the repo secret-scan hook to flag (cf. tests/unit/contracts/
+    # test_errors.py); the runtime value still matches an audit-scrub pattern.
+    secret = "sk-or-v1-" + ("A" * 24)
+    cause = RuntimeError(f"401 unauthorized (Authorization: Bearer {secret})")
+    preflight_error = RuntimePreflightFailedError(plugin_name="llm", provider="openrouter", cause=cause)
+    # Sanity: the raw, unscrubbed message really does carry the secret.
+    assert secret in str(preflight_error)
+
+    with (
+        pytest.raises(RuntimePreflightFailedError),
+        track_operation(
+            recorder=cast(ExecutionRepository, factory),
+            run_id="run-001",
+            node_id="node-001",
+            operation_type="runtime_preflight",
+            ctx=ctx,
+        ),
+    ):
+        raise preflight_error
+
+    persisted_error = factory.complete_calls[0]["error"]
+    assert factory.complete_calls[0]["status"] == "failed"
+    assert secret not in persisted_error
+    assert persisted_error == "<redacted-secret>"
 
 
 def test_track_operation_raises_db_error_if_completion_fails_after_success() -> None:

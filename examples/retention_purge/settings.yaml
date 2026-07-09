@@ -72,5 +72,5 @@ landscape:
 # Payloads older than retention_days are eligible for purge.
 payload_store:
   backend: filesystem
-  base_path: examples/retention_purge/payloads
+  base_path: examples/retention_purge/runs/payloads
   retention_days: 7

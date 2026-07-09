@@ -38,16 +38,18 @@ def test_checkpoint_dumps_raises_for_unserializable_type() -> None:
 
 
 def test_checkpoint_dumps_raises_for_custom_class_naming_type() -> None:
-    """A genuinely unserializable custom instance raises a clear typed error naming the type."""
+    """A genuinely unserializable custom instance names the type without raw value repr."""
 
     class CustomThing:
         def __repr__(self) -> str:
-            return "<CustomThing instance>"
+            return "<CustomThing token=github_pat_leaked_123>"
 
     with pytest.raises(TypeError, match="'CustomThing'") as exc_info:
         checkpoint_dumps({"obj": CustomThing()})
     message = str(exc_info.value)
-    assert "<CustomThing instance>" in message  # value repr included
+    assert "github_pat_leaked_123" not in message
+    assert "<CustomThing" not in message
+    assert "value=" not in message
     assert "JSON-native" in message
 
 
@@ -126,6 +128,17 @@ def test_checkpoint_roundtrip_user_dict_with_reserved_key() -> None:
 
     assert isinstance(result["config"], dict)
     assert result["config"]["__elspeth_type__"] == "some_user_value"
+    assert result["config"]["other_key"] == 42
+
+
+@pytest.mark.parametrize("reserved_key", ["__elspeth_type__", "__elspeth_value__"])
+def test_checkpoint_roundtrip_user_dict_with_reserved_envelope_key(reserved_key: str) -> None:
+    """User dicts containing reserved envelope keys must survive round-trip."""
+    user_data = {"config": {reserved_key: "some_user_value", "other_key": 42}}
+    result = checkpoint_loads(checkpoint_dumps(user_data))
+
+    assert isinstance(result["config"], dict)
+    assert result["config"][reserved_key] == "some_user_value"
     assert result["config"]["other_key"] == 42
 
 
@@ -238,6 +251,47 @@ def test_reserved_envelope_with_extra_keys_raises() -> None:
         checkpoint_loads(tampered)
 
 
+@pytest.mark.parametrize(
+    "tampered",
+    [
+        {"__elspeth_type__": "date"},
+        {"__elspeth_value__": "2026-01-01"},
+    ],
+)
+def test_partial_reserved_envelope_shape_raises(tampered: dict[str, object]) -> None:
+    """A raw partial reserved envelope shape must crash, not restore as user data."""
+    import json
+
+    corrupted = json.dumps({"data": tampered})
+    with pytest.raises(AuditIntegrityError, match="invalid envelope shape"):
+        checkpoint_loads(corrupted)
+
+
+def test_checkpoint_loads_rejects_duplicate_json_object_keys() -> None:
+    """Ambiguous duplicate keys must crash before JSON object collapse."""
+    corrupted = '{"data": {"safe": 1, "safe": 2}}'
+
+    with pytest.raises(AuditIntegrityError, match="duplicate JSON object key"):
+        checkpoint_loads(corrupted)
+
+
+def test_checkpoint_loads_rejects_duplicate_envelope_keys() -> None:
+    """Duplicate envelope keys must not select one type tag before restore."""
+    corrupted = '{"data": {"__elspeth_type__": "bytes", "__elspeth_type__": "date", "__elspeth_value__": "2026-01-01"}}'
+
+    with pytest.raises(AuditIntegrityError, match="duplicate JSON object key"):
+        checkpoint_loads(corrupted)
+
+
+def test_envelope_type_tag_must_be_string() -> None:
+    """Envelope type tags must be strings before dispatch."""
+    import json
+
+    corrupted = json.dumps({"data": {"__elspeth_type__": 42, "__elspeth_value__": "payload"}})
+    with pytest.raises(AuditIntegrityError, match="type tag"):
+        checkpoint_loads(corrupted)
+
+
 def test_known_envelope_wrong_value_type_datetime_raises() -> None:
     """datetime envelope with non-string value must crash — type corruption."""
     import json
@@ -272,6 +326,25 @@ def test_aware_datetime_in_envelope_accepted() -> None:
     data = json.dumps({"ts": {"__elspeth_type__": "datetime", "__elspeth_value__": "2026-03-15T10:00:00+00:00"}})
     result = checkpoint_loads(data)
     assert result["ts"].tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("envelope_type", "bad"),
+    [
+        ("datetime", "not-a-datetime"),
+        ("decimal", "not-a-decimal"),
+        ("date", "not-a-date"),
+        ("time", "not-a-time"),
+        ("uuid", "not-a-uuid"),
+    ],
+)
+def test_known_string_envelope_parse_failures_raise_audit_integrity(envelope_type: str, bad: str) -> None:
+    """Known string envelope parser failures must not leak raw parser errors."""
+    import json
+
+    corrupted = json.dumps({"data": {"__elspeth_type__": envelope_type, "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match=envelope_type):
+        checkpoint_loads(corrupted)
 
 
 # ===========================================================================
@@ -329,6 +402,26 @@ def test_checkpoint_roundtrip_bytes() -> None:
     restored = result["b"]
     assert isinstance(restored, bytes)
     assert restored == b"\x00\xff"
+
+
+@pytest.mark.parametrize("bad", ["Zm9v!!", "AA==$", "é"])
+def test_checkpoint_loads_rejects_bytes_envelope_with_non_base64_characters(bad: str) -> None:
+    """A bytes envelope with discarded non-base64 characters must crash."""
+    import json
+
+    corrupted = json.dumps({"b": {"__elspeth_type__": "bytes", "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match="bytes envelope"):
+        checkpoint_loads(corrupted)
+
+
+@pytest.mark.parametrize("bad", ["AB==", "//=="])
+def test_checkpoint_loads_rejects_non_canonical_bytes_envelope(bad: str) -> None:
+    """A bytes envelope must use the canonical Base64 spelling for its bytes."""
+    import json
+
+    corrupted = json.dumps({"b": {"__elspeth_type__": "bytes", "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match="non-canonical"):
+        checkpoint_loads(corrupted)
 
 
 def test_checkpoint_roundtrip_uuid() -> None:

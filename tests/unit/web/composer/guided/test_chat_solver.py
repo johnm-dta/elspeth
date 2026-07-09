@@ -10,15 +10,26 @@ validation; tests for that surface live in test_step_tool_scope.py.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from elspeth.web.composer.guided import chat_solver
-from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution, solve_step_chat
+from elspeth.web.composer.guided.chat_solver import (
+    AssistantScaffoldLeakError,
+    Step1SourceChatResolution,
+    _build_step_1_source_dynamic_block,
+    _build_step_2_sink_tool_prompt,
+    _parse_step_1_source_tool_arguments,
+    _parse_step_2_sink_tool_arguments,
+    build_step_chat_context_block,
+    solve_step_chat,
+)
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 
 
 @dataclass
@@ -51,6 +62,7 @@ def test_step_1_source_chat_resolution_deep_freezes_container_fields() -> None:
         options={"schema": {"fields": ["name"]}},
         observed_columns=("name",),
         sample_rows=({"name": "alice"},),
+        on_validation_failure="discard",
     )
 
     with pytest.raises(TypeError):
@@ -82,9 +94,12 @@ async def test_solver_sends_step_scoped_system_prompt(monkeypatch: pytest.Monkey
 
     assert reply == "here's some advice"
     messages = captured["messages"]
-    assert len(messages) == 2
+    assert len(messages) == 3
     assert messages[0]["role"] == "system"
-    assert messages[1] == {"role": "user", "content": "hi"}
+    # messages[1] is the no-tools addendum (solve_step_chat never attaches
+    # tools) — a fixed second system message, not step-scoped.
+    assert messages[1]["role"] == "system"
+    assert messages[2] == {"role": "user", "content": "hi"}
 
     from elspeth.web.composer.guided.prompts import load_step_chat_skill
 
@@ -142,3 +157,296 @@ async def test_whitespace_only_response_raises(monkeypatch: pytest.MonkeyPatch) 
             temperature=None,
             seed=None,
         )
+
+
+def test_build_step_chat_context_block_names_artifacts_llm_safely() -> None:
+    """The advisory context block carries plugin names / schema modes / field
+    lists via the SAME LLM-safe serializers the revision prompts use — never
+    raw options, blob paths, or secret-bearing values."""
+    current_source = SourceResolved(
+        plugin="csv",
+        options={
+            "schema": {"mode": "observed", "guaranteed_fields": ["url"]},
+            "blob_ref": {"id": "blob-1", "storage_path": "/srv/elspeth/blobs/private.csv"},
+            "raw_option_should_not_leave": "sk-secret",
+        },
+        observed_columns=("url",),
+        sample_rows=({"url": "https://example.test/a"},),
+        on_validation_failure="discard",
+    )
+    current_sink = SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                plugin="json",
+                options={"path": "results.jsonl", "token": "sk-sink-secret"},
+                required_fields=("url", "score"),
+                schema_mode="observed",
+            ),
+        )
+    )
+
+    block = build_step_chat_context_block(
+        step=GuidedStep.STEP_2_SINK,
+        current_source=current_source,
+        current_sink=current_sink,
+        state=None,
+    )
+
+    assert "step_2_sink" in block
+    assert '"plugin": "csv"' in block
+    assert '"plugin": "json"' in block
+    assert '"guaranteed_fields": ["url"]' in block
+    # LLM-safe: raw option values, blob paths, and secrets never egress.
+    assert "sk-secret" not in block
+    assert "sk-sink-secret" not in block
+    assert "/srv/elspeth/blobs" not in block
+    assert "results.jsonl" not in block
+
+
+def test_build_step_chat_context_block_is_honest_when_nothing_is_built() -> None:
+    block = build_step_chat_context_block(
+        step=GuidedStep.STEP_1_SOURCE,
+        current_source=None,
+        current_sink=None,
+        state=None,
+    )
+    assert "Applied source: none yet." in block
+    assert "Applied output(s): none yet." in block
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_threads_context_block_as_third_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The context block rides in messages[2] — the per-step skill stays the
+    byte-stable, cache-markable head (same split as the step-1 resolve path);
+    the no-tools addendum is the fixed messages[1]."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
+        captured.update(kwargs)
+        return _ok_response("here's what you're seeing")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    reply = await solve_step_chat(
+        model="test/model",
+        step=GuidedStep.STEP_2_SINK,
+        user_message="explain this",
+        temperature=None,
+        seed=None,
+        context_block="## Current build\n\nApplied source: none yet.\n",
+    )
+
+    assert reply == "here's what you're seeing"
+    messages = captured["messages"]
+    assert len(messages) == 4
+    assert messages[1]["role"] == "system"
+    assert messages[2]["role"] == "system"
+    assert messages[2]["content"].startswith("## Current build")
+    assert messages[3] == {"role": "user", "content": "explain this"}
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_rejects_tool_scaffolding_in_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The advisory reply persists into chat_history verbatim — same register
+    guard as the resolve-path assistant_message args.
+
+    Observed live 2026-07-03 (live guided, step_1): the model answered the
+    advisory path with a full pseudo <tool_call>/<tool_response> transcript
+    as literal content, which rendered raw in the user-facing bubble. The
+    dedicated subclass lets the auto-drop wrapper absorb it (synthetic
+    unavailable, Send retryable) while bare ValueError still propagates as a
+    caller bug.
+    """
+
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        return _ok_response('Let me look. <tool_call>{"name": "list_sources"}</tool_call> ...prose after.')
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    with pytest.raises(AssistantScaffoldLeakError, match="user-facing prose"):
+        await solve_step_chat(
+            model="test/model",
+            step=GuidedStep.STEP_1_SOURCE,
+            user_message="read my csv",
+            temperature=None,
+            seed=None,
+        )
+
+
+def _source_tool_args(**overrides: Any) -> str:
+    """A valid resolve_source argument blob (json-encoded), overridable per test."""
+    args: dict[str, Any] = {
+        "resolution": "source",
+        "plugin": "json",
+        "filename": "rows.json",
+        "mime_type": "application/json",
+        "content": '[{"url": "https://example.test/a"}]',
+        "options": {"schema": {"mode": "observed"}},
+        "observed_columns": ["url"],
+        "sample_rows": [{"url": "https://example.test/a"}],
+        "assistant_message": "Created the source.",
+    }
+    args.update(overrides)
+    return json.dumps(args)
+
+
+def test_parse_defaults_on_validation_failure_to_discard_when_omitted() -> None:
+    """The optional knob is absent -> default to 'discard' so a passive walk never stalls."""
+    resolution = _parse_step_1_source_tool_arguments(_source_tool_args(), plugin_hint="json")
+    assert resolution.on_validation_failure == "discard"
+
+
+def test_parse_preserves_explicit_on_validation_failure() -> None:
+    """A composer-chosen value (non-default sentinel) survives the parse verbatim."""
+    resolution = _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure="quarantine_sink"), plugin_hint="json")
+    assert resolution.on_validation_failure == "quarantine_sink"
+
+
+def test_parse_empty_on_validation_failure_defaults_to_discard() -> None:
+    """An empty string is treated as 'not set' and defaults to 'discard'."""
+    resolution = _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure=""), plugin_hint="json")
+    assert resolution.on_validation_failure == "discard"
+
+
+def test_parse_non_string_on_validation_failure_raises() -> None:
+    """When the model sends a non-string value, reject at the Tier-3 boundary."""
+    with pytest.raises(ValueError, match="on_validation_failure must be a string"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure=123), plugin_hint="json")
+
+
+def test_parse_step_2_sink_rejects_non_object_arguments() -> None:
+    """Malformed LLM resolve_sink arguments are rejected at the Tier-3 parse boundary."""
+    with pytest.raises(ValueError, match="must decode to an object"):
+        _parse_step_2_sink_tool_arguments('["not", "an", "object"]')
+
+
+def test_parse_rejects_tool_scaffolding_in_assistant_message() -> None:
+    """A model that leaks its agentic scratchpad into assistant_message is rejected.
+
+    Observed live 2026-07-03: a 2.8KB pseudo tool-call transcript
+    (``<tool_call>{"name": "list_sources"}...``) persisted verbatim into a
+    tutorial chat history and rendered as the learner-facing reply. The
+    register violation must route to MALFORMED_RESPONSE (retryable advisory),
+    never into chat_history.
+    """
+    scratchpad = 'Let me check.\n\n<tool_call>{"name": "list_sources"}</tool_call>\n<tool_response>[...]</tool_response>\nDone.'
+    with pytest.raises(ValueError, match="user-facing prose"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(assistant_message=scratchpad), plugin_hint="json")
+
+
+def test_parse_rejects_tool_scaffolding_case_insensitively() -> None:
+    with pytest.raises(ValueError, match="user-facing prose"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(assistant_message="<TOOL_CALL>{}</TOOL_CALL>"), plugin_hint="json")
+
+
+def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
+    current_source = SourceResolved(
+        plugin="csv",
+        options={
+            "schema": {"mode": "observed", "guaranteed_fields": ["email", "profile_url"]},
+            "blob_ref": {"id": "blob-private-source-id", "storage_path": "/srv/elspeth/blobs/private.csv"},
+            "raw_option_key_should_not_leave": "sk-option-secret",
+        },
+        observed_columns=("email", "profile_url", "note"),
+        sample_rows=(
+            {
+                "email": "person@example.test",
+                "profile_url": "https://example.test/private?token=secret",
+                "note": "customer asked for refunds",
+            },
+        ),
+        on_validation_failure="quarantine",
+    )
+
+    prompt = _build_step_1_source_dynamic_block(plugin_hint="csv", current_source=current_source)
+
+    assert "person@example.test" not in prompt
+    assert "https://example.test/private" not in prompt
+    assert "customer asked for refunds" not in prompt
+    assert "blob-private-source-id" not in prompt
+    assert "/srv/elspeth/blobs/private.csv" not in prompt
+    assert "raw_option_key_should_not_leave" not in prompt
+    assert "sk-option-secret" not in prompt
+    assert '"plugin": "csv"' in prompt
+    assert '"mode": "observed"' in prompt
+    assert '"guaranteed_fields": ["email", "profile_url"]' in prompt
+    assert "<sample:email-like>" in prompt
+    assert "<sample:url>" in prompt
+    assert "<sample:string:" in prompt
+
+
+def test_step_2_revision_prompt_uses_llm_safe_sink_context() -> None:
+    current_sink = SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                plugin="azure_blob",
+                options={
+                    "path": "/srv/elspeth/exports/private-output.jsonl",
+                    "sas_token": "sv=private-token",
+                    "raw_sink_option_key_should_not_leave": {"secret_ref": "PROD_BLOB_SECRET"},
+                },
+                required_fields=("email_hash", "profile_url"),
+                schema_mode="fixed",
+            ),
+        )
+    )
+
+    prompt = _build_step_2_sink_tool_prompt(current_sink=current_sink)
+
+    assert "/srv/elspeth/exports/private-output.jsonl" not in prompt
+    assert "sv=private-token" not in prompt
+    assert "raw_sink_option_key_should_not_leave" not in prompt
+    assert "PROD_BLOB_SECRET" not in prompt
+    assert '"plugin": "azure_blob"' in prompt
+    assert '"schema_mode": "fixed"' in prompt
+    assert '"required_fields": ["email_hash", "profile_url"]' in prompt
+    assert '"option_count": 3' in prompt
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_timeout_seconds_bounds_the_llm_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guided chat LLM call is server-side bounded (elspeth-fb4464cdf0).
+
+    A hung provider call must raise TimeoutError once ``timeout_seconds``
+    elapses — the same freeform-compose bound (asyncio.wait_for on
+    ``composer_timeout_seconds``). The routes thread the settings value;
+    ``None`` (legacy/test callers) stays unbounded.
+    """
+    import asyncio
+
+    async def hung_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        await asyncio.sleep(60)
+        raise AssertionError("unreachable — the wait_for bound must fire first")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", hung_acompletion)
+
+    with pytest.raises(TimeoutError):
+        await solve_step_chat(
+            model="test/model",
+            step=GuidedStep.STEP_1_SOURCE,
+            user_message="hello",
+            temperature=None,
+            seed=None,
+            timeout_seconds=0.01,
+        )
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_without_timeout_stays_unbounded_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """timeout_seconds=None (default) does not wrap the call — direct callers keep the legacy contract."""
+
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        return _ok_response("advice")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    reply = await solve_step_chat(
+        model="test/model",
+        step=GuidedStep.STEP_1_SOURCE,
+        user_message="hello",
+        temperature=None,
+        seed=None,
+    )
+    assert reply == "advice"

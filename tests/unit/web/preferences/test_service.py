@@ -784,3 +784,225 @@ def test_concurrent_partial_patches_return_serialized_current_state(tmp_path):
     assert any(_response_has_both(value) for value in results.values()), (
         "At least one concurrent PATCH response must reflect the serialized row with both the mode and banner updates."
     )
+
+
+# ── Tutorial resume-state persistence (elspeth-918f4434b3) ─────────────────
+
+
+def test_patch_persists_tutorial_progress_fields(service):
+    """Each stage transition PATCHes the resume fields; GET round-trips them
+    so a reload can resume at the persisted stage with the same session."""
+    user = "alice-tutorial-progress-roundtrip"
+    result = asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(
+                tutorial_stage="guided",
+                tutorial_session_id="sess-1",
+            ),
+        )
+    )
+    assert result.current.tutorial_stage == "guided"
+    assert result.current.tutorial_session_id == "sess-1"
+    assert result.current.tutorial_run_id is None
+
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.tutorial_stage == "guided"
+    assert prefs.tutorial_session_id == "sess-1"
+    assert prefs.tutorial_run_id is None
+    assert prefs.tutorial_source_data_hash is None
+
+
+def test_patch_advances_tutorial_stage_and_records_run_identity(service):
+    """The run-completed transition records run_id + source_data_hash so the
+    audit step can resume with zero re-execution."""
+    user = "alice-tutorial-progress-advance"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="guided", tutorial_session_id="sess-2"),
+        )
+    )
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(
+                tutorial_stage="audit",
+                tutorial_session_id="sess-2",
+                tutorial_run_id="run-9",
+                tutorial_source_data_hash="hash-9",
+            ),
+        )
+    )
+
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.tutorial_stage == "audit"
+    assert prefs.tutorial_session_id == "sess-2"
+    assert prefs.tutorial_run_id == "run-9"
+    assert prefs.tutorial_source_data_hash == "hash-9"
+
+
+def test_unrelated_patch_preserves_tutorial_progress(service):
+    """Absent resume fields are preserved by unrelated PATCHes (the
+    model_fields_set discrimination, same as banner/tutorial timestamps)."""
+    user = "alice-tutorial-progress-preserve"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="run", tutorial_session_id="sess-3"),
+        )
+    )
+
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
+
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.default_mode == "freeform"
+    assert prefs.tutorial_stage == "run"
+    assert prefs.tutorial_session_id == "sess-3"
+
+
+def test_setting_tutorial_completed_clears_progress(service):
+    """Completion-clears-progress: finishing the tutorial (any door — the
+    graduation click or the immediate skip persist) terminates the
+    in-progress resume state so a later reload lands in the composer,
+    not a stale mid-tutorial resume."""
+    user = "alice-tutorial-progress-complete"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="graduation", tutorial_session_id="sess-4"),
+        )
+    )
+
+    stamp = datetime(2026, 5, 15, 15, 0, tzinfo=UTC)
+    result = asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+    assert result.current.tutorial_stage is None
+    assert result.current.tutorial_session_id is None
+
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.tutorial_completed_at is not None
+    assert prefs.tutorial_stage is None
+    assert prefs.tutorial_session_id is None
+    assert prefs.tutorial_run_id is None
+    assert prefs.tutorial_source_data_hash is None
+
+
+def test_resetting_tutorial_clears_progress_for_clean_restart(service):
+    """The e2e harness reset recipe — PATCH {"tutorial_completed_at": null}
+    (with default_mode) — must restart the tutorial CLEANLY at Welcome. A
+    stale tutorial_stage would resurrect a mid-tutorial resume instead."""
+    user = "alice-tutorial-progress-reset"
+    stamp = datetime(2026, 5, 15, 15, 5, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="run", tutorial_session_id="sess-5"),
+        )
+    )
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(tutorial_completed_at=stamp)))
+    # Simulate a lingering in-progress row alongside a completion (write
+    # ordering race between the stage PATCH and the completion PATCH).
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="graduation", tutorial_session_id="sess-5"),
+        )
+    )
+
+    result = asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_completed_at=None, default_mode="guided"),
+        )
+    )
+
+    assert result.current.tutorial_completed_at is None
+    assert result.current.tutorial_stage is None
+    assert result.current.tutorial_session_id is None
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.tutorial_stage is None
+    assert prefs.tutorial_session_id is None
+
+
+def test_progress_only_patch_is_not_treated_as_empty(service, engine):
+    """A PATCH carrying only resume fields must write a row (it is not the
+    Panel C2 empty no-op)."""
+    user = "alice-tutorial-progress-not-empty"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="guided", tutorial_session_id="sess-6"),
+        )
+    )
+    with engine.connect() as conn:
+        row = conn.execute(select(user_preferences_table).where(user_preferences_table.c.user_id == user)).first()
+    assert row is not None
+    assert row.tutorial_stage == "guided"
+
+
+def test_explicit_null_clears_tutorial_progress(service):
+    """Backing out to Welcome clears the resume state via explicit nulls."""
+    user = "alice-tutorial-progress-clear"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="guided", tutorial_session_id="sess-7"),
+        )
+    )
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(
+                tutorial_stage=None,
+                tutorial_session_id=None,
+                tutorial_run_id=None,
+                tutorial_source_data_hash=None,
+            ),
+        )
+    )
+
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.tutorial_stage is None
+    assert prefs.tutorial_session_id is None
+
+
+def test_corrupt_tutorial_stage_crashes_with_named_error(service):
+    """Tier-1 read guard: a stored stage outside the closed set raises
+    CorruptPreferencesError naming the field, via the public read path
+    (CHECK bypassed with PRAGMA — direct-SQL / schema-drift scenarios)."""
+    user = "alice-tutorial-stage-corrupt"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="guided", tutorial_session_id="sess-8"),
+        )
+    )
+    with service._engine.begin() as conn:
+        conn.execute(text("PRAGMA ignore_check_constraints = ON"))
+        conn.execute(text("UPDATE user_preferences SET tutorial_stage = 'welcome' WHERE user_id = :uid").bindparams(uid=user))
+        conn.execute(text("PRAGMA ignore_check_constraints = OFF"))
+
+    with pytest.raises(CorruptPreferencesError, match="welcome") as exc_info:
+        asyncio.run(service.get_composer_preferences(user))
+    assert exc_info.value.user_id == user
+    assert exc_info.value.field_name == "tutorial_stage"
+    assert exc_info.value.bad_value == "welcome"
+
+
+def test_patch_progress_emits_counter_with_progress_changed_label(service, preferences_patch_counter: _RecordingCounter):
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-progress-counter",
+            UpdateComposerPreferencesRequest(tutorial_stage="guided", tutorial_session_id="sess-9"),
+        )
+    )
+
+    assert preferences_patch_counter.calls
+    _amount, attrs = preferences_patch_counter.calls[-1]
+    assert attrs["tutorial_progress_changed"] is True
+    assert attrs["tutorial_changed"] is False

@@ -1,7 +1,7 @@
 """Tests for audit trail contracts."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from hypothesis import given, settings
@@ -42,7 +42,54 @@ from elspeth.contracts import (
     TriggerType,
     ValidationErrorRecord,
 )
+from elspeth.contracts import audit as audit_contracts
+from elspeth.contracts.audit import validate_token_outcome_persisted_fields
 from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
+
+
+class TestAuditEnumValidation:
+    """Tests for required vs optional enum validation in audit contracts."""
+
+    def test_required_enum_field_rejects_none(self) -> None:
+        """Required enum fields must reject None, not silently pass."""
+        with pytest.raises(TypeError, match="status must be RunStatus"):
+            Run(
+                run_id="run-1",
+                started_at=datetime.now(UTC),
+                config_hash="a" * 64,
+                settings_json="{}",
+                canonical_version="1.0",
+                status=None,  # type: ignore[arg-type]
+            )
+
+    def test_optional_enum_fields_accept_none(self) -> None:
+        """Optional enum fields keep accepting None after required enum tightening."""
+        run = Run(
+            run_id="run-1",
+            started_at=datetime.now(UTC),
+            config_hash="a" * 64,
+            settings_json="{}",
+            canonical_version="1.0",
+            status=RunStatus.RUNNING,
+            reproducibility_grade=None,
+            export_status=None,
+        )
+
+        assert run.reproducibility_grade is None
+        assert run.export_status is None
+
+    def test_seeded_from_cache_requires_cache_key(self) -> None:
+        """Cache replay runs must carry the cache key they were replayed from."""
+        with pytest.raises(ValueError, match="seeded_from_cache=True requires cache_key"):
+            Run(
+                run_id="run-1",
+                started_at=datetime.now(UTC),
+                config_hash="a" * 64,
+                settings_json="{}",
+                canonical_version="1.0",
+                status=RunStatus.COMPLETED,
+                seeded_from_cache=True,
+            )
 
 
 class TestNodeStateVariants:
@@ -748,6 +795,119 @@ class TestNodeStatePending:
         assert state.status == NodeStateStatus.PENDING
 
 
+class TestNodeStateLifecycleContracts:
+    """Tests for shared node-state lifecycle field validation."""
+
+    _VALID_PERSISTED_FIELDS: ClassVar[dict[NodeStateStatus, dict[str, object | None]]] = {
+        NodeStateStatus.OPEN: {
+            "output_hash": None,
+            "completed_at": None,
+            "duration_ms": None,
+            "context_after_json": None,
+            "error_json": None,
+            "success_reason_json": None,
+        },
+        NodeStateStatus.PENDING: {
+            "output_hash": None,
+            "completed_at": datetime.now(UTC),
+            "duration_ms": 10.0,
+            "context_after_json": "{}",
+            "error_json": None,
+            "success_reason_json": None,
+        },
+        NodeStateStatus.COMPLETED: {
+            "output_hash": "out-hash",
+            "completed_at": datetime.now(UTC),
+            "duration_ms": 10.0,
+            "context_after_json": "{}",
+            "error_json": None,
+            "success_reason_json": "{}",
+        },
+        NodeStateStatus.FAILED: {
+            "output_hash": "partial-hash",
+            "completed_at": datetime.now(UTC),
+            "duration_ms": 10.0,
+            "context_after_json": "{}",
+            "error_json": "{}",
+            "success_reason_json": None,
+        },
+    }
+
+    def test_persisted_field_validator_accepts_open_shape(self) -> None:
+        """The contract layer owns status-dependent persisted field policy."""
+        audit_contracts.validate_node_state_persisted_fields(
+            "state_open",
+            NodeStateStatus.OPEN,
+            output_hash=None,
+            completed_at=None,
+            duration_ms=None,
+            context_after_json=None,
+            error_json=None,
+            success_reason_json=None,
+        )
+
+    def test_persisted_field_validator_rejects_open_completion_data(self) -> None:
+        """OPEN rows cannot carry completion fields."""
+        with pytest.raises(ValueError, match="OPEN state state_open has non-NULL output_hash"):
+            audit_contracts.validate_node_state_persisted_fields(
+                "state_open",
+                NodeStateStatus.OPEN,
+                output_hash="bad",
+                completed_at=None,
+                duration_ms=None,
+                context_after_json=None,
+                error_json=None,
+                success_reason_json=None,
+            )
+
+    def test_completion_field_validator_rejects_pending_output_data(self) -> None:
+        """Write paths use the same lifecycle policy before persisting rows."""
+        with pytest.raises(ValueError, match="PENDING node state must not have output_data"):
+            audit_contracts.validate_node_state_completion_fields(
+                NodeStateStatus.PENDING,
+                output_data_present=True,
+                duration_ms=10.0,
+                error_present=False,
+                success_reason_present=False,
+            )
+
+    @pytest.mark.parametrize("status", tuple(NodeStateStatus))
+    def test_persisted_field_validator_accepts_each_valid_status_shape(self, status: NodeStateStatus) -> None:
+        """Each lifecycle status has one explicit accepted persisted shape."""
+        audit_contracts.validate_node_state_persisted_fields(
+            f"state_{status.value}",
+            status,
+            **self._VALID_PERSISTED_FIELDS[status],
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "field_name", "value", "match"),
+        [
+            (NodeStateStatus.OPEN, "completed_at", datetime.now(UTC), "non-NULL completed_at"),
+            (NodeStateStatus.OPEN, "context_after_json", "{}", "non-NULL context_after_json"),
+            (NodeStateStatus.PENDING, "completed_at", None, "NULL completed_at"),
+            (NodeStateStatus.PENDING, "output_hash", "out-hash", "non-NULL output_hash"),
+            (NodeStateStatus.COMPLETED, "output_hash", None, "NULL output_hash"),
+            (NodeStateStatus.COMPLETED, "error_json", "{}", "non-NULL error_json"),
+            (NodeStateStatus.FAILED, "error_json", None, "NULL error_json"),
+            (NodeStateStatus.FAILED, "success_reason_json", "{}", "non-NULL success_reason_json"),
+        ],
+    )
+    def test_persisted_field_validator_enforces_status_matrix(
+        self,
+        status: NodeStateStatus,
+        field_name: str,
+        value: object | None,
+        match: str,
+    ) -> None:
+        """Required and forbidden persisted fields are enforced by the contract helper."""
+        fields = dict(self._VALID_PERSISTED_FIELDS[status])
+        fields[field_name] = value
+
+        with pytest.raises(ValueError, match=match):
+            audit_contracts.validate_node_state_persisted_fields(f"state_{status.value}", status, **fields)
+
+
 class TestTokenOutcome:
     """Tests for TokenOutcome audit model.
 
@@ -972,6 +1132,37 @@ class TestTokenOutcomeTwoAxis:
             completed=True,
             recorded_at=datetime.now(UTC),
         )
+
+    def test_persisted_field_validator_accepts_valid_default_flow(self) -> None:
+        """The public persisted-row validator owns ADR-019 discriminator shape."""
+        validate_token_outcome_persisted_fields(
+            "out_public_valid",
+            TerminalOutcome.SUCCESS,
+            TerminalPath.DEFAULT_FLOW,
+            True,
+            sink_name="primary",
+            batch_id=None,
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id=None,
+            error_hash=None,
+        )
+
+    def test_persisted_field_validator_rejects_missing_required_field(self) -> None:
+        """Persisted rows missing pair-required fields are contract violations."""
+        with pytest.raises(ValueError, match="requires sink_name"):
+            validate_token_outcome_persisted_fields(
+                "out_public_invalid",
+                TerminalOutcome.SUCCESS,
+                TerminalPath.DEFAULT_FLOW,
+                True,
+                sink_name=None,
+                batch_id=None,
+                fork_group_id=None,
+                join_group_id=None,
+                expand_group_id=None,
+                error_hash=None,
+            )
 
 
 class TestNonCanonicalMetadata:
@@ -2017,6 +2208,18 @@ class TestSecretResolutionInputValidation:
     def test_negative_latency_rejected(self) -> None:
         with pytest.raises(ValueError, match="non-negative"):
             SecretResolutionInput(**self._valid_kwargs(resolution_latency_ms=-1.0))  # type: ignore[arg-type]
+
+    def test_non_finite_timestamp_rejected(self) -> None:
+        with pytest.raises(ValueError, match="timestamp must be a finite number"):
+            SecretResolutionInput(**self._valid_kwargs(timestamp=float("inf")))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_vault_url(self) -> None:
+        with pytest.raises(ValueError, match="vault_url is required"):
+            SecretResolutionInput(**self._valid_kwargs(vault_url=None))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_secret_name(self) -> None:
+        with pytest.raises(ValueError, match="secret_name is required"):
+            SecretResolutionInput(**self._valid_kwargs(secret_name=None))  # type: ignore[arg-type]
 
     def test_zero_latency_accepted(self) -> None:
         """Zero latency is valid (e.g., cached resolution)."""

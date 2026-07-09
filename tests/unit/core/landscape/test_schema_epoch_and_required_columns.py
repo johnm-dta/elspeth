@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 21)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 22)."""
 
 from __future__ import annotations
 
@@ -13,14 +13,15 @@ from elspeth.core.landscape.schema import (
     checkpoints_table,
     metadata,
     node_states_table,
+    routing_events_table,
     token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty_one() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 21
+def test_epoch_is_twenty_two() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 22
 
 
 def test_token_work_items_has_barrier_blocked_at() -> None:
@@ -52,6 +53,10 @@ def test_tokens_has_token_data_ref_column() -> None:
 
 def test_node_states_has_resume_checkpoint_id_column() -> None:
     assert "resume_checkpoint_id" in node_states_table.c
+
+
+def test_routing_events_has_run_id_column() -> None:
+    assert "run_id" in routing_events_table.c
 
 
 def test_required_columns_include_new_columns_and_openrouter() -> None:
@@ -103,6 +108,11 @@ def test_required_columns_include_epoch_21_coordination_substrate() -> None:
         "adopted_epoch",
     ):
         assert ("coalesce_branch_losses", column) in required
+
+
+def test_required_columns_include_epoch_22_routing_event_run_scope() -> None:
+    """Epoch 22 routing event run ownership must trip stale-DB detection."""
+    assert ("routing_events", "run_id") in set(_REQUIRED_COLUMNS)
 
 
 def test_checkpoint_blob_columns_are_gone() -> None:

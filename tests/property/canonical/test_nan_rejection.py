@@ -214,6 +214,16 @@ class TestNonFiniteEdgeCases:
         with pytest.raises(ValueError, match="NaN/Infinity found in NumPy array"):
             canonical_json({"array": arr})
 
+    def test_object_numpy_array_non_finite_rejected_recursively(self) -> None:
+        """Object arrays use scalar normalization, so embedded NaN still fails."""
+        arr = np.array([1.0, float("nan")], dtype=object)
+        with pytest.raises(ValueError, match="non-finite float"):
+            canonical_json({"array": arr})
+
+    def test_string_numpy_array_serializes_without_numeric_finiteness_probe(self) -> None:
+        """Non-numeric arrays are normalized recursively without dtype probing fallbacks."""
+        assert canonical_json({"array": np.array(["a", "b"])}) == '{"array":["a","b"]}'
+
     def test_very_large_float_not_infinity(self) -> None:
         """Verify that very large (but finite) floats are accepted."""
         # Largest finite float

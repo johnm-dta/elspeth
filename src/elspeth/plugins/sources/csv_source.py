@@ -27,6 +27,7 @@ from elspeth.contracts.schema_contract_factory import create_contract_from_confi
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import TabularSourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sources._safe_validation_errors import safe_validation_error_text
 from elspeth.plugins.sources.field_normalization import ExternalHeaderError, FieldResolution, resolve_field_names
 
 
@@ -84,7 +85,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:586e744a9990aa8c"
+    source_file_hash: str | None = "sha256:da40c7c68226f54a"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -602,9 +603,12 @@ class CSVSource(BaseSource):
                     source_row_index=row_num - 1,
                 )
             except ValidationError as e:
+                # Input-free text: str(e) echoes the offending Tier-3 value
+                # into audit surfaces (elspeth-a300402c58).
+                error_text = safe_validation_error_text(e)
                 ctx.record_validation_error(
                     row=row,
-                    error=str(e),
+                    error=error_text,
                     schema_mode=self._schema_config.mode,
                     destination=self._on_validation_failure,
                 )
@@ -612,7 +616,7 @@ class CSVSource(BaseSource):
                 if self._on_validation_failure != "discard":
                     yield SourceRow.quarantined(
                         row=row,
-                        error=str(e),
+                        error=error_text,
                         destination=self._on_validation_failure,
                         source_row_index=row_num - 1,
                     )

@@ -164,14 +164,11 @@ class SafeExcerpt:
     ``ReauditOutcome`` and the sidecar writer serialises it into the
     JSONL trail.
 
-    ``file_fingerprint`` is the SHA-256 hex digest of the source
-    file's bytes (the same primitive C8-3 uses for entry binding). It
-    is exposed here so the caller does not re-read the file: the
-    judge-write path in ``cli._run_justify`` consumes this value
-    directly into the YAML's ``file_fingerprint:`` binding field. It
-    is also the salt the scrubber used for ``RedactionRecord.redacted_hash``
-    — a single source of truth removes the risk of the binding
-    fingerprint and the salting fingerprint drifting out of sync.
+    ``file_fingerprint`` is the SHA-256 hex digest of the source file's
+    bytes. The judge-write path in ``cli._run_justify`` compares it to the
+    scanner finding's file digest before calling the judge, proving the
+    scanner finding and prompt excerpt came from the same source snapshot. It
+    is also the salt the scrubber used for ``RedactionRecord.redacted_hash``.
     """
 
     text: str
@@ -250,6 +247,11 @@ def resolve_safe_excerpt_path(*, root: Path, target_file: Path) -> Path:
 #   ``Authorization: Bearer <token>``. The byte_count and redacted_hash
 #   measure ONLY the group, not the whole match.
 #
+# Whole-match redactions normally collapse the match to one token.
+# Patterns that may span source lines set ``preserve_line_count=True`` so
+# ``extract_safe_excerpt`` can still render faithful line-number prefixes
+# after scrubbing.
+#
 # A separate ``path_hint_required`` field gates patterns that are too
 # permissive to run unconditionally but unambiguous given filesystem
 # context — currently the bare-base64 SSH-key body, which without the
@@ -296,14 +298,30 @@ class _Pattern:
     # run on arbitrary source but unambiguous on filesystem paths
     # matching ``*.pem`` / ``*.key`` / ``id_rsa`` / ``id_ed25519``.
     path_hint_required: tuple[str, ...] = ()
+    # Preserve the number of ``\n`` delimiters in a whole-match redaction.
+    # Used for multi-line PEM blocks so source-excerpt rendering keeps a
+    # stable one-rendered-line-per-source-line contract.
+    preserve_line_count: bool = False
+
+
+_PEM_PRIVATE_KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+_SPLITLINES_BOUNDARY_RE = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 
 _SECRET_PATTERNS: tuple[_Pattern, ...] = (
-    # PEM-wrapped private keys. The block prefix is the load-bearing
-    # signal; we redact from the header through the next newline that
-    # terminates the matched line, leaving the surrounding excerpt
-    # intact. Multi-line PEM bodies still match per line via the
-    # generic high-entropy pattern below.
+    # PEM-wrapped private keys. A complete block must redact as a single
+    # audit event before the standalone delimiter patterns fire; otherwise
+    # ordinary body lines embedded in source survive because the generic
+    # high-entropy matcher is label-proximity gated. The replacement
+    # preserves newline count so ``extract_safe_excerpt`` can keep source
+    # line numbers faithful after the scrub.
+    _Pattern(
+        name="pem_private_key_block",
+        regex=_PEM_PRIVATE_KEY_BLOCK_RE,
+        preserve_line_count=True,
+    ),
+    # Standalone delimiter fallbacks for truncated excerpts whose window
+    # contains only one end of the PEM block.
     _Pattern(
         name="pem_private_key_header",
         regex=re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
@@ -551,6 +569,15 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
 )
 
 
+def _redaction_digest(redacted_segment: str, salt_bytes: bytes) -> str:
+    return hashlib.sha256(redacted_segment.encode("utf-8") + salt_bytes).hexdigest()[:16]
+
+
+def _splitlines_line_number(text: str, offset: int) -> int:
+    """Return the 1-based line number at ``offset`` under ``str.splitlines`` rules."""
+    return sum(1 for _ in _SPLITLINES_BOUNDARY_RE.finditer(text, 0, offset)) + 1
+
+
 def scrub_secrets(
     text: str,
     *,
@@ -614,12 +641,13 @@ def scrub_secrets(
             match: re.Match[str],
             _name: str = pattern.name,
             _redact_group: int = pattern.redact_group,
+            _preserve_line_count: bool = pattern.preserve_line_count,
         ) -> str:
             # ``redact_group=0`` is the default: redact the whole match.
             # Otherwise we redact only the named capture group and rebuild
             # the output with the surrounding text intact.
             redacted_segment = match.group(_redact_group)
-            digest = hashlib.sha256(redacted_segment.encode("utf-8") + salt_bytes).hexdigest()[:16]
+            digest = _redaction_digest(redacted_segment, salt_bytes)
             records.append(
                 RedactionRecord(
                     pattern_name=_name,
@@ -629,6 +657,8 @@ def scrub_secrets(
             )
             token = f"[REDACTED-SECRET-{digest}]"
             if _redact_group == 0:
+                if _preserve_line_count:
+                    return "\n".join(token for _ in redacted_segment.split("\n"))
                 return token
             # Group-bounded redaction: splice the token in place of the
             # group within the whole match. ``match.start/end`` give
@@ -645,6 +675,52 @@ def scrub_secrets(
         redactions=tuple(records),
         file_fingerprint=salt if salt is not None else "",
     )
+
+
+def _redact_pem_private_key_blocks_in_window(
+    *,
+    full_text: str,
+    window_lines: list[str],
+    start_line: int,
+    end_line: int,
+    salt: str,
+) -> tuple[str, tuple[RedactionRecord, ...]]:
+    """Redact any visible line that intersects a full-file PEM private-key block.
+
+    ``extract_safe_excerpt`` renders only a bounded window, but real PEM
+    blocks can be larger than that window. A raw-window-only regex misses
+    body-only windows whose BEGIN/END delimiters sit outside the excerpt.
+    This helper uses full-file spans to identify private-key blocks, then
+    masks the intersecting window lines while preserving the window's line
+    count for later source-line rendering. The redaction record hashes and
+    counts the exact visible window lines replaced, not the hidden rest of
+    the full-file block.
+    """
+    redacted_lines = list(window_lines)
+    records: list[RedactionRecord] = []
+    salt_bytes = salt.encode("utf-8")
+    for match in _PEM_PRIVATE_KEY_BLOCK_RE.finditer(full_text):
+        block_start_line = _splitlines_line_number(full_text, match.start())
+        block_end_line = _splitlines_line_number(full_text, match.end())
+        if block_start_line > end_line or block_end_line < start_line:
+            continue
+
+        visible_start_line = max(block_start_line, start_line)
+        visible_end_line = min(block_end_line, end_line)
+        redacted_segment = "\n".join(window_lines[visible_start_line - start_line : visible_end_line - start_line + 1])
+        digest = _redaction_digest(redacted_segment, salt_bytes)
+        records.append(
+            RedactionRecord(
+                pattern_name="pem_private_key_block",
+                byte_count=len(redacted_segment.encode("utf-8")),
+                redacted_hash=digest,
+            )
+        )
+        token = f"[REDACTED-SECRET-{digest}]"
+        for source_line in range(visible_start_line, visible_end_line + 1):
+            redacted_lines[source_line - start_line] = token
+
+    return "\n".join(redacted_lines), tuple(records)
 
 
 # =========================================================================
@@ -671,24 +747,25 @@ def extract_safe_excerpt(
     2. The resolved file is read once as bytes and hashed (SHA-256)
        to produce the ``file_fingerprint``. The bytes are then decoded
        as UTF-8 for the excerpt window. The single read + single hash
-       is the source of truth for both the C8-3 binding fingerprint
-       (consumed by ``cli._run_justify`` directly off the returned
-       ``SafeExcerpt``) AND the scrubber's per-file hash salt.
+       is the source of truth for the justify snapshot check and the
+       scrubber's per-file hash salt.
     3. Excerpt window is ``[line - context_lines, line + context_lines]``
        clamped to valid line indices (1-based), mirroring the original
        ``_extract_surrounding_code`` shape so the judge sees the same
        ±N-line window with the same ``>>``-prefixed marker line.
-    4. The RAW window text (just the body, no line-number prefix) is
-       fed through ``scrub_secrets`` with the file fingerprint as salt
-       and the resolved target's path-string as the path hint. The
-       salt scopes brute-force cost per file; the hint enables the
-       ``ssh_private_key_body`` pattern only on structurally-key files.
+    4. The RAW window text (just the body, no line-number prefix) is first
+       masked for any full-file PEM private-key block that intersects the
+       window. This catches header-only, footer-only, and body-only windows
+       around large embedded keys. The result is then fed through
+       ``scrub_secrets`` with the file fingerprint as salt and the resolved
+       target's path-string as the path hint. The salt scopes brute-force
+       cost per file; the hint enables the ``ssh_private_key_body`` pattern
+       only on structurally-key files.
     5. The scrubbed body is then prefixed line-by-line with the
-       ``>>``/``  `` + line-number marker. Splitting on ``\n`` is
-       safe because none of the patterns in ``_SECRET_PATTERNS`` span
-       a newline (every regex matches single-line bodies); the
-       newline count is conserved by ``scrub_secrets``, so line
-       numbers retain fidelity with the source file.
+       ``>>``/``  `` + line-number marker. Scrubber patterns that span
+       newlines must preserve the newline count; ``pem_private_key_block``
+       does this deliberately so line numbers retain fidelity with the
+       source file.
 
     Why scrub BEFORE render (T8c, supersedes the earlier
     render-then-scrub ordering):
@@ -753,21 +830,27 @@ def extract_safe_excerpt(
             redactions=(),
             file_fingerprint=file_fingerprint,
         )
-    raw_window = "\n".join(lines[start - 1 : end])
+    window_lines = lines[start - 1 : end]
+    raw_window, pem_block_redactions = _redact_pem_private_key_blocks_in_window(
+        full_text=text,
+        window_lines=window_lines,
+        start_line=start,
+        end_line=end,
+        salt=file_fingerprint,
+    )
     scrubbed = scrub_secrets(raw_window, salt=file_fingerprint, path_hint=str(resolved))
     scrubbed_lines = scrubbed.text.split("\n")
     # ``split("\n")`` produces ``end - start + 1`` segments when the
-    # raw window had that many lines (none of ``_SECRET_PATTERNS``
-    # span ``\n`` so the count is conserved). If a future pattern
-    # were added that DOES span newlines this assertion would
-    # surface the drift loudly, per Tier-1 doctrine.
+    # raw window had that many lines. Multi-line patterns must preserve
+    # the newline count; this assertion surfaces drift loudly, per
+    # Tier-1 doctrine.
     expected_lines = end - start + 1
     if len(scrubbed_lines) != expected_lines:
         raise RuntimeError(
             f"extract_safe_excerpt: scrubber altered newline count "
             f"(raw window had {expected_lines} lines, scrubbed has "
             f"{len(scrubbed_lines)}); a secret pattern must have "
-            f"matched across a newline. Refusing to render a line-number "
+            f"changed the newline count. Refusing to render a line-number "
             f"prefix against a mismatched body — file={resolved}."
         )
     rendered_lines: list[str] = []
@@ -778,6 +861,6 @@ def extract_safe_excerpt(
     rendered = "\n".join(rendered_lines)
     return SafeExcerpt(
         text=rendered,
-        redactions=scrubbed.redactions,
+        redactions=pem_block_redactions + scrubbed.redactions,
         file_fingerprint=file_fingerprint,
     )

@@ -62,6 +62,7 @@ from elspeth.web.composer.audit import (
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
     emit_hidden_field_rejected,
+    emit_signoff_decision,
     emit_step_advanced,
     emit_turn_answered,
     emit_turn_emitted,
@@ -71,20 +72,24 @@ from elspeth.web.composer.guided.emitters import (
     build_initial_step_1_turn,
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
-    build_step_2_5_recipe_offer_turn,
+    build_step_1_schema_form_turn_from_resolved,
     build_step_2_multi_select_turn,
     build_step_2_schema_form_turn,
+    build_step_2_schema_form_turn_from_resolved,
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
+    build_step_4_wire_turn,
 )
-from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
-from elspeth.web.composer.guided.recipe_match import match_recipe
+from elspeth.web.composer.guided.errors import InvariantError, WireConfirmRejectedError
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
     SinkIntent,
+    SinkOutputResolved,
+    SinkResolved,
     SourceResolved,
     TerminalKind,
     TerminalReason,
@@ -95,9 +100,9 @@ from elspeth.web.composer.guided.state_machine import (
 )
 from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
-    handle_step_2_5_recipe_apply,
     handle_step_2_sink,
     handle_step_3_chain_accept,
+    handle_step_4_wire_confirm,
 )
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.progress import (
@@ -115,12 +120,19 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.redaction import (
     MANIFEST,
+    redact_guided_snapshot_storage_paths,
     redact_source_storage_path,
     redact_tool_call_arguments,
     redact_tool_call_response,
 )
 from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
-from elspeth.web.composer.service import _BadRequestLLMError
+from elspeth.web.composer.service import (
+    _ADVISOR_MALFORMED_USER_DETAIL,
+    _ADVISOR_UNAVAILABLE_USER_DETAIL,
+    _advisor_signoff_blocked_validation,
+    _BadRequestLLMError,
+    _fence_advisor_findings,
+)
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.telemetry_phase8 import (
@@ -128,15 +140,24 @@ from elspeth.web.composer.telemetry_phase8 import (
     record_session_completed,
     record_session_switched,
 )
-from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.tools import _DATA_ERROR_KEY, ToolResult, execute_tool
+from elspeth.web.composer.yaml_generator import generate_public_yaml
+from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
-from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
+from elspeth.web.sessions._guided_step_chat import (
+    _COMMIT_REJECTED_MESSAGE,
+    _SYNTHETIC_UNAVAILABLE_MESSAGE,
+    Step2SinkChatResult,
+    StepChatResult,
+    resolve_step_1_source_chat_with_auto_drop,
+    resolve_step_2_sink_chat_with_auto_drop,
+    solve_step_chat_with_auto_drop,
+)
 from elspeth.web.sessions.audit_story_models import RunAuditStoryResponse
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
@@ -191,6 +212,7 @@ from elspeth.web.sessions.schemas import (
     UpdateComposerPreferencesRequest,
     UpdateSessionRequest,
     ValidationEntryResponse,
+    WorkflowProfileResponse,
 )
 from elspeth.web.sessions.service import (
     InterpretationEventAlreadyResolvedError,
@@ -205,6 +227,23 @@ slog = structlog.get_logger()
 
 _REDACTED_SECRET_DETAIL = "<redacted-secret>"
 _PROVIDER_DETAIL_REDACTED = "Provider detail redacted because it may contain secrets."
+_GUIDED_SOURCE_PATH_ALLOWLIST_DETAIL = (
+    "Source path is outside the allowed upload area. "
+    "Upload the file through the composer or use a path under the configured blobs directory."
+)
+
+
+def _guided_source_commit_failure_detail(tool_result: object) -> str:
+    if type(tool_result) is not ToolResult:
+        raise TypeError(f"guided source commit failure detail requires ToolResult, got {type(tool_result).__name__}")
+    raw_data = tool_result.data
+    if isinstance(raw_data, Mapping):
+        error = raw_data.get(_DATA_ERROR_KEY)
+        if isinstance(error, str) and error.startswith("Path violation (S2):") and "Source file paths" in error:
+            return _GUIDED_SOURCE_PATH_ALLOWLIST_DETAIL
+    return "Step 1 source commit failed"
+
+
 _MAX_PROVIDER_DETAIL_CHARS = 1_000
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
 
@@ -398,7 +437,10 @@ def _run_accounting_integrity_http(
     """Return the structured 500 used for public run-accounting contract failures."""
     detail: dict[str, object] = {
         "code": "run_integrity_error",
-        "message": message,
+        # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+        # reads nestedDetail.detail as the human-readable string, with no
+        # "message" fallback, for ANY non-2xx response (not just 400s).
+        "detail": message,
     }
     if run_id is not None:
         detail["run_id"] = str(run_id)
@@ -468,7 +510,11 @@ def _litellm_error_detail(
         raw_status_code: int | None = exc.provider_status_code
     else:
         raw_provider_detail = str(exc).strip() or None
-        natural_status_code = getattr(exc, "status_code", None)
+        try:
+            exc_attrs = vars(exc)
+        except TypeError:
+            exc_attrs = {}
+        natural_status_code = exc_attrs.get("status_code")
         raw_status_code = natural_status_code if type(natural_status_code) is int else None
 
     if raw_provider_detail:
@@ -506,6 +552,18 @@ def _state_response(
         redacted = redact_source_storage_path({"sources": sources_data})
         sources_data = redacted["sources"]
 
+    # B4 (guided): a guided blob-backed source is committed via the manual
+    # set_source path, which strips ``blob_ref`` (it cannot prove
+    # ``path == storage_path``). So the committed source AND the persisted
+    # GuidedSession snapshot in ``composer_meta`` both carry the absolute
+    # storage_path with no ``blob_ref`` for the source-keyed redaction above to
+    # key off, and the snapshot is serialised here unredacted. Cross-reference
+    # the snapshot's RETAINED ``blob_ref`` (a no-DB-lookup signal that the source
+    # is blob-backed) to mask the storage_path in both the snapshot and the
+    # committed source before either reaches the wire.
+    composer_meta_data = deep_thaw(state.composer_meta) if state.composer_meta is not None else None
+    sources_data, composer_meta_data = redact_guided_snapshot_storage_paths(sources_data, composer_meta_data)
+
     return CompositionStateResponse(
         id=str(state.id),
         session_id=str(state.session_id),
@@ -529,8 +587,14 @@ def _state_response(
         else None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
-        composer_meta=deep_thaw(state.composer_meta) if state.composer_meta is not None else None,
+        composer_meta=composer_meta_data,
     )
+
+
+def _recovery_partial_state_response(state: CompositionStateRecord) -> dict[str, Any]:
+    """Serialize the persisted recovery state, including its server identity."""
+
+    return _state_response(state).model_dump(mode="json")
 
 
 def _interpretation_event_response(event: InterpretationEventRecord) -> InterpretationEventResponse:
@@ -630,6 +694,7 @@ _ComposerPreflightTelemetrySource = Literal[
     "plugin_crash",
     "runtime_preflight",
     "yaml_export",
+    "state_seed",
     # Path-1 cached re-raise — composer.compose() re-raised a previously-
     # cached runtime-preflight failure via web/composer/service.py:
     # _raise_cached_runtime_preflight_failure. Distinct from "compose" to
@@ -1029,6 +1094,27 @@ def _composer_conversation_tool_or_llm_audit_messages(messages: Sequence[ChatMes
     ]
 
 
+def _transforms_intent_from_chat_history(guided: GuidedSession) -> str | None:
+    """The transforms-phase request — the LAST USER chat turn.
+
+    In the staged orchestrator each phase is driven by its OWN ``/guided/chat``
+    send (source → sink → transforms). The transform chain is built from the
+    STEP_3 transforms send — the most recent user turn — NOT the source-phase
+    opening turn. A reject / advisor / repair re-solve of the transform chain
+    must rebuild from THAT transforms request: feeding the *originating* (source)
+    intent would re-solve blind to the transform the operator actually asked for
+    (the passthrough-instead-of-web_scrape failure mode). The reject/advisor/
+    repair gestures arrive on ``/guided/respond`` control signals, not chat, so
+    they add no later user chat turn — the transforms send stays the last one.
+    Returns ``None`` when no user turn exists yet — the build then falls back to
+    the source/sink contract alone (the prior behaviour).
+    """
+    for turn in reversed(guided.chat_history):
+        if turn.role is ChatRole.USER:
+            return turn.content
+    return None
+
+
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
     """Convert persisted session messages to LLM chat history.
 
@@ -1098,6 +1184,7 @@ async def _runtime_preflight_for_state(
     settings: Any,
     secret_service: Any | None,
     user_id: str | None,
+    session_id: str | UUID,
 ) -> ValidationResult:
     return await asyncio.wait_for(
         run_sync_in_worker(
@@ -1107,6 +1194,7 @@ async def _runtime_preflight_for_state(
             yaml_generator,
             secret_service=secret_service,
             user_id=user_id,
+            session_id=str(session_id),
         ),
         timeout=settings.composer_runtime_preflight_timeout_seconds,
     )
@@ -1514,6 +1602,7 @@ async def _state_data_from_composer_state(
     settings: Any,
     secret_service: Any | None,
     user_id: str | None,
+    session_id: str | UUID,
     runtime_preflight: _RuntimePreflightOutcome,
     preflight_exception_policy: _PreflightExceptionPolicy,
     initial_version: int | None,
@@ -1546,6 +1635,7 @@ async def _state_data_from_composer_state(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
             )
         except Exception as exc:
             # Telemetry MUST fire on both policy branches. Emitting before
@@ -1736,6 +1826,7 @@ async def _handle_convergence_error(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -1747,8 +1838,7 @@ async def _handle_convergence_error(
                 provenance="convergence_persist",
             )
             persisted_state_id = partial_record.id
-            state_d = exc.partial_state.to_dict()
-            response_body["partial_state"] = redact_source_storage_path(state_d)
+            response_body["partial_state"] = _recovery_partial_state_response(partial_record)
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — ``IntegrityError`` alone would
             # let ``OperationalError`` (lock timeout / pool disconnect /
@@ -1880,6 +1970,7 @@ async def _handle_plugin_crash(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -1891,6 +1982,7 @@ async def _handle_plugin_crash(
                 provenance="plugin_crash_persist",
             )
             persisted_state_id_pc = partial_record.id
+            response_body["partial_state"] = _recovery_partial_state_response(partial_record)
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — a narrow ``IntegrityError``
             # catch would let ``OperationalError`` / ``ProgrammingError`` /
@@ -2113,6 +2205,7 @@ async def _handle_runtime_preflight_failure(
                 settings=settings,
                 secret_service=secret_service,
                 user_id=user_id,
+                session_id=session_id,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -2124,6 +2217,7 @@ async def _handle_runtime_preflight_failure(
                 provenance="preflight_persist",
             )
             persisted_state_id_rpf = partial_record.id
+            response_body["partial_state"] = _recovery_partial_state_response(partial_record)
         except SQLAlchemyError as save_err:
             # See sibling helpers for redaction rationale (exc_info
             # omitted; class name only on the response body).
@@ -2180,7 +2274,7 @@ async def _handle_runtime_preflight_failure(
     return response_body
 
 
-def _initial_composition_state_with_guided_session() -> CompositionState:
+def _initial_composition_state_with_guided_session(*, profile: WorkflowProfile = EMPTY_PROFILE) -> CompositionState:
     """Construct a fresh CompositionState with a latent guided-mode session attached.
 
     Originally added under spec §5.2 / errata C7 ("new sessions default to
@@ -2204,7 +2298,22 @@ def _initial_composition_state_with_guided_session() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
-        guided_session=GuidedSession.initial(),
+        guided_session=GuidedSession.initial(profile=profile),
+    )
+
+
+def _workflow_profile_response(guided: GuidedSession) -> WorkflowProfileResponse | None:
+    """Project a GuidedSession's server-owned profile onto the wire subset.
+
+    Returns ``None`` for the empty/live-guided profile (== ``EMPTY_PROFILE``).
+    """
+    if guided.profile == EMPTY_PROFILE:
+        return None
+    return WorkflowProfileResponse(
+        coaching=guided.profile.coaching,
+        bookends=guided.profile.bookends,
+        recipe_match=guided.profile.recipe_match,
+        advisor_checkpoints=guided.profile.advisor_checkpoints,
     )
 
 
@@ -2383,6 +2492,18 @@ def _summarize_guided_response(
             return "Accepted proposed chain"
         return None
 
+    if turn_type is TurnType.CONFIRM_WIRING:
+        if (
+            response["chosen"] == ["confirm"]
+            and response["edited_values"] is None
+            and response["custom_inputs"] is None
+            and response["accepted_step_index"] is None
+            and response["edit_step_index"] is None
+            and response["control_signal"] is None
+        ):
+            return "Confirmed wiring"
+        return None
+
     raise InvariantError(f"_summarize_guided_response: unhandled turn_type {turn_type!r}")
 
 
@@ -2505,7 +2626,11 @@ def _reject_hidden_field_submissions(
                     "code": "hidden_field_submitted",
                     "field": opt_name,
                     "predicate": dict(predicate),
-                    "message": f"Visibility discriminator {predicate['field']!r} is missing from submitted options.",
+                    # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+                    # reads nestedDetail.detail as the human-readable string, with no
+                    # "message" fallback — a "message" key here silently renders as
+                    # bare "Bad Request" in the UI.
+                    "detail": f"Visibility discriminator {predicate['field']!r} is missing from submitted options.",
                 },
             )
         raise HTTPException(
@@ -2515,7 +2640,7 @@ def _reject_hidden_field_submissions(
                 "field": opt_name,
                 "predicate": dict(predicate),
                 "actual_state": actual_state,
-                "message": (
+                "detail": (
                     f"Field {opt_name!r} is hidden under current form state "
                     f"({predicate['field']}={actual_state[predicate['field']]!r}, predicate expects "
                     f"{predicate['field']}={predicate['equals']!r}). Hidden fields must not appear in edited_values.options."
@@ -2535,7 +2660,10 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
             detail={
                 "code": "invalid_blob_ref",
                 "field": field_name,
-                "message": f"Field {field_name!r} must be a UUID string when provided.",
+                # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+                # reads nestedDetail.detail as the human-readable string, with no
+                # "message" fallback.
+                "detail": f"Field {field_name!r} must be a UUID string when provided.",
             },
         )
     try:
@@ -2546,9 +2674,91 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
             detail={
                 "code": "invalid_blob_ref",
                 "field": field_name,
-                "message": f"Field {field_name!r} must be a UUID string when provided.",
+                "detail": f"Field {field_name!r} must be a UUID string when provided.",
             },
         ) from exc
+
+
+def _store_guided_audit_payload(payload_store: Any, payload: Mapping[str, Any]) -> str:
+    """Persist a guided turn/response payload and return its content hash."""
+    if payload_store is None:
+        raise InvariantError("Guided audit payload store is not configured.")
+    payload_ref = payload_store.store(canonical_json(payload).encode("utf-8"))
+    if not isinstance(payload_ref, str) or not payload_ref:
+        raise InvariantError("Guided audit payload store returned an invalid content hash.")
+    return payload_ref
+
+
+def _maybe_fence_advisor_findings(findings_text: str) -> str:
+    """Fence free-text advisor findings before they reach the wire.
+
+    Mirrors the C2 discipline in ``composer/service.py``
+    (``_fence_advisor_findings`` / ``_ADVISOR_FINDINGS_MAX_CHARS``): a
+    prompt-injection payload smuggled into an operator-authored pipeline
+    option value can survive into the advisor's own free-text response
+    (a CLEAN commentary, or a non-exhausted FLAGGED finding) and get
+    parroted back to the wire, where a later turn (or a future assistant-
+    turn replay) could re-read it as an instruction rather than untrusted
+    commentary.
+
+    The two fixed Tier-3 constants the advisor checkpoint emits when it
+    could not render a verdict at all (``_ADVISOR_UNAVAILABLE_USER_DETAIL``
+    / ``_ADVISOR_MALFORMED_USER_DETAIL``) are backend-authored, not model
+    output, and are passed through literally — fencing them would just be
+    noise, and callers elsewhere (``_advisor_signoff_blocked_validation``'s
+    ``"unavailable"`` branch) already rely on their wording staying literal.
+    Every other value reaching here is the advisor MODEL's own text and is
+    fenced/capped.
+    """
+    if findings_text in (_ADVISOR_UNAVAILABLE_USER_DETAIL, _ADVISOR_MALFORMED_USER_DETAIL):
+        return findings_text
+    return _fence_advisor_findings(findings_text)
+
+
+def _emit_wire_turn(
+    *,
+    state: CompositionState,
+    guided: GuidedSession,
+    recorder: BufferingRecorder,
+    user_id: str,
+    payload_store: Any,
+    prev_step: GuidedStep | None = None,
+    advance_reason: str | None = None,
+    next_turn: Turn | None = None,
+) -> tuple[GuidedSession, Turn]:
+    """Emit the STEP_4_WIRE confirm_wiring turn."""
+    if next_turn is None:
+        next_turn = build_step_4_wire_turn(state)
+    payload_hash = stable_hash(next_turn["payload"])
+    new_record = TurnRecord(
+        step=GuidedStep.STEP_4_WIRE,
+        turn_type=TurnType.CONFIRM_WIRING,
+        payload_hash=payload_hash,
+        response_hash=None,
+        emitter="server",
+    )
+    if (prev_step is None) != (advance_reason is None):
+        raise InvariantError("wire turn emission must provide prev_step and advance_reason together")
+    if prev_step is not None and advance_reason is not None:
+        emit_step_advanced(
+            recorder,
+            prev=prev_step,
+            next_=GuidedStep.STEP_4_WIRE,
+            reason=advance_reason,
+            composition_version=state.version,
+            actor=user_id,
+        )
+    emit_turn_emitted(
+        recorder,
+        step=GuidedStep.STEP_4_WIRE,
+        turn_type=TurnType.CONFIRM_WIRING,
+        payload_hash=payload_hash,
+        payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+        emitter="server",
+        composition_version=state.version,
+        actor=user_id,
+    )
+    return _replace(guided, history=(*guided.history, new_record)), next_turn
 
 
 async def _dispatch_guided_respond(
@@ -2565,9 +2775,13 @@ async def _dispatch_guided_respond(
     session_engine: Any,
     session_id: str,
     blob_service: BlobServiceProtocol,
+    payload_store: Any,
     model: str,
     temperature: float | None,
     seed: int | None,
+    composer_service: ComposerService | None = None,  # compatibility default; tutorial profile fails closed on None (P5.6)
+    advisor_checkpoint_max_passes: int | None = None,  # compatibility default; tutorial profile requires positive int (P5.6)
+    settings: WebSettings | None = None,  # compatibility default; supplies composer_max_discovery_turns when wired
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
 
@@ -2579,13 +2793,13 @@ async def _dispatch_guided_respond(
     Returns ``(updated_state, updated_session, next_turn_or_None)``.
 
     The dispatcher is called only when ``guided.terminal is None``.  The
-    caller checks terminality before and after; the dispatcher never
-    terminates a session (that is ``step_advance``'s responsibility for
-    exit_to_freeform and the step-2.5 recipe-accept path).  The caller
-    also bypasses the dispatcher entirely on the exit-from-COMPLETED path
-    (see ``post_guided_respond``): that path transitions terminal kind
-    COMPLETED -> EXITED_TO_FREEFORM directly, without running any
-    step-handler dispatch logic.
+    caller checks terminality before and after.  ``step_advance`` owns
+    exit-to-freeform terminal transitions; this dispatcher owns the
+    STEP_4_WIRE confirm branch that can stamp COMPLETED.  The caller also
+    bypasses the dispatcher entirely on the exit-from-COMPLETED path (see
+    ``post_guided_respond``): that path transitions terminal kind COMPLETED
+    -> EXITED_TO_FREEFORM directly, without running any step-handler dispatch
+    logic.
 
     Decision table:
 
@@ -2593,35 +2807,50 @@ async def _dispatch_guided_respond(
     | current_step      | guided.step (after adv.)  | action                    |
     +-------------------+---------------------------+---------------------------+
     | STEP_1_SOURCE     | STEP_1_SOURCE             | intra-step; turn_type     |
-    |   (intra)         | (no advance fired)        | decides next turn:        |
-    |                   |                           | SINGLE_SELECT →           |
-    |                   |                           |   emit SCHEMA_FORM        |
-    |                   |                           | SCHEMA_FORM →             |
+    |   (intra)         | (_advance_step_1 is a     | decides next turn:        |
+    |                   |   pure self-loop for all  | SINGLE_SELECT →           |
+    |                   |   Step 1 turn types —     |   emit SCHEMA_FORM        |
+    |                   |   never advances)         | SCHEMA_FORM →             |
     |                   |                           |   handle_step_1_source;   |
     |                   |                           |   advance to STEP_2;      |
     |                   |                           |   emit SINGLE_SELECT      |
-    | STEP_1_SOURCE     | STEP_2_SINK               | INSPECT_AND_CONFIRM path; |
-    |   (advancing)     | (step_advance fired)      | handle_step_1_source;     |
-    |                   |                           | emit SINGLE_SELECT (sink) |
+    |                   |                           | INSPECT_AND_CONFIRM →     |
+    |                   |                           |   resolve step_1_source_  |
+    |                   |                           |   intent + edited_values  |
+    |                   |                           |   ["columns"];            |
+    |                   |                           |   handle_step_1_source;   |
+    |                   |                           |   only on success: advance|
+    |                   |                           |   to STEP_2, set          |
+    |                   |                           |   step_1_result (C-3(b))  |
     | STEP_2_SINK       | STEP_2_SINK               | intra-step; turn_type     |
-    |   (intra)         | (no advance fired)        | decides next turn:        |
-    |                   |                           | SINGLE_SELECT →           |
-    |                   |                           |   emit SCHEMA_FORM        |
-    |                   |                           | SCHEMA_FORM →             |
+    |   (intra)         | (_advance_step_2 is a     | decides next turn:        |
+    |                   |   pure self-loop for all  | SINGLE_SELECT →           |
+    |                   |   Step 2 turn types —     |   emit SCHEMA_FORM        |
+    |                   |   never advances)         | SCHEMA_FORM →             |
     |                   |                           |   emit MULTI_SELECT       |
-    |                   |                           | MULTI_SELECT →            |
-    |                   |                           |   unreachable here        |
-    |                   |                           |   (_advance_step_2 always |
-    |                   |                           |   fires for this type)    |
-    | STEP_2_SINK       | STEP_2_5_RECIPE_MATCH     | MULTI_SELECT path;        |
-    |   (advancing)     | (step_advance fired)      | handle_step_2_sink;       |
-    |                   |                           | match_recipe;             |
-    |                   |                           | emit RECIPE_OFFER or None |
+    |                   |                           | MULTI_SELECT_WITH_CUSTOM →|
+    |                   |                           |   resolve chosen +        |
+    |                   |                           |   custom_inputs +         |
+    |                   |                           |   step_2_sink_intent;     |
+    |                   |                           |   fail-closed passthrough |
+    |                   |                           |   validation (C-3(a));    |
+    |                   |                           |   handle_step_2_sink;     |
+    |                   |                           |   only on success: advance|
+    |                   |                           |   to STEP_3, set          |
+    |                   |                           |   step_2_result (C-3(b))  |
     | STEP_2_5_RECIPE   | STEP_2_5_RECIPE_MATCH     | RECIPE_OFFER chosen=      |
-    |   (intra/term.)   | (accept: no advance)      | accept → recipe apply;    |
-    |                   |                           | terminal=COMPLETED        |
+    |   (intra/wire)    | (accept: no advance)      | accept → recipe apply;    |
+    |                   |                           | emit CONFIRM_WIRING       |
     | STEP_2_5_RECIPE   | STEP_3_TRANSFORMS         | RECIPE_OFFER chosen=      |
     |   (advancing)     | (step_advance fired)      | build_manually → step 3   |
+    | STEP_3_TRANSFORMS | STEP_3_TRANSFORMS         | PROPOSE_CHAIN accept →    |
+    |   (accept/wire)   | (accept: no advance)      | set pipeline; emit        |
+    |                   |                           | CONFIRM_WIRING            |
+    | STEP_4_WIRE       | STEP_4_WIRE               | CONFIRM_WIRING confirm →  |
+    |                   |                           | validate; terminal or     |
+    |                   |                           | raise WireConfirmRejected |
+    |                   |                           | (route maps to HTTP 409,  |
+    |                   |                           | no version persisted)     |
     +-------------------+---------------------------+---------------------------+
 
     ``step_advance`` has already run; ``guided.step`` may already point to the
@@ -2659,7 +2888,7 @@ async def _dispatch_guided_respond(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -2768,9 +2997,14 @@ async def _dispatch_guided_respond(
                 session_id=session_id,
             )
             if not handler_result.tool_result.success:
+                # Egress control (symmetric with /guided/chat): the raw tool_result
+                # repr dumps CompositionState — incl. inline-content source options
+                # that can carry Tier-3 row data — so it must NOT reach the HTTP body.
+                # Keep the 400 (respond is a deliberate, load-bearing accept); only
+                # expose a sanitized category for source-path allowlist failures.
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                    detail=_guided_source_commit_failure_detail(handler_result.tool_result),
                 )
             state = handler_result.state
             # Advance step pointer to STEP_2.
@@ -2801,7 +3035,7 @@ async def _dispatch_guided_respond(
                 step=GuidedStep.STEP_2_SINK,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -2809,109 +3043,137 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-        # INSPECT_AND_CONFIRM at STEP_1: step_advance already advanced to STEP_2.
-        # But in this branch guided.step is still STEP_1 — step_advance
-        # must have already advanced it.  This case is unreachable (step_advance
-        # advances for INSPECT_AND_CONFIRM → guided.step becomes STEP_2).
-        # Fall through to the post-advance branch below.
+        if current_turn_type is TurnType.INSPECT_AND_CONFIRM:
+            # step_advance is a pure self-loop for this turn type
+            # (elspeth-948eb9c0b8 C-3(b), same shape as Step 2's
+            # MULTI_SELECT_WITH_CUSTOM fix): the resolve
+            # (step_1_source_intent + edited_values["columns"] ->
+            # SourceResolved) and the source commit via handle_step_1_source
+            # both happen here, and guided.step / step_1_result are only ever
+            # set after the commit is known to have succeeded. A failure at
+            # any point below leaves `state` and `guided` exactly as they
+            # entered this branch.
+            #
+            # The wire contract for INSPECT_AND_CONFIRM edited_values is
+            # narrow: ``{"columns": list[str]}``. Plugin, options,
+            # observed_columns (samples), and warnings are server-side
+            # knowledge held in step_1_source_intent before the turn is
+            # emitted; the widget never sees them in the response body.
+            #
+            # EMIT-SITE NOTE: step_1_source_intent must be set before emitting
+            # the INSPECT_AND_CONFIRM turn. Today no production code path
+            # emits this turn (``_build_get_guided_turn`` always passes
+            # blob_inspection=None); the only emitter is
+            # _seed_inspect_and_confirm_history in the integration test suite.
+            # When a real emitter is added, it must
+            #   ``replace(session, step_1_source_intent=SourceIntent(...))``
+            # before returning.
+            source_intent = guided.step_1_source_intent
+            if source_intent is None:
+                raise InvariantError(
+                    "STEP_1_SOURCE INSPECT_AND_CONFIRM dispatch: step_1_source_intent "
+                    "is None — the INSPECT_AND_CONFIRM emit site must set it before this "
+                    "turn can be emitted. State-machine invariant violation."
+                )
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
+                )
+            if "columns" not in edited:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"inspect_and_confirm response at step 1 edited_values missing required key: 'columns'; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            columns_raw = edited["columns"]
+            if type(columns_raw) is not list:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"inspect_and_confirm response at step 1 edited_values['columns'] must be a list; got {type(columns_raw).__name__}"
+                    ),
+                )
+            # columns is the only field the widget edits; it is Tier-3: coerce to tuple[str, ...].
+            columns = tuple(str(c) for c in columns_raw)
+            resolved = SourceResolved(
+                plugin=source_intent.plugin,
+                options=dict(source_intent.options),
+                observed_columns=columns,
+                sample_rows=tuple(dict(r) for r in source_intent.sample_rows),
+            )
+            handler_result = handle_step_1_source(
+                state=state,
+                session=guided,
+                resolved=resolved,
+                catalog=catalog,
+                data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
+            )
+            if not handler_result.tool_result.success:
+                # Egress control (see the step_1 source commit above): never
+                # interpolate the tool_result repr (dumps Tier-3-bearing
+                # CompositionState) into the body.
+                raise HTTPException(
+                    status_code=400,
+                    detail="Step 1 source commit failed",
+                )
+            state = handler_result.state
+            guided = handler_result.session
+            emit_step_advanced(
+                recorder,
+                prev=GuidedStep.STEP_1_SOURCE,
+                next_=GuidedStep.STEP_2_SINK,
+                reason="user_advanced",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(
+                guided,
+                step=GuidedStep.STEP_2_SINK,
+                step_1_source_intent=None,
+                step_1_chosen_plugin=None,
+            )
+            next_turn = build_step_2_single_select_turn(catalog)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
 
-    # --- STEP_1_SOURCE → STEP_2_SINK (step_advance fired for INSPECT_AND_CONFIRM)
+    # --- STEP_1_SOURCE → STEP_2_SINK : now unreachable ---------------------
+    # _advance_step_1 is a pure self-loop (state_machine.py) — it never
+    # advances guided.step away from STEP_1_SOURCE on its own. The
+    # INSPECT_AND_CONFIRM resolve, validation, handle_step_1_source commit,
+    # and step advance all happen together in the STEP_1_SOURCE intra-step
+    # branch above (elspeth-948eb9c0b8 C-3(b)). If this branch is ever
+    # reached, something upstream reintroduced the eager pre-set that
+    # originally caused guided_session and composition_state to diverge on a
+    # commit failure — fail loudly rather than silently repeat it.
     if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
-        # step_advance already ran and advanced the step.  _advance_step_1 built
-        # SourceResolved from step_1_source_intent (plugin/options/samples) +
-        # edited_values["columns"] (the only field the widget can edit) and stored
-        # the result in guided.step_1_result.  It also cleared step_1_source_intent.
-        #
-        # The new wire contract for INSPECT_AND_CONFIRM edited_values is narrow:
-        #   ``{"columns": list[str]}``
-        # Plugin, options, observed_columns (samples), and warnings are now
-        # server-side knowledge held in step_1_source_intent before the turn is
-        # emitted; the widget never sees them in the response body.
-        #
-        # Shadowing note: ``_advance_step_1`` raises ValueError (client-fault)
-        # on null ``edited_values`` and KeyError on missing ``columns`` — those
-        # propagate as HTTP 500 before reaching here. The null guard and missing-key guard
-        # below are defense-in-depth (locally complete; unreachable as 400 in
-        # normal flow). The isinstance(columns_raw, list) guard IS HTTP-reachable
-        # as 400: _advance_step_1's ``tuple(str(c) for c in columns_raw)`` coercion
-        # silently accepts a scalar string (iterating its characters), so the
-        # dispatcher catches non-list here before that coercion runs.
-        #
-        # EMIT-SITE NOTE: step_1_source_intent must be set before emitting the
-        # INSPECT_AND_CONFIRM turn.  Today no production code path emits this turn
-        # (``_build_get_guided_turn`` always passes blob_inspection=None); the only
-        # emitter is _seed_inspect_and_confirm_history in the integration test suite.
-        # When a real emitter is added, it must
-        #   ``replace(session, step_1_source_intent=SourceIntent(...))``
-        # before returning.
-        edited = turn_response["edited_values"]
-        if edited is None:
-            raise HTTPException(
-                status_code=400,
-                detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
-            )
-        if "columns" not in edited:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"inspect_and_confirm response at step 1 edited_values missing required key: 'columns'; got keys: {sorted(edited.keys())}"
-                ),
-            )
-        columns_raw = edited["columns"]
-        if type(columns_raw) is not list:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"inspect_and_confirm response at step 1 edited_values['columns'] must be a list; got {type(columns_raw).__name__}"
-                ),
-            )
-        # SourceResolved was built by _advance_step_1 and stored in guided.step_1_result.
-        # Unreachable None: _advance_step_1 always sets step_1_result on advance (the
-        # branch is only reached when guided.step is STEP_2_SINK, which only happens
-        # after _advance_step_1 sets step_1_result).  Assert to keep mypy happy and
-        # provide a clear crash message if this invariant is ever violated.
-        if guided.step_1_result is None:
-            raise InvariantError(
-                "inspect_and_confirm post-advance: guided.step_1_result is None after "
-                "_advance_step_1 ran — this is an invariant violation in the state machine."
-            )
-        resolved = guided.step_1_result
-        handler_result = handle_step_1_source(
-            state=state,
-            session=guided,
-            resolved=resolved,
-            catalog=catalog,
-            data_dir=data_dir,
-            session_engine=session_engine,
-            session_id=session_id,
+        raise InvariantError(
+            "STEP_1_SOURCE -> STEP_2_SINK dispatch reached with no pending source "
+            "commit to process — the commit-then-advance step now lives entirely in "
+            "the STEP_1_SOURCE intra-step INSPECT_AND_CONFIRM branch. "
+            "_advance_step_1 must remain a pure self-loop."
         )
-        if not handler_result.tool_result.success:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
-            )
-        state = handler_result.state
-        guided = handler_result.session
-        next_turn = build_step_2_single_select_turn(catalog)
-        new_record = TurnRecord(
-            step=GuidedStep.STEP_2_SINK,
-            turn_type=TurnType(next_turn["type"]),
-            payload_hash=stable_hash(next_turn["payload"]),
-            response_hash=None,
-            emitter="server",
-        )
-        emit_turn_emitted(
-            recorder,
-            step=GuidedStep.STEP_2_SINK,
-            turn_type=TurnType(next_turn["type"]),
-            payload_hash=stable_hash(next_turn["payload"]),
-            payload_payload_id="",
-            emitter="server",
-            composition_version=state.version,
-            actor=user_id,
-        )
-        guided = _replace(guided, history=(*guided.history, new_record))
-        return state, guided, next_turn
 
     # --- STEP_2_SINK intra-step turns ------------------------------------
     if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_SINK:
@@ -2937,7 +3199,7 @@ async def _dispatch_guided_respond(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3036,7 +3298,7 @@ async def _dispatch_guided_respond(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3044,292 +3306,136 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-    # --- STEP_2_SINK → STEP_2_5 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
-    # step_advance sets guided.step=STEP_2_5_RECIPE_MATCH and populates
-    # guided.step_2_result for every MULTI_SELECT_WITH_CUSTOM response, so the
-    # intra-step branch (current_step==guided.step==STEP_2_SINK) for this turn
-    # type is structurally unreachable — _advance_step_2 always fires.
-    # This is the ONLY reachable MULTI_SELECT_WITH_CUSTOM dispatch point.
-    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        # step_advance already set guided.step_2_result and advanced to STEP_2_5.
-        if guided.step_1_result is None or guided.step_2_result is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Dispatcher invariant: step_1_result and step_2_result must be set.",
+        if current_turn_type is TurnType.MULTI_SELECT_WITH_CUSTOM:
+            # User declared required output fields, or chose the "Let source
+            # decide" escape hatch. _advance_step_2 is a pure self-loop for this
+            # turn type (elspeth-948eb9c0b8 C-3(b)): the resolve (chosen +
+            # custom_inputs + step_2_sink_intent -> SinkResolved), the
+            # fail-closed passthrough validation (C-3(a)), and the sink commit
+            # via handle_step_2_sink all happen here, and guided.step /
+            # step_2_result are only ever set after the commit is known to have
+            # succeeded. A failure at any point below leaves `state` and
+            # `guided` exactly as they entered this branch — a rejected commit
+            # can no longer diverge guided_session from composition_state.
+            intent = guided.step_2_sink_intent
+            if intent is None:
+                raise InvariantError(
+                    "STEP_2_SINK MULTI_SELECT_WITH_CUSTOM dispatch: step_2_sink_intent "
+                    "is None — the SCHEMA_FORM branch above must set it before this turn "
+                    "can be emitted. State-machine invariant violation."
+                )
+            # chosen and custom_inputs are Tier-3: coerce to tuple[str, ...].
+            chosen = tuple(str(f) for f in (turn_response["chosen"] or []))
+            custom_inputs = tuple(str(f) for f in (turn_response["custom_inputs"] or []))
+            passthrough = turn_response["control_signal"] is ControlSignal.PASSTHROUGH
+
+            # Fail-closed contract (C-3(a)): an empty chosen+custom_inputs pair is
+            # ambiguous on the wire — indistinguishable between "the user
+            # explicitly asked for pass-all-fields-through" and "a stale or
+            # buggy client submitted nothing". ControlSignal.PASSTHROUGH is the
+            # one explicit, unmistakable signal for the former; every other
+            # empty submission is rejected with a structured, plain-language
+            # reason instead of a bare "commit failed".
+            # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+            # reads nestedDetail.detail as the human-readable string, with no
+            # "message" fallback — a "message" key here silently renders as bare
+            # "Bad Request" in the UI. Mirrors the "hidden_field_submitted" envelope
+            # shape above.
+            if passthrough and (chosen or custom_inputs):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "guided_step2_passthrough_conflict",
+                        "detail": (
+                            "The pass-all-fields-through option cannot be combined with "
+                            "specific fields. Submit either chosen fields or the "
+                            "pass-all-fields-through option, not both."
+                        ),
+                    },
+                )
+            if not passthrough and not chosen and not custom_inputs:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "guided_step2_no_fields_selected",
+                        "detail": ('Select at least one output field, or choose "Let source decide" to pass all fields through.'),
+                    },
+                )
+
+            output = SinkOutputResolved(
+                plugin=intent.plugin,
+                options=dict(deep_thaw(intent.options)),
+                required_fields=chosen + custom_inputs,
+                schema_mode="observed",
             )
-        source = guided.step_1_result
-        sink = guided.step_2_result
+            sink = SinkResolved(outputs=(output,))
 
-        # Commit the sink to CompositionState.outputs via handle_step_2_sink.
-        # step_advance (pure) encoded the sink in guided.step_2_result but did
-        # NOT call _execute_set_output — that side-effect is our responsibility.
-        sink_handler_result = handle_step_2_sink(
-            state=state,
-            session=guided,
-            resolved=sink,
-            catalog=catalog,
-            data_dir=data_dir,
-        )
-        if not sink_handler_result.tool_result.success:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Step 2 sink commit failed: {sink_handler_result.tool_result}",
-            )
-        state = sink_handler_result.state
-        guided = sink_handler_result.session
-
-        recipe_match = match_recipe(source, sink)
-        if recipe_match is not None:
-            next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
-            new_record = TurnRecord(
-                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                turn_type=TurnType(next_turn["type"]),
-                payload_hash=stable_hash(next_turn["payload"]),
-                response_hash=None,
-                emitter="server",
-            )
-            emit_turn_emitted(
-                recorder,
-                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                turn_type=TurnType(next_turn["type"]),
-                payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
-                emitter="server",
-                composition_version=state.version,
-                actor=user_id,
-            )
-            # Stage the offered RecipeMatch so the accept branch can verify
-            # the client-supplied recipe_name matches what was actually offered.
-            # Cleared (set to None) atomically when the acceptance is consumed.
-            guided = _replace(guided, history=(*guided.history, new_record), step_2_5_recipe_offer=recipe_match)
-            return state, guided, next_turn
-
-        # No recipe match — solve the chain via the LLM and emit propose_chain.
-        # I2: wrap transient LLM failures (LiteLLM API/auth/bad-request,
-        # timeouts, malformed-response shape) so they auto-drop to freeform
-        # via mark_solver_exhausted rather than escape as 500s.  See
-        # ``solve_chain_with_auto_drop`` for the contract.
-        proposal, guided = await solve_chain_with_auto_drop(
-            site="step_2_sink_initial_solve",
-            session=guided,
-            session_id=session_id,
-            user_id=user_id,
-            composition_version=state.version,
-            recorder=recorder,
-            model=model,
-            temperature=temperature,
-            seed=seed,
-            source=source,
-            sink=sink,
-            recipe_match=None,
-        )
-        if proposal is None:
-            return state, guided, None
-        guided = _replace(guided, step=GuidedStep.STEP_3_TRANSFORMS, step_3_proposal=proposal)
-        next_turn = build_step_3_propose_chain_turn(proposal)
-        new_record = TurnRecord(
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            turn_type=TurnType.PROPOSE_CHAIN,
-            payload_hash=stable_hash(next_turn["payload"]),
-            response_hash=None,
-            emitter="server",
-        )
-        emit_step_advanced(
-            recorder,
-            prev=GuidedStep.STEP_2_5_RECIPE_MATCH,
-            next_=GuidedStep.STEP_3_TRANSFORMS,
-            # System-driven advance: no recipe matched the (source, sink) topology,
-            # so the dispatcher hops STEP_2_5 → STEP_3 without operator input.
-            reason="auto_advanced",
-            composition_version=state.version,
-            actor=user_id,
-        )
-        emit_turn_emitted(
-            recorder,
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            turn_type=TurnType.PROPOSE_CHAIN,
-            payload_hash=stable_hash(next_turn["payload"]),
-            payload_payload_id="",
-            emitter="server",
-            composition_version=state.version,
-            actor=user_id,
-        )
-        guided = _replace(guided, history=(*guided.history, new_record))
-        return state, guided, next_turn
-
-    # --- STEP_2_5_RECIPE_MATCH turns ------------------------------------
-    if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        chosen = list(turn_response["chosen"] or [])
-        if chosen == ["accept"]:
-            # User accepted the recipe. Extract the slots from edited_values
-            # (user may have filled in required slots).
-            # ``edited_values`` is the wire contract for recipe_offer ['accept']:
-            # the RecipeOfferTurn widget always sends ``{"recipe_name": str,
-            # "slots": {...}}``. A missing key, a null payload, or a non-string
-            # ``recipe_name`` is a protocol violation, not a Tier-3 "user typo"
-            # we paper over with empty-string defaults — silent defaults here
-            # would surface far downstream as a misleading "unknown recipe ''"
-            # error, masking the actual contract drift. The HTTP boundary is a
-            # trust boundary, so we raise 400 with a contract-citing message.
-            edited = turn_response["edited_values"]
-            if edited is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="recipe_offer ['accept'] requires edited_values; received null.",
-                )
-            missing = {"recipe_name", "slots"} - edited.keys()
-            if missing:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"recipe_offer ['accept'] edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
-                    ),
-                )
-            recipe_name = edited["recipe_name"]
-            if type(recipe_name) is not str or not recipe_name:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(f"recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty string; got {recipe_name!r}"),
-                )
-            slots_raw = edited["slots"]
-            if type(slots_raw) is not dict:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(f"recipe_offer ['accept'] edited_values['slots'] must be an object; got {type(slots_raw).__name__}"),
-                )
-
-            # Binding check: the client-supplied recipe_name must match the
-            # recipe that was actually offered for this step.  ``step_2_5_recipe_offer``
-            # is written by the server immediately before emitting the RECIPE_OFFER
-            # turn (Option A staging pattern, mirrors step_2_sink_intent).  A missing
-            # offer means the session was never in the recipe-offer state — the client
-            # is sending an accept without a prior offer (protocol violation or crafted
-            # request).  A mismatched recipe_name means the client is trying to accept
-            # a different recipe than the one offered — also rejected with 400.
-            #
-            # The offered prefilled slots are server-authored and read-only in the UI.
-            # Compare their stable hashes against the client-submitted subset so a
-            # crafted API client cannot silently rewrite inspected facts.  Unsatisfied
-            # slots remain operator-editable and are intentionally not bound here.
-            offered = guided.step_2_5_recipe_offer
-            if offered is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "recipe_offer ['accept'] received but no recipe was staged for this session "
-                        "(step_2_5_recipe_offer is None — the session has not reached the recipe-offer state "
-                        "or the offer was already consumed)."
-                    ),
-                )
-            if recipe_name != offered.recipe_name:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"recipe_offer ['accept'] recipe_name mismatch: "
-                        f"client sent {recipe_name!r} but the server offered {offered.recipe_name!r}. "
-                        "Accept must reference the recipe that was offered."
-                    ),
-                )
-            prefilled_mismatches = _prefilled_recipe_slot_mismatches(
-                offered_slots=offered.slots,
-                submitted_slots=slots_raw,
-            )
-            if prefilled_mismatches:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "recipe_offer ['accept'] prefilled slot mismatch: "
-                        f"client changed or omitted server-prefilled slot(s) {list(prefilled_mismatches)}. "
-                        "Prefilled recipe slots are read-only; accept must echo the offered values."
-                    ),
-                )
-
-            # The slots must be passed as edited_values from the client.
-            # The recipe_offer turn pre-populates partial slots; the user fills
-            # the rest via the recipe_offer form and sends them back in edited_values.
-            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
-
-            slots = dict(slots_raw)
-            # The "accept" reconstruction is post-acceptance: the operator has
-            # supplied the slot values (merged into ``edited.slots`` by the
-            # widget).  ``unsatisfied_slots`` was a property of the *offer*;
-            # at apply time ``handle_step_2_5_recipe_apply`` consumes only
-            # ``recipe_name`` and ``slots``, so an empty mapping is correct.
-            match = _RecipeMatch(recipe_name=recipe_name, slots=slots, unsatisfied_slots={})
-            # Clear the staged offer atomically before passing to the handler
-            # so it cannot be re-read by a later step.
-            guided = _replace(guided, step_2_5_recipe_offer=None)
-
-            handler_result = handle_step_2_5_recipe_apply(
+            # Commit the sink to CompositionState.outputs via handle_step_2_sink.
+            sink_handler_result = handle_step_2_sink(
                 state=state,
                 session=guided,
-                match=match,
+                resolved=sink,
                 catalog=catalog,
                 data_dir=data_dir,
-                session_engine=session_engine,
-                session_id=session_id,
             )
-            if not handler_result.tool_result.success:
+            if not sink_handler_result.tool_result.success:
+                # Egress control (see the step_1 source commits above): never
+                # interpolate the tool_result repr (dumps Tier-3-bearing
+                # CompositionState) into the body.
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Recipe application failed: {handler_result.tool_result}",
+                    detail={
+                        "code": "guided_step2_sink_commit_failed",
+                        "detail": (
+                            "The output configuration could not be applied. Review the options entered for this output and try again."
+                        ),
+                    },
                 )
-            state = handler_result.state
-            guided = handler_result.session
-            # terminal is now set on guided.terminal (TerminalKind.COMPLETED).
-            return state, guided, None
+            state = sink_handler_result.state
+            guided = sink_handler_result.session
 
-        if chosen == ["build_manually"]:
-            # step_advance already advanced to STEP_3.  Solve the chain via the LLM.
-            if guided.step_1_result is None or guided.step_2_result is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Dispatcher invariant: step_1_result and step_2_result must be set at build_manually.",
-                )
-            source = guided.step_1_result
-            sink = guided.step_2_result
-            # I2: same auto-drop wrap as the no-recipe-match branch above.
-            proposal, guided = await solve_chain_with_auto_drop(
-                site="step_2_5_build_manually_solve",
-                session=guided,
-                session_id=session_id,
-                user_id=user_id,
-                composition_version=state.version,
-                recorder=recorder,
-                model=model,
-                temperature=temperature,
-                seed=seed,
-                source=source,
-                sink=sink,
-                recipe_match=None,
-            )
-            if proposal is None:
-                return state, guided, None
-            guided = _replace(guided, step_3_proposal=proposal)
-            next_turn = build_step_3_propose_chain_turn(proposal)
-            new_record = TurnRecord(
-                step=GuidedStep.STEP_3_TRANSFORMS,
-                turn_type=TurnType.PROPOSE_CHAIN,
-                payload_hash=stable_hash(next_turn["payload"]),
-                response_hash=None,
-                emitter="server",
-            )
-            emit_turn_emitted(
+            # Step-2 sink committed. PER-STAGE design: do NOT auto-build the
+            # transform chain here. STEP_3 is driven by its OWN prompt — the operator
+            # describes the transforms at STEP_3 and the /guided/chat cold-start path
+            # (``intent = body.message``, guided.py post_guided_chat) builds the chain.
+            # The previous auto-build fed solve_chain the FIRST user chat turn, which
+            # in the staged flow is the SOURCE-phase send ("create a source of
+            # url-rows"), never the transforms intent — so it built a blind chain that
+            # exhausted (solver_exhausted -> exited_to_freeform). (The reject/repair
+            # re-solves now use ``_transforms_intent_from_chat_history`` — the LAST user
+            # turn — for the same reason.)
+            # STEP_3 now starts with NO proposal; the frontend renders the chat box at
+            # step_3-no-proposal so the per-stage transforms prompt drives the build.
+            emit_step_advanced(
                 recorder,
-                step=GuidedStep.STEP_3_TRANSFORMS,
-                turn_type=TurnType.PROPOSE_CHAIN,
-                payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
-                emitter="server",
+                prev=GuidedStep.STEP_2_SINK,
+                next_=GuidedStep.STEP_3_TRANSFORMS,
+                reason="user_advanced",
                 composition_version=state.version,
                 actor=user_id,
             )
-            guided = _replace(guided, history=(*guided.history, new_record))
-            return state, guided, next_turn
+            guided = _replace(
+                guided,
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                step_2_sink_intent=None,
+            )
+            return state, guided, None
 
-        raise HTTPException(
-            status_code=400,
-            detail=f"recipe_offer response must have chosen=['accept'] or chosen=['build_manually'], got {chosen!r}.",
+    # --- STEP_2_SINK → STEP_3 : now unreachable ---------------------------
+    # _advance_step_2 is a pure self-loop (state_machine.py) — it never
+    # advances guided.step away from STEP_2_SINK on its own. The
+    # MULTI_SELECT_WITH_CUSTOM resolve, fail-closed validation,
+    # handle_step_2_sink commit, and step advance all happen together in the
+    # STEP_2_SINK intra-step branch above (elspeth-948eb9c0b8 C-3(a)/(b)). If
+    # this branch is ever reached, something upstream reintroduced the eager
+    # pre-set that originally caused guided_session and composition_state to
+    # diverge on a commit failure — fail loudly rather than silently repeat it.
+    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_3_TRANSFORMS:
+        raise InvariantError(
+            "STEP_2_SINK -> STEP_3_TRANSFORMS dispatch reached with no pending sink "
+            "commit to process — the commit-then-advance step now lives entirely in "
+            "the STEP_2_SINK intra-step MULTI_SELECT_WITH_CUSTOM branch. "
+            "_advance_step_2 must remain a pure self-loop."
         )
 
     # --- STEP_3_TRANSFORMS turns ----------------------------------------
@@ -3361,8 +3467,18 @@ async def _dispatch_guided_respond(
                     seed=seed,
                     source=guided.step_1_result,
                     sink=guided.step_2_result,
-                    recipe_match=None,
+                    # Regenerate from the TRANSFORMS-phase request (the operator
+                    # rejected the transform chain, not the source) — the last user
+                    # chat turn, NOT the source-phase opening turn.
+                    intent=_transforms_intent_from_chat_history(guided),
                     repair_context=repair_context,
+                    # Discovery loop (read-only): the regenerate solve can look up
+                    # the schema it tripped on instead of re-guessing blind.
+                    state=state,
+                    catalog=catalog,
+                    secret_service=None,
+                    max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
+                    timeout_seconds=(settings.composer_timeout_seconds if settings is not None else None),
                 )
                 if proposal is None:
                     return state, guided, None
@@ -3380,7 +3496,7 @@ async def _dispatch_guided_respond(
                     step=GuidedStep.STEP_3_TRANSFORMS,
                     turn_type=TurnType.PROPOSE_CHAIN,
                     payload_hash=stable_hash(next_turn["payload"]),
-                    payload_payload_id="",
+                    payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                     emitter="server",
                     composition_version=state.version,
                     actor=user_id,
@@ -3428,7 +3544,7 @@ async def _dispatch_guided_respond(
                     step=GuidedStep.STEP_3_TRANSFORMS,
                     turn_type=TurnType.SCHEMA_FORM,
                     payload_hash=stable_hash(next_turn["payload"]),
-                    payload_payload_id="",
+                    payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                     emitter="server",
                     composition_version=state.version,
                     actor=user_id,
@@ -3498,8 +3614,23 @@ async def _dispatch_guided_respond(
                         seed=seed,
                         source=guided.step_1_result,
                         sink=guided.step_2_result,
-                        recipe_match=None,
+                        # Repair after a failed accept still builds FROM the user's
+                        # TRANSFORMS request (the last user chat turn) while fixing the
+                        # named validation errors (repair_context) — independent
+                        # channels, both apply. Without the transforms intent the
+                        # repaired chain regenerates blind to the goal (the
+                        # passthrough-instead-of-web_scrape bug) and auto-commits.
+                        intent=_transforms_intent_from_chat_history(guided),
                         repair_context=repair_context,
+                        # Discovery loop (read-only): the repair solve can look up
+                        # the exact schema the first accept rejected. This is the
+                        # break in the blind repair loop (web_scrape required-fields
+                        # + http.* nesting were the live failure).
+                        state=state,
+                        catalog=catalog,
+                        secret_service=None,
+                        max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
+                        timeout_seconds=(settings.composer_timeout_seconds if settings is not None else None),
                     )
                     if repair_proposal is None:
                         return state, guided, None
@@ -3516,8 +3647,16 @@ async def _dispatch_guided_respond(
                         session_id=session_id,
                     )
                     if repair_result.tool_result.success:
-                        # Repair succeeded: wizard completes normally.
-                        return repair_result.state, repair_result.session, None
+                        guided, next_turn = _emit_wire_turn(
+                            state=repair_result.state,
+                            guided=repair_result.session,
+                            recorder=recorder,
+                            user_id=user_id,
+                            payload_store=payload_store,
+                            prev_step=GuidedStep.STEP_3_TRANSFORMS,
+                            advance_reason="auto_advanced",
+                        )
+                        return repair_result.state, guided, next_turn
 
                     # Repair also failed. Mark solver exhausted and auto-drop to freeform.
                     # Build the validation_result dict from the repair failure (Tier 1
@@ -3550,16 +3689,19 @@ async def _dispatch_guided_respond(
                     # Return 200 with terminal — auto-drop is a clean wizard outcome.
                     return state, new_guided, None
 
-                # handler_result.session.terminal is COMPLETED on success.
-                return handler_result.state, handler_result.session, None
-            if chosen == ["reject"]:
-                raise HTTPException(
-                    status_code=501,
-                    detail=("Step 3 chain rejection is not yet implemented. Use exit-to-freeform to drop to freeform mode."),
+                guided, next_turn = _emit_wire_turn(
+                    state=handler_result.state,
+                    guided=handler_result.session,
+                    recorder=recorder,
+                    user_id=user_id,
+                    payload_store=payload_store,
+                    prev_step=GuidedStep.STEP_3_TRANSFORMS,
+                    advance_reason="user_advanced",
                 )
+                return handler_result.state, guided, next_turn
             raise HTTPException(
                 status_code=400,
-                detail=f"propose_chain response must have chosen=['accept'] or chosen=['reject'], got {chosen!r}.",
+                detail=f"propose_chain response must have chosen=['accept'], got {chosen!r}.",
             )
         if current_turn_type is TurnType.SCHEMA_FORM:
             if guided.step_3_proposal is None:
@@ -3641,7 +3783,7 @@ async def _dispatch_guided_respond(
                 step=GuidedStep.STEP_3_TRANSFORMS,
                 turn_type=TurnType.PROPOSE_CHAIN,
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3653,6 +3795,287 @@ async def _dispatch_guided_respond(
             status_code=501,
             detail="Step 3 clarifying question handling is not yet implemented.",
         )
+
+    # --- STEP_4_WIRE turns ----------------------------------------------
+    if current_step is GuidedStep.STEP_4_WIRE:
+        if current_turn_type is not TurnType.CONFIRM_WIRING:
+            raise HTTPException(
+                status_code=400,
+                detail=f"STEP_4_WIRE expects confirm_wiring; got {current_turn_type!r}.",
+            )
+
+        # D6/D13 — per-phase ON-DEMAND advisor escape at the wire stage. A
+        # ``REQUEST_ADVISOR`` control on a CONFIRM_WIRING turn runs the
+        # whole-pipeline END sign-off on-demand, bounded by the SAME persisted
+        # pass budget as the auto sign-off below so a learner cannot spin the
+        # advisor unbounded. This MUST be handled BEFORE the P5.6 response-shape
+        # guard, which rejects any non-null ``control_signal`` — a legitimate
+        # REQUEST_ADVISOR carries one and would otherwise 400.
+        #
+        # REQUEST_ADVISOR is an ADVISORY gesture, NOT the completion gesture: it
+        # ALWAYS re-emits the wire turn with the advisor findings (terminal stays
+        # None — even on a CLEAN verdict) so the user decides. ONLY the
+        # CONFIRM_WIRING confirm path (P5.6) stamps COMPLETED. Auto-completing on
+        # a clean advisory check would surprise the user out of the wizard and
+        # double-count the pass budget vs the confirm. The on-demand checkpoint
+        # goes through ``run_wire_signoff`` -> ``run_signoff_checkpoint`` (backend
+        # Tier-1 ``schema_excerpt``), so no unvalidated user text is forwarded and
+        # the Tier-3 ``_validate_advisor_arguments`` boundary is never crossed.
+        if turn_response["control_signal"] is ControlSignal.REQUEST_ADVISOR:
+            from elspeth.web.composer.guided.signoff import (
+                SignoffOutcome,
+                run_wire_signoff,
+                signoff_audit_event_name,
+            )
+
+            if composer_service is None or advisor_checkpoint_max_passes is None or advisor_checkpoint_max_passes <= 0:
+                # Fail closed exactly as the auto sign-off path does (P5.6): a
+                # missing service/budget never silently skips the gate.
+                blocked = _advisor_signoff_blocked_validation(
+                    reason="invariant",
+                    findings="Advisor sign-off service or pass budget is not configured.",
+                )
+                advisor_findings = (
+                    blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
+                )
+                next_turn = build_step_4_wire_turn(
+                    state,
+                    catalog=catalog,
+                    advisor_findings=advisor_findings,
+                    signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
+                )
+                guided, next_turn = _emit_wire_turn(
+                    state=state,
+                    guided=guided,
+                    next_turn=next_turn,
+                    recorder=recorder,
+                    user_id=user_id,
+                    payload_store=payload_store,
+                )
+                return state, guided, next_turn
+
+            max_passes = advisor_checkpoint_max_passes  # P5.4 dispatcher param (shared bound)
+            guided, decision = await run_wire_signoff(
+                session=guided,
+                state=state,
+                session_id=session_id,
+                recorder=recorder,
+                composer_service=composer_service,
+                max_passes=max_passes,
+                acknowledged_unavailable=False,
+                progress=None,
+            )
+            # Record the DISTINCT sign-off audit event for EVERY real decision
+            # (same provenance discipline as the auto path).
+            emit_signoff_decision(
+                recorder,
+                event_name=signoff_audit_event_name(decision),
+                outcome=decision.outcome.value,
+                reason=decision.reason,
+                composition_version=state.version,
+                actor=user_id,
+            )
+            # ALWAYS re-emit the wire turn (terminal stays as run_wire_signoff
+            # returned it — None; REQUEST_ADVISOR never stamps COMPLETED). For a
+            # BLOCKED_* outcome carry the NON-RUNNABLE blocked-validation findings
+            # so the turn renders fail-closed rather than a plain retry (P5.7).
+            on_demand_blocked_findings: str | None = None
+            if decision.outcome in (SignoffOutcome.BLOCKED_FLAGGED, SignoffOutcome.BLOCKED_UNAVAILABLE):
+                blocked = _advisor_signoff_blocked_validation(
+                    reason=decision.reason or "exhausted",
+                    findings=decision.findings_text,
+                )
+                on_demand_blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
+            next_turn = build_step_4_wire_turn(
+                state,
+                catalog=catalog,
+                advisor_findings=on_demand_blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
+                signoff_outcome=decision.outcome.value,
+                # Budget left after this pass (``guided`` is post-run_wire_signoff,
+                # so the counter is already incremented). Disclosed so the revise
+                # turn can render the "spends 1 of N" cost on the explicit re-ask.
+                passes_remaining=max_passes - guided.advisor_checkpoint_passes_used,
+            )
+            guided, next_turn = _emit_wire_turn(
+                state=state,
+                guided=guided,
+                next_turn=next_turn,
+                recorder=recorder,
+                user_id=user_id,
+                payload_store=payload_store,
+            )
+            return state, guided, next_turn
+
+        # Narrowed response-shape guard (P5.6). The CONFIRM_WIRING branch accepts
+        # exactly two closed choices: the plain ``confirm`` and the server-offered
+        # unavailable-escape acknowledgement ``complete_without_signoff``. Every
+        # other ``chosen`` value (incl. None) and any non-null
+        # edited_values/step-index/control_signal is malformed and is rejected so
+        # a junk body can never flow into the EMPTY_PROFILE auto-complete branch
+        # (which never reads ``chosen``). ``custom_inputs`` is deliberately NOT
+        # gated here: it stays arbitrary Tier-3 text and can never acknowledge the
+        # escape (the escape gate below requires custom_inputs is None).
+        if (
+            turn_response["chosen"] not in (["confirm"], ["complete_without_signoff"])
+            or turn_response["edited_values"] is not None
+            or turn_response["accepted_step_index"] is not None
+            or turn_response["edit_step_index"] is not None
+            or turn_response["control_signal"] is not None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "confirm_wiring response must be chosen=['confirm'] or "
+                    "chosen=['complete_without_signoff'] with "
+                    "edited_values/step indices/control_signal all null "
+                    "(exit_to_freeform is handled before dispatch)."
+                ),
+            )
+
+        # Validate-gate first (same semantics as P1.6/P2): an invalid pipeline
+        # never completes. A confirm that cannot proceed is an ERROR, not a
+        # silent success (Tier-1 doctrine) — raise the structured rejection so
+        # the route returns HTTP 409 naming each blocking issue and, crucially,
+        # does NOT persist a new composition-state version for the failed
+        # attempt (pre-fix: every failed confirm 200'd, re-emitted the wire
+        # turn, and minted a version — 15 clicks = v11→v19 with zero feedback;
+        # ux-review elspeth-3b35abf148 variant 3). The B6 resurface hook is
+        # not run here: the composition is unchanged by a rejected confirm, so
+        # there is nothing to reconcile — the client keeps its current wire
+        # turn (whose payload already carries the contracts + warnings).
+        validation = state.validate()
+        if not validation.is_valid:
+            raise WireConfirmRejectedError(
+                step=GuidedStep.STEP_4_WIRE.value,
+                issues=tuple(entry.to_dict() for entry in validation.errors),
+            )
+
+        # D13 — profile-gated terminal advisor sign-off. The live profile runs
+        # the whole-pipeline END sign-off as a PRE-terminal gate so a FLAG can
+        # still re-emit a revise turn (a post-terminal hook would be foreclosed
+        # by the composer.py:2131 terminal-409). Tutorial is the explicit
+        # advisor-off demo bypass for the passive known-good walkthrough.
+        from elspeth.web.composer.guided.signoff import SignoffOutcome, run_wire_signoff, signoff_audit_event_name
+
+        if not guided.profile.advisor_checkpoints:
+            yaml_text = generate_public_yaml(state)
+            terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
+            guided = _replace(guided, terminal=terminal)
+            return state, guided, None
+
+        if composer_service is None or advisor_checkpoint_max_passes is None or advisor_checkpoint_max_passes <= 0:
+            blocked = _advisor_signoff_blocked_validation(
+                reason="invariant",
+                findings="Advisor sign-off service or pass budget is not configured.",
+            )
+            advisor_findings = blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
+            next_turn = build_step_4_wire_turn(
+                state,
+                catalog=catalog,
+                advisor_findings=advisor_findings,
+                signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
+            )
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_4_WIRE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_4_WIRE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        acknowledged_unavailable = (
+            guided.advisor_signoff_escape_offered
+            and guided.advisor_checkpoint_passes_used >= advisor_checkpoint_max_passes
+            # Direct access on both required TurnResponse keys: presence is
+            # enforced by the shape guard above, so schema drift crashes
+            # (KeyError) instead of silently computing False.
+            and tuple(turn_response["chosen"]) == ("complete_without_signoff",)
+            and turn_response["custom_inputs"] is None
+        )
+        max_passes = advisor_checkpoint_max_passes  # P5.4 dispatcher param
+        guided, decision = await run_wire_signoff(
+            session=guided,
+            state=state,
+            session_id=session_id,
+            recorder=recorder,
+            composer_service=composer_service,
+            max_passes=max_passes,
+            acknowledged_unavailable=acknowledged_unavailable,
+            progress=None,
+        )
+        # D13 — record the DISTINCT sign-off audit event BEFORE the COMPLETE
+        # early-return so a clean sign-off (composer.signoff.clean) and an
+        # advisor-unreachable completion
+        # (composer.signoff.completed_without_signoff_advisor_unreachable) are
+        # never indistinguishable in the audit trail. The non-COMPLETE outcomes
+        # are audited here too, ahead of the re-emitted turn.
+        emit_signoff_decision(
+            recorder,
+            event_name=signoff_audit_event_name(decision),
+            outcome=decision.outcome.value,
+            reason=decision.reason,
+            composition_version=state.version,
+            actor=user_id,
+        )
+        if decision.outcome is SignoffOutcome.COMPLETE:
+            yaml_text = generate_public_yaml(state)
+            terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
+            guided = _replace(guided, terminal=terminal)
+            return state, guided, None
+        # Non-COMPLETE: re-emit the wire turn (terminal stays None). The
+        # turn payload carries the advisor findings + outcome class so the
+        # frontend renders the revise / fail-closed / escape-offer affordance.
+        # For a BLOCKED_* terminal, carry the NON-RUNNABLE blocked-validation
+        # findings (every readiness axis False) so the turn renders fail-closed
+        # rather than a plain retry.
+        blocked_findings: str | None = None
+        if decision.outcome in (SignoffOutcome.BLOCKED_FLAGGED, SignoffOutcome.BLOCKED_UNAVAILABLE):
+            blocked = _advisor_signoff_blocked_validation(
+                reason=decision.reason or "exhausted",
+                findings=decision.findings_text,
+            )
+            blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
+        next_turn = build_step_4_wire_turn(
+            state,
+            catalog=catalog,
+            advisor_findings=blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
+            signoff_outcome=decision.outcome.value,
+            # Budget left after this pass (``guided`` is post-run_wire_signoff,
+            # so the counter is already incremented). Disclosed so a REVISE turn
+            # can render the "spends 1 of N" cost copy.
+            passes_remaining=max_passes - guided.advisor_checkpoint_passes_used,
+        )
+        new_record = TurnRecord(
+            step=GuidedStep.STEP_4_WIRE,
+            turn_type=TurnType.CONFIRM_WIRING,
+            payload_hash=stable_hash(next_turn["payload"]),
+            response_hash=None,
+            emitter="server",
+        )
+        emit_turn_emitted(
+            recorder,
+            step=GuidedStep.STEP_4_WIRE,
+            turn_type=TurnType.CONFIRM_WIRING,
+            payload_hash=stable_hash(next_turn["payload"]),
+            payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+            emitter="server",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        guided = _replace(guided, history=(*guided.history, new_record))
+        return state, guided, next_turn
 
     # Unhandled branch — this is a dispatcher gap, not a user error.
     raise InvariantError(
@@ -3676,6 +4099,7 @@ def _guided_step_index(step: Any) -> int:
         GuidedStep.STEP_2_SINK,
         GuidedStep.STEP_2_5_RECIPE_MATCH,
         GuidedStep.STEP_3_TRANSFORMS,
+        GuidedStep.STEP_4_WIRE,
     )
     return _ORDER.index(step)
 
@@ -3685,6 +4109,7 @@ __all__ = [
     "SESSION_TERMINAL_RUN_STATUS_VALUES",
     "UTC",
     "UUID",
+    "_COMMIT_REJECTED_MESSAGE",
     "_COMPOSER_AUTHORING_VALIDATION_COUNTER",
     "_COMPOSER_EXCEPTION_CLASS_BUCKETS",
     "_COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER",
@@ -3700,6 +4125,7 @@ __all__ = [
     "_RUNTIME_PREFLIGHT_FAILED",
     "_RUNTIME_PREFLIGHT_FRAME_LIMIT",
     "_RUNTIME_PREFLIGHT_MESSAGE_LIMIT",
+    "_SYNTHETIC_UNAVAILABLE_MESSAGE",
     "APIRouter",
     "Any",
     "AuditIntegrityError",
@@ -3805,6 +4231,8 @@ __all__ = [
     "SinkIntent",
     "SourceInspectionFacts",
     "SourceResolved",
+    "Step2SinkChatResult",
+    "StepChatResult",
     "TerminalKind",
     "TerminalReason",
     "TerminalState",
@@ -3843,6 +4271,7 @@ __all__ = [
     "_composer_progress_sink",
     "_composition_proposal_response",
     "_dispatch_guided_respond",
+    "_emit_wire_turn",
     "_extract_runtime_model_snapshot",
     "_failed_turn_response_body",
     "_first_message_line",
@@ -3879,24 +4308,28 @@ __all__ = [
     "_state_data_from_composer_state",
     "_state_from_record",
     "_state_response",
+    "_store_guided_audit_payload",
     "_summarize_guided_response",
     "_validate_blob_ref_submission",
     "_validate_control_signal",
     "_validate_run_status_accounting_for_list",
     "_validate_step_indices",
     "_verify_session_ownership",
+    "_workflow_profile_response",
     "annotations",
     "asyncio",
     "audit_envelope",
     "build_initial_step_1_turn",
     "build_step_1_inspect_and_confirm_turn_from_intent",
     "build_step_1_schema_form_turn",
-    "build_step_2_5_recipe_offer_turn",
+    "build_step_1_schema_form_turn_from_resolved",
     "build_step_2_multi_select_turn",
     "build_step_2_schema_form_turn",
+    "build_step_2_schema_form_turn_from_resolved",
     "build_step_2_single_select_turn",
     "build_step_3_propose_chain_turn",
     "build_step_3_schema_form_turn",
+    "build_step_4_wire_turn",
     "cast",
     "chat_turn_audit_envelope",
     "client_cancelled_progress_event",
@@ -3912,20 +4345,19 @@ __all__ = [
     "emit_turn_answered",
     "emit_turn_emitted",
     "execute_tool",
-    "generate_yaml",
+    "generate_public_yaml",
     "get_current_user",
     "get_rate_limiter",
     "handle_step_1_source",
-    "handle_step_2_5_recipe_apply",
     "handle_step_2_sink",
     "handle_step_3_chain_accept",
+    "handle_step_4_wire_confirm",
     "insert",
     "inspect_blob_content",
     "json",
     "llm_call_audit_envelope",
     "load_run_accounting_for_settings",
     "mark_solver_exhausted",
-    "match_recipe",
     "maybe_auto_title_session",
     "maybe_resolve_step_1_source_chat",
     "merge_implicit_decisions_meta",
@@ -3933,6 +4365,8 @@ __all__ = [
     "record_session_completed",
     "record_session_switched",
     "redact_source_storage_path",
+    "resolve_step_1_source_chat_with_auto_drop",
+    "resolve_step_2_sink_chat_with_auto_drop",
     "run_sync_in_worker",
     "scrub_text_for_audit",
     "slog",

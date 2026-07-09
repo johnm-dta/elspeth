@@ -14,6 +14,7 @@ Fixtures live in ``tests/integration/web/conftest.py``:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -25,7 +26,10 @@ from sqlalchemy import select
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.sessions.models import composer_completion_events_table
+from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.shareable_reviews.signer import ShareTokenPayload
+
+from .conftest import _TEST_AUTHED_USER_ID, _passthrough_composition_state
 
 # ── POST /mark-ready-for-review ─────────────────────────────────────────
 
@@ -86,6 +90,65 @@ def test_mark_ready_for_review_no_state_returns_409(
     response = client.post(f"/api/sessions/{session_id}/mark-ready-for-review")
     # validate() returns is_valid=False for "no state" → CompositionNotRunnableError → 409.
     assert response.status_code == 409
+
+
+def _seed_session_with_blob_subtree_sink(client: TestClient, *, user_id: str) -> UUID:
+    """Seed a session whose sink writes into the session's OWN blob subtree.
+
+    Mirrors ``conftest._seed_session_with_state`` but anchors the sink path
+    at ``data_dir/blobs/<session_id>/...`` — a target the session-scoped
+    sink allowlist (elspeth-bdc17cfdb1) only admits when the validator
+    receives the caller's session id. The path depends on the session id,
+    so the state is built after ``create_session``.
+    """
+    session_service = client.app.state.session_service
+    settings = client.app.state.settings
+    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
+
+    async def _seed() -> UUID:
+        record = await session_service.create_session(
+            user_id=user_id,
+            title="blob-subtree sink fixture",
+            auth_provider_type=settings.auth_provider,
+        )
+        (settings.data_dir / "blobs" / str(record.id)).mkdir(parents=True, exist_ok=True)
+        state_d = _passthrough_composition_state(settings.data_dir).to_dict()
+        state_d["outputs"][0]["options"]["path"] = str(settings.data_dir / "blobs" / str(record.id) / "review_out.csv")
+        await session_service.save_composition_state(
+            record.id,
+            CompositionStateData(
+                sources=state_d["sources"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=True,
+                validation_errors=None,
+            ),
+            provenance="session_seed",
+        )
+        return record.id
+
+    return asyncio.run(_seed())
+
+
+def test_mark_ready_for_review_allows_own_session_blob_sink(
+    audit_readiness_test_client: TestClient,
+) -> None:
+    """A sink targeting the session's own ``blobs/<session_id>/`` subtree
+    must pass the mark-time validation gate exactly as it passes /validate:
+    ``mark_ready_for_review`` threads the session id into ``validate_state``
+    so the session-scoped sink allowlist includes the caller's own subtree.
+    """
+    client = audit_readiness_test_client
+    session_id = _seed_session_with_blob_subtree_sink(client, user_id=_TEST_AUTHED_USER_ID)
+    # Parity guard: the same state is valid through /validate...
+    validate_response = client.post(f"/api/sessions/{session_id}/validate")
+    assert validate_response.status_code == 200, validate_response.text
+    assert validate_response.json()["is_valid"] is True, validate_response.text
+    # ...so the share gate must agree.
+    response = client.post(f"/api/sessions/{session_id}/mark-ready-for-review")
+    assert response.status_code == 200, response.text
 
 
 # ── GET /shareable-link ─────────────────────────────────────────────────

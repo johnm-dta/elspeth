@@ -249,26 +249,6 @@ class TestUpdateBatchStatus:
         updated = factory.execution.get_batch("b-1")
         assert updated.status == BatchStatus.EXECUTING
 
-    def test_sets_completed_at_for_completed(self):
-        _db, factory = _setup()
-        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
-
-        factory.execution.update_batch_status("b-1", BatchStatus.COMPLETED)
-
-        updated = factory.execution.get_batch("b-1")
-        assert updated.status == BatchStatus.COMPLETED
-        assert updated.completed_at is not None
-
-    def test_sets_completed_at_for_failed(self):
-        _db, factory = _setup()
-        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
-
-        factory.execution.update_batch_status("b-1", BatchStatus.FAILED)
-
-        updated = factory.execution.get_batch("b-1")
-        assert updated.status == BatchStatus.FAILED
-        assert updated.completed_at is not None
-
     def test_does_not_set_completed_at_for_executing(self):
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
@@ -278,13 +258,26 @@ class TestUpdateBatchStatus:
         updated = factory.execution.get_batch("b-1")
         assert updated.completed_at is None
 
+    def test_rejects_terminal_target_statuses(self):
+        """Terminal transitions must go through complete_batch()."""
+        _db, factory = _setup()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+
+        for terminal_status in (BatchStatus.COMPLETED, BatchStatus.FAILED):
+            with pytest.raises(AuditIntegrityError, match="complete_batch"):
+                factory.execution.update_batch_status("b-1", terminal_status)
+
+        updated = factory.execution.get_batch("b-1")
+        assert updated.status == BatchStatus.DRAFT
+        assert updated.completed_at is None
+
     def test_sets_trigger_type(self):
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
 
         factory.execution.update_batch_status(
             "b-1",
-            BatchStatus.COMPLETED,
+            BatchStatus.EXECUTING,
             trigger_type=TriggerType.COUNT,
         )
 
@@ -297,7 +290,7 @@ class TestUpdateBatchStatus:
 
         factory.execution.update_batch_status(
             "b-1",
-            BatchStatus.COMPLETED,
+            BatchStatus.EXECUTING,
             trigger_type=TriggerType.TIMEOUT,
             trigger_reason="30s elapsed",
         )
@@ -320,7 +313,7 @@ class TestUpdateBatchStatus:
 
         factory.execution.update_batch_status(
             "b-1",
-            BatchStatus.COMPLETED,
+            BatchStatus.EXECUTING,
             state_id="state-1",
         )
 
@@ -343,7 +336,7 @@ class TestUpdateBatchStatus:
         """Terminal status COMPLETED cannot transition to any other status (M2)."""
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
-        factory.execution.update_batch_status("b-1", BatchStatus.COMPLETED)
+        factory.execution.complete_batch("b-1", BatchStatus.COMPLETED)
 
         with pytest.raises(AuditIntegrityError, match="terminal status"):
             factory.execution.update_batch_status("b-1", BatchStatus.EXECUTING)
@@ -352,7 +345,7 @@ class TestUpdateBatchStatus:
         """Terminal status FAILED cannot transition to any other status (M2)."""
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
-        factory.execution.update_batch_status("b-1", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-1", BatchStatus.FAILED)
 
         with pytest.raises(AuditIntegrityError, match="terminal status"):
             factory.execution.update_batch_status("b-1", BatchStatus.DRAFT)
@@ -536,7 +529,7 @@ class TestGetBatches:
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-2")
-        factory.execution.update_batch_status("b-2", BatchStatus.COMPLETED)
+        factory.execution.complete_batch("b-2", BatchStatus.COMPLETED)
 
         draft_batches = factory.execution.get_batches("run-1", status=BatchStatus.DRAFT)
         completed_batches = factory.execution.get_batches(
@@ -585,7 +578,7 @@ class TestGetBatches:
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-2")
         factory.execution.create_batch("run-1", "agg-2", batch_id="b-3")
-        factory.execution.update_batch_status("b-2", BatchStatus.COMPLETED)
+        factory.execution.complete_batch("b-2", BatchStatus.COMPLETED)
 
         result = factory.execution.get_batches(
             "run-1",
@@ -662,7 +655,7 @@ class TestGetIncompleteBatches:
     def test_returns_failed_batches(self):
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-fail")
-        factory.execution.update_batch_status("b-fail", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-fail", BatchStatus.FAILED)
 
         incomplete = factory.execution.get_incomplete_batches("run-1")
 
@@ -673,7 +666,7 @@ class TestGetIncompleteBatches:
     def test_excludes_completed_batches(self):
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-done")
-        factory.execution.update_batch_status("b-done", BatchStatus.COMPLETED)
+        factory.execution.complete_batch("b-done", BatchStatus.COMPLETED)
 
         incomplete = factory.execution.get_incomplete_batches("run-1")
 
@@ -686,8 +679,8 @@ class TestGetIncompleteBatches:
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-fail")
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-done")
         factory.execution.update_batch_status("b-exec", BatchStatus.EXECUTING)
-        factory.execution.update_batch_status("b-fail", BatchStatus.FAILED)
-        factory.execution.update_batch_status("b-done", BatchStatus.COMPLETED)
+        factory.execution.complete_batch("b-fail", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-done", BatchStatus.COMPLETED)
 
         incomplete = factory.execution.get_incomplete_batches("run-1")
 
@@ -869,7 +862,7 @@ class TestRetryBatch:
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-orig")
         factory.execution.add_batch_member("b-orig", "tok-1", ordinal=0)
         factory.execution.add_batch_member("b-orig", "tok-2", ordinal=1)
-        factory.execution.update_batch_status("b-orig", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-orig", BatchStatus.FAILED)
 
         retried = factory.execution.retry_batch("b-orig")
 
@@ -884,7 +877,7 @@ class TestRetryBatch:
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-orig")
         factory.execution.add_batch_member("b-orig", "tok-1", ordinal=0)
         factory.execution.add_batch_member("b-orig", "tok-2", ordinal=1)
-        factory.execution.update_batch_status("b-orig", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-orig", BatchStatus.FAILED)
 
         retried = factory.execution.retry_batch("b-orig")
 
@@ -904,7 +897,7 @@ class TestRetryBatch:
     def test_raises_for_non_failed_batch_completed(self):
         _db, factory = _setup()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-done")
-        factory.execution.update_batch_status("b-done", BatchStatus.COMPLETED)
+        factory.execution.complete_batch("b-done", BatchStatus.COMPLETED)
 
         with pytest.raises(AuditIntegrityError):
             factory.execution.retry_batch("b-done")
@@ -927,13 +920,13 @@ class TestRetryBatch:
         _db, factory = _setup_with_token()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-orig", attempt=0)
         factory.execution.add_batch_member("b-orig", "tok-1", ordinal=0)
-        factory.execution.update_batch_status("b-orig", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-orig", BatchStatus.FAILED)
 
         retry1 = factory.execution.retry_batch("b-orig")
         assert retry1.attempt == 1
 
         # Fail the retry and retry again
-        factory.execution.update_batch_status(retry1.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(retry1.batch_id, BatchStatus.FAILED)
         retry2 = factory.execution.retry_batch(retry1.batch_id)
         assert retry2.attempt == 2
 
@@ -943,7 +936,7 @@ class TestRetryBatch:
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-orig")
         factory.execution.add_batch_member("b-orig", "tok-1", ordinal=0)
         factory.execution.add_batch_member("b-orig", "tok-2", ordinal=1)
-        factory.execution.update_batch_status("b-orig", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-orig", BatchStatus.FAILED)
 
         first_retry = factory.execution.retry_batch("b-orig")
         second_retry = factory.execution.retry_batch("b-orig")
@@ -961,7 +954,7 @@ class TestRetryBatch:
         _db, factory = _setup_with_token()
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-orig")
         factory.execution.add_batch_member("b-orig", "tok-1", ordinal=0)
-        factory.execution.update_batch_status("b-orig", BatchStatus.FAILED)
+        factory.execution.complete_batch("b-orig", BatchStatus.FAILED)
 
         # First recovery cycle creates retry batch
         retry1 = factory.execution.retry_batch("b-orig")

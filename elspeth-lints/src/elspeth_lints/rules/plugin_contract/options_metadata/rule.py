@@ -7,10 +7,9 @@ import inspect
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import yaml
-from pydantic import BaseModel
 
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.plugin_contract.options_metadata.metadata import ALLOWLIST_PATH, RULE_ID, RULE_METADATA
@@ -60,16 +59,24 @@ class OptionsMetadataRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[Finding]:
         """Run the repository-scoped metadata rule."""
         del tree, file_path
+        try:
+            plugin_manager = self.plugin_manager_factory()
+        except ModuleNotFoundError as exc:
+            return [_missing_runtime_dependency_finding(exc)]
         allowlist = load_options_metadata_allowlist(context.root / self.allowlist_path)
-        return collect_metadata_findings(
-            plugin_manager=self.plugin_manager_factory(),
-            allowlist=allowlist,
-            root=context.root,
-        )
+        try:
+            return collect_metadata_findings(
+                plugin_manager=plugin_manager,
+                allowlist=allowlist,
+                root=context.root,
+            )
+        except ModuleNotFoundError as exc:
+            return [_missing_runtime_dependency_finding(exc)]
 
 
-def iter_metadata_models(kind: str, plugin_cls: object) -> Iterator[tuple[str, type[BaseModel]]]:
+def iter_metadata_models(kind: str, plugin_cls: object) -> Iterator[tuple[str, type[Any]]]:
     """Yield the metadata-bearing config models for one plugin class."""
+    base_model = _pydantic_base_model()
     plugin_name = getattr(plugin_cls, "name", None)
     if not isinstance(plugin_name, str):
         raise TypeError(f"{kind} plugin {plugin_cls!r} has no string name")
@@ -84,13 +91,13 @@ def iter_metadata_models(kind: str, plugin_cls: object) -> Iterator[tuple[str, t
         for variant_name, model in variants.items():
             if not isinstance(variant_name, str):
                 raise TypeError(f"{kind}/{plugin_name}: discriminated variant names must be strings")
-            if not isinstance(model, type) or not issubclass(model, BaseModel):
+            if not isinstance(model, type) or not issubclass(model, base_model):
                 raise TypeError(f"{kind}/{plugin_name}[{variant_name}]: variant config model must inherit BaseModel")
             yield f"{kind}/{plugin_name}[{variant_name}]", model
         return
 
     options_model = getattr(plugin_cls, "config_model", None)
-    if isinstance(options_model, type) and issubclass(options_model, BaseModel):
+    if isinstance(options_model, type) and issubclass(options_model, base_model):
         yield f"{kind}/{plugin_name}", options_model
 
 
@@ -148,9 +155,10 @@ def _finding(identifier: str, message_suffix: str, fingerprint_suffix: str, loca
     )
 
 
-def _field_location(model: type[BaseModel], field_name: str, *, root: Path | None) -> FieldLocation:
+def _field_location(model: type[Any], field_name: str, *, root: Path | None) -> FieldLocation:
+    base_model = _pydantic_base_model()
     for cls in model.__mro__:
-        if not isinstance(cls, type) or not issubclass(cls, BaseModel):
+        if not isinstance(cls, type) or not issubclass(cls, base_model):
             continue
         location = _field_location_in_class(cls, field_name, root=root)
         if location is not None:
@@ -158,7 +166,7 @@ def _field_location(model: type[BaseModel], field_name: str, *, root: Path | Non
     return FieldLocation(file_path=f"plugin-config:{model.__name__}", line=1, column=0)
 
 
-def _field_location_in_class(cls: type[BaseModel], field_name: str, *, root: Path | None) -> FieldLocation | None:
+def _field_location_in_class(cls: type[Any], field_name: str, *, root: Path | None) -> FieldLocation | None:
     source_file = inspect.getsourcefile(cls)
     if source_file is None:
         return None
@@ -215,6 +223,44 @@ def _required_non_empty_string(entry: Mapping[str, object], key: str, *, path: P
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path}: entries[{index}] must include non-empty {key!r}")
     return value
+
+
+def _pydantic_base_model() -> type[Any]:
+    from pydantic import BaseModel
+
+    return BaseModel
+
+
+def _missing_runtime_dependency_finding(exc: ModuleNotFoundError) -> Finding:
+    missing = exc.name or _missing_module_name_from_message(str(exc))
+    if missing == "elspeth" or missing.startswith("elspeth."):
+        dependency = "elspeth package"
+        detail = "install or run from the main elspeth project environment so the plugin manager is importable"
+    elif missing == "pydantic" or missing.startswith("pydantic."):
+        dependency = "pydantic package"
+        detail = "install pydantic or run from the main elspeth project environment"
+    else:
+        dependency = missing
+        detail = "install the missing runtime dependency or run from the full project environment"
+    return Finding(
+        rule_id=RULE_ID,
+        file_path=".",
+        line=1,
+        column=0,
+        message=f"{RULE_ID} requires the {dependency}; {detail}.",
+        fingerprint=f"runtime-dependency:{missing}",
+        severity=RULE_METADATA.severity,
+    )
+
+
+def _missing_module_name_from_message(message: str) -> str:
+    prefix = "No module named "
+    if prefix not in message:
+        return "unknown"
+    raw = message.split(prefix, 1)[1].strip()
+    if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
+        return raw[1:-1]
+    return raw
 
 
 RULE = OptionsMetadataRule()

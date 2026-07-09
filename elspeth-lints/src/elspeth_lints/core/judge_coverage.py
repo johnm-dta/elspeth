@@ -46,6 +46,12 @@ judge metadata cluster and its ``key`` / ``file_fingerprint`` / ``ast_path``
 binding no longer matches any judged baseline binding for the same
 discriminator.
 
+In fork PR CI the HMAC key is unavailable, so a "complete" newly-signed entry
+is still only shape-valid. ``forbid_unverified_judge_metadata`` lets that lane
+reuse this diff logic while rejecting fresh judged records outright; unchanged
+baseline entries remain inspectable in shape-only mode, but forks cannot add or
+re-sign entries that the runner cannot cryptographically verify.
+
 Boundary discipline: this module routes directories into C1 only when
 they contain the standard judge-covered ``allow_hits:`` shape parsed by
 ``elspeth_lints.core.allowlist._parse_allow_hits``. Newly-added
@@ -71,6 +77,7 @@ from typing import Any
 
 from elspeth_lints.core.allowlist import (
     AllowlistEntry,
+    _verify_judge_metadata_signature_at_load,
 )
 from elspeth_lints.core.allowlist_io import (
     AllowlistIOError,
@@ -83,6 +90,7 @@ from elspeth_lints.core.allowlist_io import (
 UNRECOGNIZED_ENTRY_SHAPE = "UNRECOGNIZED_ENTRY_SHAPE"
 PER_FILE_RULE_REQUIRES_JUDGE = "PER_FILE_RULE_REQUIRES_JUDGE"
 JUDGE_METADATA_MUTATED = "JUDGE_METADATA_MUTATED"
+UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC = "UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC"
 _ALLOWLIST_ENTRY_KEYS = frozenset({"allow_hits", "allow_classes", "entries", "per_file_rules"})
 _JUDGE_COVERED_ENTRY_KEYS = frozenset({"allow_hits", "per_file_rules"})
 
@@ -158,6 +166,7 @@ def check_judge_coverage(
     allowlist_root: Path,
     baseline_ref: str,
     repo_root: Path,
+    forbid_unverified_judge_metadata: bool = False,
 ) -> dict[str, JudgeCoverageReport]:
     """Diff every judge-covered allowlist under ``allowlist_root``.
 
@@ -179,18 +188,22 @@ def check_judge_coverage(
     if not repo_root.is_dir():
         raise JudgeCoverageError(f"--repo-root {repo_root} is not a directory")
 
+    if allowlist_root.name.startswith("enforce_"):
+        candidate_dirs = [allowlist_root]
+    else:
+        candidate_dirs = sorted(
+            entry_dir for entry_dir in allowlist_root.iterdir() if entry_dir.is_dir() and entry_dir.name.startswith("enforce_")
+        )
+
     reports: dict[str, JudgeCoverageReport] = {}
-    for entry_dir in sorted(allowlist_root.iterdir()):
-        if not entry_dir.is_dir():
-            continue
-        if not entry_dir.name.startswith("enforce_"):
-            continue
+    for entry_dir in candidate_dirs:
         if not _directory_has_allowlist_entries(entry_dir):
             continue
         reports[entry_dir.name] = check_one_directory(
             allowlist_dir=entry_dir,
             baseline_ref=baseline_ref,
             repo_root=repo_root,
+            forbid_unverified_judge_metadata=forbid_unverified_judge_metadata,
         )
     return reports
 
@@ -200,6 +213,7 @@ def check_one_directory(
     allowlist_dir: Path,
     baseline_ref: str,
     repo_root: Path,
+    forbid_unverified_judge_metadata: bool = False,
 ) -> JudgeCoverageReport:
     """Diff the allow_hits entries in one enforce_* directory."""
     head_entries, head_per_file_rules, shape_violations = _load_head_from_disk(allowlist_dir)
@@ -228,6 +242,9 @@ def check_one_directory(
         discriminator: sum(1 for entry in entries if _judge_metadata_payload(entry) is None)
         for discriminator, entries in baseline_by_discriminator.items()
     }
+    baseline_judge_metadata_payloads = {
+        payload for baseline_entry in baseline_entries if (payload := _judge_metadata_payload(baseline_entry)) is not None
+    }
 
     violations: list[JudgeCoverageViolation] = list(shape_violations)
     new_count = 0
@@ -239,6 +256,8 @@ def check_one_directory(
             if not _judge_metadata_matches_any_baseline(entry, baseline_matches):
                 if _is_fresh_judge_record_after_binding_drift(entry, baseline_matches):
                     new_count += 1
+                    if forbid_unverified_judge_metadata:
+                        violations.append(_unverified_judge_metadata_violation(entry))
                     continue
                 violations.append(
                     JudgeCoverageViolation(
@@ -269,6 +288,15 @@ def check_one_directory(
             grandfathered_count += 1
             continue
         new_count += 1
+        if _judge_metadata_payload(entry) in baseline_judge_metadata_payloads:
+            violations.append(
+                JudgeCoverageViolation(
+                    entry_key=entry.key,
+                    source_file=entry.source_file,
+                    missing_fields=(JUDGE_METADATA_MUTATED,),
+                )
+            )
+            continue
         missing = _missing_judge_fields(entry)
         if missing:
             violations.append(
@@ -278,6 +306,8 @@ def check_one_directory(
                     missing_fields=missing,
                 )
             )
+        elif forbid_unverified_judge_metadata or not _has_authoritative_judge_metadata_signature(entry):
+            violations.append(_unverified_judge_metadata_violation(entry))
     for per_file_entry in head_per_file_rules:
         if _per_file_rule_discriminator(per_file_entry) in baseline_per_file_discriminators:
             grandfathered_count += 1
@@ -392,7 +422,9 @@ def _is_fresh_judge_record_after_binding_drift(entry: AllowlistEntry, baseline_e
     head_binding = _judge_binding_identity(entry)
     if any(baseline_entry.judge_metadata_signature == entry.judge_metadata_signature for baseline_entry in judged_baseline_entries):
         return False
-    return all(_judge_binding_identity(baseline_entry) != head_binding for baseline_entry in judged_baseline_entries)
+    return _has_authoritative_judge_metadata_signature(entry) and all(
+        _judge_binding_identity(baseline_entry) != head_binding for baseline_entry in judged_baseline_entries
+    )
 
 
 def _judge_binding_identity(entry: AllowlistEntry) -> tuple[str, str | None, str | None, str | None]:
@@ -477,6 +509,28 @@ def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
     if entry.judge_metadata_signature is None:
         missing.append("judge_metadata_signature")
     return tuple(missing)
+
+
+def _has_authoritative_judge_metadata_signature(entry: AllowlistEntry) -> bool:
+    """Return whether ``entry`` has a real HMAC, not only signature-shaped text."""
+    try:
+        _verify_judge_metadata_signature_at_load(
+            entry,
+            context=f"judge-coverage {entry.source_file}:{entry.key}",
+            allow_shape_only=False,
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def _unverified_judge_metadata_violation(entry: AllowlistEntry) -> JudgeCoverageViolation:
+    """Return the keyless-fork violation for a new signed allowlist entry."""
+    return JudgeCoverageViolation(
+        entry_key=entry.key,
+        source_file=entry.source_file,
+        missing_fields=(UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,),
+    )
 
 
 # =========================================================================
@@ -702,10 +756,9 @@ def _load_entries_from_git(
     with the offending baseline path and parse diagnostic. The
     operator fixes the baseline (or the ref), not the symptoms.
 
-    Same discipline applies to ``_parse_allow_hits`` invariant
-    violations: a baseline whose entry shape no longer parses under
-    the current schema is a structural anomaly that the operator
-    must see, not silently route around.
+    Baseline entries are read-only diff context, so the loader accepts
+    the historical pre-``safety`` shape while preserving fail-closed
+    behaviour for malformed YAML and every other parser invariant.
     """
     rel_dir = _relative_to_repo(allowlist_dir, repo_root)
     file_names = _ls_tree_yaml_files(
@@ -739,7 +792,13 @@ def _load_entries_from_git(
             # source_root=None: baseline entries come from a historical
             # git ref where the source tree at that ref isn't on disk —
             # binding verification is meaningless here.
-            entries.extend(parse_allow_hits(data, source_file=Path(rel_path).name))
+            entries.extend(
+                parse_allow_hits(
+                    data,
+                    source_file=Path(rel_path).name,
+                    allow_historical_missing_safety=True,
+                )
+            )
             per_file_rules.extend(_parse_per_file_rules_for_coverage(data, source_file=Path(rel_path).name))
         except AllowlistIOError as exc:
             raise JudgeCoverageError(f"baseline {baseline_ref}:{rel_path}: {exc}") from exc

@@ -225,8 +225,56 @@ class TestCsvInspection:
         )
         serialized = facts_to_dict(f)
 
-        assert serialized["url_candidates"] == ["https://example.com/download?<redacted>"]
+        assert serialized["url_candidates"] == ["https://example.com"]
         assert "SECRET_TOKEN" not in repr(serialized)
+
+    def test_url_candidates_drop_userinfo_and_path(self) -> None:
+        """Userinfo (embedded credentials) and path segments (reset tokens,
+        emails, other PII) must NOT survive redaction — only scheme + host
+        (+ port). Regression for the credential/PII egress where
+        ``_redact_url_candidate`` rebuilt the URL with raw ``netloc`` + ``path``
+        and so leaked ``user:pass@`` and ``/reset/<token>`` into the
+        tool-result / proof-diagnostic / sessions-DB surfaces.
+        """
+        f = inspect_blob_content(
+            content=(
+                b"name,site\n"
+                b"A,https://user:s3cr3t@host.example/reset-password/TOK123?sig=Z#frag\n"
+                b"B,https://api.example:8443/v1/users/alice@corp.example\n"
+            ),
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+
+        # Host preserved (routing hint); port preserved; everything else gone.
+        assert serialized["url_candidates"] == [
+            "https://host.example",
+            "https://api.example:8443",
+        ]
+        blob = repr(serialized)
+        assert "s3cr3t" not in blob  # userinfo credential
+        assert "TOK123" not in blob  # path-embedded token
+        assert "reset-password" not in blob  # path segment
+        assert "alice@corp.example" not in blob  # PII in path
+
+    def test_url_candidates_malformed_port_does_not_raise(self) -> None:
+        """A malformed/out-of-range port must not break the never-raise contract.
+
+        ``urlsplit(...).port`` raises ``ValueError`` for ``h:99999`` / ``h:abc``
+        and ``_URL_PATTERN`` matches those. Inspection runs over arbitrary blob
+        bytes, so the candidate must degrade gracefully (host kept, bad port
+        dropped) rather than propagate a ValueError up through
+        ``compute_proof_diagnostics``.
+        """
+        f = inspect_blob_content(
+            content=(b"name,site\nA,http://host.example:99999/p\nB,http://other.example:abc/q\n"),
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+        # No crash; out-of-range / non-numeric ports dropped, hosts kept, paths gone.
+        assert serialized["url_candidates"] == ["http://host.example", "http://other.example"]
 
     def test_headerless_warning(self) -> None:
         f = inspect_blob_content(
@@ -275,7 +323,11 @@ class TestCsvInspection:
         assert not any("csv_jagged_rows" in w for w in f.warnings), f.warnings
 
     def test_csv_source_content_with_columns_treats_first_record_as_data(self) -> None:
-        body = b"https://example.com/a\nhttps://example.com/b\n"
+        # Two distinct hosts so the multi-URL detection is still exercised after
+        # path-dropping redaction collapses same-host candidates. The per-path
+        # segment (``/a``, ``/b``) is intentionally dropped — only scheme + host
+        # survives (see test_url_candidates_drop_userinfo_and_path).
+        body = b"https://example.com/a\nhttps://example.org/b\n"
         f = inspect_csv_source_content(
             content=body,
             filename="urls.txt",
@@ -287,7 +339,7 @@ class TestCsvInspection:
         assert f.source_kind == "csv"
         assert f.observed_headers == ("url",)
         assert f.sample_row_count == 2
-        assert f.url_candidates == ("https://example.com/a", "https://example.com/b")
+        assert f.url_candidates == ("https://example.com", "https://example.org")
 
     def test_replacement_chars_in_csv_emit_warning(self) -> None:
         """Non-UTF-8 bytes get replaced with U+FFFD on decode; surface the
@@ -908,3 +960,79 @@ class TestInspectBlobContentHypothesis:
             assert isinstance(facts, SourceInspectionFacts)
 
         _prop()
+
+
+class TestObservedColumnsFromContent:
+    """``observed_columns_from_content`` — derive column names from inline source
+    content, used to backfill observed_columns when a chat-resolved source left
+    them empty (the data is the authority, not the LLM's claim)."""
+
+    def test_json_url_array_yields_url_column(self) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_content
+
+        content = b'[{"url": "https://example/a"}, {"url": "https://example/b"}]'
+        cols = observed_columns_from_content(content=content, filename="urls.json", mime_type="application/json")
+        assert cols == ("url",)
+
+    def test_csv_header_yields_columns(self) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_content
+
+        content = b"name,score\nada,42\n"
+        cols = observed_columns_from_content(content=content, filename="data.csv", mime_type="text/csv")
+        assert cols == ("name", "score")
+
+    def test_no_detectable_columns_yields_empty_tuple(self) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_content
+
+        content = b"just some prose with no columns or headers"
+        cols = observed_columns_from_content(content=content, filename="note.txt", mime_type="text/plain")
+        assert cols == ()
+
+
+class TestObservedColumnsFromPath:
+    """``observed_columns_from_path`` — the bounded-read, path-taking variant.
+
+    ``inspect_blob_content`` already truncates to ``_MAX_BYTES``, so reading the
+    whole file at the call site (a guided commit's column backfill) is wasted
+    I/O — a multi-hundred-MB blob would be slurped just to recover a header.
+    This entry point reads at most ``_MAX_BYTES`` and degrades an unreadable
+    file to ``()`` per its contract (the bound stays private to the inspector).
+    """
+
+    def test_reads_at_most_max_bytes(self, tmp_path, monkeypatch) -> None:
+        import elspeth.web.composer.source_inspection as si
+
+        # A file FAR larger than the inspector's read bound.
+        big = tmp_path / "big.csv"
+        big.write_bytes(b"id,name,score\n" + b"x,y,z\n" * si._MAX_BYTES)
+        assert big.stat().st_size > si._MAX_BYTES
+
+        seen: dict[str, int] = {}
+        real = si.observed_columns_from_content
+
+        def _spy(*, content: bytes, filename: str, mime_type: str) -> tuple[str, ...]:
+            seen["len"] = len(content)
+            return real(content=content, filename=filename, mime_type=mime_type)
+
+        monkeypatch.setattr(si, "observed_columns_from_content", _spy)
+        cols = si.observed_columns_from_path(path=big, filename="big.csv", mime_type="text/csv")
+
+        # The fix: the call site hands the inspector a bounded prefix, not the
+        # whole file. Without it, ``seen["len"]`` is the full file size.
+        assert seen["len"] <= si._MAX_BYTES
+        # Behaviour preserved: columns are still detected from the prefix.
+        assert cols == ("id", "name", "score")
+
+    def test_unreadable_path_degrades_to_empty(self, tmp_path) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_path
+
+        # A directory exists() but cannot be opened/read as a file -> OSError -> ().
+        d = tmp_path / "adir"
+        d.mkdir()
+        assert observed_columns_from_path(path=d, filename="x.csv", mime_type="text/csv") == ()
+
+    def test_missing_path_degrades_to_empty(self, tmp_path) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_path
+
+        missing = tmp_path / "nope.csv"
+        assert observed_columns_from_path(path=missing, filename="x.csv", mime_type="text/csv") == ()

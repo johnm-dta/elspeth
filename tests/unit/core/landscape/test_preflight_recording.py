@@ -6,11 +6,7 @@ import json
 
 import pytest
 
-from elspeth.core.dependency_config import (
-    CommencementGateResult,
-    DependencyRunResult,
-    PreflightResult,
-)
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import preflight_results_table

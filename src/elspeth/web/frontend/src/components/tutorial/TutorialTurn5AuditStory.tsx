@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getRunAuditSummary } from "@/api/client";
 import type { RunAuditStoryResponse } from "@/types/api";
-import { TURN_5_PRIMARY_BUTTON } from "./copy";
+import { TUTORIAL_ASSUMPTION_CALLOUT, TURN_5_PRIMARY_BUTTON } from "./copy";
 
 const COPY_FEEDBACK_DURATION_MS = 2_000;
 
@@ -9,7 +9,14 @@ interface TutorialTurn5AuditStoryProps {
   sessionId: string;
   runId: string;
   onContinue: () => void;
-  onBack: () => void;
+  /**
+   * Back affordance. Omitted (undefined) on the RESUMED flow
+   * (elspeth-918f4434b3): a resumed audit has no in-memory run cache, so
+   * Back into the run turn would silently re-fire the tutorial pipeline
+   * (real LLM spend). When undefined the Back button is not rendered —
+   * same pattern as TutorialTurn4Run / TutorialTurn7Graduation.
+   */
+  onBack?: () => void;
 }
 
 export function TutorialTurn5AuditStory({
@@ -51,6 +58,7 @@ export function TutorialTurn5AuditStory({
         The LLM made a judgment call on each page. ELSPETH keeps the evidence
         needed to explain that judgment later.
       </p>
+      <p className="tutorial-callout">{TUTORIAL_ASSUMPTION_CALLOUT}</p>
       {summary === null && error === null && (
         <p role="status" className="tutorial-muted">
           Loading audit evidence...
@@ -91,22 +99,24 @@ export function TutorialTurn5AuditStory({
             </div>
           </dl>
           <p>
-            If someone asks why a page received its score, the run has the
-            prompt, response, model details, source hash, and plugin
-            versions tied together.
+            If someone asks how the LLM wrote a page's summary — what it chose
+            to include or leave out — the run has the prompt, response, model
+            details, source hash, and plugin versions tied together.
           </p>
           <div className="tutorial-actions">
             <button type="button" className="btn btn-primary" onClick={onContinue}>
               {TURN_5_PRIMARY_BUTTON}
             </button>
-            <button
-              type="button"
-              className="tutorial-link-button"
-              onClick={onBack}
-              aria-label="Back: edit prompt and start over"
-            >
-              Back
-            </button>
+            {onBack !== undefined && (
+              <button
+                type="button"
+                className="tutorial-link-button"
+                onClick={onBack}
+                aria-label="Back to your pipeline run"
+              >
+                Back
+              </button>
+            )}
           </div>
         </>
       )}

@@ -292,14 +292,15 @@ class TestTypeTagIsolation:
     @given(value=st.text(min_size=1, max_size=50))
     @settings(max_examples=100)
     def test_non_iso_datetime_tag_raises_on_restore(self, value: str) -> None:
-        """Property: Invalid ISO string in datetime envelope raises ValueError on restore.
+        """Property: Invalid ISO string in datetime envelope raises AuditIntegrityError.
 
         If someone crafts a {"__elspeth_type__": "datetime", "__elspeth_value__": "garbage"},
-        fromisoformat() will raise, which is correct behavior (Tier 1 trust - crash on corruption).
+        restore must fail at the Tier 1 audit-corruption boundary instead of leaking
+        a raw parser exception.
         """
         assume(not _is_valid_isoformat(value))
         data = {"__elspeth_type__": "datetime", "__elspeth_value__": value}
-        with pytest.raises(ValueError):
+        with pytest.raises(AuditIntegrityError, match="datetime envelope"):
             _restore_types(data)
 
     def test_nested_datetime_tags_restored(self) -> None:

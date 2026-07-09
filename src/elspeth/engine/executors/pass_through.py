@@ -25,7 +25,7 @@ at startup), so the ``transform=<name>`` tag is safe.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from opentelemetry import metrics
 
@@ -41,12 +41,12 @@ from elspeth.contracts.declaration_contracts import (
     register_declaration_contract,
 )
 from elspeth.contracts.errors import (
-    FrameworkBugError,
     OrchestrationInvariantError,
     PassThroughContractViolation,
     PassThroughPayload,
 )
 from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.engine.executors.declaration_flags import _require_bool_flag, _runtime_observed_fields
 
 # Module-level counter — both call sites import this module and share the
 # same instrument.  Tests that need to assert on increments should monkeypatch
@@ -104,11 +104,7 @@ def verify_pass_through(
         )
 
     for emitted in emitted_rows:
-        if emitted.contract is None:
-            raise FrameworkBugError(f"Transform {transform_name!r} emitted row with no contract. Framework invariant violated.")
-        runtime_contract_fields = frozenset(fc.normalized_name for fc in emitted.contract.fields)
-        runtime_payload_fields = frozenset(emitted.keys())
-        runtime_observed = runtime_contract_fields & runtime_payload_fields
+        runtime_observed = _runtime_observed_fields(emitted, plugin_name=transform_name)
         divergence = input_fields - runtime_observed
         if divergence:
             _VIOLATIONS_COUNTER.add(1, {"transform": transform_name})
@@ -147,7 +143,7 @@ class PassThroughDeclarationContract(DeclarationContract):
         # Direct attribute access, NOT getattr with default (CLAUDE.md
         # §Offensive Programming). A plugin missing passes_through_input
         # is a framework bug — let it crash.
-        return cast(bool, plugin.passes_through_input)
+        return _require_bool_flag(plugin, attr_name="passes_through_input")
 
     @implements_dispatch_site("post_emission_check")
     def post_emission_check(
@@ -167,7 +163,7 @@ class PassThroughDeclarationContract(DeclarationContract):
         verify_pass_through(
             input_fields=inputs.effective_input_fields,
             emitted_rows=outputs.emitted_rows,
-            can_drop_rows=inputs.plugin.can_drop_rows,
+            can_drop_rows=_require_bool_flag(inputs.plugin, attr_name="can_drop_rows"),
             static_contract=inputs.static_contract,
             transform_name=inputs.plugin.name,
             transform_node_id=transform_node_id,
@@ -194,7 +190,7 @@ class PassThroughDeclarationContract(DeclarationContract):
         verify_pass_through(
             input_fields=inputs.effective_input_fields,
             emitted_rows=outputs.emitted_rows,
-            can_drop_rows=inputs.plugin.can_drop_rows,
+            can_drop_rows=_require_bool_flag(inputs.plugin, attr_name="can_drop_rows"),
             static_contract=inputs.static_contract,
             transform_name=inputs.plugin.name,
             transform_node_id=transform_node_id,

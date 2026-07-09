@@ -27,12 +27,16 @@ lines 2941-2982):
    hashed — the hash chain has no silent intermediate step.
 
 Scope note: this test exercises the Task 9 hash plumbing in isolation. The
-composer's ``options.prompt_template`` (composer convention) does not map to
-the runtime ``LLMConfig.template`` (Pydantic-required runtime field), which
-means the full ``state_from_record → generate_yaml → ExecutionGraph`` path
-cannot currently execute an LLM transform end-to-end. That bridge is a
-separate Phase 5b coverage gap tracked outside this commit; the hash anchor
-plumbing itself is verified here.
+composer's ``options.prompt_template`` maps directly to the runtime LLM config
+field, which is also named ``prompt_template`` (``LLMConfig.prompt_template``,
+``plugins/transforms/llm/base.py``) — there is no ``LLMConfig.template``. The
+``state_from_record → generate_yaml → validate_pipeline`` path therefore
+validates and builds the runtime graph for a complete LLM transform fine
+(empirically: a ``text → llm → json`` composer pipeline passes the real
+``validate_pipeline``). What this isolated hash-plumbing test does not exercise
+is a *live* end-to-end run: the provider client and its API key are built in
+``on_start()`` at run time, so actually issuing the LLM call needs real
+credentials — orthogonal to the hash anchor verified here.
 
 Operates under the operator-acknowledged assumption that 18a Task 0
 (empirical LLM gate ≥ 8/10 staging runs emit ``{{interpretation:<term>}}``)
@@ -43,9 +47,9 @@ from __future__ import annotations
 
 import json as jsonlib
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock, Mock
 
 import pytest
 import structlog
@@ -73,6 +77,68 @@ from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+@dataclass(frozen=True)
+class _FakeOpenAIMessage:
+    content: str
+
+
+@dataclass(frozen=True)
+class _FakeOpenAIChoice:
+    message: _FakeOpenAIMessage
+    finish_reason: str = "stop"
+
+
+@dataclass(frozen=True)
+class _FakeOpenAIUsage:
+    prompt_tokens: int = 10
+    completion_tokens: int = 5
+    total_tokens: int = 15
+
+
+@dataclass(frozen=True)
+class _FakeOpenAIResponse:
+    choices: list[_FakeOpenAIChoice]
+    model: str
+    usage: _FakeOpenAIUsage = field(default_factory=_FakeOpenAIUsage)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "id": "resp_test",
+            "choices": [
+                {
+                    "finish_reason": choice.finish_reason,
+                    "message": {"content": choice.message.content},
+                }
+                for choice in self.choices
+            ],
+            "usage": {
+                "prompt_tokens": self.usage.prompt_tokens,
+                "completion_tokens": self.usage.completion_tokens,
+                "total_tokens": self.usage.total_tokens,
+            },
+        }
+
+
+class _FakeOpenAICompletions:
+    def __init__(self, response: _FakeOpenAIResponse) -> None:
+        self.response = response
+        self.requests: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> _FakeOpenAIResponse:
+        self.requests.append(kwargs)
+        return self.response
+
+
+class _FakeOpenAIChat:
+    def __init__(self, response: _FakeOpenAIResponse) -> None:
+        self.completions = _FakeOpenAICompletions(response)
+
+
+class _FakeOpenAIClient:
+    def __init__(self, response: _FakeOpenAIResponse) -> None:
+        self.chat = _FakeOpenAIChat(response)
 
 
 def _make_session_service() -> tuple[SessionServiceImpl, Any]:
@@ -105,37 +171,17 @@ def _insert_session(conn: Any, session_id: str) -> None:
     )
 
 
-def _make_fake_openai_response(content: str, model: str) -> Any:
-    """Return a Mock that quacks like an OpenAI Chat Completion response.
+def _make_fake_openai_response(content: str, model: str) -> _FakeOpenAIResponse:
+    """Return an OpenAI Chat Completion response stand-in.
 
     Mirrors the helper in tests/unit/plugins/clients/test_audited_llm_client.py
-    so this integration test exercises the same Mock surface AuditedLLMClient
+    so this integration test exercises the same response surface AuditedLLMClient
     is contractually tested against.
     """
-    message = Mock()
-    message.content = content
-
-    choice = Mock()
-    choice.message = message
-    choice.finish_reason = "stop"
-
-    usage = Mock()
-    usage.prompt_tokens = 10
-    usage.completion_tokens = 5
-    usage.total_tokens = 15
-
-    response = Mock()
-    response.choices = [choice]
-    response.model = model
-    response.usage = usage
-    response.model_dump = Mock(
-        return_value={
-            "id": "resp_test",
-            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-        }
+    return _FakeOpenAIResponse(
+        choices=[_FakeOpenAIChoice(message=_FakeOpenAIMessage(content=content))],
+        model=model,
     )
-    return response
 
 
 class _FakeHTTPXClient:
@@ -315,10 +361,11 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
         input_data={"input": "demo"},
     )
 
-    openai_stub = MagicMock()
-    openai_stub.chat.completions.create.return_value = _make_fake_openai_response(
-        content="7 / 10",
-        model="stub-model",
+    openai_stub = _FakeOpenAIClient(
+        _make_fake_openai_response(
+            content="7 / 10",
+            model="stub-model",
+        )
     )
 
     client = AuditedLLMClient(
@@ -500,10 +547,11 @@ async def test_runtime_handoff_none_hash_records_null() -> None:
         input_data={"input": "demo"},
     )
 
-    openai_stub = MagicMock()
-    openai_stub.chat.completions.create.return_value = _make_fake_openai_response(
-        content="ok",
-        model="stub-model",
+    openai_stub = _FakeOpenAIClient(
+        _make_fake_openai_response(
+            content="ok",
+            model="stub-model",
+        )
     )
 
     client = AuditedLLMClient(

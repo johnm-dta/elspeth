@@ -1,5 +1,0 @@
-{
-  "filename": "barriers_open_responses.csv",
-  "mime_type": "text/csv",
-  "content": "respondent_id,community,age_band,response_text\nR-401,Community-A,45-64,\"Can't get there after work — Saturday clinic full.\"\nR-402,Community-B,18-29,\"Medical vocabulary issues with GP — embarrassed to ask.\"\nR-403,Community-A,65+,\"After husband passed couldn't afford prescriptions — took half doses.\"\nR-404,Community-C,30-44,\"Money fine — feels like a different country in there.\"\nR-405,Community-B,30-44,\"Night warehouse shift — skipping sleep or skipping work for child appointments.\"\n\n"
-}

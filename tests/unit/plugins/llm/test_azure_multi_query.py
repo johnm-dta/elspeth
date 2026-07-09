@@ -7,8 +7,8 @@ provider="azure" and queries={...} config format.
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
@@ -17,7 +17,7 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMProvider, LLMQueryResult
+from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -31,6 +31,48 @@ from .conftest import (
 # ---------------------------------------------------------------------------
 
 DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, return_value: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect: Any = None
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _ProviderDouble:
+    def __init__(self) -> None:
+        self.execute_query = _CallRecorder()
+        self.close = _CallRecorder()
+
+
+class _ExecutionRecorderDouble:
+    def __init__(self) -> None:
+        self.record_call = _CallRecorder()
 
 
 def _make_config(**overrides: Any) -> dict[str, Any]:
@@ -105,10 +147,10 @@ def _make_config(**overrides: Any) -> dict[str, Any]:
     return config
 
 
-def _make_mock_provider(
+def _make_provider(
     responses: Sequence[dict[str, Any] | str] | None = None,
-) -> Mock:
-    """Create a mock LLM provider returning predetermined responses.
+) -> _ProviderDouble:
+    """Create an LLM provider double returning predetermined responses.
 
     If responses is None, returns a default success response for every call.
     Otherwise cycles through the provided responses.
@@ -116,7 +158,7 @@ def _make_mock_provider(
     import itertools
     import json
 
-    mock_provider = Mock(spec=LLMProvider)
+    provider = _ProviderDouble()
 
     if responses is None:
 
@@ -137,7 +179,7 @@ def _make_mock_provider(
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider.execute_query.side_effect = default_execute
+        provider.execute_query.side_effect = default_execute
     else:
         cycle = itertools.cycle(responses)
 
@@ -154,10 +196,9 @@ def _make_mock_provider(
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider.execute_query.side_effect = execute_from_list
+        provider.execute_query.side_effect = execute_from_list
 
-    mock_provider.close = Mock()
-    return mock_provider
+    return provider
 
 
 class TestLLMTransformMultiQueryInit:
@@ -226,9 +267,9 @@ class TestSingleQueryProcessing:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock(spec=LLMProvider)
-        mock_provider.execute_query.side_effect = capture_execute
-        transform._provider = mock_provider
+        provider = _ProviderDouble()
+        provider.execute_query.side_effect = capture_execute
+        transform._provider = provider
 
         row = make_pipeline_row(
             {
@@ -252,7 +293,7 @@ class TestSingleQueryProcessing:
     def test_process_row_parses_json_response(self) -> None:
         """Query parses JSON and returns mapped fields."""
         transform = LLMTransform(_make_config())
-        mock_provider = _make_mock_provider(
+        mock_provider = _make_provider(
             [
                 {"score": 85, "rationale": "CS1 diagnosis"},
                 {"score": 90, "rationale": "CS1 treatment"},
@@ -283,7 +324,7 @@ class TestSingleQueryProcessing:
     def test_process_row_handles_invalid_json(self) -> None:
         """Query returns error on invalid JSON response."""
         transform = LLMTransform(_make_config())
-        mock_provider = _make_mock_provider(["not json"])
+        mock_provider = _make_provider(["not json"])
         transform._provider = mock_provider
 
         row = make_pipeline_row(
@@ -310,7 +351,7 @@ class TestSingleQueryProcessing:
         from elspeth.plugins.infrastructure.templates import TemplateError
 
         transform = LLMTransform(_make_config())
-        mock_provider = _make_mock_provider()
+        mock_provider = _make_provider()
         transform._provider = mock_provider
 
         row = make_pipeline_row(
@@ -343,11 +384,13 @@ class TestSingleQueryProcessing:
         transform = LLMTransform(_make_config())
         assert not transform._on_start_called
 
-        ctx = Mock()
-        ctx.landscape = Mock()
-        ctx.run_id = "test-run"
-        ctx.telemetry_emit = None
-        ctx.rate_limit_registry = None
+        ctx = SimpleNamespace(
+            landscape=_ExecutionRecorderDouble(),
+            run_id="test-run",
+            telemetry_emit=None,
+            rate_limit_registry=None,
+            shutdown_event=None,
+        )
         transform.on_start(ctx)
 
         assert transform._on_start_called
@@ -361,11 +404,9 @@ class TestRowProcessingWithPipelining:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
+    def mock_recorder(self) -> _ExecutionRecorderDouble:
         """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+        return _ExecutionRecorderDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -373,7 +414,7 @@ class TestRowProcessingWithPipelining:
         return CollectorOutputPort()
 
     @pytest.fixture
-    def ctx(self, mock_recorder: Mock) -> PluginContext:
+    def ctx(self, mock_recorder: _ExecutionRecorderDouble) -> PluginContext:
         """Create plugin context with landscape, state_id, and token."""
         token = make_token("row-1")
         return make_context(
@@ -387,7 +428,7 @@ class TestRowProcessingWithPipelining:
     def transform(
         self,
         collector: CollectorOutputPort,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
     ) -> Generator[LLMTransform, None, None]:
         """Create and initialize LLMTransform with multi-query and pipelining."""
         t = LLMTransform(_make_config())
@@ -395,7 +436,7 @@ class TestRowProcessingWithPipelining:
         init_ctx = make_context(run_id="test", landscape=mock_recorder)
         t.on_start(init_ctx)
         # Replace provider with mock
-        t._provider = _make_mock_provider()
+        t._provider = _make_provider()
         # Connect output port
         t.connect_output(collector, max_pending=10)
         yield t
@@ -416,7 +457,7 @@ class TestRowProcessingWithPipelining:
             {"score": 75, "rationale": "CS2 diagnosis"},
             {"score": 80, "rationale": "CS2 treatment"},
         ]
-        transform._provider = _make_mock_provider(responses)
+        transform._provider = _make_provider(responses)
 
         row_data = {
             "cs1_bg": "case1 bg",
@@ -456,7 +497,7 @@ class TestRowProcessingWithPipelining:
             {"score": 75, "rationale": "R3"},
             {"score": 80, "rationale": "R4"},
         ]
-        transform._provider = _make_mock_provider(responses)
+        transform._provider = _make_provider(responses)
 
         row_data = {
             "cs1_bg": "bg1",
@@ -484,7 +525,7 @@ class TestRowProcessingWithPipelining:
         self,
         ctx: PluginContext,
         collector: CollectorOutputPort,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
     ) -> None:
         """Original source headers in input_fields resolve via PipelineRow contract."""
         # Build config with original column names mapped to normalized names
@@ -507,7 +548,7 @@ class TestRowProcessingWithPipelining:
         transform = LLMTransform(config)
         init_ctx = make_context(run_id="test", landscape=mock_recorder)
         transform.on_start(init_ctx)
-        transform._provider = _make_mock_provider([{"score": 85, "rationale": "Looks consistent"}])
+        transform._provider = _make_provider([{"score": 85, "rationale": "Looks consistent"}])
         transform.connect_output(collector, max_pending=10)
 
         contract = SchemaContract(
@@ -568,10 +609,9 @@ class TestRowProcessingWithPipelining:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock(spec=LLMProvider)
-        mock_provider.execute_query.side_effect = fail_on_fourth
-        mock_provider.close = Mock()
-        transform._provider = mock_provider
+        provider = _ProviderDouble()
+        provider.execute_query.side_effect = fail_on_fourth
+        transform._provider = provider
 
         row_data = {
             "cs1_bg": "bg",
@@ -593,7 +633,7 @@ class TestRowProcessingWithPipelining:
         assert result.reason is not None
         assert "json" in result.reason["reason"].lower()
 
-    def test_connect_output_required_before_accept(self, mock_recorder: Mock) -> None:
+    def test_connect_output_required_before_accept(self, mock_recorder: _ExecutionRecorderDouble) -> None:
         """accept() raises RuntimeError if connect_output() not called."""
         transform = LLMTransform(_make_config())
 
@@ -610,7 +650,7 @@ class TestRowProcessingWithPipelining:
     def test_connect_output_cannot_be_called_twice(
         self,
         collector: CollectorOutputPort,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
     ) -> None:
         """connect_output() raises if called more than once."""
         transform = LLMTransform(_make_config())
@@ -629,11 +669,9 @@ class TestMultiRowPipelining:
     """Tests for processing multiple rows with FIFO ordering."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
+    def mock_recorder(self) -> _ExecutionRecorderDouble:
         """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+        return _ExecutionRecorderDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -642,7 +680,7 @@ class TestMultiRowPipelining:
 
     def test_multiple_rows_processed_in_fifo_order(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
         collector: CollectorOutputPort,
     ) -> None:
         """Multiple rows are emitted in submission order (FIFO).
@@ -654,7 +692,7 @@ class TestMultiRowPipelining:
         transform = LLMTransform(config)
         init_ctx = make_context(run_id="test", landscape=mock_recorder)
         transform.on_start(init_ctx)
-        transform._provider = _make_mock_provider()
+        transform._provider = _make_provider()
         transform.connect_output(collector, max_pending=10)
 
         try:
@@ -689,7 +727,7 @@ class TestMultiRowPipelining:
             assert result.row is not None
             assert result.row["row_id"] == f"row-{i}"
 
-    def test_on_start_captures_recorder(self, mock_recorder: Mock) -> None:
+    def test_on_start_captures_recorder(self, mock_recorder: _ExecutionRecorderDouble) -> None:
         """on_start() captures recorder reference for provider creation."""
         transform = LLMTransform(_make_config())
 
@@ -708,14 +746,14 @@ class TestMultiRowPipelining:
 
     def test_close_clears_recorder_and_provider(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
         collector: CollectorOutputPort,
     ) -> None:
         """close() clears recorder reference and provider."""
         transform = LLMTransform(_make_config())
         init_ctx = make_context(run_id="test", landscape=mock_recorder)
         transform.on_start(init_ctx)
-        transform._provider = _make_mock_provider()
+        transform._provider = _make_provider()
         transform.connect_output(collector, max_pending=10)
 
         assert transform._recorder is not None
@@ -730,11 +768,9 @@ class TestMultiQueryWithMockProvider:
     """Tests for multi-query using mock provider (no ChaosLLM server)."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
+    def mock_recorder(self) -> _ExecutionRecorderDouble:
         """Create mock ExecutionRepository."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+        return _ExecutionRecorderDouble()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -743,7 +779,7 @@ class TestMultiQueryWithMockProvider:
 
     def test_parallel_mode_includes_no_pool_stats_in_context_after(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
         collector: CollectorOutputPort,
     ) -> None:
         """Multi-query with mocked provider processes correctly.
@@ -756,7 +792,7 @@ class TestMultiQueryWithMockProvider:
         transform = LLMTransform(config)
         init_ctx = make_context(run_id="test", landscape=mock_recorder)
         transform.on_start(init_ctx)
-        transform._provider = _make_mock_provider([{"score": i, "rationale": f"R{i}"} for i in range(4)])
+        transform._provider = _make_provider([{"score": i, "rationale": f"R{i}"} for i in range(4)])
         transform.connect_output(collector, max_pending=10)
 
         try:
@@ -791,7 +827,7 @@ class TestMultiQueryWithMockProvider:
 
     def test_sequential_mode_processes_rows(
         self,
-        mock_recorder: Mock,
+        mock_recorder: _ExecutionRecorderDouble,
         collector: CollectorOutputPort,
     ) -> None:
         """Sequential mode (no pool_size) processes rows correctly."""
@@ -801,7 +837,7 @@ class TestMultiQueryWithMockProvider:
         transform = LLMTransform(config)
         init_ctx = make_context(run_id="test", landscape=mock_recorder)
         transform.on_start(init_ctx)
-        transform._provider = _make_mock_provider([{"score": i, "rationale": f"R{i}"} for i in range(4)])
+        transform._provider = _make_provider([{"score": i, "rationale": f"R{i}"} for i in range(4)])
         transform.connect_output(collector, max_pending=10)
 
         try:
@@ -844,7 +880,7 @@ class TestBug4_1_KeyErrorInBuildTemplateContext:
     def test_missing_input_field_returns_error(self) -> None:
         """Row missing required input field returns error instead of crashing."""
         transform = LLMTransform(_make_config())
-        mock_provider = _make_mock_provider()
+        mock_provider = _make_provider()
         transform._provider = mock_provider
 
         # Row is missing cs1_bg, cs1_sym, cs1_hist — required by first query

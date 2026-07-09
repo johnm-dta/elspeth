@@ -36,13 +36,15 @@ import os
 import textwrap
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
-from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH, JudgeRequest, JudgeResponse
 from elspeth_lints.core.reaudit import (
     _EXCLUDED_FROM_REAUDIT,
     _RULE_VOCABULARY_REGISTRY,
@@ -295,6 +297,77 @@ def test_generic_dispatch_reaudits_composer_catch_order_end_to_end(tmp_path: Pat
     assert client_class.return_value.chat.completions.create.call_count == 1
 
 
+def test_reaudit_uses_non_tier_rule_definition_for_generic_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-tier-model reaudit judge call receives the active rule's definition."""
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+    root = tmp_path / "src_root"
+    target = root / "models.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        textwrap.dedent(
+            """\
+            from dataclasses import dataclass
+            from types import MappingProxyType
+
+
+            @dataclass(frozen=True)
+            class FrozenConfig:
+                values: dict[str, str]
+
+                def __post_init__(self) -> None:
+                    object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+            """
+        ),
+        encoding="utf-8",
+    )
+    findings = _scan_via_rule_analyze(
+        rule_filter="immutability.freeze_guards",
+        target_file=target,
+        root=root,
+    )
+    finding = next(finding for finding in findings if finding.rule_id == "FG1")
+    allowlist_dir = tmp_path / "allowlist"
+    allowlist_dir.mkdir()
+    (allowlist_dir / "_defaults.yaml").write_text(
+        "version: 1\ndefaults:\n  fail_on_stale: false\n  fail_on_expired: false\n",
+        encoding="utf-8",
+    )
+    _write_pre_judge_allow_hit(allowlist_dir / "freeze.yaml", key=finding.canonical_key())
+    captured: dict[str, str] = {}
+
+    def _fake_call_judge(request: JudgeRequest, **_kwargs: object) -> JudgeResponse:
+        captured["rule_definition"] = request.rule_definition
+        return JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id=DEFAULT_JUDGE_MODEL,
+            judge_rationale="freeze guard suppression still warranted",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.91,
+            prompt_tokens_total=4000,
+            prompt_tokens_cached=0,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport="openrouter",
+        )
+
+    monkeypatch.setattr("elspeth_lints.core.reaudit.call_judge", _fake_call_judge)
+
+    report = reaudit_entries(
+        root=root.resolve(),
+        allowlist_dir=allowlist_dir,
+        rule_filter="immutability.freeze_guards",
+        since=None,
+        limit=None,
+        include_pre_judge=True,
+    )
+
+    assert report.outcomes[0].divergence is ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT
+    assert "FG1" in captured["rule_definition"]
+    assert "Bare MappingProxyType wrap" in captured["rule_definition"]
+    assert "recursive immutability" in captured["rule_definition"]
+    assert "no definition available" not in captured["rule_definition"]
+
+
 def _single_catch_order_finding(*, root: Path, target: Path):
     findings = _scan_via_rule_analyze(
         rule_filter="composer.catch_order",
@@ -334,29 +407,44 @@ def _write_pre_judge_allow_hit(path: Path, *, key: str) -> None:
     )
 
 
-def _mock_openrouter_completion(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> MagicMock:
-    message = MagicMock()
-    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
-    choice = MagicMock()
-    choice.message = message
-    choice.finish_reason = "stop"
-    completion = MagicMock()
-    completion.choices = [choice]
-    completion.model = served_model
-    completion.usage = MagicMock(
-        prompt_tokens=4000,
-        prompt_tokens_details=MagicMock(cached_tokens=0),
+class _RecordingCompletionCreate:
+    def __init__(self, completion: SimpleNamespace) -> None:
+        self._completion = completion
+        self.call_count = 0
+
+    def __call__(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        self.call_count += 1
+        return self._completion
+
+
+class _OpenAIFactory:
+    def __init__(self, return_value: SimpleNamespace) -> None:
+        self.return_value = return_value
+
+    def __call__(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return self.return_value
+
+
+def _mock_openrouter_completion(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> SimpleNamespace:
+    message = SimpleNamespace(
+        content=json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
     )
-    return completion
+    choice = SimpleNamespace(message=message, finish_reason="stop")
+    usage = SimpleNamespace(
+        prompt_tokens=4000,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+    )
+    return SimpleNamespace(choices=[choice], model=served_model, usage=usage)
 
 
 @contextmanager
-def _mock_judge_call(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> Iterator[MagicMock]:
+def _mock_judge_call(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> Iterator[_OpenAIFactory]:
     fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale, served_model=served_model)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_create = _RecordingCompletionCreate(fake_completion)
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    fake_openai = _OpenAIFactory(fake_client)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
-        patch("openai.OpenAI", return_value=fake_client) as client_class,
+        patch("openai.OpenAI", new=fake_openai),
     ):
-        yield client_class
+        yield fake_openai

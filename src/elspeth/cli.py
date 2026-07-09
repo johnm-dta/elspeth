@@ -29,11 +29,11 @@ from elspeth.contracts.errors import (
     GracefulShutdownError,
     IncompleteSourceResumeError,
 )
+from elspeth.contracts.preflight import PreflightResult
 from elspeth.contracts.types import AggregationName
 from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
-from elspeth.core.dependency_config import PreflightResult
 from elspeth.core.security.config_secrets import SecretLoadError, load_secrets_from_config
 
 if TYPE_CHECKING:
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
     from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
+    from elspeth.web.auth.local import LocalAuthProvider
 __all__ = [
     "app",
     "load_settings",  # Re-exported from config for convenience
@@ -54,6 +55,10 @@ app = typer.Typer(
     help="ELSPETH: Auditable Sense/Decide/Act pipelines.",
     no_args_is_help=True,
 )
+composer_app = typer.Typer(help="Composer web UI commands.")
+composer_users_app = typer.Typer(help="Local composer user management commands.")
+app.add_typer(composer_app, name="composer")
+composer_app.add_typer(composer_users_app, name="users")
 
 
 def version_callback(value: bool) -> None:
@@ -90,6 +95,36 @@ def _load_dotenv(env_file: Path | None = None) -> bool:
 
     # load_dotenv searches current dir and parents by default
     return load_dotenv(override=False)  # Don't override existing env vars
+
+
+def _emit_schema_compatibility_error(
+    error: Exception,
+    output_format: Literal["console", "json"] = "console",
+    *,
+    operation: str,
+) -> None:
+    """Emit stale/incompatible Landscape schema errors without a traceback."""
+    if output_format == "json":
+        import json as json_module
+
+        typer.echo(
+            json_module.dumps(
+                {
+                    "event": "schema_compatibility_error",
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                }
+            ),
+            err=True,
+        )
+        return
+
+    typer.secho(
+        f"Landscape database schema compatibility error during {operation}.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    typer.echo(str(error), err=True)
 
 
 @app.callback()
@@ -189,12 +224,19 @@ def _ensure_output_directories(config: ElspethSettings) -> list[str]:
     payload_path = config.payload_store.base_path
     if not payload_path.exists():
         try:
-            payload_path.mkdir(parents=True, exist_ok=True)
+            # FilesystemPayloadStore rejects group/world-writable roots. mkdir()
+            # mode is still filtered through umask, so normalize only the root
+            # this preflight creates instead of weakening validation later.
+            payload_path.mkdir(mode=0o700, parents=True, exist_ok=False)
+            os.chmod(payload_path, 0o700)
+        except FileExistsError as e:
+            if not payload_path.exists():
+                errors.append(f"Cannot create payload store directory: {payload_path.resolve()}\n  Error: {e}")
         except OSError as e:
             errors.append(f"Cannot create payload store directory: {payload_path.resolve()}\n  Error: {e}")
-    elif not payload_path.is_dir():
+    if payload_path.exists() and not payload_path.is_dir():
         errors.append(f"Payload store path exists but is not a directory: {payload_path.resolve()}")
-    elif not os.access(payload_path, os.W_OK):
+    elif payload_path.exists() and not os.access(payload_path, os.W_OK):
         errors.append(f"Payload store directory is not writable: {payload_path.resolve()}")
 
     # 3. Ensure sink output directories exist (for file-based sinks)
@@ -500,6 +542,7 @@ def run(
         raise typer.Exit(1) from None
 
     # Resolve dependencies and commencement gates before pipeline execution
+    from elspeth.core.landscape.database import SchemaCompatibilityError
     from elspeth.engine.bootstrap import resolve_preflight
     from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
 
@@ -508,6 +551,9 @@ def run(
         preflight = resolve_preflight(config, settings_path, probes=probes, runner=bootstrap_and_run)
     except (DependencyFailedError, CommencementGateFailedError, ValueError) as e:
         typer.echo(f"Pre-flight check failed: {e}", err=True)
+        raise typer.Exit(1) from None
+    except SchemaCompatibilityError as e:
+        _emit_schema_compatibility_error(e, output_format, operation="pre-flight check")
         raise typer.Exit(1) from None
     except contract_errors.TIER_1_ERRORS as e:
         import traceback
@@ -573,6 +619,9 @@ def run(
             typer.echo(f"\nWorker evicted from run {e.run_id}.", err=True)
             typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
         raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
+    except SchemaCompatibilityError as e:
+        _emit_schema_compatibility_error(e, output_format, operation="pipeline execution")
+        raise typer.Exit(1) from None
     except contract_errors.TIER_1_ERRORS as e:
         # Tier 1 violations and framework bugs MUST be clearly distinguishable
         # from config errors. These indicate database corruption, tampering,
@@ -696,11 +745,11 @@ def explain(
     from elspeth.cli_helpers import resolve_database_url, resolve_run_id
     from elspeth.core.landscape import (
         LandscapeDB,
-        LineageTextFormatter,
-        dataclass_to_dict,
     )
     from elspeth.core.landscape import explain as explain_lineage
     from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.core.landscape.lineage_text import LineageTextFormatter
+    from elspeth.core.landscape.serialization import dataclass_to_dict
 
     if database is None:
         message = "--database is required for explain."
@@ -842,7 +891,9 @@ def explain(
 
     finally:
         if db is not None:
-            db.close()
+            import sys
+
+            _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 @dataclass(frozen=True, slots=True)
@@ -1433,40 +1484,6 @@ plugins_app = typer.Typer(help="Plugin management commands.")
 app.add_typer(plugins_app, name="plugins")
 
 
-@dataclass(frozen=True, slots=True)
-class PluginInfo:
-    """Metadata for a registered plugin.
-
-    Attributes:
-        name: The plugin identifier used in configuration files.
-        description: Human-readable description of the plugin's purpose.
-    """
-
-    name: str
-    description: str
-
-
-def _build_plugin_registry() -> dict[str, list[PluginInfo]]:
-    """Build plugin registry dynamically from discovered plugins.
-
-    Uses PluginManager to discover all plugins and extracts descriptions
-    from their docstrings.
-
-    Returns:
-        Dict mapping plugin type to list of PluginInfo for each plugin.
-    """
-    from elspeth.plugins.infrastructure.discovery import get_plugin_description
-    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-
-    manager = get_shared_plugin_manager()
-
-    return {
-        "source": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sources()],
-        "transform": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_transforms()],
-        "sink": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sinks()],
-    }
-
-
 @plugins_app.command("list")
 def plugins_list(
     plugin_type: str | None = typer.Option(
@@ -1475,32 +1492,157 @@ def plugins_list(
         "-t",
         help="Filter by plugin type (source, transform, sink).",
     ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format (text, json).",
+    ),
 ) -> None:
     """List available plugins."""
-    # Build registry dynamically from discovered plugins
-    registry = _build_plugin_registry()
-    valid_types = set(registry.keys())
+    from elspeth.cli_plugins import format_plugins_list_text, list_plugins_payload, list_plugins_text_payload, parse_plugin_kind
 
-    if plugin_type and plugin_type not in valid_types:
-        typer.echo(f"Error: Invalid type '{plugin_type}'.", err=True)
-        typer.echo(f"Valid types: {', '.join(sorted(valid_types))}", err=True)
+    if output_format not in {"text", "json"}:
+        typer.echo(f"Error: Invalid format '{output_format}'.", err=True)
+        typer.echo("Valid formats: text, json", err=True)
         raise typer.Exit(1)
 
-    types_to_show = [plugin_type] if plugin_type else list(registry.keys())
+    try:
+        parsed_type = parse_plugin_kind(plugin_type) if plugin_type is not None else None
+        payload = list_plugins_payload(parsed_type) if output_format == "json" else list_plugins_text_payload(parsed_type)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
 
-    for ptype in types_to_show:
-        # types_to_show only contains keys from registry (either filtered by validated plugin_type
-        # or directly from registry.keys()), so direct access is safe
-        plugins = registry[ptype]
-        if plugins:
-            typer.echo(f"\n{ptype.upper()}S:")
-            for plugin in plugins:
-                typer.echo(f"  {plugin.name:20} - {plugin.description}")
-        else:
-            typer.echo(f"\n{ptype.upper()}S:")
-            typer.echo("  (none available)")
+    if output_format == "json":
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
 
-    typer.echo()  # Final newline
+    typer.echo(format_plugins_list_text(payload), nl=False)
+
+
+@plugins_app.command("inspect")
+def plugins_inspect(
+    plugin_type: str = typer.Argument(..., help="Plugin type (source, transform, sink)."),
+    name: str = typer.Argument(..., help="Plugin name."),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format (text, json).",
+    ),
+) -> None:
+    """Inspect one plugin's catalog schema."""
+    from elspeth.cli_plugins import format_plugin_inspect_text, inspect_plugin_payload, parse_plugin_kind
+
+    if output_format not in {"text", "json"}:
+        typer.echo(f"Error: Invalid format '{output_format}'.", err=True)
+        typer.echo("Valid formats: text, json", err=True)
+        raise typer.Exit(1)
+
+    try:
+        parsed_type = parse_plugin_kind(plugin_type)
+        payload = inspect_plugin_payload(parsed_type, name)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    if output_format == "json":
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    typer.echo(format_plugin_inspect_text(payload), nl=False)
+
+
+def _resolve_composer_auth_db(*, data_dir: Path, auth_db: Path | None) -> Path:
+    path = auth_db if auth_db is not None else data_dir / "auth.db"
+    return path.expanduser().resolve()
+
+
+def _composer_auth_provider(auth_db: Path) -> LocalAuthProvider:
+    from elspeth.web.auth.local import LocalAuthProvider
+
+    auth_db.parent.mkdir(parents=True, exist_ok=True)
+    secret_key = os.environ.get("ELSPETH_WEB__SECRET_KEY", "composer-cli-user-management")
+    return LocalAuthProvider(db_path=auth_db, secret_key=secret_key)
+
+
+@composer_users_app.command("add")
+def composer_users_add(
+    username: str = typer.Argument(..., help="Local composer username to create."),
+    password: str = typer.Option(
+        ...,
+        "--password",
+        prompt=True,
+        confirmation_prompt=True,
+        hide_input=True,
+        help="Initial password for the local composer user.",
+    ),
+    display_name: str | None = typer.Option(
+        None,
+        "--display-name",
+        help="Display name. Defaults to the username.",
+    ),
+    email: str | None = typer.Option(None, "--email", help="Optional user email."),
+    data_dir: Path = typer.Option(
+        Path("data"),
+        "--data-dir",
+        help="Web data directory containing auth.db.",
+    ),
+    auth_db: Path | None = typer.Option(
+        None,
+        "--auth-db",
+        help="Explicit auth.db path; overrides --data-dir.",
+    ),
+) -> None:
+    """Add a local user for the Composer web interface."""
+    db_path = _resolve_composer_auth_db(data_dir=data_dir, auth_db=auth_db)
+    provider = _composer_auth_provider(db_path)
+    try:
+        provider.create_user(
+            username,
+            password,
+            display_name=display_name or username,
+            email=email,
+            email_verified=True,
+        )
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Added composer user {username} in {db_path}")
+
+
+@composer_users_app.command("remove")
+def composer_users_remove(
+    username: str = typer.Argument(..., help="Local composer username to remove."),
+    data_dir: Path = typer.Option(
+        Path("data"),
+        "--data-dir",
+        help="Web data directory containing auth.db.",
+    ),
+    auth_db: Path | None = typer.Option(
+        None,
+        "--auth-db",
+        help="Explicit auth.db path; overrides --data-dir.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Remove without an interactive confirmation prompt.",
+    ),
+) -> None:
+    """Remove a local Composer web user."""
+    db_path = _resolve_composer_auth_db(data_dir=data_dir, auth_db=auth_db)
+    if not db_path.exists():
+        typer.echo(f"Error: composer auth database not found: {db_path}", err=True)
+        raise typer.Exit(1)
+    if not yes and not typer.confirm(f"Remove composer user {username} from {db_path}?"):
+        typer.echo("Aborted.")
+        raise typer.Exit(1)
+    provider = _composer_auth_provider(db_path)
+    if not provider.delete_user(username):
+        typer.echo(f"Error: composer user not found: {username}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Removed composer user {username} from {db_path}")
 
 
 @app.command()
@@ -1709,7 +1851,9 @@ def purge(
             for run_id in result.grade_update_failures[:5]:
                 typer.echo(f"    {run_id}")
     finally:
-        db.close()
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 def _execute_resume_with_instances(
@@ -1981,7 +2125,7 @@ def resume(
         existing_tables = set(inspector.get_table_names())
     except Exception as e:
         typer.echo(f"Error inspecting database schema: {e}", err=True)
-        db.close()
+        _close_landscape_db(db, pending_exc=e)
         raise typer.Exit(1) from None
 
     required_tables = {"runs", "tokens", "node_states"}
@@ -1993,8 +2137,9 @@ def resume(
             f"Check the database path.",
             err=True,
         )
-        db.close()
-        raise typer.Exit(1) from None
+        exit_exc = typer.Exit(1)
+        _close_landscape_db(db, pending_exc=exit_exc)
+        raise exit_exc from None
 
     try:
         checkpoint_manager = CheckpointManager(db)
@@ -2335,7 +2480,9 @@ def resume(
         _emit_not_resumable_event(e, output_format)
         raise typer.Exit(1) from e
     finally:
-        db.close()
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 @app.command()

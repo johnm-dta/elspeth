@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import stat
 import subprocess
 import sys
 import textwrap
@@ -49,6 +50,14 @@ def test_happy_path_writes_content_and_leaves_no_temp(tmp_path: Path) -> None:
     # Only the target and the persistent lockfile may remain.
     residue = sorted(p.name for p in tmp_path.iterdir())
     assert residue == [".allowlist.yaml.lock", "allowlist.yaml"]
+
+
+def test_atomic_write_text_uses_owner_only_target_permissions(tmp_path: Path) -> None:
+    target = tmp_path / "allowlist.yaml"
+    atomic_write_text(target, "allow_hits: []\n")
+
+    mode = stat.S_IMODE(target.stat().st_mode)
+    assert mode & 0o077 == 0
 
 
 def test_overwrites_existing_file_atomically(tmp_path: Path) -> None:

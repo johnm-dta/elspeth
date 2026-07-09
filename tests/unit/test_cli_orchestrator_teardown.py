@@ -14,15 +14,20 @@ orchestrator context.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from typer.testing import CliRunner
 
 import elspeth.contracts.errors as contract_errors
-from elspeth.cli import _close_orchestrator_resources
+from elspeth.cli import _close_orchestrator_resources, app
 
 
 class _CloseRaises:
@@ -43,6 +48,40 @@ class _CloseOk:
         self.closed = True
 
 
+@dataclass(slots=True)
+class _LandscapeDBFactory:
+    db: object
+
+    def from_url(self, *_args: object, **_kwargs: object) -> object:
+        return self.db
+
+
+@dataclass(slots=True)
+class _FakePayloadStore:
+    base_path: Path
+
+
+class _FakeOrchestrator:
+    def __init__(self, run_result: object | BaseException) -> None:
+        self._run_result = run_result
+
+    def run(self, *_args: object, **_kwargs: object) -> object:
+        if isinstance(self._run_result, BaseException):
+            raise self._run_result
+        return self._run_result
+
+
+@dataclass(slots=True)
+class _FakeContextManager:
+    value: object
+
+    def __enter__(self) -> object:
+        return self.value
+
+    def __exit__(self, *_exc_info: object) -> bool:
+        return False
+
+
 def _interactive_config() -> SimpleNamespace:
     return SimpleNamespace(
         landscape=SimpleNamespace(
@@ -61,27 +100,22 @@ def _interactive_config() -> SimpleNamespace:
 
 
 @contextmanager
-def _patched_interactive_execution(mock_db: MagicMock, mock_run_result: object | BaseException):
-    mock_ctx = MagicMock()
-    mock_ctx.pipeline_config = MagicMock()
-    if isinstance(mock_run_result, BaseException):
-        mock_ctx.orchestrator.run.side_effect = mock_run_result
-    else:
-        mock_ctx.orchestrator.run.return_value = mock_run_result
+def _patched_interactive_execution(db: object, run_result: object | BaseException):
+    ctx = SimpleNamespace(
+        pipeline_config=SimpleNamespace(),
+        orchestrator=_FakeOrchestrator(run_result),
+    )
 
     with (
-        patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
-        patch("elspeth.core.payload_store.FilesystemPayloadStore"),
-        patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
-        patch("elspeth.plugins.infrastructure.runtime_factory.make_sink_factory", return_value=MagicMock()),
+        patch("elspeth.core.landscape.LandscapeDB", new=_LandscapeDBFactory(db)),
+        patch("elspeth.core.payload_store.FilesystemPayloadStore", new=_FakePayloadStore),
+        patch("elspeth.cli._orchestrator_context", new=lambda *_args, **_kwargs: _FakeContextManager(ctx)),
+        patch("elspeth.plugins.infrastructure.runtime_factory.make_sink_factory", new=lambda _config: object()),
         patch(
             "elspeth.plugins.transforms.llm.model_catalog.read_openrouter_catalog_snapshot_id",
-            return_value=("sha256", "test"),
+            new=lambda: ("sha256", "test"),
         ),
     ):
-        mock_db_cls.from_url.return_value = mock_db
-        mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-        mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
         yield
 
 
@@ -135,13 +169,12 @@ def test_interactive_pipeline_failure_is_not_masked_by_db_close_failure():
     """The interactive run wrapper must preserve the primary orchestrator error."""
     from elspeth.cli import _execute_pipeline_with_instances
 
-    mock_db = MagicMock()
-    mock_db.close.side_effect = RuntimeError("close failed")
-    with _patched_interactive_execution(mock_db, ValueError("pipeline failed")), pytest.raises(ValueError, match="pipeline failed"):
+    db = _CloseRaises(RuntimeError("close failed"))
+    with _patched_interactive_execution(db, ValueError("pipeline failed")), pytest.raises(ValueError, match="pipeline failed"):
         _execute_pipeline_with_instances(
             _interactive_config(),
-            graph=MagicMock(),
-            plugins=MagicMock(),
+            graph=object(),
+            plugins=object(),
         )
 
 
@@ -149,12 +182,52 @@ def test_interactive_success_propagates_db_close_failure():
     """A clean interactive run must not report success when db.close() failed."""
     from elspeth.cli import _execute_pipeline_with_instances
 
-    mock_db = MagicMock()
-    mock_db.close.side_effect = RuntimeError("close failed")
+    db = _CloseRaises(RuntimeError("close failed"))
     run_result = SimpleNamespace(run_id="run-1", status="completed", rows_processed=1)
-    with _patched_interactive_execution(mock_db, run_result), pytest.raises(RuntimeError, match="close failed"):
+    with _patched_interactive_execution(db, run_result), pytest.raises(RuntimeError, match="close failed"):
         _execute_pipeline_with_instances(
             _interactive_config(),
-            graph=MagicMock(),
-            plugins=MagicMock(),
+            graph=object(),
+            plugins=object(),
         )
+
+
+def test_explain_exit_not_masked_by_db_close_failure():
+    """The explain command's intended CLI exit must survive database close failure."""
+    db = _CloseRaises(RuntimeError("close failed"))
+
+    with (
+        patch("elspeth.cli_helpers.resolve_database_url", new=lambda _database, _settings_path: ("sqlite:///audit.db", None)),
+        patch("elspeth.cli_helpers.resolve_audit_passphrase", new=lambda _landscape_settings: None),
+        patch("elspeth.cli_helpers.resolve_run_id", new=lambda _run_id, _factory: None),
+        patch("elspeth.core.landscape.LandscapeDB", new=_LandscapeDBFactory(db)),
+        patch("elspeth.core.landscape.factory.RecorderFactory", new=lambda _db: SimpleNamespace()),
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["explain", "--run", "latest", "--row", "row-1", "--no-tui", "--database", "audit.db"],
+        )
+
+    assert result.exit_code == 1
+    assert getattr(result.exception, "code", None) == 1
+    assert "No runs found in database" in result.output
+    assert "close failed" not in str(result.exception)
+
+
+def test_cli_db_commands_use_failure_preserving_close_helper():
+    """Resume, explain, and purge must not use bare db.close() teardown."""
+    import elspeth.cli as cli
+
+    for command in (cli.resume, cli.explain, cli.purge):
+        source = textwrap.dedent(inspect.getsource(command))
+        assert "_close_landscape_db" in source, command.__name__
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "close"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "db"
+            ):
+                pytest.fail(f"{command.__name__} uses bare db.close() instead of _close_landscape_db()")

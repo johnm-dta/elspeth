@@ -9,9 +9,13 @@ from sqlalchemy import update
 
 from elspeth.contracts import NodeType
 from elspeth.core.canonical import stable_hash
-from elspeth.core.landscape.schema import rows_table
+from elspeth.core.landscape.schema import rows_table, runs_table
 from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
-from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
+from elspeth.web.sessions.audit_story_service import (
+    AuditStoryIntegrityError,
+    AuditStoryNotRecordedError,
+    AuditStoryService,
+)
 from tests.fixtures.landscape import make_landscape_db
 
 
@@ -21,7 +25,7 @@ def test_audit_story_reads_real_landscape_rows() -> None:
     run_id = write_repo.record_synthesised_run(
         pipeline_yaml="source: {}\n",
         rows=[{"url": "ato.gov.au", "rating": 5}],
-        source_data_hash="a7f3e2cached",
+        source_data_hash="1" * 64,
         llm_call_count=0,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -42,7 +46,7 @@ def test_audit_story_reads_real_landscape_rows() -> None:
     assert story.run_id == "session-run-1"
     assert story.session_id == "session-1"
     assert story.llm_call_count == 0
-    assert story.source_data_hash == "a7f3e2cached"
+    assert story.source_data_hash == "1" * 64
     assert "output_file_hash" not in story.model_dump()
     assert story.started_at == datetime(2026, 5, 15, tzinfo=UTC).replace(tzinfo=None) or story.started_at == datetime(
         2026, 5, 15, tzinfo=UTC
@@ -58,7 +62,7 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
     run_id = write_repo.record_synthesised_run(
         pipeline_yaml="source: {}\n",
         rows=[{"url": "ato.gov.au"}, {"url": "data.gov.au"}],
-        source_data_hash="initial",
+        source_data_hash="2" * 64,
         llm_call_count=0,
         node_specs=[
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
@@ -86,6 +90,66 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
     )
 
     assert story.source_data_hash == stable_hash({"source_data_hashes": list(hashes)})
+
+
+def _record_run(db: object) -> str:
+    """Record a minimal synthesised run with a complete audit story."""
+    return LandscapeWriteRepository(db).record_synthesised_run(  # type: ignore[arg-type]
+        pipeline_yaml="source: {}\n",
+        rows=[{"url": "ato.gov.au"}],
+        source_data_hash="3" * 64,
+        llm_call_count=1,
+        node_specs=[
+            SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
+            SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="tutorial_summary", plugin_version="1.0"),
+        ],
+        started_at=datetime(2026, 5, 15, tzinfo=UTC),
+        metadata={"seeded_from_cache": False, "cache_key": "d" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
+    )
+
+
+def test_audit_story_null_llm_call_count_raises_not_recorded_error() -> None:
+    """A NULL llm_call_count means the audit-story columns were never written
+    for this run — the normal, expected state for every non-tutorial run today.
+    That is a distinct absent-state (mapped to 404 at the HTTP boundary), NOT
+    an integrity violation (500)."""
+    db = make_landscape_db()
+    run_id = _record_run(db)
+    with db.connection() as conn:
+        conn.execute(update(runs_table).where(runs_table.c.run_id == run_id).values(llm_call_count=None))
+
+    with pytest.raises(AuditStoryNotRecordedError):
+        AuditStoryService(db).get_run_audit_story(
+            run_id,
+            public_run_id="session-run-1",
+            session_id="session-1",
+        )
+
+
+def test_audit_story_not_recorded_error_is_not_an_integrity_error() -> None:
+    """The absent-state must never route through the integrity-error handler
+    (structured 500); it has its own 404 mapping."""
+    assert not issubclass(AuditStoryNotRecordedError, AuditStoryIntegrityError)
+    assert not issubclass(AuditStoryIntegrityError, AuditStoryNotRecordedError)
+
+
+def test_audit_story_corrupt_recorded_row_still_raises_integrity_error() -> None:
+    """A row that WAS recorded (llm_call_count present) but is internally
+    inconsistent — a claimed cache replay with no cache_key — remains a
+    genuine Tier-1 integrity violation (500), not the absent-state 404."""
+    db = make_landscape_db()
+    run_id = _record_run(db)
+    with db.connection() as conn:
+        conn.execute(update(runs_table).where(runs_table.c.run_id == run_id).values(seeded_from_cache=True, cache_key=None))
+
+    with pytest.raises(AuditStoryIntegrityError, match="NULL cache_key"):
+        AuditStoryService(db).get_run_audit_story(
+            run_id,
+            public_run_id="session-run-1",
+            session_id="session-1",
+        )
 
 
 def test_audit_story_missing_run_raises_named_error() -> None:

@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
-from elspeth.core.secrets import SecretResolutionError, resolve_secret_refs
+from elspeth.core.secrets import (
+    SECRET_REF_VALIDATION_PLACEHOLDER,
+    SecretResolutionError,
+    redact_secret_refs_for_validation,
+    resolve_secret_refs,
+)
 
 _VALID_FINGERPRINT = "a" * 64
 
@@ -199,3 +204,31 @@ def test_mapping_is_secret_ref_detection() -> None:
     result, resolutions = resolve_secret_refs(config, resolver, "user1")
     assert result == {"items": ["resolved"]}
     assert len(resolutions) == 1
+
+
+class TestRedactSecretRefsForValidation:
+    """The no-resolver substitution used by export preflight."""
+
+    def test_replaces_marker_with_placeholder(self) -> None:
+        config = {"transforms": [{"plugin": "llm", "options": {"api_key": {"secret_ref": "OPENROUTER_API_KEY"}}}]}
+        result = redact_secret_refs_for_validation(config)
+        assert result["transforms"][0]["options"]["api_key"] == SECRET_REF_VALIDATION_PLACEHOLDER
+
+    def test_preserves_non_marker_values(self) -> None:
+        config = {"a": "literal", "b": 7, "c": {"model": "openai/gpt-4o-mini"}, "d": ["x", {"secret_ref": "K"}]}
+        result = redact_secret_refs_for_validation(config)
+        assert result["a"] == "literal"
+        assert result["b"] == 7
+        assert result["c"]["model"] == "openai/gpt-4o-mini"
+        assert result["d"][0] == "x"
+        assert result["d"][1] == SECRET_REF_VALIDATION_PLACEHOLDER
+
+    def test_does_not_mutate_input(self) -> None:
+        config = {"options": {"api_key": {"secret_ref": "K"}}}
+        redact_secret_refs_for_validation(config)
+        # Original marker is intact — only the returned deep copy is rewritten.
+        assert config["options"]["api_key"] == {"secret_ref": "K"}
+
+    def test_placeholder_is_a_nonempty_non_secret_string(self) -> None:
+        assert isinstance(SECRET_REF_VALIDATION_PLACEHOLDER, str)
+        assert len(SECRET_REF_VALIDATION_PLACEHOLDER) >= 8

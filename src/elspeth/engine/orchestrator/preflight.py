@@ -26,7 +26,6 @@ error.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 from elspeth.contracts.types import AggregationName
@@ -42,21 +41,17 @@ from elspeth.contracts.value_source import (
 from elspeth.core.config import resolve_config
 from elspeth.engine.orchestrator.types import (
     PipelineConfig,
-    ValueSourceFinding,
-    ValueSourceValidationError,
 )
 from elspeth.engine.orchestrator.validation import (
-    validate_route_destinations,
-    validate_sink_failsink_destinations,
-    validate_source_quarantine_destination,
-    validate_transform_error_sinks,
+    validate_pipeline_route_targets,
 )
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceFinding, ValueSourceValidationError
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
     from elspeth.core.config import AggregationSettings, ElspethSettings
-    from elspeth.core.dag import WiredTransform
     from elspeth.core.dag.graph import ExecutionGraph
+    from elspeth.core.dag.wiring import WiredTransform
 
 
 def assemble_and_validate_pipeline_config(
@@ -121,34 +116,11 @@ def assemble_and_validate_pipeline_config(
         coalesce_settings=(list(settings.coalesce) if settings.coalesce else []),
     )
 
-    available_sinks = set(pipeline_config.sinks.keys())
-
-    validate_route_destinations(
+    validate_pipeline_route_targets(
+        config=pipeline_config,
         route_resolution_map=graph.get_route_resolution_map(),
-        available_sinks=available_sinks,
         transform_id_map=graph.get_transform_id_map(),
-        transforms=pipeline_config.transforms,
         config_gate_id_map=graph.get_config_gate_id_map(),
-        config_gates=pipeline_config.gates,
-    )
-
-    validate_transform_error_sinks(
-        transforms=pipeline_config.transforms,
-        available_sinks=available_sinks,
-    )
-
-    for source_instance in pipeline_config.sources.values():
-        validate_source_quarantine_destination(
-            source=source_instance,
-            available_sinks=available_sinks,
-        )
-
-    sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in pipeline_config.sinks.items()}
-    sink_plugins = {name: sink.name for name, sink in pipeline_config.sinks.items()}
-    validate_sink_failsink_destinations(
-        sink_configs=sink_validation_stubs,
-        available_sinks=available_sinks,
-        sink_plugins=sink_plugins,
     )
 
     # NB: Value-source compliance is enforced upstream in

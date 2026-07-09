@@ -8,7 +8,8 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has incomplete type stubs
     AbstractClock,
@@ -23,7 +24,7 @@ from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from elspeth.engine.clock import Clock
+    from elspeth.core.clock import MonotonicClock
 
 # Pattern for valid rate limiter names (used in SQL table names)
 _VALID_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
@@ -41,9 +42,9 @@ _hook_installed: bool = False
 
 
 class _PyrateClockAdapter(AbstractClock):
-    """Adapt ELSPETH's monotonic Clock protocol to pyrate-limiter milliseconds."""
+    """Adapt ELSPETH's monotonic clock protocol to pyrate-limiter milliseconds."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: MonotonicClock) -> None:
         self._clock = clock
 
     def now(self) -> int:
@@ -108,6 +109,27 @@ def _custom_excepthook(args: threading.ExceptHookArgs) -> None:
         original(args)  # type: ignore[operator]
 
 
+def validate_limiter_weight(weight: object) -> None:
+    """Validate a limiter token weight before any acquire attempt."""
+    if type(weight) is not int:
+        raise TypeError(f"weight must be int, got {type(weight).__name__}: {weight!r}")
+    if weight <= 0:
+        raise ValueError(f"weight must be positive, got {weight!r}")
+
+
+def validate_limiter_timeout(timeout: object | None) -> None:
+    """Validate a blocking acquire timeout."""
+    if timeout is None:
+        return
+    if type(timeout) not in (int, float):
+        raise TypeError(f"timeout must be int or float, got {type(timeout).__name__}: {timeout!r} — this is a bug in the calling code")
+    timeout_number = cast(int | float, timeout)
+    if not math.isfinite(timeout_number):
+        raise ValueError(f"timeout must be finite, got {timeout!r}")
+    if timeout_number < 0:
+        raise ValueError(f"timeout must be non-negative, got {timeout!r}")
+
+
 class RateLimiter:
     """Rate limiter for external API calls.
 
@@ -139,7 +161,7 @@ class RateLimiter:
         requests_per_minute: int,
         persistence_path: str | None = None,
         window_ms: int | Duration | None = None,
-        clock: Clock | None = None,
+        clock: MonotonicClock | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         """Initialize rate limiter.
@@ -198,6 +220,7 @@ class RateLimiter:
 
         # Create bucket (persistent or in-memory)
         if persistence_path:
+            Path(persistence_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             self._conn = sqlite3.connect(persistence_path, check_same_thread=False)
             table_name = f"ratelimit_{name}"
             self._conn.execute(SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name))
@@ -210,17 +233,20 @@ class RateLimiter:
         else:
             self._bucket = InMemoryBucket(rates=rates)
 
-        # Single limiter with per-minute rate. Omit the clock argument in
-        # production so pyrate-limiter keeps its wall-clock behavior; inject the
-        # adapter only for deterministic in-memory tests.
+        # Single limiter with per-minute rate. The wrapper owns blocking by
+        # polling try_acquire(), so configure pyrate-limiter in non-blocking
+        # mode once instead of mutating limiter flags on every acquire attempt.
+        # Omit the clock argument in production so pyrate-limiter keeps its
+        # wall-clock behavior; inject the adapter only for deterministic
+        # in-memory tests.
         if clock is None:
-            self._limiter = Limiter(self._bucket, max_delay=self._window_ms, raise_when_fail=True)
+            self._limiter = Limiter(self._bucket, max_delay=None, raise_when_fail=False)
         else:
             self._limiter = Limiter(
                 self._bucket,
                 clock=_PyrateClockAdapter(clock),
-                max_delay=self._window_ms,
-                raise_when_fail=True,
+                max_delay=None,
+                raise_when_fail=False,
             )
 
     def _monotonic(self) -> float:
@@ -230,10 +256,7 @@ class RateLimiter:
 
     @staticmethod
     def _validate_weight(weight: int) -> None:
-        if type(weight) is not int:
-            raise TypeError(f"weight must be int, got {type(weight).__name__}: {weight!r}")
-        if weight <= 0:
-            raise ValueError(f"weight must be positive, got {weight!r}")
+        validate_limiter_weight(weight)
 
     def acquire(self, weight: int = 1, timeout: float | None = None) -> None:
         """Acquire rate limit tokens, blocking if necessary.
@@ -251,15 +274,7 @@ class RateLimiter:
         if self._closed:
             raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
         self._validate_weight(weight)
-        if timeout is not None:
-            if type(timeout) not in (int, float):
-                raise TypeError(
-                    f"timeout must be int or float, got {type(timeout).__name__}: {timeout!r} — this is a bug in the calling code"
-                )
-            if not math.isfinite(timeout):
-                raise ValueError(f"timeout must be finite, got {timeout!r}")
-            if timeout < 0:
-                raise ValueError(f"timeout must be non-negative, got {timeout!r}")
+        validate_limiter_timeout(timeout)
 
         deadline = None if timeout is None else (self._monotonic() + timeout)
 
@@ -291,22 +306,7 @@ class RateLimiter:
             raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
         self._validate_weight(weight)
         with self._lock:
-            # Temporarily disable blocking + raising so the library reports the
-            # rate-limit outcome as its documented bool return instead of via a
-            # BucketFullException. With max_delay=None the limiter never waits,
-            # and with raise_when_fail=False it returns False on a full bucket
-            # rather than raising — letting us return that bool directly. The
-            # limiter is otherwise constructed with raise_when_fail=True for the
-            # blocking acquire() path, so both flags are restored in finally.
-            original_max_delay = self._limiter.max_delay
-            original_raise_when_fail = self._limiter.raise_when_fail
-            self._limiter.max_delay = None
-            self._limiter.raise_when_fail = False
-            try:
-                return bool(self._limiter.try_acquire(self.name, weight=weight))
-            finally:
-                self._limiter.max_delay = original_max_delay
-                self._limiter.raise_when_fail = original_raise_when_fail
+            return bool(self._limiter.try_acquire(self.name, weight=weight))
 
     def close(self) -> None:
         """Close the rate limiter and release resources."""

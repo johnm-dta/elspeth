@@ -21,7 +21,6 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   const loaded = usePreferencesStore((s) => s.loaded);
   const writing = usePreferencesStore((s) => s.writing);
   const writeError = usePreferencesStore((s) => s.writeError);
-  const tutorialCompleted = usePreferencesStore((s) => s.tutorialCompleted);
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
   const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
 
@@ -88,24 +87,29 @@ export function ComposerPreferencesForm(): JSX.Element | null {
           className="composer-preferences-error"
           style={{
             marginTop: 8,
-            color: "var(--color-danger, #b00020)",
+            color: "var(--color-error)",
             fontSize: 13,
           }}
         >
           {writeError}
         </div>
       )}
-      {tutorialCompleted && (
-        <button
-          type="button"
-          className="btn btn-compact"
-          disabled={writing}
-          onClick={() => void onResetTutorial()}
-          style={{ marginTop: 16 }}
-        >
-          Reset tutorial
-        </button>
-      )}
+      {/* ALWAYS offered (operator requirement: restart the tutorial from
+          preferences at any time). The button was originally gated on
+          tutorialCompleted, which hid it from mid-tutorial users (the wedged-
+          resume escape-hatch case) and from fresh/reset users — reading as
+          "the button disappeared". resetTutorial clears completion AND the
+          resume fields server-side, so the next load starts a fresh Welcome;
+          for a user who never started, it is a harmless no-op PATCH. */}
+      <button
+        type="button"
+        className="btn btn-compact"
+        disabled={writing}
+        onClick={() => void onResetTutorial()}
+        style={{ marginTop: 16 }}
+      >
+        Reset tutorial
+      </button>
     </>
   );
 }

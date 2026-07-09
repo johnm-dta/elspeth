@@ -1073,6 +1073,53 @@ def _settings(**overrides: Any) -> WebSettings:
     return WebSettings(**base)
 
 
+class TestPublicBaseUrlValidation:
+    """Tests for the trusted external origin used in generated email links."""
+
+    def test_public_base_url_accepts_https_and_strips_trailing_slash(self) -> None:
+        settings = _settings(public_base_url="https://composer.example.test/")
+
+        assert settings.public_base_url == "https://composer.example.test"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://composer.example.test",
+            "https://user:pass@composer.example.test",
+            "https://127.0.0.1",
+            "https://169.254.169.254",
+        ],
+    )
+    def test_public_base_url_rejects_unsafe_origin(self, url: str) -> None:
+        with pytest.raises(ValidationError):
+            _settings(public_base_url=url)
+
+    def test_public_base_url_allows_http_loopback_for_local_development(self) -> None:
+        settings = _settings(public_base_url="http://127.0.0.1:8451/")
+
+        assert settings.public_base_url == "http://127.0.0.1:8451"
+
+    def test_email_verified_non_local_host_requires_public_base_url(self) -> None:
+        with pytest.raises(ValidationError, match="public_base_url"):
+            _settings(
+                host="0.0.0.0",
+                registration_mode="email_verified",
+                secret_key="this-non-loopback-secret-is-long-enough",
+                shareable_link_signing_key=b"\xab\xcd" * 16,
+            )
+
+    def test_email_verified_non_local_host_allows_configured_public_base_url(self) -> None:
+        settings = _settings(
+            host="0.0.0.0",
+            registration_mode="email_verified",
+            public_base_url="https://composer.example.test",
+            secret_key="this-non-loopback-secret-is-long-enough",
+            shareable_link_signing_key=b"\xab\xcd" * 16,
+        )
+
+        assert settings.public_base_url == "https://composer.example.test"
+
+
 def test_advisor_must_differ_from_primary_exact() -> None:
     with pytest.raises(ValidationError, match="composer_advisor_model must differ from composer_model"):
         _settings(composer_model="gpt-5.5", composer_advisor_model="gpt-5.5")

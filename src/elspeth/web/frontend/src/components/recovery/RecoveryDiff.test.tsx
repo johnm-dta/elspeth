@@ -79,6 +79,21 @@ describe("RecoveryDiff", () => {
     expect(screen.getByText("json")).toBeInTheDocument();
   });
 
+  it("exposes the summary strip as a named group (WCAG 1.3.1)", () => {
+    // aria-label on a role-less div is not exposed to AT; the strip must
+    // carry role="group" for the label to associate (elspeth-37293a3b7c).
+    render(
+      <RecoveryDiff
+        currentState={makeState({ sources: {} })}
+        recoveredState={makeState({ sources: { source: makeSource() } })}
+      />,
+    );
+
+    expect(
+      screen.getByRole("group", { name: "Recovery diff summary" }),
+    ).toBeInTheDocument();
+  });
+
   it("handles null source collections", () => {
     render(
       <RecoveryDiff

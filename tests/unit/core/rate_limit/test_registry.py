@@ -1,12 +1,33 @@
 """Tests for RateLimitRegistry and NoOpLimiter."""
 
+import math
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+import elspeth.core.rate_limit as rate_limit
 from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
+from elspeth.contracts.contexts import RateLimitRegistryProtocol
 from elspeth.core.config import RateLimitSettings, ServiceRateLimit
 from elspeth.core.rate_limit.limiter import RateLimiter
 from elspeth.core.rate_limit.registry import NoOpLimiter, RateLimitRegistry
+from elspeth.plugins.infrastructure.clients.base import AuditedClientBase
+from elspeth.plugins.infrastructure.clients.dataverse import DataverseClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
+from elspeth.plugins.infrastructure.clients.retrieval.azure_search import AzureSearchProvider
+
+
+def test_limiter_protocol_is_shared_public_surface() -> None:
+    """Registry and audited clients should depend on the limiter behavior contract."""
+    assert "LimiterProtocol" in rate_limit.__all__
+    assert rate_limit.LimiterProtocol.__name__ == "LimiterProtocol"
+    assert RateLimitRegistryProtocol.get_limiter.__annotations__["return"] == "LimiterProtocol"
+    assert RateLimitRegistry.get_limiter.__annotations__["return"] == "LimiterProtocol"
+    for client_type in (AuditedClientBase, AuditedHTTPClient, AuditedLLMClient, DataverseClient, AzureSearchProvider):
+        assert client_type.__init__.__annotations__["limiter"] == "LimiterProtocol | None"
 
 
 class TestNoOpLimiter:
@@ -92,6 +113,59 @@ class TestRateLimitRegistryDisabled:
 
         assert limiter1 is limiter2
         assert limiter2 is limiter3
+
+    @pytest.mark.parametrize("weight", [0, -1])
+    def test_disabled_limiter_acquire_rejects_non_positive_weight(self, weight: int) -> None:
+        """Disabled registry preserves RateLimiter's positive weight contract."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(ValueError, match="weight must be positive"):
+            limiter.acquire(weight=weight)
+
+    def test_disabled_limiter_acquire_rejects_non_int_weight(self) -> None:
+        """Disabled registry rejects non-int acquire weights like RateLimiter."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(TypeError, match="weight must be int"):
+            limiter.acquire(weight="1")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("weight", [0, -1])
+    def test_disabled_limiter_try_acquire_rejects_non_positive_weight(self, weight: int) -> None:
+        """Disabled registry preserves try_acquire's positive weight contract."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(ValueError, match="weight must be positive"):
+            limiter.try_acquire(weight=weight)
+
+    def test_disabled_limiter_try_acquire_rejects_non_int_weight(self) -> None:
+        """Disabled registry rejects non-int try_acquire weights like RateLimiter."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises(TypeError, match="weight must be int"):
+            limiter.try_acquire(weight="1")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("timeout", ["1.0", math.nan, math.inf, -1.0])
+    def test_disabled_limiter_acquire_rejects_invalid_timeout(self, timeout: float | str) -> None:
+        """Disabled registry preserves RateLimiter's timeout validation contract."""
+        settings = RateLimitSettings(enabled=False)
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+        limiter = registry.get_limiter("disabled_service")
+
+        with pytest.raises((TypeError, ValueError), match="timeout must be"):
+            limiter.acquire(timeout=timeout)  # type: ignore[arg-type]
 
 
 class TestRateLimitRegistryEnabled:
@@ -359,21 +433,26 @@ class TestRateLimitRegistryNameCollision:
     """elspeth-2af4e98ee2: distinct service names must not collide onto one
     persistent SQLite bucket via a non-injective sanitizer."""
 
-    def _config(self, tmp_path, rpm=1):  # type: ignore[no-untyped-def]
+    def _config(self, rpm: int = 1) -> RuntimeRateLimitConfig:
         settings = RateLimitSettings(
             enabled=True,
             default_requests_per_minute=rpm,
-            persistence_path=str(tmp_path / "rl.db"),
+            persistence_path="rl.db",
         )
         return RuntimeRateLimitConfig.from_settings(settings)
 
-    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        registry = RateLimitRegistry(self._config(tmp_path, rpm=1))
+    def _rate_limiter(self, registry: RateLimitRegistry, service_name: str) -> RateLimiter:
+        limiter = registry.get_limiter(service_name)
+        assert isinstance(limiter, RateLimiter)
+        return limiter
+
+    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        registry = RateLimitRegistry(self._config(rpm=1))
         try:
-            a = registry.get_limiter("api.example")
-            b = registry.get_limiter("api_example")
+            a = self._rate_limiter(registry, "api.example")
+            b = self._rate_limiter(registry, "api_example")
             assert a is not b
-            assert isinstance(a, RateLimiter) and isinstance(b, RateLimiter)
             # Distinct persistent bucket names (the SQLite table is f"ratelimit_{name}").
             assert a.name != b.name
             # Independent RPM=1 buckets: exhausting one must not exhaust the other.
@@ -382,12 +461,28 @@ class TestRateLimitRegistryNameCollision:
         finally:
             registry.close()
 
-    def test_already_valid_name_bucket_is_unchanged(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_already_valid_name_bucket_is_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stability guard: an already-valid service name keeps its byte-identical
         bucket name (edge-only migration — common case is untouched)."""
-        registry = RateLimitRegistry(self._config(tmp_path, rpm=10))
+        monkeypatch.chdir(tmp_path)
+        registry = RateLimitRegistry(self._config(rpm=10))
         try:
-            assert registry.get_limiter("openai").name == "openai"
-            assert registry.get_limiter("api_example").name == "api_example"
+            assert self._rate_limiter(registry, "openai").name == "openai"
+            assert self._rate_limiter(registry, "api_example").name == "api_example"
+        finally:
+            registry.close()
+
+    def test_valid_service_name_matching_rewritten_bucket_gets_independent_bucket(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        registry = RateLimitRegistry(self._config(rpm=1))
+        try:
+            rewritten = self._rate_limiter(registry, "api.example")
+            matching_raw = self._rate_limiter(registry, rewritten.name)
+
+            assert rewritten.name != matching_raw.name
+            assert rewritten.try_acquire() is True
+            assert matching_raw.try_acquire() is True
         finally:
             registry.close()

@@ -55,37 +55,44 @@ tests/e2e/
 This is the proof-of-life that the harness itself works. If `smoke.spec.ts`
 fails, fix the harness before debugging any other spec.
 
-## What's stubbed (test.fixme)
+## What's stubbed (tracked test.skip)
 
 The remaining specs target the composer-correctness epic
-[`elspeth-e1ab67e55a`](../../../../../../) and its sub-issues. They are
-sketched with `test.fixme()` and detailed step-by-step bodies so a
+[`elspeth-e1ab67e55a`](../../../../../../) and its sub-issues. Five of them
+are gated with a describe-level `test.skip(true, "…tracked as <issue>")` —
+NOT `test.fixme`, which silently reports as passing; a tracked skip is
+CI-visible in the run summary — and detailed step-by-step bodies so a
 contributor can pick them up without re-deriving intent:
 
-| Spec                              | Targets                                | Blocker                  |
-|-----------------------------------|----------------------------------------|--------------------------|
-| `topology.spec.ts`                | `elspeth-3724f02de9` (closed)          | direct state-seed gap    |
-| `mandatory-fields.spec.ts`        | `elspeth-39089c98ee` (closed)          | direct state-seed gap    |
-| `schema-preview-parity.spec.ts`   | `elspeth-87f6d5dea5` (open, P2)        | state-seed; expected-fail|
-| `llm-provider-schema.spec.ts`     | `elspeth-dcf12c061b` (open, P2)        | state-seed; expected-fail|
-| `yaml-export-roundtrip.spec.ts`   | parent epic acceptance criterion       | direct state-seed gap    |
-| `compose-happy-path.spec.ts`      | through-UI proof; `elspeth-528bde62bb` | LLM stub server          |
+| Spec                              | Targets                                | Blocker (tracked)                                            |
+|-----------------------------------|-----------------------------------------|---------------------------------------------------------------|
+| `topology.spec.ts`                | `elspeth-3724f02de9` (closed)          | `elspeth-7cf763da7c` seeded spec implementation               |
+| `mandatory-fields.spec.ts`        | `elspeth-39089c98ee` (closed)          | `elspeth-7cf763da7c` seeded spec implementation               |
+| `schema-preview-parity.spec.ts`   | `elspeth-87f6d5dea5` (open, P2)        | `elspeth-7cf763da7c` + expected-fail on `elspeth-87f6d5dea5`  |
+| `yaml-export-roundtrip.spec.ts`   | parent epic acceptance criterion       | `elspeth-7cf763da7c` seeded spec implementation               |
+| `compose-happy-path.spec.ts`      | through-UI proof; `elspeth-528bde62bb` | `elspeth-617e1ca703` LLM stub server                          |
 
-### The two unblockers
+`llm-provider-schema.spec.ts` is different: its describe-level `test.fixme()`
+gate was already removed (per plan 16c Task 6 Step 3a) — most of its tests run
+on every CI pass, with a single per-test `test.skip(!hasStateSeed, "state-seed
+gap — see elspeth-dcf12c061b")` for the one path still needing the
+add-node-without-LLM affordance.
 
-1. **Direct state-mutation REST endpoint.** The composer's `upsert_node`,
-   `upsert_edge`, `set_source`, etc. are LLM tools, not REST endpoints.
-   For E2E seeding, we need either a `POST /api/sessions/{id}/state`
-   accepting canonical state JSON, OR a test-only endpoint behind a
-   feature flag. Either way the seam lives in the engine, not in the
-   frontend tests.
+### State seeding and LLM stubbing
 
-2. **JS-side LLM stub server.** The pytest suite uses the `ChaosLLM`
+The Playwright-managed backend enables the test-only direct seed endpoint
+with `ELSPETH_WEB__e2e_state_seed_enabled=true`. Tests should call
+`seedCompositionState(ctx, sessionId, state)` from `tests/e2e/helpers/api.ts`
+instead of hard-coding the endpoint path. The endpoint accepts canonical
+`CompositionState.to_dict()` JSON and persists it as the session's latest
+state.
+
+The remaining unblocker is a **JS-side LLM stub server**. The pytest suite uses the `ChaosLLM`
    fixture (under `tests/`) — a real HTTP server impersonating an LLM
    provider that returns scripted responses. Porting that to a JS shape
    the Playwright `webServer` can dial via `ELSPETH_WEB__composer_model`
    env override unblocks `compose-happy-path.spec.ts` and would also let
-   the seeding-blocked specs drive through the LLM as a fallback.
+   seeded specs drive through the LLM as a fallback.
 
 ## Selectors
 

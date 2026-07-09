@@ -31,6 +31,7 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+from elspeth.engine.orchestrator.idle_timeout_pump import IdleTimeoutPump
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.testing import make_pipeline_row
@@ -226,6 +227,64 @@ class ThreadAffinitySource(_TestSourceBase):
         if self.next_thread_ids[-1] != self.load_thread_id:
             raise RuntimeError("source iterator advanced on a different thread from load()")
         yield rows[1]
+
+
+class MultiGapIdleBlockingSource(_TestSourceBase):
+    """Source with two idle gaps, each requiring a timeout flush to proceed."""
+
+    name = "multi_gap_idle_blocking_source"
+    output_schema = _TestSchema
+    idle_flush_wait_seconds = 5.0
+
+    def __init__(self, gap_events: list[threading.Event]) -> None:
+        super().__init__()
+        self.on_success = "agg_in"
+        self._gap_events = gap_events
+
+    def load(self, ctx: Any) -> Any:
+        rows = list(self.wrap_rows([{"value": 1}]))
+        contract = rows[0].contract
+        yield rows[0]
+        for gap_index, gap in enumerate(self._gap_events, start=1):
+            if not gap.wait(timeout=self.idle_flush_wait_seconds):
+                raise RuntimeError(
+                    f"aggregation timeout did not fire during idle gap {gap_index} within {self.idle_flush_wait_seconds:.1f}s"
+                )
+            yield SourceRow.valid(
+                {"value": gap_index + 1},
+                contract=contract,
+                source_row_index=gap_index,
+            )
+
+
+class SequentialFlushSignalingBatchTransform(BaseTransform):
+    """Batch transform that releases one source idle gap per flush and records the flushing thread."""
+
+    name = "sequential_idle_flush_signaler"
+    determinism = Determinism.DETERMINISTIC
+    input_schema = _TestSchema
+    output_schema = _TestSchema
+    is_batch_aware = True
+    on_success = "output"
+    on_error = "discard"
+
+    def __init__(self, gap_events: list[threading.Event], flush_thread_idents: list[int]) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+        self._gap_events = gap_events
+        self._flush_thread_idents = flush_thread_idents
+        self._flush_index = 0
+
+    def process(  # type: ignore[override]
+        self, rows: list[PipelineRow], ctx: Any
+    ) -> TransformResult:
+        self._flush_thread_idents.append(threading.get_ident())
+        if self._flush_index < len(self._gap_events):
+            self._gap_events[self._flush_index].set()
+        self._flush_index += 1
+        return TransformResult.success(
+            make_pipeline_row({"flushed_count": len(rows)}),
+            success_reason={"action": "idle_timeout_flushed"},
+        )
 
 
 class IdleFlushSignalingBatchTransform(BaseTransform):
@@ -454,6 +513,83 @@ class TestExecutionLoopRowProcessing:
         assert source.next_thread_ids == [source.load_thread_id, source.load_thread_id]
         assert flush_seen.is_set()
         assert sink.results[0]["flushed_count"] == 2
+
+    def test_idle_timeout_polling_uses_one_pump_for_the_whole_run(self, payload_store, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One persistent IdleTimeoutPump per run — no per-fetch thread churn (elspeth-735df9576d).
+
+        The run performs four source ``next()`` calls (prefetch, two gap rows,
+        exhaustion); the historical implementation spawned a poller thread per
+        call. This pins: exactly one pump start per run, both idle-gap flushes
+        executed on the same single persistent worker thread (never the
+        orchestrator thread), and flushes still firing while the source is
+        blocked inside ``next()``.
+        """
+        gap_events = [threading.Event(), threading.Event()]
+        flush_thread_idents: list[int] = []
+        source = MultiGapIdleBlockingSource(gap_events)
+        transform = SequentialFlushSignalingBatchTransform(gap_events, flush_thread_idents)
+        sink = CollectSink("output")
+
+        pump_starts: list[int] = []
+        original_start = IdleTimeoutPump.start
+
+        def counting_start(pump: IdleTimeoutPump) -> None:
+            pump_starts.append(1)
+            original_start(pump)
+
+        monkeypatch.setattr(IdleTimeoutPump, "start", counting_start)
+
+        agg_settings = AggregationSettings(
+            name="multi_gap_idle_flush",
+            plugin=transform.name,
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(timeout_seconds=0.05),
+            output_mode=OutputMode.TRANSFORM,
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": as_source(source)},
+            source_settings_map={
+                "primary": SourceSettings(
+                    plugin=source.name,
+                    on_success="agg_in",
+                    options={},
+                ),
+            },
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+            aggregations={"multi_gap_idle_flush": (as_transform(transform), agg_settings)},
+            gates=[],
+        )
+        agg_node_id = graph.get_aggregation_id_map()[AggregationName("multi_gap_idle_flush")]
+        transform.node_id = agg_node_id
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[as_transform(transform)],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={agg_node_id: agg_settings},
+        )
+
+        result = Orchestrator(LandscapeDB.in_memory()).run(
+            config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert all(gap.is_set() for gap in gap_events), "idle flushes must fire while the source is blocked in next()"
+        # Exactly ONE pump start for the whole run, not one per source fetch.
+        assert pump_starts == [1]
+        # The first two flushes are the idle-gap flushes (the source cannot
+        # advance until each fires); both ran on the same persistent worker
+        # thread, never on the orchestrator thread. (A third, end-of-input
+        # flush runs on the orchestrator thread during finalization.)
+        assert len(flush_thread_idents) >= 2
+        idle_flush_idents = set(flush_thread_idents[:2])
+        assert len(idle_flush_idents) == 1
+        assert threading.get_ident() not in idle_flush_idents
 
 
 class TestDatabaseInitialization:

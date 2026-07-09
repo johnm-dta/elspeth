@@ -8,31 +8,156 @@ diverted rows to the failsink (or record discard).
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, PluginSchema, TokenInfo
+from elspeth.contracts.audit import Artifact
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import AuditIntegrityError, PluginContractViolation, SinkRequiredFieldsViolation
+from elspeth.contracts.enums import NodeStateStatus, NodeType, RoutingMode, TerminalOutcome, TerminalPath
+from elspeth.contracts.errors import (
+    AuditIntegrityError,
+    FrameworkBugError,
+    PluginContractViolation,
+    SinkRequiredFieldsViolation,
+)
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.core.landscape.schema import artifacts_table, node_states_table, token_outcomes_table
 from elspeth.engine.executors.sink import SinkExecutor
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 
-def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = None) -> MagicMock:
-    """Create a minimal TokenInfo mock."""
-    token = MagicMock(spec=TokenInfo)
-    token.token_id = token_id
-    token.row_id = f"row-{token_id}"
-    mock_row = MagicMock()
-    mock_row.to_dict.return_value = row_data or {"field": "value"}
-    mock_row.contract = MagicMock()
-    mock_row.contract.merge_for_batch.return_value = mock_row.contract
-    token.row_data = mock_row
-    return token
+class _PermissiveSchema(PluginSchema):
+    """Accept arbitrary sink rows for executor plumbing tests."""
+
+
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+        effect = self.side_effect
+        if isinstance(effect, list):
+            effect = effect.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
+class _ContractDouble:
+    def merge_for_batch(self, other: object) -> _ContractDouble:
+        del other
+        return self
+
+
+class _RowDouble:
+    def __init__(self, data: dict[str, object]) -> None:
+        self._data = data
+        self.contract = _ContractDouble()
+
+    def to_dict(self) -> dict[str, object]:
+        return dict(self._data)
+
+
+class _TokenDouble:
+    def __init__(self, token_id: str, row_data: dict[str, object] | None = None) -> None:
+        self.token_id = token_id
+        self.row_id = f"row-{token_id}"
+        self.row_data = _RowDouble(row_data or {"field": "value"})
+        self.resume_attempt_offset = 0
+        self.resume_checkpoint_id = None
+
+
+class _SinkDouble:
+    def __init__(
+        self,
+        *,
+        name: str,
+        node_id: str,
+        diversions: tuple[RowDiversion, ...] = (),
+        on_write_failure: str = "discard",
+        artifact_path: str = "/tmp/test",
+    ) -> None:
+        self.name = name
+        self.node_id = node_id
+        self.input_schema = _PermissiveSchema
+        self.declared_guaranteed_fields = frozenset()
+        self.declared_required_fields = frozenset()
+        self.write = _CallRecorder(
+            return_value=SinkWriteResult(
+                artifact=_make_artifact(artifact_path),
+                diversions=diversions,
+            )
+        )
+        self.flush = _CallRecorder()
+        self._on_write_failure = on_write_failure
+        self._reset_diversion_log = _CallRecorder()
+
+
+class _SpanContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+
+class _SpanFactoryDouble:
+    def __init__(self) -> None:
+        self.sink_span = _CallRecorder(return_value=_SpanContext())
+
+
+def _make_context(run_id: str = "run-1") -> PluginContext:
+    return PluginContext(run_id=run_id, config={})
+
+
+def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = None) -> TokenInfo:
+    """Create a minimal token double."""
+    return _TokenDouble(token_id, row_data)  # type: ignore[return-value]
 
 
 def _make_artifact(path: str = "/tmp/test") -> ArtifactDescriptor:
@@ -48,49 +173,62 @@ def _make_sink(
     node_id: str = "node-primary",
     diversions: tuple[RowDiversion, ...] = (),
     on_write_failure: str = "discard",
-) -> MagicMock:
-    sink = MagicMock()
-    sink.name = name
-    sink.node_id = node_id
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink.write.return_value = SinkWriteResult(
-        artifact=_make_artifact(),
-        diversions=diversions,
-    )
-    sink._on_write_failure = on_write_failure
-    sink._reset_diversion_log = MagicMock()
-    return sink
+) -> _SinkDouble:
+    return _SinkDouble(name=name, node_id=node_id, diversions=diversions, on_write_failure=on_write_failure)
 
 
-def _make_failsink(name: str = "csv_failsink", node_id: str = "node-failsink") -> MagicMock:
-    failsink = MagicMock()
-    failsink.name = name
-    failsink.node_id = node_id
-    failsink.declared_guaranteed_fields = frozenset()
-    failsink.declared_required_fields = frozenset()
-    failsink.write.return_value = SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
-    failsink._reset_diversion_log = MagicMock()
-    return failsink
+def _make_failsink(name: str = "csv_failsink", node_id: str = "node-failsink") -> _SinkDouble:
+    return _SinkDouble(name=name, node_id=node_id, artifact_path="/tmp/failsink")
 
 
-def _make_executor() -> tuple[SinkExecutor, MagicMock, MagicMock]:
-    execution = MagicMock()
-    data_flow = MagicMock()
+def _make_executor(*, bulk_repository: bool = False) -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
+    execution = SimpleNamespace()
+    execution.begin_node_state = _CallRecorder()
+    execution.complete_node_state = _CallRecorder()
+    execution.register_artifact = _CallRecorder()
+    execution.record_routing_event = _CallRecorder()
+    execution.begin_operation = _CallRecorder(return_value=SimpleNamespace(operation_id="op-1"))
+    execution.complete_operation = _CallRecorder()
+    data_flow = SimpleNamespace()
+    data_flow.record_token_outcome = _CallRecorder()
     state_counter = [0]
+    artifact_counter = [0]
 
-    def _begin_state(**kwargs: Any) -> MagicMock:
+    def _begin_state(**kwargs: Any) -> SimpleNamespace:
         state_counter[0] += 1
-        state = MagicMock()
-        state.state_id = f"state-{state_counter[0]}"
-        return state
+        return SimpleNamespace(state_id=f"state-{state_counter[0]}")
+
+    def _register_artifact(**kwargs: Any) -> Artifact:
+        artifact_counter[0] += 1
+        return Artifact(
+            artifact_id=f"artifact-{artifact_counter[0]}",
+            run_id=kwargs["run_id"],
+            produced_by_state_id=kwargs["state_id"],
+            sink_node_id=kwargs["sink_node_id"],
+            artifact_type=kwargs["artifact_type"],
+            path_or_uri=kwargs["path"],
+            content_hash=kwargs["content_hash"],
+            size_bytes=kwargs["size_bytes"],
+            created_at=datetime.now(UTC),
+            idempotency_key=kwargs.get("idempotency_key"),
+        )
 
     execution.begin_node_state.side_effect = _begin_state
-    spans = MagicMock()
-    spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
-    spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
+    execution.register_artifact.side_effect = _register_artifact
+    if bulk_repository:
+
+        def _begin_states_many(entries: tuple[tuple[str, str, str, int, dict[str, object]], ...]) -> list[SimpleNamespace]:
+            states: list[SimpleNamespace] = []
+            for _entry in entries:
+                state_counter[0] += 1
+                states.append(SimpleNamespace(state_id=f"state-{state_counter[0]}"))
+            return states
+
+        execution.begin_node_states_many = _CallRecorder(side_effect=_begin_states_many)
+        execution.complete_node_states_completed_many = _CallRecorder()
+    spans = _SpanFactoryDouble()
     executor = SinkExecutor(execution, data_flow, spans, "run-1")
-    return executor, execution, data_flow
+    return executor, execution, data_flow  # type: ignore[return-value]
 
 
 def _unique_completion_kwargs_by_state(completions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -102,27 +240,98 @@ def _unique_completion_kwargs_by_state(completions: list[dict[str, Any]]) -> dic
     return by_state
 
 
-def _complete_node_state_kwargs_by_state(execution: MagicMock) -> dict[str, dict[str, Any]]:
+def _complete_node_state_kwargs_by_state(execution: SimpleNamespace) -> dict[str, dict[str, Any]]:
     return _unique_completion_kwargs_by_state([call.kwargs for call in execution.complete_node_state.call_args_list])
 
 
 def _assert_single_primary_divert_cleanup(
-    execution: MagicMock,
+    execution: SimpleNamespace,
     *,
     phase: str,
     exception_type: str,
 ) -> None:
+    # Failsink states now open BEFORE failsink I/O (elspeth-adaca19c75), so a
+    # single diverted token has TWO open states (primary anchor + failsink
+    # destination) and cleanup must terminalize both.
     begin_calls = execution.begin_node_state.call_args_list
-    assert len(begin_calls) == 1
+    assert len(begin_calls) == 2
     assert begin_calls[0].kwargs["token_id"] == "t0"
     assert begin_calls[0].kwargs["node_id"] == "node-primary"
+    assert begin_calls[1].kwargs["token_id"] == "t0"
+    assert begin_calls[1].kwargs["node_id"] == "node-failsink"
 
     completion_by_state = _complete_node_state_kwargs_by_state(execution)
-    assert set(completion_by_state) == {"state-1"}
-    failed_kwargs = completion_by_state["state-1"]
-    assert failed_kwargs["status"] == NodeStateStatus.FAILED
-    assert failed_kwargs["error"].phase == phase
-    assert failed_kwargs["error"].exception_type == exception_type
+    assert set(completion_by_state) == {"state-1", "state-2"}
+    for state_id in ("state-1", "state-2"):
+        failed_kwargs = completion_by_state[state_id]
+        assert failed_kwargs["status"] == NodeStateStatus.FAILED
+        assert failed_kwargs["error"].phase == phase
+        assert failed_kwargs["error"].exception_type == exception_type
+
+
+class TestSinkWriteResultValidation:
+    """Shared SinkWriteResult validation used by primary sink and failsink paths."""
+
+    def test_primary_result_returns_artifact_and_diversions(self) -> None:
+        diversions = (RowDiversion(row_index=0, reason="bad metadata", row_data={"field": "bad"}),)
+        artifact = _make_artifact("/tmp/primary")
+        result = SinkWriteResult(artifact=artifact, diversions=diversions)
+
+        returned_artifact, returned_diversions = SinkExecutor._require_sink_write_result(
+            label="primary",
+            result=result,
+            allow_diversions=True,
+        )
+
+        assert returned_artifact is artifact
+        assert returned_diversions == diversions
+
+    def test_primary_result_rejects_wrong_return_type(self) -> None:
+        with pytest.raises(PluginContractViolation, match="Sink 'primary' returned dict, expected SinkWriteResult"):
+            SinkExecutor._require_sink_write_result(
+                label="primary",
+                result={},
+                allow_diversions=True,
+            )
+
+    def test_primary_result_rejects_wrong_artifact_type(self) -> None:
+        result = object.__new__(SinkWriteResult)
+        object.__setattr__(result, "artifact", "not-an-artifact")
+        object.__setattr__(result, "diversions", ())
+
+        with pytest.raises(
+            PluginContractViolation,
+            match="Sink 'primary' returned SinkWriteResult with artifact of type str, expected ArtifactDescriptor",
+        ):
+            SinkExecutor._require_sink_write_result(
+                label="primary",
+                result=result,
+                allow_diversions=True,
+            )
+
+    def test_failsink_result_returns_artifact_when_diversions_absent(self) -> None:
+        artifact = _make_artifact("/tmp/failsink")
+        result = SinkWriteResult(artifact=artifact)
+
+        returned_artifact, returned_diversions = SinkExecutor._require_sink_write_result(
+            label="csv_failsink",
+            result=result,
+            allow_diversions=False,
+        )
+
+        assert returned_artifact is artifact
+        assert returned_diversions == ()
+
+    def test_failsink_result_rejects_diversions(self) -> None:
+        diversions = (RowDiversion(row_index=0, reason="bad metadata", row_data={"field": "bad"}),)
+        result = SinkWriteResult(artifact=_make_artifact("/tmp/failsink"), diversions=diversions)
+
+        with pytest.raises(FrameworkBugError, match="Failsink 'csv_failsink' produced 1 diversions"):
+            SinkExecutor._require_sink_write_result(
+                label="csv_failsink",
+                result=result,
+                allow_diversions=False,
+            )
 
 
 class TestNoDiversions:
@@ -135,7 +344,7 @@ class TestNoDiversions:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -155,7 +364,7 @@ class TestNoDiversions:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -170,13 +379,38 @@ class TestNoDiversions:
         artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
         )
         assert artifact is not None
         assert diversion_counts.total == 0
+
+
+class TestBulkRepositoryCapabilities:
+    """SinkExecutor bulk paths are selected by repository capability."""
+
+    def test_capability_repository_uses_bulk_primary_begin_and_completion(self) -> None:
+        executor, execution, _data_flow = _make_executor(bulk_repository=True)
+        sink = _make_sink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        artifact, diversion_counts = executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=_make_context(),
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+        )
+
+        assert artifact is not None
+        assert diversion_counts.total == 0
+        assert execution.begin_node_states_many.call_count == 1
+        assert execution.begin_node_state.call_count == 0
+        assert execution.complete_node_states_completed_many.call_count == 1
+        assert execution.complete_node_state.call_count == 0
 
 
 class TestDiscardMode:
@@ -190,7 +424,7 @@ class TestDiscardMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -218,7 +452,7 @@ class TestDiscardMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -246,7 +480,7 @@ class TestDiscardMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -263,7 +497,7 @@ class TestDiscardMode:
         artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -322,7 +556,7 @@ class TestFailsinkMode:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -348,7 +582,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -365,6 +599,56 @@ class TestFailsinkMode:
         assert failsink_rows[0]["__diverted_from"] == "primary"
         assert "__diversion_timestamp" in failsink_rows[0]
 
+    def test_primary_and_failsink_use_separate_scoped_contexts(self) -> None:
+        executor, _execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=1, reason="invalid metadata", row_data={"doc": "hello"}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+        caller_ctx = _make_context()
+        stale_contract = _ContractDouble()
+        caller_ctx.contract = stale_contract  # type: ignore[assignment]
+        caller_ctx.state_id = "prior-state"
+        primary_ctx = None
+        failsink_ctx = None
+
+        def _primary_write(_rows: list[dict[str, object]], call_ctx: PluginContext) -> SinkWriteResult:
+            nonlocal primary_ctx
+            primary_ctx = call_ctx
+            return SinkWriteResult(artifact=_make_artifact("/tmp/primary"), diversions=diversions)
+
+        def _failsink_write(_rows: list[dict[str, object]], call_ctx: PluginContext) -> SinkWriteResult:
+            nonlocal failsink_ctx
+            failsink_ctx = call_ctx
+            return SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
+
+        sink.write.side_effect = _primary_write
+        failsink.write.side_effect = _failsink_write
+
+        executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=caller_ctx,
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+            failsink=failsink,
+            failsink_name="csv_failsink",
+            failsink_edge_id="edge-failsink-1",
+        )
+
+        assert primary_ctx is not caller_ctx
+        assert primary_ctx is not None
+        assert primary_ctx.contract is tokens[0].row_data.contract
+        assert primary_ctx.state_id is None
+        assert failsink_ctx is not caller_ctx
+        assert failsink_ctx is not primary_ctx
+        assert failsink_ctx is not None
+        assert failsink_ctx.contract is None
+        assert failsink_ctx.state_id is None
+        assert caller_ctx.contract is stale_contract
+        assert caller_ctx.state_id == "prior-state"
+
     def test_failsink_flush_called(self) -> None:
         executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
@@ -374,7 +658,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -392,7 +676,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -409,7 +693,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -430,7 +714,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -475,7 +759,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -526,7 +810,7 @@ class TestFailsinkMode:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -556,7 +840,7 @@ class TestFailsinkErrorHandling:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -566,15 +850,63 @@ class TestFailsinkErrorHandling:
             )
 
 
+class TestFailsinkStateOrdering:
+    """Failsink node_states open BEFORE external failsink I/O (elspeth-adaca19c75).
+
+    Mirrors the primary path's open-before-I/O invariant: a durable failsink
+    write must never exist without a failsink node_state — a crash between
+    flush and audit recording would otherwise leave a durable artifact with
+    no node_state, routing_event, DIVERTED outcome, or checkpoint.
+    """
+
+    def test_failsink_states_opened_before_external_failsink_write(self) -> None:
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        tokens = [_make_token("t0")]
+
+        call_order: list[str] = []
+        orig_begin = execution.begin_node_state.side_effect
+
+        def _begin(**kwargs: Any) -> Any:
+            if kwargs.get("node_id") == failsink.node_id:
+                call_order.append("failsink_begin_node_state")
+            return orig_begin(**kwargs)
+
+        def _write(rows: Any, ctx: Any) -> SinkWriteResult:
+            call_order.append("failsink_write")
+            return SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
+
+        execution.begin_node_state.side_effect = _begin
+        failsink.write.side_effect = _write
+
+        executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=_make_context(),
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+            failsink=failsink,
+            failsink_name="csv_failsink",
+            failsink_edge_id="edge-failsink-1",
+        )
+
+        assert call_order == ["failsink_begin_node_state", "failsink_write"], (
+            f"failsink node_state must open BEFORE the external failsink write, got: {call_order}"
+        )
+
+
 class TestFailsinkCleanup:
     """Verify node_state recording when failsink write/flush fails."""
 
     def test_failsink_write_failure_completes_failsink_states_as_failed(self) -> None:
-        """When failsink.write() raises, no failsink node_states are opened.
+        """When failsink.write() raises, the pre-opened failsink states FAIL.
 
-        Batch: 1 token, 1 diversion. The failsink write crashes before
-        begin_node_state is called for failsink states, so complete_node_state
-        is never called with FAILED for the failsink node.
+        Batch: 1 token, 1 diversion. Failsink node_states open BEFORE the
+        external failsink write (elspeth-adaca19c75), so a write crash must
+        terminalize BOTH the primary divert anchor and the failsink state.
         """
         executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
@@ -586,7 +918,7 @@ class TestFailsinkCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -594,25 +926,26 @@ class TestFailsinkCleanup:
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
             )
-        # t0's primary divert state was opened (divert anchor), then failsink
-        # write crashed. The cleanup marks the primary divert state as FAILED.
+        # t0's primary divert anchor AND its pre-opened failsink state were
+        # open when the failsink write crashed — cleanup fails BOTH.
         complete_calls = execution.complete_node_state.call_args_list
         failed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED]
         completed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
-        assert len(failed_calls) == 1  # primary divert anchor cleaned up
+        assert len(failed_calls) == 2  # primary divert anchor + failsink state
         assert len(completed_calls) == 0
-        # Primary divert state opened, but no failsink states (write crashed first)
+        # Failsink state opened BEFORE the write (open-before-I/O invariant)
         begin_calls = execution.begin_node_state.call_args_list
         primary_begins = [c for c in begin_calls if c.kwargs.get("node_id") == sink.node_id]
         failsink_begins = [c for c in begin_calls if c.kwargs.get("node_id") == failsink.node_id]
         assert len(primary_begins) == 1  # divert anchor
-        assert len(failsink_begins) == 0
+        assert len(failsink_begins) == 1
 
     def test_failsink_failure_does_not_affect_primary_states(self) -> None:
         """Primary COMPLETED states remain intact when failsink fails.
 
         Batch: 2 tokens, 1 diversion at index 1.
-        Expect: t0 COMPLETED at primary, t1 gets no failsink state (write crashes).
+        Expect: t0 COMPLETED at primary; t1's divert anchor AND its pre-opened
+        failsink state both FAIL when the failsink write crashes.
         """
         executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
@@ -624,7 +957,7 @@ class TestFailsinkCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -634,17 +967,18 @@ class TestFailsinkCleanup:
             )
         complete_calls = execution.complete_node_state.call_args_list
         # t0: COMPLETED at primary (Phase 2)
-        # t1: FAILED at primary (divert anchor — failsink write crashed)
+        # t1: FAILED at primary (divert anchor) + FAILED at failsink (pre-opened)
         completed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
         failed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED]
         assert len(completed_calls) == 1  # t0
-        assert len(failed_calls) == 1  # t1 primary divert state cleaned up
-        # Verify: 2 primary states opened (t0 + t1 divert anchor), 0 failsink states
+        assert len(failed_calls) == 2  # t1 primary divert anchor + t1 failsink state
+        # Verify: 2 primary states opened (t0 + t1 divert anchor), 1 failsink
+        # state (opened BEFORE the crashing write — open-before-I/O invariant)
         begin_calls = execution.begin_node_state.call_args_list
         primary_begins = [c for c in begin_calls if c.kwargs.get("node_id") == sink.node_id]
         failsink_begins = [c for c in begin_calls if c.kwargs.get("node_id") == failsink.node_id]
         assert len(primary_begins) == 2  # t0 + t1 divert anchor
-        assert len(failsink_begins) == 0  # failsink write crashed before state opening
+        assert len(failsink_begins) == 1
 
     def test_failsink_flush_failure_crashes(self) -> None:
         """If failsink.flush() raises, crash — it's the last resort."""
@@ -658,7 +992,7 @@ class TestFailsinkCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -684,7 +1018,7 @@ class TestFailsinkCleanupEnvelope:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -720,7 +1054,7 @@ class TestFailsinkCleanupEnvelope:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -746,8 +1080,7 @@ class TestFailsinkOperationAndSpanRecording:
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
-        ctx = MagicMock(run_id="run-1")
-        ctx.operation_id = None
+        ctx = _make_context()
 
         executor.write(
             sink=sink,
@@ -791,7 +1124,7 @@ class TestNonContiguousDiversions:
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -817,7 +1150,7 @@ class TestEmptyBatch:
         artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=[],
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -845,11 +1178,11 @@ class TestOnTokenWrittenWithDiversions:
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
-        callback = MagicMock()
+        callback = _CallRecorder()
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -867,11 +1200,11 @@ class TestOnTokenWrittenWithDiversions:
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0"), _make_token("t1")]
-        callback = MagicMock()
+        callback = _CallRecorder()
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -891,11 +1224,11 @@ class TestOnTokenWrittenWithDiversions:
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
-        callback = MagicMock()
+        callback = _CallRecorder()
         executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
-            ctx=MagicMock(run_id="run-1"),
+            ctx=_make_context(),
             step_in_pipeline=5,
             sink_name="primary",
             pending_outcome=_default_pending(),
@@ -945,7 +1278,7 @@ class TestMidLoopAuditRecordingCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -969,6 +1302,179 @@ class TestMidLoopAuditRecordingCleanup:
         assert len(completed_state_ids) == 1
         # No overlap between FAILED and COMPLETED
         assert failed_state_ids & completed_state_ids == set()
+
+
+class TestCompletePrimaryFailureClosesDivertAnchors:
+    """Phase-2 (_complete_primary) failures must not leave diverted anchors OPEN.
+
+    Regression tests for elspeth-5a5e83d3e5: a failure while recording the
+    primary tokens' completions/artifact/outcomes propagates out of write()
+    BEFORE Phase 3 runs, so the diverted tokens' pre-opened primary node_states
+    must be closed FAILED by the Phase-2 cleanup envelope — nothing downstream
+    would ever terminalize them.
+
+    RuntimeError deliberately exercises the generic arm; AuditIntegrityError
+    the TIER_1 best-effort arm (same convention as
+    TestUncoveredExceptArmCharacterization).
+    """
+
+    def test_outcome_recording_failure_closes_divert_anchor(self) -> None:
+        """A generic error from record_token_outcome (primary states already
+        COMPLETED) must close the diverted token's primary anchor as FAILED
+        with phase='primary_audit_recording' before re-raising."""
+        executor, execution, data_flow = _make_executor()
+        sink = _make_sink(diversions=(RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),))
+        tokens = [_make_token("t0"), _make_token("t1")]
+        data_flow.record_token_outcome.side_effect = RuntimeError("DB connection lost")
+
+        with pytest.raises(RuntimeError, match="DB connection lost"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        # state-1 = t0 primary (COMPLETED before the outcome loop raised);
+        # state-2 = t1 divert anchor (closed FAILED by the Phase-2 envelope).
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        assert completion_by_state["state-1"]["status"] == NodeStateStatus.COMPLETED
+        failed_kwargs = completion_by_state["state-2"]
+        assert failed_kwargs["status"] == NodeStateStatus.FAILED
+        assert failed_kwargs["error"].phase == "primary_audit_recording"
+        assert failed_kwargs["error"].exception_type == "RuntimeError"
+
+    def test_register_artifact_tier1_failure_closes_divert_anchor(self) -> None:
+        """A TIER_1 error from register_artifact hits the best-effort arm:
+        the diverted token's primary anchor is closed FAILED, the completed
+        primary state is left untouched, and the original error re-raises."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(diversions=(RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),))
+        tokens = [_make_token("t0"), _make_token("t1")]
+        execution.register_artifact.side_effect = AuditIntegrityError("artifact registry corrupted")
+
+        with pytest.raises(AuditIntegrityError, match="artifact registry corrupted"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        assert completion_by_state["state-1"]["status"] == NodeStateStatus.COMPLETED
+        failed_kwargs = completion_by_state["state-2"]
+        assert failed_kwargs["status"] == NodeStateStatus.FAILED
+        assert failed_kwargs["error"].phase == "primary_audit_recording"
+        assert failed_kwargs["error"].exception_type == "AuditIntegrityError"
+
+    def test_primary_completion_failure_closes_primary_and_divert_anchor(self) -> None:
+        """A failure while completing the primary states themselves must close
+        BOTH the not-yet-completed primary state and the divert anchor as
+        FAILED (per-state progress tracking, mirroring the Phase-3 pattern)."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(diversions=(RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),))
+        tokens = [_make_token("t0"), _make_token("t1")]
+        # First complete_node_state call (t0's COMPLETED attempt) raises;
+        # the two cleanup closes that follow succeed.
+        execution.complete_node_state.side_effect = [RuntimeError("audit write lost"), None, None]
+
+        with pytest.raises(RuntimeError, match="audit write lost"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        # The failed COMPLETED attempt for state-1 is also recorded by the
+        # _CallRecorder, so filter by status rather than asserting uniqueness.
+        complete_calls = execution.complete_node_state.call_args_list
+        failed_by_state = {c.kwargs["state_id"]: c.kwargs for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED}
+        assert set(failed_by_state) == {"state-1", "state-2"}
+        for state_id, kwargs in failed_by_state.items():
+            assert kwargs["error"].phase == "primary_audit_recording"
+            assert kwargs["error"].exception_type == "RuntimeError", state_id
+
+
+class TestPrimaryAuditAtomicity:
+    """Primary sink completion and terminal outcomes commit atomically."""
+
+    def test_outcome_recording_failure_rolls_back_completed_primary_states(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        setup = make_recorder_with_run(run_id="run-sink-atomic")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "node-primary",
+            node_type=NodeType.SINK,
+            plugin_name="primary",
+        )
+        sink = _make_sink(name="primary", node_id="node-primary")
+        tokens: list[TokenInfo] = []
+        for index in range(2):
+            row, db_token = setup.data_flow.create_row_with_token(
+                run_id=setup.run_id,
+                source_node_id=setup.source_node_id,
+                row_index=index,
+                data={"field": f"value-{index}"},
+                source_row_index=index,
+                ingest_sequence=index,
+            )
+            tokens.append(
+                TokenInfo(
+                    row_id=row.row_id,
+                    token_id=db_token.token_id,
+                    row_data=_RowDouble({"field": f"value-{index}"}),  # type: ignore[arg-type]
+                )
+            )
+
+        def _fail_record_token_outcome(*args: object, **kwargs: object) -> str:
+            del args, kwargs
+            raise RuntimeError("DB connection lost")
+
+        monkeypatch.setattr(setup.data_flow, "record_token_outcome", _fail_record_token_outcome)
+        executor = SinkExecutor(setup.execution, setup.data_flow, _SpanFactoryDouble(), setup.run_id)
+
+        with pytest.raises(RuntimeError, match="DB connection lost"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,
+                ctx=_make_context(setup.run_id),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        with setup.db.engine.connect() as conn:
+            completed_states = conn.execute(
+                node_states_table.select().where(
+                    node_states_table.c.run_id == setup.run_id,
+                    node_states_table.c.node_id == "node-primary",
+                    node_states_table.c.status == NodeStateStatus.COMPLETED.value,
+                )
+            ).fetchall()
+            failed_states = conn.execute(
+                node_states_table.select().where(
+                    node_states_table.c.run_id == setup.run_id,
+                    node_states_table.c.node_id == "node-primary",
+                    node_states_table.c.status == NodeStateStatus.FAILED.value,
+                )
+            ).fetchall()
+            outcomes = conn.execute(token_outcomes_table.select().where(token_outcomes_table.c.run_id == setup.run_id)).fetchall()
+            artifacts = conn.execute(artifacts_table.select().where(artifacts_table.c.run_id == setup.run_id)).fetchall()
+
+        assert completed_states == []
+        assert {row.token_id for row in failed_states} == {token.token_id for token in tokens}
+        assert outcomes == []
+        assert artifacts == []
 
 
 class TestSystemErrorStateCleanup:
@@ -1008,7 +1514,7 @@ class TestSystemErrorStateCleanup:
         call_count = [0]
         original_side_effect = execution.begin_node_state.side_effect
 
-        def begin_state_with_error(**kwargs: Any) -> MagicMock:
+        def begin_state_with_error(**kwargs: Any) -> SimpleNamespace:
             call_count[0] += 1
             # Calls 1-2: primary divert states (OK)
             # Call 3: first failsink state (OK)
@@ -1023,7 +1529,7 @@ class TestSystemErrorStateCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1087,7 +1593,7 @@ class TestSystemErrorStateCleanup:
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
-                ctx=MagicMock(run_id="run-1"),
+                ctx=_make_context(),
                 step_in_pipeline=5,
                 sink_name="primary",
                 pending_outcome=_default_pending(),
@@ -1144,8 +1650,8 @@ class TestDiversionIndexValidation:
         with pytest.raises(PluginContractViolation, match=r"row_index=5.*batch has only 2 rows"):
             executor.write(
                 sink,
-                tokens,  # type: ignore[arg-type]  # MagicMock(spec=TokenInfo) satisfies runtime checks
-                MagicMock(),
+                tokens,  # type: ignore[arg-type]
+                _make_context(),
                 step_in_pipeline=0,
                 sink_name="out",
                 pending_outcome=pending,
@@ -1155,3 +1661,128 @@ class TestDiversionIndexValidation:
         assert execution.begin_node_state.call_count == 2
         failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
         assert len(failed_calls) == 2
+
+
+class TestUncoveredExceptArmCharacterization:
+    """Characterize three error-cleanup arms that were untested before the
+    SinkExecutor.write() decomposition (elspeth-f6a6ab0a46).
+
+    These pin CURRENT behavior so the behavior-preserving extraction into phase
+    helpers cannot silently break a cleanup path. Each targets an arm whose
+    only prior protection was the (ineffective) TIER_1-guard count floor:
+
+    * Test A: failsink begin_node_state GENERIC arm (non-TIER_1 error) — distinct
+      from its TIER_1 sibling; completes states directly + sets divert_states_closed.
+    * Test B: primary Phase-1 outer TIER_1 arm, flag False (best-effort cleanup).
+    * Test C: failsink outer TIER_1 arm, divert_states_closed False (best-effort cleanup).
+
+    RuntimeError is deliberately used for Test A because it is NOT in
+    contract_errors.TIER_1_ERRORS (so it routes to the generic arm), whereas
+    AuditIntegrityError/FrameworkBugError ARE in TIER_1_ERRORS (Tests B/C).
+    """
+
+    def test_failsink_begin_node_state_generic_error_cleans_up_open_states(self) -> None:
+        """A NON-TIER_1 error from failsink begin_node_state hits the generic arm
+        (sink.py 793-813), which completes the primary-divert anchors AND the
+        partially-opened failsink state as FAILED with phase='begin_node_state_failsink',
+        and sets divert_states_closed so the outer arm does not double-complete."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(
+            diversions=(
+                RowDiversion(row_index=0, reason="bad-0", row_data={"field": "v0"}),
+                RowDiversion(row_index=1, reason="bad-1", row_data={"field": "v1"}),
+            ),
+        )
+        failsink = _make_failsink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        # begin_node_state: calls 1-2 primary divert states OK, call 3 first
+        # failsink state OK, call 4 (second failsink state) raises a non-TIER_1 error.
+        call_count = [0]
+        original_side_effect = execution.begin_node_state.side_effect
+
+        def begin_state_with_error(**kwargs: Any) -> SimpleNamespace:
+            call_count[0] += 1
+            if call_count[0] == 4:
+                raise RuntimeError("transient failsink begin failure")
+            return original_side_effect(**kwargs)  # type: ignore[no-any-return]
+
+        execution.begin_node_state.side_effect = begin_state_with_error
+
+        with pytest.raises(RuntimeError, match="transient failsink begin failure"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-divert-1",
+            )
+
+        # state-1/2 (primary divert anchors) + state-3 (1st failsink) closed by the generic arm.
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2", "state-3"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "begin_node_state_failsink"
+            assert kwargs["error"].exception_type == "RuntimeError", state_id
+
+    def test_primary_write_tier1_error_cleans_up_states_flag_false(self) -> None:
+        """A TIER_1 error from primary sink.write() with NO boundary violation hits
+        the outer TIER_1 arm (sink.py 599-602) with primary_states_closed_by_boundary_failure
+        False, so best-effort cleanup closes every pre-opened primary state as FAILED."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink()  # no diversions
+        sink.write.side_effect = AuditIntegrityError("primary write audit failure")
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        with pytest.raises(AuditIntegrityError, match="primary write audit failure"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "sink_write"
+            assert kwargs["error"].exception_type == "AuditIntegrityError", state_id
+
+    def test_failsink_write_tier1_error_cleans_up_states_flag_false(self) -> None:
+        """A TIER_1 error from failsink.write() (failsink states already open, so
+        divert_states_closed False) hits the outer TIER_1 arm (sink.py 913-916),
+        best-effort closing the primary-divert anchor AND failsink state as FAILED."""
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        failsink.write.side_effect = FrameworkBugError("failsink write framework bug")
+        tokens = [_make_token("t0")]
+
+        with pytest.raises(FrameworkBugError, match="failsink write framework bug"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=_make_context(),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-failsink-1",
+            )
+
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "failsink_write"
+            assert kwargs["error"].exception_type == "FrameworkBugError", state_id

@@ -20,13 +20,18 @@ with the expected message substring.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
+
+
+class _UnusedWriter:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Shared config helpers
@@ -239,12 +244,12 @@ class TestAssertToRaiseConversions:
             factory = make_factory()
             ctx = make_context(run_id="test-run", landscape=factory.plugin_audit_writer())
 
-            mock_writer = MagicMock()
+            writer = _UnusedWriter()
 
             def broken_open_file_no_fieldnames(rows: list) -> None:  # type: ignore[type-arg]
                 # Provide _file and _writer but deliberately omit _fieldnames.
                 sink._file = open(str(output_path), "w")  # noqa: SIM115
-                sink._writer = mock_writer
+                sink._writer = writer
                 sink._fieldnames = None  # intentionally broken
                 sink._hasher = __import__("hashlib").sha256()
 

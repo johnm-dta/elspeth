@@ -42,6 +42,7 @@ from elspeth.web.composer.tutorial_telemetry import record_tutorial_completed_pa
 from elspeth.web.preferences.models import (
     ComposerMode,
     ComposerPreferences,
+    TutorialStage,
     UpdateComposerPreferencesRequest,
 )
 from elspeth.web.sessions.models import user_preferences_table
@@ -128,12 +129,17 @@ _PREFERENCES_PATCH_COUNTER = _meter.create_counter(
     "composer.preferences.patch_total",
     description=(
         "Composer-preferences PATCH operations. Attributes: mode_changed (bool), "
-        "banner_dismissed (bool), tutorial_changed (bool), wrote_row (bool)."
+        "banner_dismissed (bool), tutorial_changed (bool), "
+        "tutorial_progress_changed (bool), wrote_row (bool)."
     ),
 )
 
 _DEFAULT_MODE: ComposerMode = "guided"
 _VALID_MODES: frozenset[ComposerMode] = frozenset({"guided", "freeform"})
+# Tier-1 read-guard set for ``tutorial_stage``; lockstep with the
+# ``TutorialStage`` Literal (models.py) and the
+# ``ck_user_preferences_tutorial_stage`` CHECK (sessions/models.py).
+_VALID_TUTORIAL_STAGES: frozenset[TutorialStage] = frozenset({"guided", "run", "audit", "graduation"})
 
 
 def _utcnow() -> datetime:
@@ -152,6 +158,10 @@ def _select_preferences_for_user(user_id: str) -> Any:
         user_preferences_table.c.default_composer_mode,
         user_preferences_table.c.banner_dismissed_at,
         sql_cast(user_preferences_table.c.tutorial_completed_at, String).label("tutorial_completed_at"),
+        user_preferences_table.c.tutorial_stage,
+        user_preferences_table.c.tutorial_session_id,
+        user_preferences_table.c.tutorial_run_id,
+        user_preferences_table.c.tutorial_source_data_hash,
         user_preferences_table.c.updated_at,
     ).where(user_preferences_table.c.user_id == user_id)
 
@@ -211,6 +221,10 @@ class PreferencesService:
                 default_mode=_DEFAULT_MODE,
                 banner_dismissed_at=None,
                 tutorial_completed_at=None,
+                tutorial_stage=None,
+                tutorial_session_id=None,
+                tutorial_run_id=None,
+                tutorial_source_data_hash=None,
                 updated_at=None,
             )
 
@@ -233,10 +247,17 @@ class PreferencesService:
         if mode not in _VALID_MODES:
             raise CorruptPreferencesError(user_id, mode)
         tutorial_completed_at = _decode_tutorial_completed_at(user_id, row.tutorial_completed_at)
+        stage = row.tutorial_stage
+        if stage is not None and stage not in _VALID_TUTORIAL_STAGES:
+            raise CorruptPreferencesError(user_id, stage, field_name="tutorial_stage")
         return ComposerPreferences(
             default_mode=mode,
             banner_dismissed_at=row.banner_dismissed_at,
             tutorial_completed_at=tutorial_completed_at,
+            tutorial_stage=stage,
+            tutorial_session_id=row.tutorial_session_id,
+            tutorial_run_id=row.tutorial_run_id,
+            tutorial_source_data_hash=row.tutorial_source_data_hash,
             updated_at=row.updated_at,
         )
 
@@ -279,7 +300,20 @@ class PreferencesService:
         now = self._now()
         tutorial_in_payload = "tutorial_completed_at" in payload.model_fields_set
         banner_in_payload = "banner_dismissed_at" in payload.model_fields_set
-        payload_is_empty = payload.default_mode is None and not banner_in_payload and not tutorial_in_payload
+        # Tutorial resume fields (elspeth-918f4434b3) — each carries the same
+        # absent-vs-explicit-null discrimination as the banner/tutorial
+        # timestamps. See the completion-clears-progress rule below.
+        progress_fields = (
+            "tutorial_stage",
+            "tutorial_session_id",
+            "tutorial_run_id",
+            "tutorial_source_data_hash",
+        )
+        progress_in_payload = {name: name in payload.model_fields_set for name in progress_fields}
+        any_progress_in_payload = any(progress_in_payload.values())
+        payload_is_empty = (
+            payload.default_mode is None and not banner_in_payload and not tutorial_in_payload and not any_progress_in_payload
+        )
 
         def _sync() -> tuple[ComposerPreferences, bool, ComposerPreferences | None]:
             """Returns (current_prefs, wrote, prior_prefs)."""
@@ -310,6 +344,10 @@ class PreferencesService:
                             default_mode=_DEFAULT_MODE,
                             banner_dismissed_at=None,
                             tutorial_completed_at=None,
+                            tutorial_stage=None,
+                            tutorial_session_id=None,
+                            tutorial_run_id=None,
+                            tutorial_source_data_hash=None,
                             updated_at=None,
                         ),
                         False,
@@ -344,12 +382,35 @@ class PreferencesService:
                 else:
                     resolved_tutorial = None
 
+                # Tutorial resume fields. Completion-clears-progress rule:
+                # a PATCH that sets OR clears ``tutorial_completed_at`` also
+                # clears any resume field it does not itself supply, because
+                # completing the tutorial (any door: finish, skip) and
+                # resetting it for a retake (the e2e harness recipe —
+                # ``PATCH {"tutorial_completed_at": null}``) both terminate
+                # any in-progress tutorial. Without this rule a stale
+                # ``tutorial_stage`` would resurrect a mid-tutorial resume
+                # after a reset, breaking the restart-cleanly contract.
+                def _resolve_progress(name: str) -> str | None:
+                    if progress_in_payload[name]:
+                        value: str | None = getattr(payload, name)
+                        return value
+                    if tutorial_in_payload:
+                        return None
+                    if prior_prefs is not None:
+                        prior_value: str | None = getattr(prior_prefs, name)
+                        return prior_value
+                    return None
+
+                resolved_progress = {name: _resolve_progress(name) for name in progress_fields}
+
                 values: dict[str, object] = {
                     "user_id": user_id,
                     "default_composer_mode": insert_mode,
                     "banner_dismissed_at": resolved_banner,
                     "tutorial_completed_at": resolved_tutorial,
                     "updated_at": now,
+                    **resolved_progress,
                 }
                 stmt = sqlite_insert(user_preferences_table).values(**values)
                 update_clause: dict[str, object] = {"updated_at": now}
@@ -359,12 +420,21 @@ class PreferencesService:
                     update_clause["banner_dismissed_at"] = payload.banner_dismissed_at
                 if tutorial_in_payload:
                     update_clause["tutorial_completed_at"] = payload.tutorial_completed_at
+                for name in progress_fields:
+                    # Written when the caller supplied the field OR the
+                    # completion-clears-progress rule applies.
+                    if progress_in_payload[name] or tutorial_in_payload:
+                        update_clause[name] = resolved_progress[name]
                 stmt = stmt.on_conflict_do_update(index_elements=["user_id"], set_=update_clause)
                 row = conn.execute(
                     stmt.returning(
                         user_preferences_table.c.default_composer_mode,
                         user_preferences_table.c.banner_dismissed_at,
                         sql_cast(user_preferences_table.c.tutorial_completed_at, String).label("tutorial_completed_at"),
+                        user_preferences_table.c.tutorial_stage,
+                        user_preferences_table.c.tutorial_session_id,
+                        user_preferences_table.c.tutorial_run_id,
+                        user_preferences_table.c.tutorial_source_data_hash,
                         user_preferences_table.c.updated_at,
                     )
                 ).one()
@@ -374,6 +444,13 @@ class PreferencesService:
                 default_mode=payload.default_mode if payload.default_mode is not None else returned.default_mode,
                 banner_dismissed_at=payload.banner_dismissed_at if banner_in_payload else returned.banner_dismissed_at,
                 tutorial_completed_at=payload.tutorial_completed_at if tutorial_in_payload else returned.tutorial_completed_at,
+                # The RETURNING row carries the post-write resolved values
+                # (including the completion-clears-progress rule), so the
+                # resume fields read straight off ``returned``.
+                tutorial_stage=returned.tutorial_stage,
+                tutorial_session_id=returned.tutorial_session_id,
+                tutorial_run_id=returned.tutorial_run_id,
+                tutorial_source_data_hash=returned.tutorial_source_data_hash,
                 updated_at=now,
             )
             return current, True, prior_prefs
@@ -388,6 +465,7 @@ class PreferencesService:
                 "mode_changed": payload.default_mode is not None,
                 "banner_dismissed": payload.banner_dismissed_at is not None,
                 "tutorial_changed": tutorial_in_payload,
+                "tutorial_progress_changed": any_progress_in_payload,
                 "wrote_row": wrote,
             },
         )

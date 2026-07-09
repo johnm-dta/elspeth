@@ -244,7 +244,7 @@
   ("Dataverse plugin (OData v4)", "RC-4.0"),
   ("RAG retrieval transform", "RC-4.0"),
   ("Output schema contract enforcement", "RC-4.0"),
-  ("enforce_freeze_guards.py CI gate", "RC-4.0"),
+  ("immutability.freeze_guards CI rule", "RC-4.0"),
   ("ChromaSink (vector store population)", "RC-4.1"),
   ("depends_on pipeline sequencing", "RC-4.1"),
   ("Commencement gates", "RC-4.1"),

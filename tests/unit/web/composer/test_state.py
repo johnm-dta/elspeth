@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT, FAILSINK_ELIGIBLE_SINK_PLUGINS
 from elspeth.plugins.infrastructure.templates import TemplateError
 from elspeth.web.composer.state import (
     CompositionState,
@@ -1692,7 +1693,24 @@ class TestStage1Validation:
         state = state.with_edge(self._make_edge("e1", "source", "t1"))
         state = state.with_edge(self._make_edge("e2", "t1", "main"))
         result = state.validate()
-        assert any("must use csv or json" in w.message for w in result.warnings)
+        assert any(f"must use {FAILSINK_ELIGIBLE_PLUGIN_TEXT}" in w.message for w in result.warnings)
+
+    @pytest.mark.parametrize("plugin_name", sorted(FAILSINK_ELIGIBLE_SINK_PLUGINS))
+    def test_validate_on_write_failure_shared_policy_plugins_are_valid(self, plugin_name: str) -> None:
+        """W7: every centrally failsink-capable plugin is accepted by composer warnings."""
+        state = self._empty_state()
+        state = state.with_source(self._make_source(on_success="t1"))
+        state = state.with_node(self._make_transform("t1", "t1", "main"))
+        main_out = OutputSpec(name="main", plugin="database", options={"table": "rows"}, on_write_failure="errors")
+        errors_out = OutputSpec(name="errors", plugin=plugin_name, options={"path": f"/errors.{plugin_name}"}, on_write_failure="discard")
+        state = state.with_output(main_out)
+        state = state.with_output(errors_out)
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        state = state.with_edge(self._make_edge("e2", "t1", "main"))
+
+        result = state.validate()
+
+        assert not any("on_write_failure" in w.message for w in result.warnings)
 
     def test_validate_on_write_failure_chain_warns(self) -> None:
         """W7: failsink target has its own non-discard on_write_failure (chain)."""
@@ -3886,6 +3904,51 @@ class TestSchemaContractValidation:
         assert sink_contract.from_id == "source"
         assert sink_contract.consumer_requires == ("text",)
         assert sink_contract.satisfied is False
+
+    def test_fork_branch_name_cannot_overlap_coalesce_branch_and_sink(self) -> None:
+        """Composer must reject branch names that runtime routes to coalesce before sink."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="gate_in",
+                options={"schema": {"mode": "fixed", "fields": ["text: str"]}},
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="gate_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("main", "review"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_node(
+            self._make_coalesce(
+                "merge",
+                "branches",
+                "merged",
+                branches=("main", "review"),
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+        state = state.with_output(self._make_output("merged"))
+        state = state.with_edge(self._make_edge("e1", "source", "g1"))
+        state = state.with_edge(EdgeSpec(id="e2", from_node="g1", to_node="main", edge_type="fork", label="main"))
+        state = state.with_edge(EdgeSpec(id="e3", from_node="g1", to_node="merge", edge_type="fork", label="review"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any("Connection names overlap with sink names" in error.message and "main" in error.message for error in result.errors)
 
     def test_multi_hop_transform_no_schema_breaks_chain(self) -> None:
         """A schema-less transform breaks downstream guarantees across hops."""

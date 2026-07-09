@@ -1,7 +1,7 @@
 # ELSPETH Composer Guide
 
-**Document date:** 5 June 2026
-**Release covered:** RC-5.3
+**Document date:** 8 July 2026
+**Release covered:** 0.7.0
 **Audience:** Evaluators, programme teams, operators, and technical reviewers
 **Register:** Public-facing / lightly technical
 **Status:** Current capability guide
@@ -25,10 +25,10 @@ from a blank YAML file.
 
 | Need | Composer capability |
 |---|---|
-| Start from plain-language intent | Describe the workflow in chat or use guided mode to answer one decision at a time. |
-| Build with structure | Add a source, sink, transforms, routing, batch steps, and plugin options through controlled UI turns. |
+| Start from plain-language intent | Describe the workflow in chat or use guided mode to let the model build each stage from an operator instruction. |
+| Build with structure | Add or revise a source, sink, transforms, final wiring, routing, batch steps, and plugin options through controlled UI turns. |
 | Keep the operator in control | Accept, reject, or edit proposed changes before they become part of the composition. |
-| Check readiness | Use the audit-readiness panel to see validation, plugin trust, provenance, retention, LLM interpretation, and secret status. |
+| Check readiness | Use the audit-readiness and live verification panels to see validation, plugin trust, provenance, retention, LLM interpretation, and secret status. |
 | Review the shape | Inspect the graph view and rendered YAML before running or sharing. |
 | Handle credentials safely | Reference secrets by name instead of placing secret values in pipeline configuration. |
 | Preserve work in progress | Resume after an interrupted authoring session with transcript, redacted tool rows, and state diffs. |
@@ -41,12 +41,18 @@ Composer supports three authoring paths.
 | Path | Best for | How it feels |
 |---|---|---|
 | First-run tutorial | New users learning the vocabulary | A short guided walkthrough that builds a simple pipeline and explains the audit story. |
-| Guided mode | Users who want structure | A step-by-step flow through source, destination, recipe matching, and transforms. |
+| Guided mode | Users who want structure | A conversational builder that uses an LLM to construct source, sink, transforms, and final wiring one stage at a time. |
 | Freeform mode | Experienced users with a clear pipeline in mind | A chat-first surface where the user describes the pipeline and reviews proposed changes. |
 
 Guided mode is the default for new sessions unless the user changes their
 Composer preference. Users can switch modes during a session without changing
 their account default.
+
+In 0.7.0, guided mode is LLM-primary. The operator stays in control, but the
+model proposes the concrete stage change through `/guided/chat`; ELSPETH applies
+that proposal to the in-progress pipeline only after validation, presents the
+plain-language gloss and graph impact, and gates final wiring on advisor
+sign-off.
 
 ## How Composer Keeps Work Auditable
 
@@ -62,6 +68,8 @@ Composer treats authoring as part of the evidence chain.
   to run or share.
 - If an LLM-assisted step depends on a subjective interpretation, Composer can
   surface that interpretation for review instead of silently deciding it.
+- Guided sessions surface pending interpretation cards before persistence can
+  advance, and the wire stage can request an advisor rather than auto-complete.
 
 This does not make the language model an authority. The language model proposes
 changes. ELSPETH records, validates, and gates the resulting pipeline.

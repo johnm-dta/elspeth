@@ -1338,14 +1338,17 @@ class TestExpressionEvaluationError:
         with pytest.raises(ExpressionEvaluationError, match="nonexistent"):
             parser.evaluate({"other_field": 1})
 
-    def test_missing_field_error_includes_available_fields(self) -> None:
-        """Error message includes list of available fields for debugging."""
+    def test_missing_field_error_omits_available_fields(self) -> None:
+        """Missing-field errors identify the missing key without exposing row schema."""
         parser = ExpressionParser("row['missing'] == 'value'")
         with pytest.raises(ExpressionEvaluationError) as exc_info:
-            parser.evaluate({"field_a": 1, "field_b": 2})
+            parser.evaluate({"ssn": "123-45-6789", "api_token": "tok-secret"})
         error_msg = str(exc_info.value)
         assert "missing" in error_msg
-        assert "field_a" in error_msg or "Available fields" in error_msg
+        assert "dict" in error_msg
+        assert "Available fields" not in error_msg
+        assert "ssn" not in error_msg
+        assert "api_token" not in error_msg
 
     def test_division_by_zero_raises_evaluation_error(self) -> None:
         """Division by zero raises ExpressionEvaluationError with context."""

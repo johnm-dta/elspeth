@@ -38,11 +38,13 @@ Per CLAUDE.md:
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import math
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, cast
 from uuid import UUID
 
 import numpy as np
@@ -59,6 +61,18 @@ from elspeth.contracts.errors import AuditIntegrityError
 # are escaped via _escape_reserved_keys() before encoding.
 _ENVELOPE_TYPE_KEY = "__elspeth_type__"
 _ENVELOPE_VALUE_KEY = "__elspeth_value__"
+_KNOWN_ENVELOPE_TYPES = frozenset(
+    {
+        "datetime",
+        "decimal",
+        "date",
+        "time",
+        "bytes",
+        "uuid",
+        "escaped_dict",
+        "tuple",
+    }
+)
 
 
 class CheckpointEncoder(json.JSONEncoder):
@@ -173,15 +187,12 @@ class CheckpointEncoder(json.JSONEncoder):
         # Offensive-programming boundary: the SchemaContract `object` type is an
         # unbounded catch-all, so the serializer cannot be made total. Replace the
         # cryptic stdlib "Object of type X is not JSON serializable" with a clear
-        # audit-fidelity error that NAMES the type and the offending value. Tier-1
-        # checkpoints (token_data_ref envelopes, aggregation state) must contain
-        # only JSON-native values or one of the envelope-tagged types.
-        value_repr = repr(obj)
-        if len(value_repr) > 200:
-            value_repr = value_repr[:200] + "…"
+        # audit-fidelity error that names the type without previewing raw payload
+        # data. Tier-1 checkpoints (token_data_ref envelopes, aggregation state)
+        # must contain only JSON-native values or one of the envelope-tagged types.
         raise TypeError(
             f"Cannot serialize value of type {type(obj).__name__!r} into a checkpoint payload "
-            f"(value={value_repr}). Checkpoint payloads are a Tier-1 audit-fidelity boundary: "
+            f"at the Tier-1 audit-fidelity boundary. "
             f"every value must be JSON-native (int, float, str, bool, None, list, dict) or one of "
             f"the type-preserving envelopes (datetime, Decimal, date, time, bytes, UUID, tuple). "
             f"numpy scalars are accepted and normalized to Python primitives. To record this value, "
@@ -218,7 +229,7 @@ def _reject_nan_infinity(obj: Any) -> Any:
 def _escape_reserved_keys(obj: Any) -> Any:
     """Recursively escape user dicts that coincidentally contain the reserved key.
 
-    If a user dict contains __elspeth_type__, wrap it in an escape envelope so
+    If a user dict contains a reserved envelope key, wrap it in an escape envelope so
     _restore_types() can distinguish it from a real type envelope.
 
     Args:
@@ -241,8 +252,8 @@ def _escape_reserved_keys(obj: Any) -> Any:
     if isinstance(obj, dict):
         # First recurse into values
         escaped = {k: _escape_reserved_keys(v) for k, v in obj.items()}
-        # If this dict contains our reserved key, wrap it in an escape envelope
-        if _ENVELOPE_TYPE_KEY in escaped:
+        # If this dict contains a reserved envelope key, wrap it in an escape envelope.
+        if _ENVELOPE_TYPE_KEY in escaped or _ENVELOPE_VALUE_KEY in escaped:
             return {
                 _ENVELOPE_TYPE_KEY: "escaped_dict",
                 _ENVELOPE_VALUE_KEY: escaped,
@@ -303,26 +314,32 @@ def _restore_types(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         # Check for collision-safe envelope
-        if _ENVELOPE_TYPE_KEY in obj and _ENVELOPE_VALUE_KEY in obj:
-            if len(obj) != 2:
+        if _ENVELOPE_TYPE_KEY in obj or _ENVELOPE_VALUE_KEY in obj:
+            if _ENVELOPE_TYPE_KEY not in obj or _ENVELOPE_VALUE_KEY not in obj or len(obj) != 2:
                 raise AuditIntegrityError(
-                    f"Corrupted checkpoint: invalid envelope shape for type {obj[_ENVELOPE_TYPE_KEY]!r} — "
-                    f"reserved envelope keys must not be mixed with extra keys"
+                    f"Corrupted checkpoint: invalid envelope shape for type {obj.get(_ENVELOPE_TYPE_KEY)!r} - "
+                    f"reserved envelope keys must appear together and must not be mixed with extra keys"
                 )
             envelope_type = obj[_ENVELOPE_TYPE_KEY]
             envelope_value = obj[_ENVELOPE_VALUE_KEY]
 
-            if envelope_type == "datetime" and isinstance(envelope_value, str):
-                dt = datetime.fromisoformat(envelope_value)
+            if not isinstance(envelope_type, str):
+                raise AuditIntegrityError(
+                    f"Checkpoint envelope type tag must be str, got {type(envelope_type).__name__!r} - data may be corrupted"
+                )
+
+            if envelope_type == "datetime":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                dt = _parse_string_envelope(envelope_type, value, datetime.fromisoformat)
                 if dt.tzinfo is None:
                     raise AuditIntegrityError(
-                        f"Corrupted checkpoint: datetime envelope contains naive datetime "
-                        f"{envelope_value!r} — timezone-aware datetimes are required"
+                        f"Corrupted checkpoint: datetime envelope contains naive datetime {value!r} — timezone-aware datetimes are required"
                     )
                 return dt
 
-            if envelope_type == "decimal" and isinstance(envelope_value, str):
-                restored = Decimal(envelope_value)
+            if envelope_type == "decimal":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                restored = _parse_string_envelope(envelope_type, value, Decimal)
                 # Re-validate finiteness on restore — symmetric with the write-side
                 # reject at line 115. Decimal("NaN")/Decimal("Infinity") construct
                 # successfully, so without this guard a corrupted or tampered
@@ -331,46 +348,39 @@ def _restore_types(obj: Any) -> Any:
                 if not restored.is_finite():
                     raise AuditIntegrityError(
                         f"Corrupted checkpoint: decimal envelope contains non-finite value "
-                        f"{envelope_value!r} — NaN/Infinity are not valid audit values"
+                        f"{value!r} — NaN/Infinity are not valid audit values"
                     )
                 return restored
 
-            if envelope_type == "date" and isinstance(envelope_value, str):
-                return date.fromisoformat(envelope_value)
+            if envelope_type == "date":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _parse_string_envelope(envelope_type, value, date.fromisoformat)
 
-            if envelope_type == "time" and isinstance(envelope_value, str):
-                return time.fromisoformat(envelope_value)
+            if envelope_type == "time":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _parse_string_envelope(envelope_type, value, time.fromisoformat)
 
-            if envelope_type == "bytes" and isinstance(envelope_value, str):
-                return base64.b64decode(envelope_value)
+            if envelope_type == "bytes":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _restore_bytes_envelope(value)
 
-            if envelope_type == "uuid" and isinstance(envelope_value, str):
-                return UUID(envelope_value)
+            if envelope_type == "uuid":
+                value = _require_envelope_value_type(envelope_type, envelope_value, str)
+                return _parse_string_envelope(envelope_type, value, UUID)
 
-            if envelope_type == "escaped_dict" and isinstance(envelope_value, dict):
+            if envelope_type == "escaped_dict":
+                escaped_value = _require_envelope_value_type(envelope_type, envelope_value, dict)
                 # Unwrap the escaped dict and recurse into its values
-                return {k: _restore_types(v) for k, v in envelope_value.items()}
+                return {k: _restore_types(v) for k, v in escaped_value.items()}
 
-            if envelope_type == "tuple" and isinstance(envelope_value, list):
-                return tuple(_restore_types(v) for v in envelope_value)
+            if envelope_type == "tuple":
+                tuple_value = _require_envelope_value_type(envelope_type, envelope_value, list)
+                return tuple(_restore_types(v) for v in tuple_value)
 
             # Envelope shape detected — all known types handled above.
-            _KNOWN_ENVELOPE_TYPES = {
-                "datetime",
-                "decimal",
-                "date",
-                "time",
-                "bytes",
-                "uuid",
-                "escaped_dict",
-                "tuple",
-            }
             if envelope_type in _KNOWN_ENVELOPE_TYPES:
                 # Known type but value failed isinstance check above — wrong Python type
-                raise AuditIntegrityError(
-                    f"Checkpoint envelope type {envelope_type!r} has invalid value type "
-                    f"{type(envelope_value).__name__!r} — data may be corrupted"
-                )
+                _raise_invalid_envelope_value_type(envelope_type, envelope_value)
             raise AuditIntegrityError(f"Unknown checkpoint envelope type {envelope_type!r} — data may be corrupted or tampered")
 
         # Recurse into dict values
@@ -378,6 +388,43 @@ def _restore_types(obj: Any) -> Any:
     elif isinstance(obj, list):
         return [_restore_types(v) for v in obj]
     return obj
+
+
+def _require_envelope_value_type[T](envelope_type: str, envelope_value: object, value_type: type[T]) -> T:
+    if not isinstance(envelope_value, value_type):
+        _raise_invalid_envelope_value_type(envelope_type, envelope_value)
+    return cast(T, envelope_value)
+
+
+def _raise_invalid_envelope_value_type(envelope_type: str, envelope_value: object) -> None:
+    raise AuditIntegrityError(
+        f"Checkpoint envelope type {envelope_type!r} has invalid value type {type(envelope_value).__name__!r} — data may be corrupted"
+    )
+
+
+def _parse_string_envelope[T](envelope_type: str, envelope_value: str, parser: Callable[[str], T]) -> T:
+    try:
+        return parser(envelope_value)
+    except (InvalidOperation, ValueError) as exc:
+        raise AuditIntegrityError(
+            f"Corrupted checkpoint: {envelope_type} envelope contains invalid value {envelope_value!r} - data may be corrupted or tampered"
+        ) from exc
+
+
+def _restore_bytes_envelope(envelope_value: str) -> bytes:
+    try:
+        restored = base64.b64decode(envelope_value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AuditIntegrityError(
+            f"Corrupted checkpoint: bytes envelope contains invalid Base64 {envelope_value!r} - data may be corrupted or tampered"
+        ) from exc
+
+    canonical = base64.b64encode(restored).decode("ascii")
+    if canonical != envelope_value:
+        raise AuditIntegrityError(
+            f"Corrupted checkpoint: bytes envelope contains non-canonical Base64 {envelope_value!r} - expected {canonical!r}"
+        )
+    return restored
 
 
 def _reject_json_constant(constant: str) -> Any:
@@ -394,6 +441,15 @@ def _reject_json_constant(constant: str) -> Any:
     ``_restore_types`` applies the matching ``is_finite()`` guard.)
     """
     raise AuditIntegrityError(f"Corrupted checkpoint: non-finite JSON constant {constant!r} — NaN/Infinity are not valid audit values")
+
+
+def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    restored: dict[str, object] = {}
+    for key, value in pairs:
+        if key in restored:
+            raise AuditIntegrityError(f"Corrupted checkpoint: duplicate JSON object key {key!r} — data may be corrupted or tampered")
+        restored[key] = value
+    return restored
 
 
 def checkpoint_loads(s: str) -> Any:
@@ -417,5 +473,5 @@ def checkpoint_loads(s: str) -> Any:
         json.JSONDecodeError: If string is not valid JSON
         AuditIntegrityError: If the payload carries a non-finite NaN/Infinity value
     """
-    data = json.loads(s, parse_constant=_reject_json_constant)
+    data = json.loads(s, parse_constant=_reject_json_constant, object_pairs_hook=_reject_duplicate_object_pairs)
     return _restore_types(data)

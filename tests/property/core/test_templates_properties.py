@@ -7,7 +7,8 @@ Extraction Properties:
 - Attribute access (row.field) is extracted
 - Item access (row["field"]) is extracted
 - Namespace filtering works correctly
-- Only static keys are extracted (dynamic ignored)
+- Field-only extraction returns only static keys
+- Structured usage reports dynamic row keys separately
 
 Return Type Properties:
 - Always returns frozenset (immutable)
@@ -31,6 +32,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.core.templates import (
+    extract_jinja2_field_usage,
     extract_jinja2_fields,
     extract_jinja2_fields_with_details,
 )
@@ -40,18 +42,16 @@ from elspeth.core.templates import (
 # =============================================================================
 
 # Valid Python-style field names (for row.field).
-# Excludes the PipelineRow API names that extract_jinja2_fields deliberately
-# skips — "get" (mapping method handled as row.get("key") Call pattern),
-# "contract" (@property exposing the SchemaContract), and "to_dict"
-# (serialization method). Must mirror src/elspeth/core/templates.py
-# ``_PIPELINE_ROW_API_NAMES`` or the property domain will produce examples
+# Excludes private attributes and PipelineRow API names that
+# extract_jinja2_fields deliberately skips. Must mirror
+# src/elspeth/core/templates.py or the property domain will produce examples
 # Hypothesis then fails to round-trip through the extractor.
-_EXCLUDED_ROW_API_NAMES = frozenset({"get", "contract", "to_dict"})
+_EXCLUDED_ROW_API_NAMES = frozenset({"get", "contract", "to_dict", "to_checkpoint_format"})
 valid_field_names = st.text(
     min_size=1,
     max_size=20,
     alphabet=string.ascii_letters + "_",
-).filter(lambda s: s.isidentifier() and s not in _EXCLUDED_ROW_API_NAMES)
+).filter(lambda s: s.isidentifier() and not s.startswith("_") and s not in _EXCLUDED_ROW_API_NAMES)
 
 # Field names that can include dashes/special chars (for row["field"])
 bracket_field_names = st.text(
@@ -142,6 +142,8 @@ class TestItemAccessProperties:
         assume(field1 != field2)
         # field1 uses dot notation (must be valid identifier)
         assume(field1.isidentifier())
+        assume(not field1.startswith("_"))
+        assume(field1 not in _EXCLUDED_ROW_API_NAMES)
 
         template = f'{{{{ row.{field1} }}}} {{{{ row["{field2}"] }}}}'
         fields = extract_jinja2_fields(template)
@@ -279,25 +281,31 @@ class TestDynamicKeyExclusionProperties:
     """Property tests for dynamic key handling (row[variable])."""
 
     def test_dynamic_key_ignored(self) -> None:
-        """Property: Dynamic keys (row[variable]) are NOT extracted.
+        """Property: Field-only extraction excludes dynamic keys.
 
-        We can't know what 'key' contains at parse time, so we correctly
-        ignore it. Developers must manually declare such dependencies.
+        We can't know what 'key' contains at parse time, so it is reported
+        through extract_jinja2_field_usage() instead of as a concrete field.
         """
         template = "{{ row[key] }}"  # key is a variable, not a string literal
         fields = extract_jinja2_fields(template)
+        usage = extract_jinja2_field_usage(template)
 
         assert len(fields) == 0
+        assert usage.fields == frozenset()
+        assert usage.dynamic_accesses == ("item",)
 
     @given(static_field=valid_field_names)
     @settings(max_examples=50)
     def test_static_keys_extracted_dynamic_ignored(self, static_field: str) -> None:
-        """Property: Static keys extracted, dynamic keys ignored."""
+        """Property: Static keys extracted, dynamic keys reported separately."""
         template = f'{{{{ row["{static_field}"] }}}} {{{{ row[dynamic_var] }}}}'
         fields = extract_jinja2_fields(template)
+        usage = extract_jinja2_field_usage(template)
 
         assert static_field in fields
         assert len(fields) == 1  # Only the static one
+        assert usage.fields == fields
+        assert usage.dynamic_accesses == ("item",)
 
 
 # =============================================================================

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import os
 import sys
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
@@ -34,6 +37,34 @@ def _allow_insecure_test_keys(host: str) -> bool:
     return host in _LOCAL_HOSTS and ("pytest" in sys.modules or os.environ.get("ELSPETH_ENV") == "test")
 
 
+def _is_loopback_or_private_origin(value: str) -> bool:
+    parsed = urlparse(value)
+    hostname = parsed.hostname
+    if hostname is None:
+        return True
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return False
+    return not address.is_global
+
+
+def _is_loopback_origin(value: str) -> bool:
+    parsed = urlparse(value)
+    hostname = parsed.hostname
+    if hostname is None:
+        return False
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_loopback
+
+
 class WebSettings(BaseModel):
     """Configuration for the ELSPETH web application.
 
@@ -53,9 +84,17 @@ class WebSettings(BaseModel):
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
-    # Phase 4A: cache directory for the tutorial-seed run cache. Defaults
-    # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
-    tutorial_cache_dir: Path | None = Field(default=None)
+    # Trusted externally visible origin used for generated user-facing links.
+    # Required for email-verified registration when binding to a non-local host;
+    # never derive emailed links from request Host headers.
+    public_base_url: str | None = Field(default=None)
+    # Phase p4: override for the public base URL the tutorial synthetic-scrape
+    # pages are reachable at. When None (the default), the canonical public
+    # GitHub Pages copy (TUTORIAL_SAMPLE_PAGES_BASE_URL) is used. Used ONLY to
+    # build {base}/tutorial-site/project-N.html for the tutorial's web_scrape
+    # node; that node uses the plugin default allowed_hosts="public_only" and the
+    # server injects no allowlist. Set this only to host your own copy (a fork).
+    tutorial_sample_base_url: str | None = Field(default=None)
     composer_model: str = "gpt-5.5"
     # Operator-set LLM sampling. Default None means omitted from the
     # provider request, which is the coherent default for reasoning-model
@@ -82,6 +121,7 @@ class WebSettings(BaseModel):
     composer_runtime_preflight_timeout_seconds: float = Field(default=5.0, gt=0)
     composer_rate_limit_per_minute: int = Field(..., ge=1)
     composer_expose_provider_errors: bool = False
+    e2e_state_seed_enabled: bool = False
     composer_advisor_model: str = "anthropic/claude-sonnet-4-6"
     composer_advisor_max_calls_per_compose: int = Field(
         default=4,
@@ -159,6 +199,7 @@ class WebSettings(BaseModel):
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "AZURE_API_KEY",
+        "AZURE_CONTENT_SAFETY_KEY",
     )
     orphan_run_max_age_seconds: int = Field(default=3600, ge=60)
     orphan_run_check_interval_seconds: int = Field(default=300, ge=30)
@@ -309,6 +350,32 @@ class WebSettings(BaseModel):
             raise ValueError("must not be blank (omit the field to disable encryption)")
         return v
 
+    @field_validator("tutorial_sample_base_url")
+    @classmethod
+    def _reject_blank_tutorial_sample_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not v.strip():
+            raise ValueError("must not be blank (omit the field or set to a non-empty base URL)")
+        return v
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _validate_public_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        safe_url = validate_credential_safe_https_url(
+            v,
+            field_name="public_base_url",
+            allow_http_loopback=True,
+        ).rstrip("/")
+        parsed = urlparse(safe_url)
+        if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("public_base_url must be an origin without path, query, or fragment")
+        if _is_loopback_or_private_origin(safe_url) and not (parsed.scheme == "http" and _is_loopback_origin(safe_url)):
+            raise ValueError("public_base_url must target a public origin unless using HTTP loopback for local development")
+        return safe_url
+
     @field_validator("secret_key")
     @classmethod
     def _reject_blank_secret_key(cls, v: str) -> str:
@@ -375,14 +442,14 @@ class WebSettings(BaseModel):
             raise ValueError("shareable_link_signing_key must be at least 32 bytes")
         return v
 
-    @field_validator("data_dir", "payload_store_path", "tutorial_cache_dir", mode="before")
+    @field_validator("data_dir", "payload_store_path", mode="before")
     @classmethod
     def _reject_blank_path_strings(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
             raise ValueError("must not be blank")
         return v
 
-    @field_validator("data_dir", "payload_store_path", "tutorial_cache_dir")
+    @field_validator("data_dir", "payload_store_path")
     @classmethod
     def _normalize_paths(cls, v: Path | None) -> Path | None:
         if v is None:
@@ -399,13 +466,6 @@ class WebSettings(BaseModel):
         # lifetime regardless of later os.chdir calls.
         return v.expanduser().resolve()
 
-    @model_validator(mode="after")
-    def _default_tutorial_cache_dir(self) -> WebSettings:
-        """Resolve the tutorial cache directory under the validated data_dir."""
-        if self.tutorial_cache_dir is None:
-            object.__setattr__(self, "tutorial_cache_dir", self.data_dir / "tutorial_cache")
-        return self
-
     @field_validator("server_secret_allowlist")
     @classmethod
     def _validate_server_secret_allowlist(cls, v: tuple[str, ...]) -> tuple[str, ...]:
@@ -418,6 +478,12 @@ class WebSettings(BaseModel):
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> WebSettings:
         """Enforce that OIDC/Entra providers have their required fields."""
+        if self.registration_mode == "email_verified" and self.host not in _LOCAL_HOSTS:
+            if self.public_base_url is None:
+                raise ValueError("email_verified registration on a non-local host requires public_base_url")
+            if _is_loopback_or_private_origin(self.public_base_url):
+                raise ValueError("public_base_url for a non-local email_verified host must be publicly reachable")
+
         if self.auth_provider == "local":
             configured = [
                 name

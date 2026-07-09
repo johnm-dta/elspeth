@@ -56,15 +56,34 @@ def best_effort(operation: str, /, **context: Any) -> Iterator[None]:
         catches are forbidden for plugin/engine bugs in the primary
         execution path, but post-audit ceremony is *secondary* to the
         primary event.
+
+    EXCEPTION — Tier-1 always escapes: audit-integrity / framework-invariant
+    errors (``TIER_1_ERRORS``) re-raise before the broad catch. Audit
+    corruption during ceremony outranks even the in-flight primary event
+    (errors.py policy: ``except TIER_1_ERRORS: raise`` before any
+    ``except Exception``). Tier-2 coordination refusals
+    (``RunLeadershipLostError``, ``RunWorkerEvictedError``) are NOT Tier-1
+    and stay suppressed — the finalize call sites rely on that.
     """
+    # Live attribute access of the lazily materialized TIER_1_ERRORS tuple —
+    # never a from-import snapshot (which would capture an empty/stale tuple
+    # and let Tier-1 errors fall through to the broad suppression below).
+    import elspeth.contracts.errors as contract_errors
+
     try:
         yield
+    except contract_errors.TIER_1_ERRORS:
+        raise
     except Exception as ceremony_failure:
-        fields = {
-            **context,
-            "operation": operation,
-            "error_type": type(ceremony_failure).__name__,
-        }
+        fields = dict(context)
+        if "event" in fields:
+            fields["context_event"] = fields.pop("event")
+        fields.update(
+            {
+                "operation": operation,
+                "error_type": type(ceremony_failure).__name__,
+            }
+        )
         with suppress(Exception):
             _slog.warning(
                 "best-effort ceremony failed during error propagation; original event preserved",

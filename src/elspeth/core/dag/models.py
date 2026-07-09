@@ -14,12 +14,10 @@ from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.core.landscape.schema import NODE_ID_COLUMN_LENGTH
+from elspeth.contracts.types import NODE_ID_MAX_LENGTH, CoalesceName, NodeID
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PluginSchema, TransformProtocol
-    from elspeth.core.config import TransformSettings
+    from elspeth.contracts import PluginSchema
 
 
 class GraphValidationError(ValueError):
@@ -127,9 +125,9 @@ class GraphValidationWarning:
 class BranchInfo:
     """Properties of a fork branch that routes to a coalesce node.
 
-    Consolidates two parallel dicts that were both keyed by BranchName:
-    - branch_to_coalesce (BranchName -> CoalesceName)
-    - branch_gate_map (BranchName -> NodeID)
+    Consolidates branch routing facts that used to be carried by several
+    builder-local structures: destination coalesce, producing gate, coalesce
+    input connection, and whether the branch goes through a transform chain.
 
     The optional ``schema`` field stores the branch's producer schema,
     enabling runtime tracking of which fields would have been contributed
@@ -139,6 +137,8 @@ class BranchInfo:
 
     coalesce_name: CoalesceName
     gate_node_id: NodeID
+    input_connection: str = ""
+    uses_transform_chain: bool = False
     schema: SchemaConfig | None = None
 
     def __post_init__(self) -> None:
@@ -148,7 +148,7 @@ class BranchInfo:
             raise ValueError("BranchInfo.gate_node_id must not be empty")
 
 
-_NODE_ID_MAX_LENGTH = NODE_ID_COLUMN_LENGTH
+_NODE_ID_MAX_LENGTH = NODE_ID_MAX_LENGTH
 
 
 # Config stored on graph nodes varies by node type:
@@ -246,10 +246,9 @@ class NodeInfo:
                 component_id=self.node_id,
                 component_type=component_type,
             )
-        # NOTE: config is NOT frozen here because the builder mutates
-        # output_schema_config on pass-through nodes (gates, coalesce) via
-        # object.__setattr__ during schema propagation. Deep freeze is
-        # applied by build_execution_graph() after all mutations are complete.
+        # NOTE: config is NOT frozen here because graph construction replaces
+        # NodeInfo payloads during schema propagation and final config freezing.
+        # Deep freeze is applied by build_execution_graph() after construction.
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,23 +270,6 @@ class _GateEntry:
         if len(self.routes) == 0:
             raise ValueError("_GateEntry.routes must have at least one entry")
         freeze_fields(self, "routes")
-
-
-@dataclass(frozen=True, slots=True)
-class WiredTransform:
-    """Pair a transform plugin instance with its wiring settings."""
-
-    plugin: TransformProtocol
-    settings: TransformSettings
-
-    def __post_init__(self) -> None:
-        """Ensure wiring metadata matches the instantiated plugin."""
-        if self.plugin.name != self.settings.plugin:
-            raise GraphValidationError(
-                f"WiredTransform mismatch: settings.plugin='{self.settings.plugin}' but plugin instance name='{self.plugin.name}'.",
-                component_id=self.settings.name,
-                component_type="transform",
-            )
 
 
 def _suggest_similar(name: str, candidates: list[str]) -> list[str]:

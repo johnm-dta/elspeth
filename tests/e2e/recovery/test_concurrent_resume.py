@@ -50,17 +50,26 @@ import re
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import insert, select, update
 
 from elspeth.contracts import RunStatus
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.scheduler import TokenWorkStatus
-from elspeth.core.checkpoint.recovery import NonResumableRunError
-from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
+from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager
+from elspeth.core.landscape.schema import (
+    run_coordination_table,
+    run_workers_table,
+    runs_table,
+    token_outcomes_table,
+    tokens_table,
+)
 from elspeth.engine.clock import MockClock
 from elspeth.engine.orchestrator import Orchestrator
+from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from tests.e2e.recovery.harness import (
     _DEFAULT_LEASE_SECONDS,
     _SOURCE_ROWS,
@@ -462,6 +471,172 @@ class TestTwoResumesSameRunId:
         assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
         seat_final = _coordination_row(crashed.db, crashed.run_id)
         assert seat_final["leader_worker_id"] is None, "graceful release after finalize"
+        crashed.db.close()
+
+    def test_cas_loser_skips_unprocessed_payload_restore(self, tmp_path: Path) -> None:
+        """elspeth-e3d1310b93: a resume contender that LOSES the seat CAS refuses
+        BEFORE the unprocessed-row payload restore.
+
+        ``get_unprocessed_row_data_by_source`` retrieves + json-decodes +
+        Pydantic-validates every unprocessed payload blob from the payload store
+        (recovery.py). Historically it ran BEFORE ``acquire_run_leadership``, so
+        every LOSING resume contender paid that full read/decode/validate cost
+        before the seat CAS rejected it — the CAS protected durable mutation but
+        not the expensive input boundary. The restore now runs AFTER the CAS, so
+        a losing racer is refused before touching the payload store.
+
+        This drives ``reconstruct_resume_state`` DIRECTLY rather than public
+        ``resume()``: a live-seat loser is refused earlier, at the resume() entry
+        guard (``test_entry_guard_refuses_resume_while_run_status_running``). The
+        ordering fixed here matters for the RESIDUAL-TOCTOU racer — one that
+        passed the FAILED-status entry guard and only loses at the seat CAS
+        inside ``reconstruct_resume_state`` — so the honest seam is the method
+        itself. A spy on the restore step proves it never runs for the loser;
+        pre-reorder the same spy would record one call before the refusal.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        # Capture the loser's resume point from the FAILED state — the
+        # residual-TOCTOU racer fetches an equally-valid resume point before the
+        # winner takes the seat (mirrors test_two_resumes_loser_after_winner).
+        resume_point = _resume_point(crashed)
+        assert resume_point is not None
+
+        # Seat a LIVE incumbent leader (huge window → live under both the
+        # MockClock and the wall clock the resume-side CAS reads), so the loser's
+        # seat CAS inside reconstruct_resume_state loses to it.
+        winner_id = f"worker:{crashed.run_id}:winner"
+        _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=winner_id,
+            now=clock.now_utc(),
+            window_seconds=_GUARD_LIVE_SEAT_WINDOW_SECONDS,
+        )
+
+        # Spy on the payload-restore read: record every invocation, delegate to
+        # the real implementation so behaviour is otherwise unchanged.
+        restore_invocations: list[str] = []
+        real_restore = RecoveryManager.get_unprocessed_row_data_by_source
+
+        def _spy_restore(self: RecoveryManager, run_id: str, payload_store: object, *, source_schema_classes: object) -> object:
+            restore_invocations.append(run_id)
+            return real_restore(self, run_id, payload_store, source_schema_classes=source_schema_classes)  # type: ignore[arg-type]
+
+        coordinator = crashed.resume_orchestrator()._resume_coordinator
+        with (
+            patch.object(RecoveryManager, "get_unprocessed_row_data_by_source", _spy_restore),
+            pytest.raises(NonResumableRunError, match=r"run leadership is held by"),
+        ):
+            coordinator.reconstruct_resume_state(resume_point, crashed.payload_store)
+
+        assert restore_invocations == [], (
+            "CAS loser must refuse BEFORE the unprocessed-row payload restore "
+            "(elspeth-e3d1310b93: get_unprocessed_row_data_by_source moved after acquire_run_leadership)"
+        )
+        crashed.db.close()
+
+    def test_cas_winner_recomputes_workset_after_leadership(self, tmp_path: Path) -> None:
+        """The resume work set must be computed AFTER the seat CAS, not before.
+
+        ``reconstruct_resume_state`` selects the row-replay work set (row IDs +
+        incomplete-token continuations) and then hydrates those rows. If the
+        work set is read BEFORE ``acquire_run_leadership``, a competing resume
+        that won leadership first — completed a row, then died/relinquished,
+        returning the run to FAILED — leaves THIS attempt to win the CAS and
+        replay a STALE work set: re-driving the already-completed row (and
+        missing any newly-incomplete tokens the competing leader created).
+
+        The competing leader's completed-row write is injected RIGHT AFTER this
+        attempt's seat CAS commits — a faithful stand-in for "the prior leader
+        had already completed the row before dying; by the time we win the seat
+        the terminal outcome is durable." Post-fix, the work set is read after
+        the CAS and excludes the completed row; pre-fix it was read before the
+        CAS (inside the read-only snapshot), so the row is still — wrongly — in
+        the replay set. This is the winner-side twin of
+        ``test_cas_loser_skips_unprocessed_payload_restore`` and drives
+        ``reconstruct_resume_state`` directly for the same residual-TOCTOU
+        seam.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        # Two genuinely-unprocessed rows: the competing leader completes row A
+        # between our snapshot read and our CAS win; row B stays unprocessed.
+        token_a = _craft_crashed_lease(crashed, ingest_sequence=3, lease_owner="crashed-worker-a", lease_seconds=_DEFAULT_LEASE_SECONDS)
+        token_b = _craft_crashed_lease(crashed, ingest_sequence=4, lease_owner="crashed-worker-b", lease_seconds=_DEFAULT_LEASE_SECONDS)
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        with crashed.db.engine.connect() as conn:
+            row_a = conn.execute(select(tokens_table.c.row_id).where(tokens_table.c.token_id == token_a)).scalar_one()
+            row_b = conn.execute(select(tokens_table.c.row_id).where(tokens_table.c.token_id == token_b)).scalar_one()
+
+        resume_point = _resume_point(crashed)
+        assert resume_point is not None
+        coordinator = crashed.resume_orchestrator()._resume_coordinator
+
+        # The competing leader's writes land just AFTER this attempt wins the
+        # seat CAS (the real acquire runs first, then the injection) — so a work
+        # set read after the CAS sees them and a work set read before it does
+        # not. Two writes, one per review-named harm:
+        #   * completing row A  -> EXCLUSION: A must drop out of the replay set;
+        #   * creating a fresh incomplete token on a new row C -> INCLUSION:
+        #     C must appear (the "missing newly-incomplete tokens" harm).
+        real_acquire = ResumeCoordinator._acquire_resume_leadership
+        newly_created: dict[str, str] = {}
+
+        def _acquire_then_competing_writes(self: ResumeCoordinator, snapshot: Any) -> object:
+            token = real_acquire(self, snapshot)
+            with crashed.db.engine.begin() as conn:
+                conn.execute(
+                    token_outcomes_table.insert().values(
+                        outcome_id=f"out-competing-{token_a}",
+                        run_id=crashed.run_id,
+                        token_id=token_a,
+                        outcome=TerminalOutcome.SUCCESS.value,
+                        path=TerminalPath.DEFAULT_FLOW.value,
+                        completed=1,
+                        recorded_at=datetime.now(UTC),
+                        sink_name="output",
+                    )
+                )
+            new_row = crashed.factory.data_flow.create_row(
+                run_id=crashed.run_id,
+                source_node_id=crashed.source_node_id,
+                row_index=5,
+                data={"id": 5, "value": 50},
+                source_row_index=5,
+                ingest_sequence=5,
+            )
+            crashed.factory.data_flow.create_token(row_id=new_row.row_id)
+            newly_created["row_id"] = new_row.row_id
+            return token
+
+        with patch.object(ResumeCoordinator, "_acquire_resume_leadership", _acquire_then_competing_writes):
+            state = coordinator.reconstruct_resume_state(resume_point, crashed.payload_store)
+
+        resumed_row_ids = {row.row_id for row in state.unprocessed_rows}
+        row_c = newly_created["row_id"]
+        # EXCLUSION: the row the competing leader completed must not be replayed.
+        assert row_a not in resumed_row_ids, (
+            "resume replayed a row the competing leader had already completed — "
+            "the work set was read BEFORE the seat CAS (stale) instead of after it"
+        )
+        assert row_a not in state.incomplete_by_row
+        # INCLUSION: work the competing leader created after our stale read must
+        # still be picked up (harm 2: missing newly-incomplete tokens).
+        assert row_c in resumed_row_ids, (
+            "resume missed a row the competing leader created before we won the seat — the work set was read BEFORE the seat CAS (stale)"
+        )
+        assert row_c in state.incomplete_by_row
+        # The genuinely-unprocessed row is unaffected either way.
+        assert row_b in resumed_row_ids, "the genuinely-unprocessed row must still be replayed"
         crashed.db.close()
 
     def test_two_resumes_loser_after_winner_refused_at_entry_guard(self, tmp_path: Path) -> None:
@@ -904,10 +1079,10 @@ class TestTwoResumesSameRunId:
         # ── A1: join_run admits the follower ───────────────────────────────
         # Mock stable_hash(resolve_config(settings)) to return the ACTUAL hash
         # stored in the runs table (the real hash from the real run).
-        fake_settings = types.SimpleNamespace()
+        fake_settings: Any = types.SimpleNamespace()
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_config_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_config_hash),
         ):
             orch = Orchestrator(crashed.db, clock=crashed.clock)
             follower_id = orch.join_run(

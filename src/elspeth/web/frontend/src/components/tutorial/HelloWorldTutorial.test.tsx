@@ -1,295 +1,251 @@
 import { StrictMode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { resetStore } from "@/test/store-helpers";
-import { usePreferencesStore } from "@/stores/preferencesStore";
-import { useSessionStore } from "@/stores/sessionStore";
-import type { ChatMessage, CompositionState, Session } from "@/types/index";
-import type { InterpretationEvent } from "@/types/interpretation";
-import * as api from "@/api/client";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HelloWorldTutorial } from "./HelloWorldTutorial";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
+import { usePreferencesStore } from "@/stores/preferencesStore";
+import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
-  acceptCompositionProposal: vi.fn(),
-  createSession: vi.fn(),
   deleteTutorialOrphans: vi.fn().mockResolvedValue({ deleted_count: 0 }),
-  fetchComposerPreferences: vi.fn(),
-  fetchCompositionProposals: vi.fn(),
-  fetchCompositionState: vi.fn(),
-  fetchMessages: vi.fn(),
+  // Mount-time resume validation lists live sessions; default includes the
+  // canonical resume session so the existing resume tests read as "alive".
+  fetchSessions: vi.fn().mockResolvedValue([
+    {
+      id: "sess-resume",
+      title: "First-run tutorial (in progress)",
+      created_at: "2026-05-19T12:00:00Z",
+      updated_at: "2026-05-19T12:00:00Z",
+    },
+  ]),
+  createSession: vi.fn().mockResolvedValue({
+    id: "sess-new",
+    title: "New session",
+    created_at: "2026-05-19T12:00:00Z",
+    updated_at: "2026-05-19T12:00:00Z",
+  }),
+  renameSession: vi.fn().mockResolvedValue({
+    id: "sess-new",
+    title: "First-run tutorial (in progress)",
+    created_at: "2026-05-19T12:00:00Z",
+    updated_at: "2026-05-19T12:00:00Z",
+  }),
+  // TutorialTurn4Run reaches the real api.runTutorialPipeline in the relocated
+  // StrictMode dedup test below, so it must be mocked even though the staged
+  // flow tests stop at the mocked guided shell.
+  runTutorialPipeline: vi.fn().mockResolvedValue({
+    run_id: "run-1",
+    output: {
+      source_data_hash: "a7f3e2fullhash",
+      rows: [{ url: "dta.gov.au", score: 9, rationale: "bold" }],
+      discarded_row_count: 0,
+    },
+  }),
+  sendTutorialAbandonBeacon: vi.fn(),
+  // The tutorial-persistence slice (elspeth-918f4434b3): the component
+  // persists stage transitions through preferencesStore, which calls this.
+  // Body-aware echo mirroring the backend upsert (supplied fields land in
+  // the response; completion clears progress server-side).
+  updateUserComposerPreferences: vi.fn(async (body: Record<string, unknown>) => ({
+    default_mode: "guided",
+    banner_dismissed_at: null,
+    tutorial_completed_at: body.tutorial_completed_at ?? null,
+    tutorial_stage: body.tutorial_completed_at ? null : (body.tutorial_stage ?? null),
+    tutorial_session_id: body.tutorial_completed_at
+      ? null
+      : (body.tutorial_session_id ?? null),
+    tutorial_run_id: body.tutorial_completed_at ? null : (body.tutorial_run_id ?? null),
+    tutorial_source_data_hash: body.tutorial_completed_at
+      ? null
+      : (body.tutorial_source_data_hash ?? null),
+    updated_at: "2026-07-02T00:00:00Z",
+  })),
   fetchUserComposerPreferences: vi.fn(),
-  getRunAuditSummary: vi.fn(),
-  listInterpretationEvents: vi.fn(),
-  optOutOfInterpretations: vi.fn(),
-  renameSession: vi.fn(),
-  resolveInterpretation: vi.fn(),
-  runTutorialPipeline: vi.fn(),
-  sendMessage: vi.fn(),
-  updateUserComposerPreferences: vi.fn(),
+  // The resumed-audit test mounts the real TutorialTurn5AuditStory.
+  getRunAuditSummary: vi.fn().mockResolvedValue({
+    run_id: "run-resume",
+    session_id: "sess-resume",
+    llm_call_count: 3,
+    source_data_hash: "hash-resume",
+    started_at: "2026-07-02T00:00:00Z",
+    plugin_versions: {},
+    seeded_from_cache: false,
+    cache_key: null,
+  }),
 }));
 
-const tutorialSession: Session = {
-  id: "session-1",
-  title: "New session",
-  created_at: "2026-05-19T12:00:00Z",
-  updated_at: "2026-05-19T12:00:00Z",
-};
-
-const emptySession: Session = {
-  id: "session-empty",
-  title: "New session",
-  created_at: "2026-05-19T12:30:00Z",
-  updated_at: "2026-05-19T12:30:00Z",
-};
-
-const assistantMessage: ChatMessage = {
-  id: "message-1",
-  session_id: "session-1",
-  role: "assistant",
-  content: "Drafted a pipeline.",
-  tool_calls: null,
-  created_at: "2026-05-19T12:00:01Z",
-};
-
-const compositionState: CompositionState = {
-  id: "state-1",
-  version: 1,
-  sources: {
-    source: {
-      plugin: "inline_blob",
-      options: { rows: [{ url: "dta.gov.au" }, { url: "data.gov.au" }] },
-    },
-  },
-  nodes: [
-    {
-      id: "scrape",
-      node_type: "transform",
-      plugin: "web_scrape",
-      input: "source",
-      on_success: "rate",
-      on_error: null,
-      options: {},
-    },
-    {
-      id: "rate",
-      node_type: "transform",
-      plugin: "llm_rate",
-      input: "scrape",
-      on_success: "sink",
-      on_error: null,
-      options: {},
-    },
-  ],
-  edges: [],
-  outputs: [{ name: "ratings", plugin: "jsonl", options: {} }],
-  metadata: { name: null, description: null },
-};
-
-const pendingInterpretation: InterpretationEvent = {
-  id: "event-1",
-  session_id: "session-1",
-  composition_state_id: "state-1",
-  affected_node_id: "rate",
-  tool_call_id: "call-1",
-  user_term: "cool",
-  kind: "vague_term",
-  llm_draft: "modern, useful, and interesting",
-  accepted_value: null,
-  choice: "pending",
-  created_at: "2026-05-19T12:00:02Z",
-  resolved_at: null,
-  actor: "composer-llm",
-  interpretation_source: "user_approved",
-  model_identifier: "openrouter/openai/gpt-5.4-mini",
-  model_version: "openai/gpt-5.4-mini-20260317",
-  provider: "openrouter",
-  composer_skill_hash: "a".repeat(64),
-  arguments_hash: null,
-  hash_domain_version: null,
-  runtime_model_identifier_at_resolve: null,
-  runtime_model_version_at_resolve: null,
-  resolved_prompt_template_hash: null,
-};
-
-describe("HelloWorldTutorial", () => {
-  beforeEach(() => {
-    resetStore(usePreferencesStore);
-    resetStore(useSessionStore);
-    vi.clearAllMocks();
-    usePreferencesStore.setState({
-      loaded: true,
-      defaultMode: "guided",
-      tutorialCompletedAt: null,
-      tutorialCompleted: false,
-    });
-    vi.mocked(api.createSession)
-      .mockResolvedValueOnce(tutorialSession)
-      .mockResolvedValueOnce(emptySession);
-    vi.mocked(api.sendMessage).mockResolvedValue({
-      message: assistantMessage,
-      state: compositionState,
-      proposals: [],
-    });
-    vi.mocked(api.fetchMessages).mockResolvedValue([assistantMessage]);
-    vi.mocked(api.fetchCompositionProposals).mockResolvedValue([]);
-    vi.mocked(api.fetchComposerPreferences).mockResolvedValue({
-      session_id: "session-1",
-      trust_mode: "explicit_approve",
-      density_default: "medium",
-      interpretation_review_disabled: false,
-      updated_at: "2026-05-19T12:00:00Z",
-    });
-    vi.mocked(api.listInterpretationEvents).mockResolvedValue([]);
-    vi.mocked(api.optOutOfInterpretations).mockResolvedValue({
-      session_id: "session-1",
-      interpretation_review_disabled: true,
-      opted_out_at: "2026-05-19T12:00:02Z",
-    });
-    vi.mocked(api.resolveInterpretation).mockResolvedValue({
-      event: {
-        ...pendingInterpretation,
-        choice: "accepted_as_drafted",
-        accepted_value: pendingInterpretation.llm_draft,
-        resolved_at: "2026-05-19T12:00:03Z",
-        arguments_hash: "b".repeat(64),
-        hash_domain_version: "v1",
-        resolved_prompt_template_hash: "c".repeat(64),
-      },
-      new_state: compositionState,
-    });
-    vi.mocked(api.runTutorialPipeline).mockResolvedValue({
-      run_id: "run-1",
-      output: {
-        source_data_hash: "a7f3e2fullhash",
-        rows: [
-          { url: "dta.gov.au", score: 9, rationale: "bold" },
-          { url: "data.gov.au", score: 8, rationale: "useful" },
-        ],
-        discarded_row_count: 0,
-      },
-      seeded_from_cache: false,
-      cache_key: null,
-    });
-    vi.mocked(api.getRunAuditSummary).mockResolvedValue({
-      run_id: "run-1",
-      session_id: "session-1",
-      llm_call_count: 5,
-      source_data_hash: "a7f3e2fullhash",
-      started_at: "2026-05-19T12:05:00Z",
-      plugin_versions: { web_scrape: "1.0.0", llm_rate: "1.0.0" },
-      seeded_from_cache: false,
-      cache_key: null,
-    });
-    vi.mocked(api.renameSession).mockResolvedValue({
-      ...tutorialSession,
-      title: "hello-world (cool government pages)",
-    });
-    vi.mocked(api.updateUserComposerPreferences).mockImplementation(async (body) => {
-      const updatedAt = "2026-05-19T12:10:00Z";
-      return {
-        default_mode: body.default_mode ?? usePreferencesStore.getState().defaultMode ?? "guided",
-        banner_dismissed_at: null,
-        tutorial_completed_at:
-          body.tutorial_completed_at === undefined
-            ? null
-            : body.tutorial_completed_at,
-        updated_at: updatedAt,
-      };
-    });
-  });
-
-  it("walks the tutorial through mode selection and graduation", async () => {
-    const user = userEvent.setup();
-    render(<HelloWorldTutorial />);
-
-    expect(api.deleteTutorialOrphans).toHaveBeenCalledTimes(1);
-
-    await user.click(screen.getByRole("button", { name: "Let's go" }));
-    await user.click(screen.getByRole("button", { name: "Build it" }));
-
-    expect(await screen.findByText(/Here is what the composer drafted/i)).toBeInTheDocument();
-    expect(screen.getByText("dta.gov.au")).toBeInTheDocument();
-    expect(api.optOutOfInterpretations).not.toHaveBeenCalled();
-    expect(api.resolveInterpretation).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "Looks good" }));
-    await user.click(screen.getByRole("button", { name: "Looks good, run it" }));
-
-    expect(await screen.findByText("bold")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(await screen.findByText(/This is the audit story/i)).toBeInTheDocument();
-    expect(screen.getByText("5")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    await user.click(screen.getByRole("radio", { name: /Freeform/i }));
-    await user.click(screen.getByRole("button", { name: "Save and go" }));
-
-    await waitFor(() => {
-      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith(
-        { default_mode: "freeform" },
+// Replace the embedded guided surface with a one-button stub that fires the
+// completion callback; the real ChatPanel guided behaviour is covered by
+// TutorialGuidedShell.test.tsx.
+// When set, the stub fires onSessionMissing TWICE on mount with its session
+// id — simulating the live race where the shell's guided/start 404 handler
+// and the mount-time membership check both detect the same dead resume.
+let stubShellReportsSessionMissing = false;
+vi.mock("./TutorialGuidedShell", async () => {
+  const { useEffect } = await import("react");
+  return {
+    TutorialGuidedShell: ({
+      sessionId,
+      onCompleted,
+      onSessionMissing,
+    }: {
+      sessionId: string;
+      onCompleted: (s: string) => void;
+      onSessionMissing?: (deadSessionId: string) => void;
+    }) => {
+      useEffect(() => {
+        if (stubShellReportsSessionMissing) {
+          onSessionMissing?.(sessionId);
+          onSessionMissing?.(sessionId);
+        }
+        // Mount-only, mirroring the real shell's start effect.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return (
+        <button type="button" onClick={() => onCompleted("sess-new")}>
+          finish-guided
+        </button>
       );
-    });
-    expect(vi.mocked(api.updateUserComposerPreferences).mock.calls[0]?.[0]).toEqual({
-      default_mode: "freeform",
-    });
-    expect(api.renameSession).toHaveBeenCalledWith(
-      "session-1",
-      "hello-world (cool government pages)",
-    );
-    expect(usePreferencesStore.getState().tutorialCompleted).toBe(false);
-    expect(useSessionStore.getState().activeSessionId).toBe("session-1");
+    },
+  };
+});
 
-    expect(
-      await screen.findByRole("heading", {
-        name: "You're ready to use the composer.",
-      }),
-    ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Take me to the composer" }),
-    );
-
-    await waitFor(() => {
-      expect(api.updateUserComposerPreferences).toHaveBeenCalledTimes(2);
-    });
-    expect(vi.mocked(api.updateUserComposerPreferences).mock.calls[1]?.[0]).toEqual({
-      tutorial_completed_at: expect.any(String),
-    });
-    expect(usePreferencesStore.getState().tutorialCompleted).toBe(true);
-    expect(useSessionStore.getState().activeSessionId).toBe("session-empty");
+describe("HelloWorldTutorial staged flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(usePreferencesStore);
+    stubShellReportsSessionMissing = false;
   });
 
-  it("surfaces pending interpretation drafts for explicit review before continuing", async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.listInterpretationEvents).mockResolvedValue([
-      pendingInterpretation,
-    ]);
-
+  it("renders the welcome bookend first", () => {
     render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("heading", { name: /welcome/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("labels the tutorial progress row visibly so it reads as a different hierarchy from the build stepper", async () => {
+    // elspeth-d75756fa2c: the 5 unlabeled dots sat directly above the guided
+    // 5-chip build stepper and read as a broken duplicate of it. The visible
+    // "Tutorial · <stage>" label is aria-hidden — the existing sr-only "Step N
+    // of M" line stays the AT signal (the ARIA was already right).
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    const label = screen.getByText("Tutorial · Welcome — step 1 of 5");
+    expect(label).toHaveAttribute("aria-hidden", "true");
 
     await user.click(screen.getByRole("button", { name: "Let's go" }));
-    await user.click(screen.getByRole("button", { name: "Build it" }));
-
-    expect(await screen.findByText(/Here is what the composer drafted/i)).toBeInTheDocument();
-    expect(screen.getByText("1 assumption to review")).toBeInTheDocument();
-    expect(screen.getByText("cool")).toBeInTheDocument();
-    expect(api.listInterpretationEvents).toHaveBeenCalledWith(
-      "session-1",
-      "all",
-    );
-    expect(api.optOutOfInterpretations).not.toHaveBeenCalled();
-    expect(api.resolveInterpretation).not.toHaveBeenCalled();
-    expect(useSessionStore.getState().compositionState?.id).toBe("state-1");
+    expect(
+      await screen.findByText("Tutorial · Build — step 2 of 5"),
+    ).toBeInTheDocument();
   });
 
+  it("runs orphan cleanup on mount", async () => {
+    const api = await import("@/api/client");
+    render(<HelloWorldTutorial />);
+    expect(api.deleteTutorialOrphans).toHaveBeenCalledTimes(1);
+  });
+
+  it("advances welcome -> guided -> run on guided completion", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "finish-guided" }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: "finish-guided" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "finish-guided" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("renders no Back affordance on the run turn (consumed guided wizard is non-returnable)", async () => {
+    // previousStep(run) is null, so HelloWorldTutorial passes no onBack to the
+    // run turn and TutorialTurn4Run renders no Back button. This is the wiring
+    // half of the fix: Back from run must not remount the completed guided
+    // wizard (which would re-fire onCompleted and bounce the user back to run).
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    // The run turn fetches via the mocked runTutorialPipeline and renders its
+    // result row ("bold" rationale) plus the primary "continue" button.
+    expect(await screen.findByText("bold")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Back/ })).toBeNull();
+  });
+
+  it("tags the created tutorial session before entering guided", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(api.renameSession).toHaveBeenCalledWith(
+        "sess-new",
+        "First-run tutorial (in progress)",
+      ),
+    );
+    const createOrder = vi.mocked(api.createSession).mock
+      .invocationCallOrder[0];
+    const renameOrder = vi.mocked(api.renameSession).mock
+      .invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(renameOrder);
+  });
+
+  it("surfaces createSession failure instead of stalling on welcome", async () => {
+    const api = await import("@/api/client");
+    vi.mocked(api.createSession).mockRejectedValueOnce(
+      new Error("session service down"),
+    );
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "session service down",
+    );
+    // Still on welcome — the guided shell never mounted.
+    expect(
+      screen.getByRole("heading", { name: /welcome/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("preflights composer availability before creating a guided tutorial session", async () => {
+    const api = await import("@/api/client");
+    render(
+      <HelloWorldTutorial
+        composerAvailable={false}
+        composerUnavailableReason="Composer model openrouter/openai/gpt-4o is unavailable: missing OPENROUTER_API_KEY."
+      />,
+    );
+
+    const start = screen.getByRole("button", { name: "Let's go" });
+    expect(start).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "missing OPENROUTER_API_KEY",
+    );
+    expect(
+      screen.getByRole("button", { name: "Skip the tutorial" }),
+    ).toBeEnabled();
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  // Relocated from the old big-bang test: TutorialTurn4Run dedups the run
+  // request under StrictMode's double-invoke. This is the only coverage of
+  // that behaviour, so it rides along with HelloWorldTutorial's suite rather
+  // than being dropped with the removed turns.
   it("settles the run turn under React StrictMode without duplicating the run request", async () => {
+    const api = await import("@/api/client");
     render(
       <StrictMode>
         <TutorialTurn4Run
           sessionId="strict-session"
-          prompt="strict prompt"
           onCompleted={() => undefined}
           onCancelled={() => undefined}
           onBack={() => undefined}
@@ -299,14 +255,285 @@ describe("HelloWorldTutorial", () => {
 
     expect(await screen.findByText("bold")).toBeInTheDocument();
     expect(api.runTutorialPipeline).toHaveBeenCalledTimes(1);
-    // Body shape unchanged; the second argument is the AbortSignal owned
-    // by the per-(session, prompt) cache entry and is asserted by type
-    // rather than by identity (a fresh signal is created per cache miss).
     const [body, signal] = vi.mocked(api.runTutorialPipeline).mock.calls[0];
     expect(body).toEqual({
       session_id: "strict-session",
-      prompt: "strict prompt",
     });
     expect(signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("HelloWorldTutorial — abandon beacon (F4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(usePreferencesStore);
+  });
+
+  it("does not fire the abandon beacon on pagehide while still on the welcome bookend", async () => {
+    const api = await import("@/api/client");
+    render(<HelloWorldTutorial />);
+    // Nothing has started yet — there is no in-progress tutorial to abandon.
+    window.dispatchEvent(new Event("pagehide"));
+    expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+
+  it("fires the abandon beacon on pagehide once the tutorial is in progress", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "finish-guided" }),
+      ).toBeInTheDocument(),
+    );
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(api.sendTutorialAbandonBeacon).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire the abandon beacon on pagehide once graduation is reached (skip path)", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Skip the tutorial" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "You're ready to use the composer." }),
+      ).toBeInTheDocument(),
+    );
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    // Skip lands on the same terminal `graduation` step every completing path
+    // reaches — the learner saw the tutorial through, so this is not an
+    // abandon, regardless of which door they left through.
+    expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+
+  it("removes its pagehide listener on unmount so a later pagehide cannot fire the beacon", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    const { unmount } = render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "finish-guided" }),
+      ).toBeInTheDocument(),
+    );
+
+    unmount();
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+});
+
+describe("HelloWorldTutorial — server-persisted resume (elspeth-918f4434b3)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(usePreferencesStore);
+  });
+
+  it("persists the guided stage + session on Start", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_stage: "guided",
+        tutorial_session_id: "sess-new",
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
+      }),
+    );
+  });
+
+  it("persists the run stage when guided completes", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tutorial_stage: "run",
+          tutorial_session_id: "sess-new",
+        }),
+      ),
+    );
+  });
+
+  it("persists the skip opt-out IMMEDIATELY on the first click", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Skip the tutorial" }));
+    // The opt-out lands on the FIRST click — not on the follow-up
+    // "Take me to the composer" click (which is never made here).
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: expect.any(String),
+      }),
+    );
+    // No stage write for the skip path: the completion persist above
+    // clears the resume state server-side.
+    const bodies = vi.mocked(api.updateUserComposerPreferences).mock.calls.map(
+      ([body]) => body,
+    );
+    expect(bodies.some((body) => "tutorial_stage" in body)).toBe(false);
+    // The graduation card stays mounted (publishLocally=false): the skip
+    // must not yank the farewell out from under the user.
+    expect(
+      screen.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeInTheDocument();
+  });
+
+  it("resumes at guided with the persisted session — no orphan sweep, no restart", async () => {
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-resume",
+    });
+    render(<HelloWorldTutorial />);
+    // The guided shell (stubbed) mounts directly — not the Welcome bookend.
+    expect(
+      screen.getByRole("button", { name: "finish-guided" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /welcome/i })).toBeNull();
+    // The resumable session must NOT be renamed "abandoned-..." on reload:
+    // orphan cleanup is a fresh-entry-only sweep.
+    expect(api.deleteTutorialOrphans).not.toHaveBeenCalled();
+    // And no session re-creation — the persisted session is reused.
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a fresh Welcome when the resumed session no longer exists", async () => {
+    // The persisted resume fields can outlive their session (orphan sweep,
+    // archive, prerelease wipe). Without recovery the guided stage dead-ends
+    // on "Session not found" with NO affordance (skip/exit are suppressed
+    // past Welcome) — the operator-observed blank-page failure.
+    const api = await import("@/api/client");
+    // Once, not a standing override: clearAllMocks clears CALLS but keeps
+    // implementations, so a standing mockResolvedValue([]) here would poison
+    // the sibling resume tests into the recovery path.
+    vi.mocked(api.fetchSessions).mockResolvedValueOnce([]);
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-resume",
+    });
+    render(<HelloWorldTutorial />);
+    // Recovery lands on the Welcome bookend, not the guided shell.
+    expect(
+      await screen.findByRole("heading", { name: /welcome/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "finish-guided" })).toBeNull();
+    // And the stale server-side resume fields are cleared (welcome → all-null).
+    await waitFor(() => {
+      const bodies = vi
+        .mocked(api.updateUserComposerPreferences)
+        .mock.calls.map(([body]) => body);
+      expect(
+        bodies.some(
+          (body) =>
+            "tutorial_stage" in body && body.tutorial_stage === null,
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("recovery is idempotent per dead id and releases the app-level session binding", async () => {
+    // Live-observed residue of the dead-resume recovery: the shell's
+    // guided/start 404 handler and the mount-time membership check RACE and
+    // both detect the same dead session — the warning double-logged — and
+    // activeSessionId stayed bound to the corpse, so InlineRunResults kept
+    // polling /runs (404) while the user sat at Welcome.
+    const { useSessionStore } = await import("@/stores/sessionStore");
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    stubShellReportsSessionMissing = true;
+    useSessionStore.setState({ activeSessionId: "sess-resume" });
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      await screen.findByRole("heading", { name: /welcome/i }),
+    ).toBeInTheDocument();
+    // The dead binding is released — pollers keyed on activeSessionId stop.
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    // Double detection of the same dead id recovers ONCE.
+    const recoveryWarns = warnSpy.mock.calls.filter(([msg]) =>
+      String(msg).includes("persisted resume session no longer exists"),
+    );
+    expect(recoveryWarns).toHaveLength(1);
+    warnSpy.mockRestore();
+  });
+
+  it("resumes a completed run at the audit step without re-executing", async () => {
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "run",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      await screen.findByRole("heading", { name: "This is the audit story." }),
+    ).toBeInTheDocument();
+    // Zero re-execution: the run identity came from the persisted fields.
+    expect(api.runTutorialPipeline).not.toHaveBeenCalled();
+    // The resumed audit suppresses Back — there is no in-memory run cache,
+    // so Back into the run turn would silently re-fire the pipeline.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: /back/i })).toBeNull();
+  });
+
+  it("resumes at graduation once the graduation card has been shown", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not fire a progress write when the persisted state already matches", async () => {
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    // The mount-time persist effect dedupes against the store's mirror of
+    // the server row — a resume must not immediately re-PATCH it.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "You're ready to use the composer." }),
+      ).toBeInTheDocument(),
+    );
+    expect(api.updateUserComposerPreferences).not.toHaveBeenCalled();
   });
 });

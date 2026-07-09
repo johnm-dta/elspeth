@@ -192,6 +192,29 @@ def test_post_emission_check_raises_on_mode_mismatch() -> None:
     }
 
 
+def test_post_emission_check_rejects_noncanonical_runtime_mode_before_normalization() -> None:
+    contract = SchemaConfigModeContract()
+    plugin = _plugin(output_schema_config=_schema_config(mode="fixed", fields=("source",)))
+    inputs = PostEmissionInputs(
+        plugin=plugin,
+        node_id="n-1",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        input_row=_row(("source",), mode="FIXED"),
+        static_contract=frozenset({"source"}),
+        effective_input_fields=frozenset({"source"}),
+    )
+    outputs = PostEmissionOutputs(emitted_rows=(_row(("source",), mode="fixed"),))
+
+    with pytest.raises(SchemaConfigModeViolation) as exc_info:
+        contract.post_emission_check(inputs, outputs)
+
+    assert exc_info.value.payload["declared_mode"] == "fixed"
+    assert exc_info.value.payload["observed_mode"] == "fixed"
+    assert "noncanonical runtime mode 'fixed'" in str(exc_info.value)
+
+
 def test_post_emission_check_raises_on_fixed_mode_undeclared_extra_fields() -> None:
     contract = SchemaConfigModeContract()
     plugin = _plugin(output_schema_config=_schema_config(mode="fixed", fields=("source",)))

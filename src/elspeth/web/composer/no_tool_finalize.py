@@ -15,19 +15,35 @@ from typing import TYPE_CHECKING
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
-from elspeth.web.composer.protocol import ComposerResult
-from elspeth.web.composer.service import (
-    _blocking_result_from_tool_invocations,
-    _compose_empty_state_message,
-    _compose_preflight_failure_message,
-    _enforce_augmentation_prefix_invariant,
-    _is_pending_interpretation_handoff,
-    _last_mutation_was_pending_proposal,
-    _no_mutation_empty_state_validation,
-    _RuntimePreflightCache,
-    _state_is_structurally_empty,
-    _user_request_expects_pipeline_mutation,
+from elspeth.web.composer.discovery_cache import RuntimePreflightCache as _RuntimePreflightCache
+from elspeth.web.composer.no_tool_policy import (
+    blocking_result_from_tool_invocations as _blocking_result_from_tool_invocations,
 )
+from elspeth.web.composer.no_tool_policy import (
+    compose_empty_state_message as _compose_empty_state_message,
+)
+from elspeth.web.composer.no_tool_policy import (
+    compose_preflight_failure_message as _compose_preflight_failure_message,
+)
+from elspeth.web.composer.no_tool_policy import (
+    enforce_augmentation_prefix_invariant as _enforce_augmentation_prefix_invariant,
+)
+from elspeth.web.composer.no_tool_policy import (
+    is_pending_interpretation_handoff as _is_pending_interpretation_handoff,
+)
+from elspeth.web.composer.no_tool_policy import (
+    last_mutation_was_pending_proposal as _last_mutation_was_pending_proposal,
+)
+from elspeth.web.composer.no_tool_policy import (
+    no_mutation_empty_state_validation as _no_mutation_empty_state_validation,
+)
+from elspeth.web.composer.no_tool_policy import (
+    state_is_structurally_empty as _state_is_structurally_empty,
+)
+from elspeth.web.composer.no_tool_policy import (
+    user_request_expects_pipeline_mutation as _user_request_expects_pipeline_mutation,
+)
+from elspeth.web.composer.protocol import ComposerResult
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.state_claim_grounding import (
     check_state_claim_grounding,
@@ -46,6 +62,7 @@ async def finalize_no_tool_response(
     state: CompositionState,
     initial_version: int,
     user_id: str | None,
+    session_id: str | None,
     last_runtime_preflight: ValidationResult | None,
     runtime_preflight_cache: _RuntimePreflightCache,
     session_scope: str,
@@ -183,6 +200,7 @@ async def finalize_no_tool_response(
         runtime_result = await service._cached_runtime_preflight(
             state,
             user_id=user_id,
+            session_id=session_id,
             cache=runtime_preflight_cache,
             initial_version=initial_version,
             session_scope=session_scope,

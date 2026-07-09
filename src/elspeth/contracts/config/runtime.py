@@ -19,6 +19,7 @@ See alignment.py for complete field mapping documentation.
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -33,6 +34,44 @@ from elspeth.contracts.config.protocols import (
 from elspeth.contracts.engine import RetryPolicy
 from elspeth.contracts.enums import _IMPLEMENTED_BACKPRESSURE_MODES, BackpressureMode, TelemetryGranularity
 from elspeth.contracts.freeze import freeze_fields, require_bool, require_int
+
+
+def _rate_limit_state_dir(state_dir: str | Path | None = None) -> Path:
+    if state_dir is None:
+        default_state_dir = INTERNAL_DEFAULTS["rate_limit"]["state_dir"]
+        if not isinstance(default_state_dir, (str, Path)):
+            raise TypeError(
+                f"rate_limit state_dir default must be str or Path, got {type(default_state_dir).__name__}: {default_state_dir!r}"
+            )
+        state_dir = default_state_dir
+    if isinstance(state_dir, Path):
+        return state_dir.resolve()
+    if not isinstance(state_dir, str):
+        raise TypeError(f"rate_limit state_dir must be str or Path, got {type(state_dir).__name__}: {state_dir!r}")
+    return Path(state_dir).resolve()
+
+
+def _resolve_rate_limit_persistence_path(value: str | None, *, state_dir: str | Path | None = None) -> str | None:
+    """Resolve configured rate-limit SQLite path under the application state dir."""
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError(f"rate_limit.persistence_path must be str or None, got {type(value).__name__}: {value!r}")
+    if value != value.strip() or not value:
+        raise ValueError("rate_limit.persistence_path must be a non-empty path without leading/trailing whitespace")
+    if value.lower().startswith("file:") or "://" in value:
+        raise ValueError("rate_limit.persistence_path must be a filesystem path under the application state directory, not a SQLite URI")
+
+    state_dir = _rate_limit_state_dir(state_dir)
+    raw_path = Path(value)
+    candidate = raw_path.resolve(strict=False) if raw_path.is_absolute() else (state_dir / raw_path).resolve(strict=False)
+
+    try:
+        candidate.relative_to(state_dir)
+    except ValueError as exc:
+        raise ValueError(f"rate_limit.persistence_path escapes allowed root {state_dir}: {value!r}") from exc
+
+    return str(candidate)
 
 
 def _merge_policy_with_defaults(policy: RetryPolicy) -> dict[str, Any]:
@@ -333,6 +372,10 @@ class RuntimeRateLimitConfig:
         """Validate rate limit config and freeze mutable services mapping."""
         require_bool(self.enabled, "enabled")
         require_int(self.default_requests_per_minute, "default_requests_per_minute", min_value=1)
+        if self.persistence_path is not None and type(self.persistence_path) is not str:
+            raise TypeError(
+                f"rate_limit.persistence_path must be str or None, got {type(self.persistence_path).__name__}: {self.persistence_path!r}"
+            )
         # Settings->Runtime is mechanical: a services value that isn't a
         # RuntimeServiceRateLimit (e.g. a raw dict) would satisfy the Mapping
         # protocol but fail later in get_service_config. Reject at the boundary.
@@ -374,7 +417,7 @@ class RuntimeRateLimitConfig:
         )
 
     @classmethod
-    def from_settings(cls, settings: RateLimitSettingsProtocol) -> "RuntimeRateLimitConfig":
+    def from_settings(cls, settings: RateLimitSettingsProtocol, *, state_dir: str | Path | None = None) -> "RuntimeRateLimitConfig":
         """Factory from RateLimitSettings config model.
 
         Field Mapping (all direct, no renames):
@@ -385,6 +428,10 @@ class RuntimeRateLimitConfig:
 
         Args:
             settings: Validated Pydantic settings model
+            state_dir: Application state directory that bounds SQLite persistence.
+                Defaults to ELSPETH's CLI state root (``./data``). Web callers
+                must pass ``WebSettings.data_dir`` so rate-limit state follows
+                the configured web application state root.
 
         Returns:
             RuntimeRateLimitConfig with mapped values
@@ -392,7 +439,7 @@ class RuntimeRateLimitConfig:
         return cls(
             enabled=settings.enabled,
             default_requests_per_minute=settings.default_requests_per_minute,
-            persistence_path=settings.persistence_path,
+            persistence_path=_resolve_rate_limit_persistence_path(settings.persistence_path, state_dir=state_dir),
             services=MappingProxyType(
                 {k: RuntimeServiceRateLimit(requests_per_minute=v.requests_per_minute) for k, v in settings.services.items()}
             ),
@@ -458,10 +505,9 @@ class RuntimeCheckpointConfig:
           - "every_n" -> checkpoint_interval value
           - "aggregation_only" -> 0
         - checkpoint_interval: CheckpointSettings.checkpoint_interval (direct mapping)
-        - aggregation_boundaries: CheckpointSettings.aggregation_boundaries (direct mapping)
 
     Protocol Coverage:
-        RuntimeCheckpointProtocol requires: enabled, frequency, aggregation_boundaries.
+        RuntimeCheckpointProtocol requires: enabled, frequency.
         The additional field (checkpoint_interval) is preserved for full Settings
         fidelity but not part of the protocol.
 
@@ -474,12 +520,10 @@ class RuntimeCheckpointConfig:
     enabled: bool
     frequency: int  # checkpoint every N rows (1=every_row, 0=aggregation_only)
     checkpoint_interval: int | None  # preserved from Settings for reference
-    aggregation_boundaries: bool  # whether to checkpoint at aggregation flush
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
         require_bool(self.enabled, "enabled")
-        require_bool(self.aggregation_boundaries, "aggregation_boundaries")
         require_int(self.frequency, "frequency", min_value=0)
         require_int(self.checkpoint_interval, "checkpoint_interval", optional=True, min_value=0)
 
@@ -491,13 +535,11 @@ class RuntimeCheckpointConfig:
         - enabled=True
         - frequency=1 (every_row)
         - checkpoint_interval=None
-        - aggregation_boundaries=True
         """
         return cls(
             enabled=True,
             frequency=1,  # every_row
             checkpoint_interval=None,
-            aggregation_boundaries=True,
         )
 
     @classmethod
@@ -511,7 +553,6 @@ class RuntimeCheckpointConfig:
                 - "every_n" -> checkpoint_interval value
                 - "aggregation_only" -> 0
             settings.checkpoint_interval -> checkpoint_interval (direct)
-            settings.aggregation_boundaries -> aggregation_boundaries (direct)
 
         Args:
             settings: Validated Pydantic settings model
@@ -536,7 +577,6 @@ class RuntimeCheckpointConfig:
             enabled=settings.enabled,
             frequency=frequency,
             checkpoint_interval=settings.checkpoint_interval,
-            aggregation_boundaries=settings.aggregation_boundaries,
         )
 
 

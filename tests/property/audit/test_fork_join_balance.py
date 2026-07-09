@@ -52,6 +52,7 @@ from tests.fixtures.plugins import (
     PassTransform,
 )
 from tests.fixtures.stores import MockPayloadStore
+from tests.helpers.checkpoint import create_checkpoint
 
 # =============================================================================
 # Audit Verification Helpers
@@ -749,7 +750,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run.run_id)
         # Create a checkpoint (required for recovery to work)
         checkpoint_manager = CheckpointManager(db)
-        checkpoint_manager.create_checkpoint(
+        create_checkpoint(
+            checkpoint_manager,
             run_id=run.run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -890,7 +892,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # A checkpoint is the precondition for resume.
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -1052,7 +1055,8 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2220,7 +2224,8 @@ class TestForkRecoveryInvariant:
             )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2278,7 +2283,7 @@ class TestForkRecoveryInvariant:
             journal verbs (enqueue_ready_claimed + mark_blocked with
             barrier_key='merge', the coalesce name) carrying its real row payload —
             F1: the journal BLOCKED row is the ONLY barrier-buffer truth. On resume,
-            processor._restore_barriers_from_journal repopulates _pending with this
+            BarrierRecoveryCoordinator.restore_from_journal repopulates _pending with this
             branch — it is "already arrived", awaiting the sibling. The HELD branch is
             chosen as the one with the smaller token_id so a buggy re-drive would be
             dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
@@ -2479,7 +2484,7 @@ class TestForkRecoveryInvariant:
         # claimed it, the branch arrived at the coalesce and accept() held it →
         # mark_blocked(barrier_key='merge') stamped barrier_blocked_at. The BLOCKED
         # row carries the branch's row payload — resume restores _pending from it
-        # (processor._restore_barriers_from_journal ← list_blocked_barrier_items).
+        # (BarrierRecoveryCoordinator.restore_from_journal ← list_blocked_barrier_items).
         held_first_node = str(graph.get_transform_id_map()[branch_index_by_name[held_branch_name]])
         seed_now = datetime.now(UTC)
         held_item = scheduler_repo.enqueue_ready_claimed(
@@ -2508,7 +2513,8 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Create the checkpoint (F1: scalars only — no barrier blob) ──
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2714,7 +2720,8 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2997,7 +3004,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -3330,7 +3338,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -3468,7 +3477,7 @@ class TestForkRecoveryInvariant:
         --------------------------------------------------------------
         ``rows_processed`` is reconstructed as the count of DISTINCT source
         ``row_id`` reaching a terminal outcome (see
-        ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``),
+        ``AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome``),
         NOT a per-terminal-token tally.  This matches the live loops, which
         increment ``rows_processed`` once per source row regardless of fork
         fan-out, aggregation fan-in, or expand fan-out.  For this 1-source-row
@@ -3592,7 +3601,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db_b, run_id)
         # Create checkpoint + mark run failed (resume preconditions).
         checkpoint_mgr = CheckpointManager(db_b)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -3696,7 +3706,7 @@ class TestForkRecoveryInvariant:
         # vacuously here. The field IS audit-derived now (the old resume-graft
         # over a derive-time 0 was deleted with F1):
         # derive_resume_terminal_status_from_audit sets rows_coalesce_failed
-        # from query.count_failed_coalesce_barrier_rows — DISTINCT
+        # from run_status_projection.count_failed_coalesce_barrier_rows — DISTINCT
         # (coalesce node, row_id) pairs with FAILED node_states, the
         # _fail_pending writes — which is cumulative over run-1 AND resume
         # re-drives (elspeth-7294de558e). A non-vacuous reconciliation of this
@@ -3893,7 +3903,8 @@ class TestForkRecoveryInvariant:
         # ── Resume ────────────────────────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -4075,8 +4086,8 @@ class TestForkRecoveryInvariant:
         ``(None, BUFFERED)`` audit record per input row that derive() counts
         (run_status.py line ~113), so an N-row aggregation completes with
         ``rows_buffered == N`` (cf. test_terminal_states.py and
-        test_t18_characterization.py, which both assert ``rows_buffered == N``
-        on COMPLETED aggregation runs).  This cell reconciles all 12 fields on
+        test_orchestrator_execute_run_characterization.py, which both assert
+        ``rows_buffered == N`` on COMPLETED aggregation runs).  This cell reconciles all 12 fields on
         such a topology where ``rows_buffered >= 1`` (non-vacuous).
 
         TOPOLOGY (``_build_end_of_source_flush_aggregation``, N=3):
@@ -4155,7 +4166,8 @@ class TestForkRecoveryInvariant:
         # reconstructs the cumulative counters from the intact audit trail.
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -4265,7 +4277,7 @@ class TestForkRecoveryInvariant:
         run_id = run_b1.run_id
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(run_id=run_id, sequence_number=1, barrier_scalars=None, graph=graph)
+        create_checkpoint(checkpoint_mgr, run_id=run_id, sequence_number=1, barrier_scalars=None, graph=graph)
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
             conn.commit()
@@ -4449,7 +4461,8 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -5193,7 +5206,8 @@ class TestForkRecoveryInvariant:
         assert spec.token_data_ref == merged_data_ref, f"recovery must surface the merged token_data_ref; got {spec.token_data_ref!r}"
 
         # ── Resume ──
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -5407,7 +5421,8 @@ class TestForkRecoveryInvariant:
 
         # A checkpoint is the resume precondition (get_unprocessed_rows returns []
         # for a run with no checkpoint). F1: it carries scalars only — no blob.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,

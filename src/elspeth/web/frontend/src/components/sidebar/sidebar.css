@@ -68,7 +68,7 @@
   cursor: pointer;
   color: var(--color-info);
   font-size: var(--font-size-xs);
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -90,6 +90,24 @@
   width: calc(100% - (2 * var(--space-sm)));
   margin: var(--space-sm);
   justify-content: center;
+}
+
+/* Gate legibility (elspeth-088bf83922 T-2): the plain-language reason line
+   ExecuteButton.tsx renders under the button — either which gate is
+   currently blocking Run, or a one-line note that a non-green advisory row
+   did not block it. Muted text, same token as every other secondary label
+   in the rail; the "advisory" modifier exists for future differentiation
+   but intentionally shares the base rule today (no colour-only signal).
+   Margin is 0 here because the only shipped mount point is inside
+   .completion-bar, whose `.completion-bar > *` rule (below) forces
+   margin:0 / width:100% on every direct child at equal specificity and
+   wins on source order — the flex `gap` on .completion-bar supplies the
+   spacing instead. */
+.side-rail-execute-reason {
+  margin: 0;
+  padding: 0 var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
 }
 
 .side-rail-catalog-btn {
@@ -130,12 +148,13 @@
 }
 
 .catalog-reference-meta {
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
+  /* secondary not muted: muted is ~3.84:1 on elevated at 10px (fails AA). */
+  color: var(--color-text-secondary);
   background-color: var(--color-surface-elevated);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.2;
   text-transform: uppercase;
@@ -145,7 +164,7 @@
    (.btn), ExecuteButton (.btn .side-rail-execute-btn), and ExportYamlButton
    (.btn .side-rail-export-yaml-btn).
    The earlier horizontal layout clipped Export-YAML: the side rail is 320px
-   wide (Layout.tsx SIDERAIL_WIDTH), the three labels need ~436px of min-content
+   wide (--siderail-width, tokens.css), the three labels need ~436px of min-content
    width at --font-size-base with white-space:nowrap, and the row overflowed
    into .layout-siderail's overflow:hidden region — making the third button
    invisible. The three-co-equal-verbs intent is preserved by stacking them
@@ -196,4 +215,67 @@
 .side-rail-error-banner {
   padding: var(--space-xs) var(--space-md);
   font-size: var(--font-size-xs);
+}
+
+/* ImportYamlButton / ImportYamlModal (elspeth-24c56585f9 T-1) --------------
+   The button mirrors the full-width rail-body layout shared by
+   .side-rail-execute-btn / .side-rail-export-yaml-btn above (kept as its
+   own rule rather than joining that comma group, per this pass's
+   additive-only constraint on this file). The modal itself reuses
+   .yaml-modal-* (common.css) for its shell and .textarea / .field-label /
+   .field-hint / .validation-banner* (shared.css) for its form and outcome
+   surfaces -- these rules cover only the layout those primitives don't. */
+.side-rail-import-yaml-btn {
+  width: calc(100% - (2 * var(--space-sm)));
+  margin: var(--space-sm);
+  justify-content: center;
+}
+
+.import-yaml-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  overflow-y: auto;
+}
+
+.import-yaml-textarea {
+  min-height: 240px;
+}
+
+.import-yaml-file-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.import-yaml-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+/* Pre-run egress disclosure (elspeth-c18ad229cc) — rendered inside the
+   shared ConfirmDialog by ExecuteButton. The list names what the run will
+   reach (sources, LLM/model, network fetches, sinks), derived from the
+   live composition. */
+.run-disclosure-summary {
+  margin: 0 0 var(--space-md);
+  padding-left: var(--space-lg);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.run-disclosure-summary li {
+  margin-bottom: var(--space-xs);
+}
+
+.run-disclosure-opt-out {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
 }

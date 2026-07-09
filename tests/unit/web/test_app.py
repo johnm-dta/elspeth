@@ -7,9 +7,10 @@ import contextlib
 import gc
 import sys
 import weakref
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -99,6 +100,77 @@ class _EnteringAsyncClientRaises:
         return False
 
 
+class _RecordingCounter:
+    """Counter fake for composer boot telemetry assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int | float, dict[str, object]]] = []
+
+    def add(self, amount: int | float, attributes: dict[str, object]) -> None:
+        self.calls.append((amount, dict(attributes)))
+
+
+class _RecordingHistogram:
+    """Histogram fake for composer boot telemetry assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int | float, dict[str, object]]] = []
+
+    def record(self, value: int | float, attributes: dict[str, object]) -> None:
+        self.calls.append((value, dict(attributes)))
+
+
+class _RecordingExecutionService:
+    """Execution-service fake for lifespan and orphan-cleanup tests."""
+
+    def __init__(
+        self,
+        *,
+        live_run_ids: frozenset[str] = frozenset(),
+        get_live_run_ids_error: BaseException | None = None,
+    ) -> None:
+        self._live_run_ids = live_run_ids
+        self._get_live_run_ids_error = get_live_run_ids_error
+        self.get_live_run_ids_calls = 0
+        self.catalog_snapshots: list[tuple[str, str]] = []
+        self.shutdown_calls = 0
+
+    def get_live_run_ids(self) -> frozenset[str]:
+        self.get_live_run_ids_calls += 1
+        if self._get_live_run_ids_error is not None:
+            raise self._get_live_run_ids_error
+        return self._live_run_ids
+
+    def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
+        self.catalog_snapshots.append((sha256, source))
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+_CancelOrphanedRuns = Callable[..., Awaitable[int]]
+
+
+class _RecordingSessionService:
+    """Session-service fake for periodic orphan-cleanup tests."""
+
+    def __init__(
+        self,
+        *,
+        cancel_result: int = 0,
+        cancel_side_effect: _CancelOrphanedRuns | None = None,
+    ) -> None:
+        self._cancel_result = cancel_result
+        self._cancel_side_effect = cancel_side_effect
+        self.cancel_all_orphaned_runs_calls: list[dict[str, object]] = []
+
+    async def cancel_all_orphaned_runs(self, **kwargs: object) -> int:
+        self.cancel_all_orphaned_runs_calls.append(dict(kwargs))
+        if self._cancel_side_effect is not None:
+            return await self._cancel_side_effect(**kwargs)
+        return self._cancel_result
+
+
 class TestCreateApp:
     """Tests for create_app()."""
 
@@ -121,33 +193,6 @@ class TestCreateApp:
         app = create_app(settings)
         assert app.state.settings is settings
         assert app.state.settings.port == 9999
-
-    def test_tutorial_cache_stored_on_app_state_with_configured_dir(self, tmp_path) -> None:
-        from datetime import UTC, datetime
-
-        from elspeth.web.preferences.tutorial_cache import (
-            CANONICAL_SEED_PROMPT,
-            TutorialCache,
-            TutorialCacheEntry,
-        )
-
-        cache_dir = tmp_path / "custom-cache"
-        app = create_app(_settings(tmp_path, tutorial_cache_dir=cache_dir))
-
-        cache = app.state.tutorial_cache
-        assert isinstance(cache, TutorialCache)
-        cache.store(
-            TutorialCacheEntry(
-                canonical_prompt=CANONICAL_SEED_PROMPT,
-                model_id="gpt-5.5:gpt-5.5",
-                cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-                rows=[],
-                source_data_hash="hash",
-                llm_call_count=0,
-                pipeline_yaml="source: {}\n",
-            )
-        )
-        assert len(list(cache_dir.glob("*.json"))) == 1
 
     def test_loopback_default_secret_key_rejected_without_pytest_module(self, tmp_path, monkeypatch) -> None:
         """Loopback bind is not proof the service is unreachable behind a proxy."""
@@ -198,9 +243,27 @@ class TestHealthEndpoint:
 class TestMetricsEndpoint:
     """Tests for GET /metrics (Prometheus scrape endpoint)."""
 
-    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+    @staticmethod
+    def _authed_client(tmp_path) -> TestClient:
+        from elspeth.web.auth.middleware import get_current_user
+        from elspeth.web.auth.models import UserIdentity
+
+        app = create_app(_settings(tmp_path))
+
+        async def _mock_user() -> UserIdentity:
+            return UserIdentity(user_id="metrics-user", username="metrics-user")
+
+        app.dependency_overrides[get_current_user] = _mock_user
+        return TestClient(app)
+
+    def test_metrics_requires_auth(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
         client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 401
+
+    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+        client = self._authed_client(tmp_path)
         response = client.get("/metrics")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/plain")
@@ -212,8 +275,7 @@ class TestMetricsEndpoint:
         (sanctioned telemetry-system-failure logging per CLAUDE.md), carrying
         a bounded detail that identifies which collector broke.
         """
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
+        client = self._authed_client(tmp_path)
         boom = RuntimeError("collector 'broken_metric' raised during collect()")
         with (
             patch("elspeth.web.app.generate_latest", side_effect=boom),
@@ -297,6 +359,14 @@ class TestBodySizeLimitMiddleware:
         assert response.status_code == 413
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("content_length", ["not-a-number", "-1", "+1", "1_000"])
+    async def test_rejects_malformed_content_length_without_body_read(self, content_length: str) -> None:
+        response = await self._dispatch_with_content_length(content_length)
+
+        assert response.status_code == 400
+        assert response.body == b'{"error": "Invalid Content-Length"}'
+
+    @pytest.mark.asyncio
     async def test_missing_content_length_stream_passes_through_without_body_read(self) -> None:
         """No Content-Length means the middleware defers to per-route validators."""
 
@@ -329,7 +399,7 @@ class TestBodySizeLimitMiddleware:
 
         assert response.status_code == 204
 
-    async def _dispatch_with_content_length(self, content_length: int) -> StarletteResponse:
+    async def _dispatch_with_content_length(self, content_length: int | str) -> StarletteResponse:
         async def noop_app(scope, receive, send) -> None:
             return None
 
@@ -626,8 +696,8 @@ class TestLifespanShutdown:
     @pytest.mark.asyncio
     async def test_lifespan_aborts_on_composer_config_rejection(self, monkeypatch, tmp_path) -> None:
         app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
-        counter = MagicMock(spec=["add"])
-        latency = MagicMock(spec=["record"])
+        counter = _RecordingCounter()
+        latency = _RecordingHistogram()
 
         async def _reject_probe(**_kwargs: object) -> bool:
             raise ComposerBootConfigError("composer sampling rejected")
@@ -642,11 +712,11 @@ class TestLifespanShutdown:
             async with lifespan(app):
                 pass
 
-        counter.add.assert_called_once()
-        _, attributes = counter.add.call_args.args
+        assert len(counter.calls) == 1
+        _, attributes = counter.calls[0]
         assert attributes["probe_status"] == "rejected"
         assert attributes["probed_model"] == "gpt-5.5"
-        latency.record.assert_called_once()
+        assert len(latency.calls) == 1
 
     @pytest.mark.asyncio
     async def test_lifespan_skips_composer_probe_when_disabled(self, monkeypatch, tmp_path) -> None:
@@ -717,8 +787,8 @@ class TestLifespanShutdown:
             )
         )
         probed_models: list[str] = []
-        counter = MagicMock(spec=["add"])
-        latency = MagicMock(spec=["record"])
+        counter = _RecordingCounter()
+        latency = _RecordingHistogram()
 
         async def _probe(**kwargs: object) -> bool:
             probed_models.append(str(kwargs["model"]))
@@ -733,9 +803,9 @@ class TestLifespanShutdown:
                 pass
 
         assert probed_models == ["gpt-5.5", "anthropic/claude-sonnet-4-6"]
-        assert counter.add.call_count == 2
-        assert latency.record.call_count == 2
-        counter_attributes = [call.args[1] for call in counter.add.call_args_list]
+        assert len(counter.calls) == 2
+        assert len(latency.calls) == 2
+        counter_attributes = [attributes for _amount, attributes in counter.calls]
         assert [attrs["probed_model"] for attrs in counter_attributes] == probed_models
         for attributes in counter_attributes:
             assert attributes["composer_model"] == "gpt-5.5"
@@ -743,16 +813,15 @@ class TestLifespanShutdown:
             assert attributes["composer_seed"] == "42"
             assert attributes["composer_advisor_model"] == "anthropic/claude-sonnet-4-6"
             assert attributes["probe_status"] == "success"
-        for call in latency.record.call_args_list:
-            value, attributes = call.args
+        for value, attributes in latency.calls:
             assert type(value) is int
             assert attributes["probe_status"] == "success"
 
     @pytest.mark.asyncio
     async def test_lifespan_records_transient_failure_when_composer_probe_times_out(self, monkeypatch, tmp_path) -> None:
         app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
-        counter = MagicMock(spec=["add"])
-        latency = MagicMock(spec=["record"])
+        counter = _RecordingCounter()
+        latency = _RecordingHistogram()
         cancelled = False
 
         async def _hanging_probe(**_kwargs: object) -> bool:
@@ -778,20 +847,19 @@ class TestLifespanShutdown:
         # Advisor is mandatory, so both the primary and advisor models are
         # probed. Both hang and time out as transient_failure; the loop does
         # not break on a transient failure.
-        assert counter.add.call_count == 2
-        probed = [call.args[1]["probed_model"] for call in counter.add.call_args_list]
+        assert len(counter.calls) == 2
+        probed = [attributes["probed_model"] for _amount, attributes in counter.calls]
         assert probed[0] == "gpt-5.5"
-        for call in counter.add.call_args_list:
-            _, attributes = call.args
+        for _amount, attributes in counter.calls:
             assert attributes["probe_status"] == "transient_failure"
-        assert latency.record.call_count == 2
+        assert len(latency.calls) == 2
         assert cancelled is True
 
     @pytest.mark.asyncio
     async def test_lifespan_records_local_error_when_composer_probe_raises_programmer_error(self, monkeypatch, tmp_path) -> None:
         app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
-        counter = MagicMock(spec=["add"])
-        latency = MagicMock(spec=["record"])
+        counter = _RecordingCounter()
+        latency = _RecordingHistogram()
 
         async def _buggy_probe(**_kwargs: object) -> bool:
             raise TypeError("signature drift")
@@ -807,11 +875,11 @@ class TestLifespanShutdown:
             async with lifespan(app):
                 pass
 
-        counter.add.assert_called_once()
-        _, attributes = counter.add.call_args.args
+        assert len(counter.calls) == 1
+        _, attributes = counter.calls[0]
         assert attributes["probe_status"] == "local_error"
         assert attributes["probed_model"] == "gpt-5.5"
-        latency.record.assert_called_once()
+        assert len(latency.calls) == 1
 
     @pytest.mark.asyncio
     async def test_lifespan_propagates_catalog_client_context_failure(self, tmp_path) -> None:
@@ -828,15 +896,13 @@ class TestLifespanShutdown:
     @pytest.mark.asyncio
     async def test_lifespan_awaits_execution_service_shutdown(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path, composer_boot_probe_enabled=False))
-        fake_execution_service = MagicMock(spec=["get_live_run_ids", "set_openrouter_catalog_snapshot", "shutdown"])
-        fake_execution_service.get_live_run_ids.return_value = frozenset()
-        fake_execution_service.shutdown = AsyncMock()
+        fake_execution_service = _RecordingExecutionService()
 
         with patch("elspeth.web.app.ExecutionServiceImpl", return_value=fake_execution_service):
             async with lifespan(app):
                 pass
 
-        fake_execution_service.shutdown.assert_awaited_once()
+        assert fake_execution_service.shutdown_calls == 1
 
 
 class TestSettingsFromEnv:
@@ -982,7 +1048,7 @@ class TestPeriodicOrphanCleanup:
     async def test_calls_cancel_all_with_max_age(self) -> None:
         """Periodic cleanup passes max_age_seconds (not None) to cancel_all_orphaned_runs.
 
-        Synchronisation: an ``asyncio.Event`` set by the mocked
+        Synchronisation: an ``asyncio.Event`` set by the fake
         ``cancel_all_orphaned_runs`` makes the test wait for exactly one
         loop iteration — no wall-clock sleep, no inverted-flake risk if
         the loop scheduler is slow on a loaded CI box.
@@ -993,13 +1059,13 @@ class TestPeriodicOrphanCleanup:
             called.set()
             return 0
 
-        mock_service = AsyncMock()
-        mock_service.cancel_all_orphaned_runs.side_effect = signal_called
-        mock_exec = MagicMock()
-        mock_exec.get_live_run_ids.return_value = frozenset()
+        session_service = _RecordingSessionService(cancel_side_effect=signal_called)
+        execution_service = _RecordingExecutionService()
 
         telemetry = build_sessions_telemetry()
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=900))
+        task = asyncio.create_task(
+            _periodic_orphan_cleanup(session_service, execution_service, telemetry, interval_seconds=0, max_age_seconds=900)
+        )
         try:
             await asyncio.wait_for(called.wait(), timeout=5.0)
         finally:
@@ -1007,11 +1073,13 @@ class TestPeriodicOrphanCleanup:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        mock_service.cancel_all_orphaned_runs.assert_called_with(
-            max_age_seconds=900,
-            exclude_run_ids=frozenset(),
-            reason="Orphaned by periodic cleanup — no active executor thread",
-        )
+        assert session_service.cancel_all_orphaned_runs_calls == [
+            {
+                "max_age_seconds": 900,
+                "exclude_run_ids": frozenset(),
+                "reason": "Orphaned by periodic cleanup — no active executor thread",
+            }
+        ]
         assert observed_value(telemetry.orphaned_runs_cancelled_total) == 0
 
     @pytest.mark.asyncio
@@ -1022,13 +1090,13 @@ class TestPeriodicOrphanCleanup:
             cleanup_called.set()
             return 3
 
-        mock_service = AsyncMock()
-        mock_service.cancel_all_orphaned_runs.side_effect = signal_called
-        mock_exec = MagicMock()
-        mock_exec.get_live_run_ids.return_value = frozenset({"run-live"})
+        session_service = _RecordingSessionService(cancel_side_effect=signal_called)
+        execution_service = _RecordingExecutionService(live_run_ids=frozenset({"run-live"}))
         telemetry = build_sessions_telemetry()
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=900))
+        task = asyncio.create_task(
+            _periodic_orphan_cleanup(session_service, execution_service, telemetry, interval_seconds=0, max_age_seconds=900)
+        )
         try:
             await asyncio.wait_for(cleanup_called.wait(), timeout=5.0)
         finally:
@@ -1079,15 +1147,13 @@ class TestPeriodicOrphanCleanup:
             recovered.set()
             return 2
 
-        mock_service = AsyncMock()
-        mock_service.cancel_all_orphaned_runs.side_effect = cancel_side_effect
-        mock_exec = MagicMock()
-        mock_exec.get_live_run_ids.return_value = frozenset()
+        session_service = _RecordingSessionService(cancel_side_effect=cancel_side_effect)
+        execution_service = _RecordingExecutionService()
 
         with capture_logs() as cap_logs:
             telemetry = build_sessions_telemetry()
             task = asyncio.create_task(
-                _periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600)
+                _periodic_orphan_cleanup(session_service, execution_service, telemetry, interval_seconds=0, max_age_seconds=3600)
             )
             try:
                 await asyncio.wait_for(recovered.wait(), timeout=5.0)
@@ -1096,7 +1162,7 @@ class TestPeriodicOrphanCleanup:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-        assert mock_service.cancel_all_orphaned_runs.call_count >= 2
+        assert len(session_service.cancel_all_orphaned_runs_calls) >= 2
 
         failure_events = [entry for entry in cap_logs if entry.get("event") == "periodic_orphan_cleanup_failed"]
         assert len(failure_events) >= 1, cap_logs
@@ -1114,13 +1180,13 @@ class TestPeriodicOrphanCleanup:
     @pytest.mark.asyncio
     async def test_cancellation_is_clean(self) -> None:
         """Task cancellation doesn't raise or leave dangling state."""
-        mock_service = AsyncMock()
-        mock_service.cancel_all_orphaned_runs.return_value = 0
-        mock_exec = MagicMock()
-        mock_exec.get_live_run_ids.return_value = frozenset()
+        session_service = _RecordingSessionService(cancel_result=0)
+        execution_service = _RecordingExecutionService()
 
         telemetry = build_sessions_telemetry()
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=10, max_age_seconds=3600))
+        task = asyncio.create_task(
+            _periodic_orphan_cleanup(session_service, execution_service, telemetry, interval_seconds=10, max_age_seconds=3600)
+        )
         await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1145,16 +1211,17 @@ class TestPeriodicOrphanCleanup:
         """
         from structlog.testing import capture_logs
 
-        mock_service = AsyncMock()
-        mock_exec = MagicMock()
+        session_service = _RecordingSessionService()
         # AttributeError from get_live_run_ids — canonical Tier-1/2 programmer
         # bug (e.g., _shutdown_events replaced with a non-mapping type).
-        mock_exec.get_live_run_ids.side_effect = AttributeError("ExecutionServiceImpl has no attribute '_shutdown_events'")
+        execution_service = _RecordingExecutionService(
+            get_live_run_ids_error=AttributeError("ExecutionServiceImpl has no attribute '_shutdown_events'")
+        )
 
         with capture_logs() as cap_logs:
             telemetry = build_sessions_telemetry()
             task = asyncio.create_task(
-                _periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600)
+                _periodic_orphan_cleanup(session_service, execution_service, telemetry, interval_seconds=0, max_age_seconds=3600)
             )
             # Task must terminate on its own with the AttributeError.
             # ``asyncio.wait_for`` provides the deterministic wait: if the
@@ -1171,7 +1238,7 @@ class TestPeriodicOrphanCleanup:
 
         # cancel_all_orphaned_runs must NOT have been called — the bug
         # short-circuits before the DB write.
-        mock_service.cancel_all_orphaned_runs.assert_not_called()
+        assert session_service.cancel_all_orphaned_runs_calls == []
 
         # No periodic_orphan_cleanup_failed event — the catch did not fire,
         # so the structured logging path was not reached. A regression that
@@ -1182,31 +1249,33 @@ class TestPeriodicOrphanCleanup:
     @pytest.mark.asyncio
     async def test_excludes_live_run_ids(self) -> None:
         """Periodic cleanup passes live run IDs as exclude_run_ids."""
-        mock_service = AsyncMock()
         cleanup_called = asyncio.Event()
 
         async def _cancel_all_orphaned_runs(**_kwargs):
             cleanup_called.set()
             return 0
 
-        mock_service.cancel_all_orphaned_runs.side_effect = _cancel_all_orphaned_runs
-        mock_exec = MagicMock()
+        session_service = _RecordingSessionService(cancel_side_effect=_cancel_all_orphaned_runs)
         live_ids = frozenset({"run-1", "run-2"})
-        mock_exec.get_live_run_ids.return_value = live_ids
+        execution_service = _RecordingExecutionService(live_run_ids=live_ids)
 
         telemetry = build_sessions_telemetry()
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600))
+        task = asyncio.create_task(
+            _periodic_orphan_cleanup(session_service, execution_service, telemetry, interval_seconds=0, max_age_seconds=3600)
+        )
         await asyncio.wait_for(cleanup_called.wait(), timeout=5.0)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-        mock_exec.get_live_run_ids.assert_called()
-        mock_service.cancel_all_orphaned_runs.assert_called_with(
-            max_age_seconds=3600,
-            exclude_run_ids=live_ids,
-            reason="Orphaned by periodic cleanup — no active executor thread",
-        )
+        assert execution_service.get_live_run_ids_calls >= 1
+        assert session_service.cancel_all_orphaned_runs_calls == [
+            {
+                "max_age_seconds": 3600,
+                "exclude_run_ids": live_ids,
+                "reason": "Orphaned by periodic cleanup — no active executor thread",
+            }
+        ]
 
 
 class TestOrphanLandscapeReconciliation:

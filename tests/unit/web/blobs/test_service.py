@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
@@ -1051,6 +1052,67 @@ class TestFinalizeBlob:
 
 class TestBlobQuota:
     """Per-session cumulative storage quota prevents unbounded disk growth."""
+
+    def test_quota_lock_statement_serializes_session_writers_on_postgresql(self) -> None:
+        """Quota writers must lock the session row on MVCC databases."""
+        statement = blob_service_module._session_quota_lock_statement("session-1")
+
+        compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+        assert "FROM sessions" in compiled
+        assert "WHERE sessions.id = " in compiled
+        assert "FOR UPDATE" in compiled
+
+    @pytest.mark.asyncio
+    async def test_create_blob_locks_session_before_quota_sum(self, db_engine, session_id, tmp_path, monkeypatch) -> None:
+        """create_blob must serialize same-session quota writers before SUM+insert."""
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=200)
+        locked_sessions: list[str] = []
+        original_lock = blob_service_module._lock_session_for_blob_quota
+
+        def recording_lock(conn, session_id_str: str) -> None:
+            locked_sessions.append(session_id_str)
+            original_lock(conn, session_id_str)
+
+        monkeypatch.setattr(blob_service_module, "_lock_session_for_blob_quota", recording_lock)
+
+        await service.create_blob(
+            session_id=session_id,
+            filename="serialized.csv",
+            content=b"x" * 50,
+            mime_type="text/csv",
+            created_by="user",
+        )
+
+        assert locked_sessions == [str(session_id)]
+
+    @pytest.mark.asyncio
+    async def test_finalize_blob_locks_session_before_quota_sum(self, db_engine, session_id, tmp_path, monkeypatch) -> None:
+        """finalize_blob must serialize same-session quota writers before SUM+update."""
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=200)
+        pending = await service.create_pending_blob(
+            session_id=session_id,
+            filename="serialized-output.csv",
+            mime_type="text/csv",
+            created_by="pipeline",
+        )
+        locked_sessions: list[str] = []
+        original_lock = blob_service_module._lock_session_for_blob_quota
+
+        def recording_lock(conn, session_id_str: str) -> None:
+            locked_sessions.append(session_id_str)
+            original_lock(conn, session_id_str)
+
+        monkeypatch.setattr(blob_service_module, "_lock_session_for_blob_quota", recording_lock)
+
+        await service.finalize_blob(
+            blob_id=pending.id,
+            status="ready",
+            size_bytes=50,
+            content_hash=content_hash(b"finalized"),
+        )
+
+        assert locked_sessions == [str(session_id)]
 
     @pytest.mark.asyncio
     async def test_quota_rejects_when_exceeded(self, db_engine, session_id, tmp_path) -> None:

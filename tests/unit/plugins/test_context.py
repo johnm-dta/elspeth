@@ -1,9 +1,61 @@
 # tests/plugins/test_context.py
 """Tests for plugin context."""
 
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import Any
+
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.factories import make_source_context
+
+
+def _call_result(
+    *,
+    call_id: str = "call-001",
+    request_hash: str | None = None,
+    response_hash: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(call_id=call_id, request_hash=request_hash, response_hash=response_hash)
+
+
+@dataclass(slots=True)
+class _RecordingLandscape:
+    validation_error_id: str | None = None
+    transform_error_id: str | None = None
+    call_result: Any = field(default_factory=_call_result)
+    operation_call_result: Any = field(default_factory=lambda: _call_result(call_id="op-call-001"))
+    node_state: Any = field(default_factory=lambda: SimpleNamespace(token_id=None))
+    validation_error_calls: list[dict[str, Any]] = field(default_factory=list)
+    transform_error_calls: list[dict[str, Any]] = field(default_factory=list)
+    record_call_calls: list[dict[str, Any]] = field(default_factory=list)
+    record_operation_call_calls: list[dict[str, Any]] = field(default_factory=list)
+    allocate_call_index_calls: list[str] = field(default_factory=list)
+    get_node_state_calls: list[str] = field(default_factory=list)
+
+    def record_validation_error(self, **kwargs: Any) -> str | None:
+        self.validation_error_calls.append(kwargs)
+        return self.validation_error_id
+
+    def record_transform_error(self, **kwargs: Any) -> str | None:
+        self.transform_error_calls.append(kwargs)
+        return self.transform_error_id
+
+    def allocate_call_index(self, state_id: str) -> int:
+        self.allocate_call_index_calls.append(state_id)
+        return len(self.allocate_call_index_calls)
+
+    def record_call(self, **kwargs: Any) -> Any:
+        self.record_call_calls.append(kwargs)
+        return self.call_result
+
+    def record_operation_call(self, **kwargs: Any) -> Any:
+        self.record_operation_call_calls.append(kwargs)
+        return self.operation_call_result
+
+    def get_node_state(self, state_id: str) -> Any:
+        self.get_node_state_calls.append(state_id)
+        return self.node_state
 
 
 class TestPluginContext:
@@ -134,19 +186,15 @@ class TestValidationErrorRecording:
 
     def test_record_validation_error_with_landscape(self) -> None:
         """record_validation_error records to landscape when configured."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.plugin_context import PluginContext
 
-        # Create mock landscape recorder
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_abc123"
+        landscape = _RecordingLandscape(validation_error_id="verr_abc123")
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
             node_id="source_node",
-            landscape=mock_landscape,
+            landscape=landscape,
         )
 
         token = ctx.record_validation_error(
@@ -157,8 +205,8 @@ class TestValidationErrorRecording:
         )
 
         # Should have called landscape
-        mock_landscape.record_validation_error.assert_called_once()
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
+        assert len(landscape.validation_error_calls) == 1
+        call_kwargs = landscape.validation_error_calls[0]
         assert call_kwargs["run_id"] == "test-run"
         assert call_kwargs["node_id"] == "source_node"
         assert call_kwargs["row_data"] == {"id": 42, "invalid": "data"}
@@ -178,19 +226,16 @@ class TestValidationErrorRecording:
         landscape's record_validation_error. This broke structured auditing of
         schema contract violations.
         """
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.errors import TypeMismatchViolation
         from elspeth.contracts.plugin_context import PluginContext
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_cv001"
+        landscape = _RecordingLandscape(validation_error_id="verr_cv001")
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
             node_id="source_node",
-            landscape=mock_landscape,
+            landscape=landscape,
         )
 
         violation = TypeMismatchViolation(
@@ -209,24 +254,21 @@ class TestValidationErrorRecording:
             contract_violation=violation,
         )
 
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
+        call_kwargs = landscape.validation_error_calls[0]
         assert call_kwargs["contract_violation"] is violation
         assert token.error_id == "verr_cv001"
 
     def test_record_validation_error_passes_none_violation_by_default(self) -> None:
         """contract_violation defaults to None when not provided."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.plugin_context import PluginContext
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_validation_error.return_value = "verr_no_cv"
+        landscape = _RecordingLandscape(validation_error_id="verr_no_cv")
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
             node_id="source_node",
-            landscape=mock_landscape,
+            landscape=landscape,
         )
 
         ctx.record_validation_error(
@@ -236,7 +278,7 @@ class TestValidationErrorRecording:
             destination="discard",
         )
 
-        call_kwargs = mock_landscape.record_validation_error.call_args[1]
+        call_kwargs = landscape.validation_error_calls[0]
         assert call_kwargs["contract_violation"] is None
 
 
@@ -340,19 +382,15 @@ class TestTransformErrorRecording:
 
     def test_record_transform_error_with_landscape(self) -> None:
         """record_transform_error stores in audit trail via mock."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.plugin_context import PluginContext
 
-        # Create mock landscape recorder
-        mock_landscape = MagicMock()
-        mock_landscape.record_transform_error.return_value = "terr_abc123def4"
+        landscape = _RecordingLandscape(transform_error_id="terr_abc123def4")
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
             node_id="transform_node",
-            landscape=mock_landscape,
+            landscape=landscape,
         )
 
         token = ctx.record_transform_error(
@@ -364,8 +402,8 @@ class TestTransformErrorRecording:
         )
 
         # Should have called landscape
-        mock_landscape.record_transform_error.assert_called_once()
-        call_kwargs = mock_landscape.record_transform_error.call_args[1]
+        assert len(landscape.transform_error_calls) == 1
+        call_kwargs = landscape.transform_error_calls[0]
         assert call_kwargs["ref"].run_id == "test-run"
         assert call_kwargs["ref"].token_id == "tok_456"
         assert call_kwargs["transform_id"] == "field_mapper"
@@ -480,7 +518,6 @@ class TestRecordCallTelemetryPayloadSnapshot:
     def test_request_payload_snapshot_is_immutable_after_call(self) -> None:
         """Mutating request_data after record_call must not change telemetry payload."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
@@ -495,17 +532,18 @@ class TestRecordCallTelemetryPayloadSnapshot:
         request_data: dict[str, Any] = {"a": 1, "nested": {"x": 2}}
         expected_request: dict[str, Any] = {"a": 1, "nested": {"x": 2}}
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash(expected_request),
-            response_hash=stable_hash({"ok": True}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash(expected_request),
+                response_hash=stable_hash({"ok": True}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=capture_telemetry,
         )
@@ -531,7 +569,6 @@ class TestRecordCallTelemetryPayloadSnapshot:
     def test_response_payload_snapshot_is_immutable_after_call(self) -> None:
         """Mutating response_data after record_call must not change telemetry payload."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
@@ -543,17 +580,18 @@ class TestRecordCallTelemetryPayloadSnapshot:
         def capture_telemetry(event):
             emitted_events.append(event)
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash({"prompt": "hi"}),
-            response_hash=stable_hash({"usage": {"prompt_tokens": 1, "completion_tokens": 2}}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash({"prompt": "hi"}),
+                response_hash=stable_hash({"usage": {"prompt_tokens": 1, "completion_tokens": 2}}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=capture_telemetry,
         )
@@ -588,7 +626,6 @@ class TestRecordCallTelemetryTokenCorrelation:
     def test_state_context_emits_token_id_when_token_present(self) -> None:
         """Transform-context calls should include token_id for correlation."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.identity import TokenInfo
@@ -601,13 +638,12 @@ class TestRecordCallTelemetryTokenCorrelation:
         def capture_telemetry(event):
             emitted_events.append(event)
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(call_id="call-001")
         # get_node_state must return an object with the authoritative token_id
         # (record_call resolves token_id from state_id lookup, not ctx.token)
-        mock_node_state = MagicMock()
-        mock_node_state.token_id = "tok-001"
-        mock_landscape.get_node_state.return_value = mock_node_state
+        landscape = _RecordingLandscape(
+            call_result=_call_result(call_id="call-001"),
+            node_state=SimpleNamespace(token_id="tok-001"),
+        )
 
         contract = SchemaContract(
             mode="OBSERVED",
@@ -620,7 +656,7 @@ class TestRecordCallTelemetryTokenCorrelation:
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             token=token,
             telemetry_emit=capture_telemetry,
@@ -641,7 +677,6 @@ class TestRecordCallTelemetryTokenCorrelation:
     def test_operation_context_allows_missing_token_id(self) -> None:
         """Operation-context calls should be valid with token_id=None."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
@@ -651,13 +686,12 @@ class TestRecordCallTelemetryTokenCorrelation:
         def capture_telemetry(event):
             emitted_events.append(event)
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_operation_call.return_value = MagicMock(call_id="op-call-001")
+        landscape = _RecordingLandscape(operation_call_result=_call_result(call_id="op-call-001"))
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             operation_id="operation-001",
             telemetry_emit=capture_telemetry,
         )
@@ -692,7 +726,6 @@ class TestRecordCallTelemetryResponseHash:
         """
         # Set up telemetry callback to capture emitted events
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
@@ -702,21 +735,22 @@ class TestRecordCallTelemetryResponseHash:
         def capture_telemetry(event):
             emitted_events.append(event)
 
-        # Mock landscape — recorder is single source of truth for hashes.
+        # Fake landscape recorder is the single source of truth for hashes.
         # Empty dict {} is a valid response with a real hash, not None.
         from elspeth.core.canonical import stable_hash
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash({"endpoint": "/empty"}),
-            response_hash=stable_hash({}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash({"endpoint": "/empty"}),
+                response_hash=stable_hash({}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",  # Required for call recording
             telemetry_emit=capture_telemetry,
         )
@@ -743,7 +777,6 @@ class TestRecordCallTelemetryResponseHash:
     def test_empty_list_response_gets_hashed(self) -> None:
         """Empty list [] response should emit response_hash in telemetry."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
@@ -755,17 +788,18 @@ class TestRecordCallTelemetryResponseHash:
 
         from elspeth.core.canonical import stable_hash
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash({"query": "SELECT * FROM empty_table"}),
-            response_hash=stable_hash({"rows": []}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash({"query": "SELECT * FROM empty_table"}),
+                response_hash=stable_hash({"rows": []}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=capture_telemetry,
         )
@@ -786,7 +820,6 @@ class TestRecordCallTelemetryResponseHash:
     def test_empty_string_response_gets_hashed(self) -> None:
         """Empty string '' response should emit response_hash in telemetry."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
@@ -797,17 +830,18 @@ class TestRecordCallTelemetryResponseHash:
         def capture_telemetry(event):
             emitted_events.append(event)
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash({"method": "DELETE"}),
-            response_hash=stable_hash({"body": ""}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash({"method": "DELETE"}),
+                response_hash=stable_hash({"body": ""}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=capture_telemetry,
         )
@@ -828,7 +862,6 @@ class TestRecordCallTelemetryResponseHash:
     def test_none_response_does_not_get_hashed(self) -> None:
         """None response should emit response_hash=None (no response data)."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
@@ -838,17 +871,18 @@ class TestRecordCallTelemetryResponseHash:
         def capture_telemetry(event):
             emitted_events.append(event)
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash="abc123",
-            response_hash=None,  # No response recorded
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash="abc123",
+                response_hash=None,  # No response recorded
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=capture_telemetry,
         )
@@ -878,22 +912,21 @@ class TestRecordCallRawCallPayloadWrapping:
 
     def test_response_data_none_not_wrapped_in_raw_call_payload(self) -> None:
         """record_call() with response_data=None should pass None, not RawCallPayload(None)."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash="req-hash",
-            response_hash=None,
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash="req-hash",
+                response_hash=None,
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
         )
 
@@ -907,28 +940,27 @@ class TestRecordCallRawCallPayloadWrapping:
         )
 
         # Verify record_call was invoked with response_data=None (not wrapped)
-        call_kwargs = mock_landscape.record_call.call_args[1]
+        call_kwargs = landscape.record_call_calls[0]
         assert call_kwargs["response_data"] is None
 
     def test_response_data_dict_wrapped_in_raw_call_payload(self) -> None:
         """record_call() with response_data=dict should wrap in RawCallPayload."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-002",
-            request_hash="req-hash",
-            response_hash="resp-hash",
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-002",
+                request_hash="req-hash",
+                response_hash="resp-hash",
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
         )
 
@@ -941,30 +973,29 @@ class TestRecordCallRawCallPayloadWrapping:
             status=CallStatus.SUCCESS,
         )
 
-        call_kwargs = mock_landscape.record_call.call_args[1]
+        call_kwargs = landscape.record_call_calls[0]
         # response_data should be RawCallPayload, not a raw dict
         assert isinstance(call_kwargs["response_data"], RawCallPayload)
         assert call_kwargs["response_data"].to_dict() == {"key": "val"}
 
     def test_request_data_wrapped_in_raw_call_payload(self) -> None:
         """record_call() always wraps request_data in RawCallPayload."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-003",
-            request_hash="req-hash",
-            response_hash=None,
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-003",
+                request_hash="req-hash",
+                response_hash=None,
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
         )
 
@@ -977,14 +1008,13 @@ class TestRecordCallRawCallPayloadWrapping:
             status=CallStatus.SUCCESS,
         )
 
-        call_kwargs = mock_landscape.record_call.call_args[1]
+        call_kwargs = landscape.record_call_calls[0]
         assert isinstance(call_kwargs["request_data"], RawCallPayload)
         assert call_kwargs["request_data"].to_dict() == {"endpoint": "/test"}
 
     def test_telemetry_event_request_payload_is_raw_call_payload(self) -> None:
         """Telemetry event emitted by record_call has request_payload as RawCallPayload."""
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
@@ -995,17 +1025,18 @@ class TestRecordCallRawCallPayloadWrapping:
         def capture_telemetry(event: Any) -> None:
             emitted_events.append(event)
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-004",
-            request_hash="req-hash",
-            response_hash="resp-hash",
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-004",
+                request_hash="req-hash",
+                response_hash="resp-hash",
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=capture_telemetry,
         )
@@ -1026,23 +1057,22 @@ class TestRecordCallRawCallPayloadWrapping:
 
     def test_operation_context_also_wraps_in_raw_call_payload(self) -> None:
         """record_call() via operation_id path also wraps in RawCallPayload."""
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_operation_call.return_value = MagicMock(
-            call_id="op-call-001",
-            request_hash="req-hash",
-            response_hash="resp-hash",
+        landscape = _RecordingLandscape(
+            operation_call_result=_call_result(
+                call_id="op-call-001",
+                request_hash="req-hash",
+                response_hash="resp-hash",
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             operation_id="operation-001",
         )
 
@@ -1055,7 +1085,7 @@ class TestRecordCallRawCallPayloadWrapping:
             status=CallStatus.SUCCESS,
         )
 
-        call_kwargs = mock_landscape.record_operation_call.call_args[1]
+        call_kwargs = landscape.record_operation_call_calls[0]
         assert isinstance(call_kwargs["request_data"], RawCallPayload)
         assert isinstance(call_kwargs["response_data"], RawCallPayload)
         assert call_kwargs["request_data"].to_dict() == {"url": "https://example.com"}
@@ -1079,7 +1109,6 @@ class TestRecordCallFrozenData:
         """
         from types import MappingProxyType
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallStatus, CallType
         from elspeth.contracts.plugin_context import PluginContext
@@ -1088,17 +1117,18 @@ class TestRecordCallFrozenData:
 
         emitted_events: list[Any] = []
 
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash({"prompt": "hi"}),
-            response_hash=stable_hash({"usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash({"prompt": "hi"}),
+                response_hash=stable_hash({"usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=emitted_events.append,
         )
@@ -1138,7 +1168,6 @@ class TestRecordCallFrozenData:
         """
         from types import MappingProxyType
         from typing import Any
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.call_data import RawCallPayload
         from elspeth.contracts.enums import CallStatus, CallType
@@ -1148,17 +1177,18 @@ class TestRecordCallFrozenData:
         emitted_events: list[Any] = []
 
         expected_request = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
-        mock_landscape = MagicMock()
-        mock_landscape.record_call.return_value = MagicMock(
-            call_id="call-001",
-            request_hash=stable_hash(expected_request),
-            response_hash=stable_hash({"ok": True}),
+        landscape = _RecordingLandscape(
+            call_result=_call_result(
+                call_id="call-001",
+                request_hash=stable_hash(expected_request),
+                response_hash=stable_hash({"ok": True}),
+            )
         )
 
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-001",
             telemetry_emit=emitted_events.append,
         )

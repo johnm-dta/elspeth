@@ -8,6 +8,7 @@ live in tests/integration/pipeline/test_bootstrap_preflight.py.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -15,10 +16,9 @@ import pytest
 
 from elspeth.contracts.errors import CommencementGateFailedError
 from elspeth.contracts.pipeline_runner import PipelineRunner
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult
 from elspeth.core.dependency_config import (
     CommencementGateConfig,
-    CommencementGateResult,
-    DependencyRunResult,
 )
 
 
@@ -29,7 +29,7 @@ class TestResolvePreflightDirect:
         """Returns None when neither depends_on nor commencement_gates are configured."""
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = []
         mock_config.commencement_gates = []
 
@@ -41,7 +41,7 @@ class TestResolvePreflightDirect:
         from elspeth.core.dependency_config import DependencyConfig
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = [DependencyConfig(name="indexer", settings="./index.yaml")]
         mock_config.commencement_gates = []
 
@@ -71,7 +71,7 @@ class TestResolvePreflightDirect:
         """When only commencement_gates are configured, gates are evaluated."""
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = []
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
 
@@ -95,12 +95,32 @@ class TestResolvePreflightDirect:
         assert result.gate_results[0].name == "corpus_ready"
         assert result.gate_results[0].result is True
 
+    def test_commencement_gate_context_uses_empty_env_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Host process environment is not exposed unless the caller supplies gate env."""
+        from elspeth.engine.bootstrap import resolve_preflight
+
+        monkeypatch.setenv("ELSPETH_SECRET_ORACLE", "sk-hidden")
+        mock_config = SimpleNamespace()
+        mock_config.depends_on = []
+        mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
+
+        captured_context: dict[str, Any] = {}
+
+        def capture_gate_context(gates: object, context: dict[str, Any]) -> list[Any]:
+            captured_context.update(context)
+            return []
+
+        with patch("elspeth.engine.commencement.evaluate_commencement_gates", side_effect=capture_gate_context):
+            resolve_preflight(mock_config, Path("/fake/pipeline.yaml"), probes=[])
+
+        assert captured_context["env"] == {}
+
     def test_dependency_results_flow_into_gate_context(self) -> None:
         """When both depends_on and gates are configured, dep results are in gate context."""
         from elspeth.core.dependency_config import DependencyConfig
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = [DependencyConfig(name="indexer", settings="./index.yaml")]
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
 
@@ -136,7 +156,7 @@ class TestResolvePreflightDirect:
         """CommencementGateFailedError propagates through resolve_preflight."""
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = []
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
 
@@ -162,7 +182,7 @@ class TestResolvePreflightDirect:
         from elspeth.core.dependency_config import DependencyConfig
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = [DependencyConfig(name="idx", settings="./idx.yaml")]
         mock_config.commencement_gates = []
 
@@ -174,7 +194,7 @@ class TestResolvePreflightDirect:
         from elspeth.contracts.errors import FrameworkBugError
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = []
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
 
@@ -186,7 +206,7 @@ class TestResolvePreflightDirect:
         from elspeth.core.dependency_config import DependencyConfig
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = [
             DependencyConfig(name="indexer", settings="./a.yaml"),
             DependencyConfig(name="indexer", settings="./b.yaml"),
@@ -211,7 +231,7 @@ class TestResolvePreflightDirect:
         from elspeth.core.expression_parser import ExpressionSyntaxError
         from elspeth.engine.bootstrap import resolve_preflight
 
-        mock_config = MagicMock()
+        mock_config = SimpleNamespace()
         mock_config.depends_on = [DependencyConfig(name="indexer", settings="./index.yaml")]
         mock_config.commencement_gates = [CommencementGateConfig.model_construct(name="malformed_gate", condition="collections[")]
 

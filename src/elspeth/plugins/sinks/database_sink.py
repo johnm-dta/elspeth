@@ -29,7 +29,7 @@ from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.url import SanitizedDatabaseUrl
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
@@ -70,7 +70,7 @@ class DatabaseSinkConfig(DataPluginConfig):
     def _reject_empty_table(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("table name must not be empty")
-        return reject_placeholder_value(v, field_name="table")
+        return reject_operator_required_placeholder_value(v, field_name="table")
 
 
 class DatabaseSink(BaseSink):
@@ -108,7 +108,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2aae58abe52b07e9"
+    source_file_hash: str | None = "sha256:9cd8b3ada5a0c96e"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

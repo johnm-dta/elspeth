@@ -46,6 +46,7 @@ const exitedGuidedSession: GuidedSession = {
   },
   chat_history: [],
   chat_turn_seq: 0,
+  profile: null,
 };
 
 describe("CommandPalette guided-mode commands", () => {
@@ -144,15 +145,36 @@ describe("CommandPalette guided-mode commands", () => {
     window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
   });
 
-  it("opens the yaml export modal via the command 'Export YAML'", () => {
+  it("opens the yaml export modal via the command 'Export YAML' when the pipeline has content", () => {
     const handler = vi.fn();
     window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
+    useSessionStore.setState({
+      compositionState: {
+        id: "state-1",
+        version: 1,
+        sources: { source: { plugin: "csv", options: {} } },
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: { name: null, description: null },
+      },
+    } as never);
 
     render(<CommandPalette isOpen onClose={vi.fn()} />);
     fireEvent.click(screen.getByText(/export yaml/i));
 
     expect(handler).toHaveBeenCalled();
     window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
+  });
+
+  // elspeth-bff8043d33 residual: the palette command was a leftover path
+  // into the near-empty Export-YAML modal. Same hasCompositionContent gate
+  // as ExportYamlButton — the command is withheld entirely (disabled
+  // commands are filtered from the palette, matching Validate/Execute).
+  it("withholds 'Export YAML' when the pipeline is empty", () => {
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/export yaml/i)).toBeNull();
   });
 
   it("does not offer the old Graph or YAML tab commands", () => {

@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-ELSPETH is currently on the `0.6.0` release line. Security
+ELSPETH is currently on the `0.7.0` release line. Security
 fixes are prioritised against the current release branch and `main`.
 Older release snapshots are retained for provenance, but are not
 maintained as separately supported long-term release lines.
@@ -24,7 +24,7 @@ Preferred disclosure path:
 3. If no private route is available, open a public issue that says only
    "Security disclosure path requested" and includes no exploit detail.
 
-As of 0.6.0, a dedicated public security mailbox has not yet been published in
+As of 0.7.0, a dedicated public security mailbox has not yet been published in
 this repository. Publishing or enabling a permanent private disclosure channel
 remains a public-release readiness item.
 
@@ -50,6 +50,10 @@ Security reports are triaged according to the highest credible impact:
 - suspected contract violations in audit, lineage, trust-tier handling,
   redaction, or secret references are treated as security-relevant even when
   they do not resemble a conventional CVE-class vulnerability;
+- reports affecting signed judge metadata, trust-tier allowlists, audit-anchor
+  integrity, websocket ticket handling, authenticated metrics, provider endpoint
+  pinning, bounded execution budgets, or secret-inventory redaction are handled
+  as release-gate issues until triaged;
 - public disclosure timing is coordinated with the reporter where possible.
 
 ## Scope
@@ -59,6 +63,8 @@ In scope:
 - source code in this repository;
 - GitHub Actions workflows and release artifacts;
 - the web Composer, authentication, sessions, execution, and audit surfaces;
+- trust-tier signing and verification metadata, redaction gates, signed
+  allowlists, and CI/CD policy cells;
 - official container images and published release bundles;
 - documentation that makes security or assurance claims.
 

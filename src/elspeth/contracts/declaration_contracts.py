@@ -100,8 +100,7 @@ type DispatchSiteName = Literal[
 
 
 class DispatchSite(StrEnum):
-    """Named dispatch site. StrEnum so members are directly usable as method
-    names via ``getattr(contract, site.value)``."""
+    """Named dispatch site. Values are the concrete contract method names."""
 
     # Keep in sync with DispatchSiteName above; the Literal serves static tools.
     PRE_EMISSION = "pre_emission_check"
@@ -145,7 +144,7 @@ def implements_dispatch_site(site_name: DispatchSiteName) -> Callable[[F], F]:
        this marker to build the per-site registration map. Methods without
        the marker are NOT invoked by the dispatcher for any site, even if
        their name happens to match a ``DispatchSite`` value.
-    2. Static: ``scripts/cicd/enforce_contract_manifest.py`` MC3a/b/c rules
+    2. Static: ``manifest.contract_manifest`` ``elspeth-lints`` MC3a/b/c rules
        AST-detect the decorator on concrete contract classes. Required for
        multi-level-inheritance detection per the D1 correction on H2
        (``subclass.__dict__`` does not see mixin-inherited overrides).
@@ -167,6 +166,17 @@ def implements_dispatch_site(site_name: DispatchSiteName) -> Callable[[F], F]:
         return method
 
     return wrap
+
+
+def _dispatch_site_marker(candidate: object) -> object | None:
+    """Return the dispatch-site marker from a decorated Python method."""
+    if not callable(candidate):
+        return None
+    candidate_attrs = vars(candidate)
+    if _DISPATCH_SITE_MARKER_ATTR not in candidate_attrs:
+        return None
+    marker: object = candidate_attrs[_DISPATCH_SITE_MARKER_ATTR]
+    return marker
 
 
 def _normalise_row_tuple(
@@ -251,8 +261,11 @@ class PostEmissionOutputs:
     """
 
     emitted_rows: tuple[Any, ...]
+    used_success_empty: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.used_success_empty) is not bool:
+            raise TypeError(f"{type(self).__name__}.used_success_empty must be bool, got {type(self.used_success_empty).__name__!r}")
         object.__setattr__(
             self,
             "emitted_rows",
@@ -306,8 +319,11 @@ class BatchFlushOutputs:
     """
 
     emitted_rows: tuple[Any, ...]
+    used_success_empty: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.used_success_empty) is not bool:
+            raise TypeError(f"{type(self).__name__}.used_success_empty must be bool, got {type(self.used_success_empty).__name__!r}")
         object.__setattr__(
             self,
             "emitted_rows",
@@ -392,8 +408,7 @@ class ExampleBundle:
     dispatch per site:
 
         bundle = type(contract).negative_example()
-        method = getattr(contract, bundle.site.value)
-        method(*bundle.args)
+        contract.pre_emission_check(*bundle.args)  # when bundle.site is PRE_EMISSION
 
     ``args`` shape by site:
       * PRE_EMISSION: ``(PreEmissionInputs,)``
@@ -557,16 +572,16 @@ class _EmptyPayload(TypedDict):
 def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset[str]]:
     """Return ``(required, optional)`` frozensets for a TypedDict class.
 
-    Implemented via ``typing.get_type_hints(schema, include_extras=True)`` so
-    ``NotRequired[...]`` / ``Required[...]`` wrappers survive under
-    ``from __future__ import annotations``. The metaclass-populated
-    ``__required_keys__`` / ``__optional_keys__`` are unreliable in that
-    case because the class-body annotations are string literals the
-    metaclass cannot parse at class-definition time. ``get_type_hints``
-    resolves the strings at call time and ``typing.get_origin`` yields
-    the wrapper so author intent survives regardless of syntax.
+    ``typing.get_type_hints(schema, include_extras=True)`` is authoritative
+    for explicit ``NotRequired[...]`` / ``Required[...]`` wrappers under
+    ``from __future__ import annotations``. For bare inherited keys, the
+    TypedDict metaclass key sets preserve the defining class's totality.
+    Combine both signals so wrapper intent wins and inherited bare keys do
+    not get reclassified by the most-derived class's ``__total__``.
     """
     total_required_default: bool = schema.__total__  # type: ignore[attr-defined]
+    native_required = frozenset(schema.__required_keys__)  # type: ignore[attr-defined]
+    native_optional = frozenset(schema.__optional_keys__)  # type: ignore[attr-defined]
     hints = get_type_hints(schema, include_extras=True)
     required: set[str] = set()
     optional: set[str] = set()
@@ -575,6 +590,10 @@ def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset
         if origin is Required:
             required.add(key)
         elif origin is NotRequired:
+            optional.add(key)
+        elif key in native_required:
+            required.add(key)
+        elif key in native_optional:
             optional.add(key)
         elif total_required_default:
             required.add(key)
@@ -1041,8 +1060,9 @@ _REGISTRY_LOCK = _DECLARATION_REGISTRY.lock
 # CLOSED SET — adding or removing a contract requires updating this manifest
 # in the SAME commit as the register_declaration_contract(...) call site AND
 # the @implements_dispatch_site markers on the contract's methods.
-# ``scripts/cicd/enforce_contract_manifest.py`` scans the source tree and
-# fails CI if the manifest drifts from the registration + marker call sites.
+# The ``manifest.contract_manifest`` ``elspeth-lints`` rule scans the source
+# tree and fails CI if the manifest drifts from the registration + marker call
+# sites.
 
 
 EXPECTED_CONTRACT_SITES: Mapping[str, frozenset[DispatchSiteName]] = MappingProxyType(
@@ -1112,12 +1132,12 @@ def _collect_contract_sites(contract: DeclarationContract) -> frozenset[Dispatch
     same per-contract site set.
     """
     sites: set[DispatchSiteName] = set()
-    first_definitions: dict[str, tuple[type[object], object, str | None]] = {}
+    first_definitions: dict[str, tuple[type[object], object, object | None]] = {}
     for klass in type(contract).__mro__:
         if klass is object or klass is DeclarationContract:
             continue
         for attr_name, candidate in vars(klass).items():
-            site_name = getattr(candidate, _DISPATCH_SITE_MARKER_ATTR, None)
+            site_name = _dispatch_site_marker(candidate)
             if attr_name in first_definitions:
                 _overriding_class, _, overriding_site_name = first_definitions[attr_name]
                 if site_name is not None and overriding_site_name is None:
@@ -1131,10 +1151,9 @@ def _collect_contract_sites(contract: DeclarationContract) -> frozenset[Dispatch
                         f"runtime dispatch cannot disagree."
                     )
                 continue
-            first_definitions[attr_name] = (klass, candidate, cast(str | None, site_name))
-            # Only functions carry the marker; non-callables and dataclass
-            # fields are skipped naturally because getattr returns the
-            # unwrapped value.
+            first_definitions[attr_name] = (klass, candidate, site_name)
+            # Only decorated Python methods carry the marker; non-callables and
+            # undecorated callables are skipped naturally by _dispatch_site_marker().
             if site_name is None:
                 continue
             if site_name not in _DISPATCH_SITE_VALUES:
@@ -1218,13 +1237,11 @@ def register_declaration_contract(contract: DeclarationContract) -> None:
         # Example-classmethod callability — N2 Layer A / B harnesses require both.
         for method_name in ("negative_example", "positive_example_does_not_apply"):
             try:
-                method = getattr(type(contract), method_name)
+                _resolve_contract_example_method(type(contract), method_name)
             except AttributeError as exc:
                 raise TypeError(
                     f"Contract {contract.name!r} missing required {method_name!r} classmethod (ADR-010 §Decision 3 + N2 Layer A/B harness)."
                 ) from exc
-            if not callable(method):
-                raise TypeError(f"Contract {contract.name!r}.{method_name} must be callable")
 
         # Claimed-sites validation (H2 §Fix direction + N1 MC3).
         sites = _collect_contract_sites(contract)

@@ -96,7 +96,6 @@ class TestRuntimeCheckpointConfigPostInit:
             "enabled": True,
             "frequency": 1,
             "checkpoint_interval": None,
-            "aggregation_boundaries": True,
         }
         kwargs.update(overrides)
         return kwargs
@@ -104,10 +103,6 @@ class TestRuntimeCheckpointConfigPostInit:
     def test_rejects_non_bool_enabled(self) -> None:
         with pytest.raises(TypeError, match="enabled must be bool"):
             RuntimeCheckpointConfig(**self._kwargs(enabled=1))  # type: ignore[arg-type]
-
-    def test_rejects_non_bool_aggregation_boundaries(self) -> None:
-        with pytest.raises(TypeError, match="aggregation_boundaries must be bool"):
-            RuntimeCheckpointConfig(**self._kwargs(aggregation_boundaries="yes"))  # type: ignore[arg-type]
 
     def test_valid_construction_succeeds(self) -> None:
         cfg = RuntimeCheckpointConfig(**self._kwargs())

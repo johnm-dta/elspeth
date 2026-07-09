@@ -10,11 +10,17 @@ import { useAuditReadinessStore } from "./auditReadinessStore";
 import { useAuthStore } from "./authStore";
 import type { ValidationResult } from "@/types/index";
 import { hasCompositionContent } from "@/utils/compositionState";
+import { humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
 
 let previousVersion: number | null = null;
 let previousSessionIds: Set<string> = new Set();
 let initialized = false;
 let unsubscribe: (() => void) | null = null;
+
+// Tracks the last-seen activeSessionId so the run-rehydration subscriber
+// fires once per session activation, not on every sessionStore write.
+let previousActiveSessionId: string | null = null;
+let unsubscribeRunRehydration: (() => void) | null = null;
 
 // Module-level state for the executionStore subscriber.
 // Must be reset in _resetSubscriptionsForTesting().
@@ -39,16 +45,37 @@ let unsubscribeAuth: (() => void) | null = null;
  *
  * Returned by ``web/execution/validation.py::validate_pipeline`` when the
  * composition has no source, no transforms, and no outputs. The frontend
- * uses this to suppress chat-injected error banners and to prevent
- * ``sendValidationFeedback`` from POSTing the failure to ``/messages`` —
- * doing so would push the LLM to confabulate a placeholder ``set_pipeline``
- * fix that the user did not ask for.
+ * uses this to suppress chat-injected error banners. The historical
+ * feedback-to-LLM path also used this guard to avoid POSTing the failure to
+ * ``/messages`` and prompting a confabulated placeholder ``set_pipeline``
+ * fix; validation failures are now local-only, but the empty-state silence
+ * remains intentional.
  */
 function isEmptyPipelineResult(result: ValidationResult): boolean {
   return (
     !result.is_valid &&
     result.errors.length === 1 &&
     result.errors[0].error_code === "empty_pipeline"
+  );
+}
+
+/**
+ * Detects the "partial composition" outcomes — a lone source, a lone output,
+ * or a transform with neither (error codes ``missing_source`` / ``missing_sink``
+ * from the settings-load reframe, elspeth-901a404926). Like ``empty_pipeline``,
+ * these are the tutorial's normal mid-build steady state: the rail strip
+ * already carries the plain "Add an output step…" guidance, so injecting an
+ * alarmist "Validation failed" chat line on every intermediate build step would
+ * be noise. Keep them silent in chat.
+ */
+const INCOMPLETE_PIPELINE_CODES = new Set(["missing_source", "missing_sink"]);
+function isIncompletePipelineResult(result: ValidationResult): boolean {
+  return (
+    !result.is_valid &&
+    result.errors.length > 0 &&
+    result.errors.every(
+      (err) => err.error_code != null && INCOMPLETE_PIPELINE_CODES.has(err.error_code),
+    )
   );
 }
 
@@ -85,6 +112,29 @@ function validationFingerprint(result: ValidationResult | null): string | null {
 }
 
 /**
+ * Format one validation finding as a novice-register chat bullet
+ * (elspeth-d9e5d157cb). Routes the raw backend message through the SHARED
+ * humaniser and drops the engineer-grade "[type] id:" internal-id prefix the
+ * old injection leaked verbatim. Prefixes the plain step name only when the
+ * finding is attributed to a resolvable component AND was passed through
+ * un-humanised (a humanised contract headline already names its steps) —
+ * mirrors formatFindingBody (elspeth-901a404926). Interpretation-review-pending
+ * findings never reach here (handled by isPendingInterpretationReviewResult
+ * above), so no stepLabelFor is needed.
+ */
+function humanisedValidationBullet(
+  message: string,
+  componentId: string | null,
+  phraseFor: (componentId: string | null) => string,
+): string {
+  const finding = humaniseValidationMessage(message, phraseFor);
+  const attributed = finding.raw === null && componentId !== null;
+  return attributed
+    ? `- **${phraseFor(componentId)}:** ${finding.headline}`
+    : `- ${finding.headline}`;
+}
+
+/**
  * Returns a string that changes when the authenticated identity changes.
  * "anon" when no token is present; the user_id string otherwise.
  * Used by the auth subscription to detect user switches (logout / re-login
@@ -108,9 +158,8 @@ function authIdentityFingerprint(state: { token: string | null; user: { user_id:
  * to drop a stale validationResult that resolves after the user has
  * already switched sessions or identities. Nulling it here would short-
  * circuit that guard and let a previous user's validation side-effect
- * (system message, sendValidationFeedback) fire on the new user's
- * session. fireValidateLoop's own try/finally clears the field once
- * the in-flight validate() promise settles.
+ * system message fire on the new user's session. fireValidateLoop's own
+ * try/finally clears the field once the in-flight validate() promise settles.
  */
 function resetPerUserState(): void {
   previousVersion = null;
@@ -119,6 +168,10 @@ function resetPerUserState(): void {
   previousSessionIds = new Set();
   lastValidatedVersionBySession.clear();
   pendingValidateTarget = null;
+  // Pre-run disclosure opt-outs are per user: the ack map survives
+  // executionStore.reset() (session switches) by design, so the identity
+  // transition is the one place it must be flushed.
+  useExecutionStore.getState().clearRunDisclosureAcks();
 }
 
 /**
@@ -131,13 +184,20 @@ function resetPerUserState(): void {
  *   sessionStore.sessions (archive, 404 self-eviction, future removal paths).
  *   Uses a previous-id set tracked across firings to detect removals
  *   uniformly — no need to instrument each removal call site.
- * - Fire injectSystemMessage + sendValidationFeedback when
- *   useExecutionStore.validationResult transitions to a failing or
- *   warnings-only result. Phase 2C centralized the side-effect orchestration
- *   so keyboard and CommandPalette callers of validate() share the same path.
+ * - Fire injectSystemMessage when useExecutionStore.validationResult
+ *   transitions to a failing or warnings-only result. Phase 2C centralized
+ *   the side-effect orchestration so keyboard and CommandPalette callers of
+ *   validate() share the same local UI path.
  * - Auto-validate when compositionState.version increments, with a correctness
  *   loop that re-fires after in-flight validation settles if a newer version
  *   arrived in the meantime.
+ * - Rehydrate a live run on session activation (elspeth-90db33baac): when
+ *   activeSessionId changes, executionStore.rehydrateActiveRun re-attaches
+ *   activeRunId + the progress WebSocket if the backend reports a pending or
+ *   running run, so a page reload during execution keeps its Cancel control.
+ *   Lives here rather than in sessionStore because sessionStore must not
+ *   depend on execution wiring (same circular-import break as the rest of
+ *   this module).
  */
 export function initStoreSubscriptions(): void {
   if (initialized) return;
@@ -172,6 +232,20 @@ export function initStoreSubscriptions(): void {
     previousSessionIds = currentIds;
   });
 
+  // Run/WebSocket rehydration on session activation. Seeded from current
+  // state (like previousSessionIds above) so init itself does not fire a
+  // rehydrate for a session that was already active before wiring.
+  previousActiveSessionId = useSessionStore.getState().activeSessionId;
+  unsubscribeRunRehydration = useSessionStore.subscribe((state) => {
+    const sessionId = state.activeSessionId;
+    if (sessionId === previousActiveSessionId) return;
+    previousActiveSessionId = sessionId;
+    if (!sessionId) return;
+    // Fire-and-forget: rehydrateActiveRun guards internally against the
+    // session changing again while its fetch is in flight.
+    void useExecutionStore.getState().rehydrateActiveRun(sessionId);
+  });
+
   const VALIDATION_MSG_ID = "system-validation-current";
 
   unsubscribeExecution = useExecutionStore.subscribe((state) => {
@@ -195,15 +269,15 @@ export function initStoreSubscriptions(): void {
     if (fingerprint === previousValidationFingerprint) return;
     previousValidationFingerprint = fingerprint;
 
-    // Empty-pipeline guard: never inject the system message or send
-    // validation feedback to the LLM when the backend reports the
-    // structured ``empty_pipeline`` outcome. The user has not built
-    // anything yet (e.g. immediately after exit_to_freeform) — feeding a
-    // "fix these errors" message to the LLM produces a confabulated
-    // placeholder source/sink (set_pipeline auto-fix), which is worse
-    // than no feedback. The fingerprint update above stays so a later
-    // non-empty failure with a different fingerprint still surfaces.
-    if (isEmptyPipelineResult(result)) return;
+    // Structural-incompleteness guard: when the backend reports the
+    // ``empty_pipeline`` outcome (nothing built yet, e.g. immediately after
+    // exit_to_freeform) or a partial ``missing_source`` / ``missing_sink``
+    // outcome (a normal mid-build step), keep that state silent instead of
+    // injecting a local "fix these errors" message — the rail strip carries
+    // the plain-language guidance. The fingerprint update above stays so a
+    // later, genuinely-actionable failure with a different fingerprint still
+    // surfaces.
+    if (isEmptyPipelineResult(result) || isIncompletePipelineResult(result)) return;
 
     const sessionStore = useSessionStore.getState();
 
@@ -231,26 +305,18 @@ export function initStoreSubscriptions(): void {
 
     if (!result.is_valid && result.errors.length > 0) {
       previousWasPendingReview = false;
-      const lines = ["**Validation failed** — the following errors were sent to the agent:"];
+      const phraseFor = makePhraseFor(sessionStore.compositionState);
+      const lines = ["**Validation failed** — fix the following errors before running:"];
       for (const err of result.errors) {
-        lines.push(
-          `- **[${err.component_type ?? "unknown"}] ${err.component_id ?? "unknown"}:** ${err.message}`,
-        );
+        lines.push(humanisedValidationBullet(err.message, err.component_id ?? null, phraseFor));
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
-      // sendValidationFeedback is fire-and-forget. Per CLAUDE.md audit-primacy,
-      // the backend records the validation event in the audit Landscape; a
-      // frontend telemetry breadcrumb would duplicate that record. The
-      // user-visible system message is already injected above. Phase 8 is
-      // the right owner if a frontend operational signal proves useful.
-      void sessionStore.sendValidationFeedback(result);
     } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
       previousWasPendingReview = false;
+      const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation passed with warnings:**"];
       for (const warn of result.warnings) {
-        lines.push(
-          `- **[${warn.component_type ?? "unknown"}] ${warn.component_id ?? "unknown"}:** ${warn.message}`,
-        );
+        lines.push(humanisedValidationBullet(warn.message, warn.component_id ?? null, phraseFor));
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && previousWasPendingReview) {
@@ -378,6 +444,9 @@ export function _resetSubscriptionsForTesting(): void {
   unsubscribeAutoValidate = null;
   unsubscribeAuth?.();
   unsubscribeAuth = null;
+  unsubscribeRunRehydration?.();
+  unsubscribeRunRehydration = null;
+  previousActiveSessionId = null;
   previousVersion = null;
   previousValidationFingerprint = null;
   previousWasPendingReview = false;

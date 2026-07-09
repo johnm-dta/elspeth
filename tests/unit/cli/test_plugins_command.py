@@ -1,95 +1,85 @@
 """Tests for elspeth plugins commands."""
 
+import json
+import subprocess
+import sys
+from typing import Any, cast
+
 import pytest
 from typer.testing import CliRunner
 
 runner = CliRunner()
 
 
-class TestPluginInfo:
-    """Tests for PluginInfo dataclass."""
+class TestCliPluginCatalogAdapter:
+    """Tests for the Typer-free plugin catalog adapter."""
 
-    def test_plugin_info_creation(self) -> None:
-        """PluginInfo can be created with name and description."""
-        from elspeth.cli import PluginInfo
+    def test_list_plugins_payload_is_json_ready(self) -> None:
+        """list_plugins_payload returns plain JSON-ready dictionaries."""
+        from elspeth.cli_plugins import list_plugins_payload
 
-        plugin = PluginInfo(name="csv", description="Load rows from CSV files")
+        payload = list_plugins_payload(None)
 
-        assert plugin.name == "csv"
-        assert plugin.description == "Load rows from CSV files"
+        assert set(payload) == {"source", "transform", "sink"}
+        assert any(plugin["name"] == "csv" for plugin in payload["source"])
+        assert any(plugin["name"] == "passthrough" for plugin in payload["transform"])
+        json.dumps(payload)
 
-    def test_plugin_info_is_frozen(self) -> None:
-        """PluginInfo instances are immutable."""
-        from elspeth.cli import PluginInfo
+    def test_list_plugins_payload_type_filter(self) -> None:
+        """list_plugins_payload honors plugin type filtering."""
+        from elspeth.cli_plugins import list_plugins_payload
 
-        plugin = PluginInfo(name="csv", description="Load rows from CSV files")
+        payload = list_plugins_payload("source")
 
-        with pytest.raises(AttributeError):
-            plugin.name = "json"  # type: ignore[misc]
+        assert set(payload) == {"source"}
+        assert all(plugin["plugin_type"] == "source" for plugin in payload["source"])
 
-    def test_plugin_info_equality(self) -> None:
-        """PluginInfo instances with same values are equal."""
-        from elspeth.cli import PluginInfo
+    def test_text_list_payload_does_not_build_schema_catalog(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Text listing stays available even if full schema lowering is broken."""
+        import elspeth.cli_plugins as cli_plugins
 
-        plugin1 = PluginInfo(name="csv", description="Load rows from CSV files")
-        plugin2 = PluginInfo(name="csv", description="Load rows from CSV files")
+        def fail_catalog_build(*args: object, **kwargs: object) -> object:
+            raise AssertionError("text list should not lower full catalog schemas")
 
-        assert plugin1 == plugin2
+        monkeypatch.setattr(cli_plugins, "CatalogServiceImpl", fail_catalog_build)
 
-    def test_plugin_info_inequality(self) -> None:
-        """PluginInfo instances with different values are not equal."""
-        from elspeth.cli import PluginInfo
+        payload = cli_plugins.list_plugins_text_payload(None)
 
-        plugin1 = PluginInfo(name="csv", description="Load rows from CSV files")
-        plugin2 = PluginInfo(name="json", description="Load rows from JSON files")
+        assert any(plugin["name"] == "csv" for plugin in payload["source"])
+        assert all(plugin["config_fields"] == [] for plugins in payload.values() for plugin in plugins)
 
-        assert plugin1 != plugin2
+    def test_inspect_plugin_payload_combines_schema_and_config_fields(self) -> None:
+        """inspect payload joins schema detail with summary config fields."""
+        from elspeth.cli_plugins import inspect_plugin_payload
 
-    def test_plugin_info_hashable(self) -> None:
-        """PluginInfo instances can be used as dict keys or in sets."""
-        from elspeth.cli import PluginInfo
+        payload = inspect_plugin_payload("source", "csv")
 
-        plugin1 = PluginInfo(name="csv", description="Load rows from CSV files")
-        plugin2 = PluginInfo(name="csv", description="Load rows from CSV files")
+        assert payload["name"] == "csv"
+        assert payload["plugin_type"] == "source"
+        assert isinstance(payload["description"], str)
+        assert isinstance(payload["config_fields"], list)
+        assert isinstance(payload["json_schema"], dict)
+        assert isinstance(payload["knob_schema"], dict)
+        json.dumps(payload)
 
-        # Should be hashable and produce same hash for equal instances
-        plugin_set = {plugin1, plugin2}
-        assert len(plugin_set) == 1
+    def test_format_plugin_inspect_text_does_not_treat_bad_config_fields_as_empty(self) -> None:
+        """The text formatter must fail loudly if the required typed field is corrupt."""
+        from elspeth.cli_plugins import PluginInspectPayload, format_plugin_inspect_text
 
-    def test_build_plugin_registry_returns_plugin_info(self) -> None:
-        """_build_plugin_registry returns PluginInfo instances."""
-        from elspeth.cli import PluginInfo, _build_plugin_registry
+        payload = cast(
+            PluginInspectPayload,
+            {
+                "name": "broken",
+                "plugin_type": "source",
+                "description": "bad payload",
+                "json_schema": {},
+                "knob_schema": {},
+                "config_fields": cast(Any, "not-a-list"),
+            },
+        )
 
-        registry = _build_plugin_registry()
-
-        for plugin_type, plugins in registry.items():
-            for plugin in plugins:
-                assert isinstance(plugin, PluginInfo), f"Plugin in {plugin_type} is not PluginInfo: {plugin}"
-                assert isinstance(plugin.name, str)
-                assert isinstance(plugin.description, str)
-
-    def test_build_plugin_registry_includes_all_discovered_plugins(self) -> None:
-        """_build_plugin_registry includes all plugins from PluginManager."""
-        from elspeth.cli import _build_plugin_registry
-        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-
-        registry = _build_plugin_registry()
-        manager = get_shared_plugin_manager()
-
-        # All discovered sources should be in registry
-        source_names = {p.name for p in registry["source"]}
-        for source_cls in manager.get_sources():
-            assert source_cls.name in source_names, f"Missing source: {source_cls.name}"
-
-        # All discovered transforms should be in registry
-        transform_names = {p.name for p in registry["transform"]}
-        for transform_cls in manager.get_transforms():
-            assert transform_cls.name in transform_names, f"Missing transform: {transform_cls.name}"
-
-        # All discovered sinks should be in registry
-        sink_names = {p.name for p in registry["sink"]}
-        for sink_cls in manager.get_sinks():
-            assert sink_cls.name in sink_names, f"Missing sink: {sink_cls.name}"
+        with pytest.raises(TypeError):
+            format_plugin_inspect_text(payload)
 
 
 class TestPluginsListCommand:
@@ -218,3 +208,78 @@ class TestPluginsListCommand:
         assert "invalid" in output, f"Expected 'invalid' in error message, got: {output}"
         # Should mention valid types
         assert "valid types" in output or "source" in output, f"Expected mention of valid types, got: {output}"
+
+    def test_plugins_list_json_output_is_parseable_and_pure_stdout(self) -> None:
+        """plugins list --format json writes only parseable JSON to stdout."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["plugins", "list", "--format", "json"])
+
+        assert result.exit_code == 0
+        assert result.stdout.startswith("{")
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert any(plugin["name"] == "csv" for plugin in payload["source"])
+        assert "SOURCES:" not in result.stdout
+
+    def test_plugins_list_json_type_filter(self) -> None:
+        """plugins list --type source --format json emits only the filtered section."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["plugins", "list", "--type", "source", "--format", "json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert set(payload) == {"source"}
+        assert all(plugin["plugin_type"] == "source" for plugin in payload["source"])
+
+    def test_plugins_inspect_json_output(self) -> None:
+        """plugins inspect exposes schema detail as JSON."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["plugins", "inspect", "source", "csv", "--format", "json"])
+
+        assert result.exit_code == 0
+        assert result.stdout.startswith("{")
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert payload["name"] == "csv"
+        assert payload["plugin_type"] == "source"
+        assert isinstance(payload["config_fields"], list)
+        assert isinstance(payload["json_schema"], dict)
+        assert isinstance(payload["knob_schema"], dict)
+
+    def test_plugins_inspect_text_output(self) -> None:
+        """plugins inspect has a human-readable text mode."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["plugins", "inspect", "transform", "passthrough"])
+
+        assert result.exit_code == 0
+        assert "passthrough" in result.stdout
+        assert "transform" in result.stdout.lower()
+        assert "JSON Schema" in result.stdout
+
+    def test_plugins_inspect_invalid_plugin_exits_nonzero(self) -> None:
+        """plugins inspect fails clearly for unknown plugins."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["plugins", "inspect", "source", "does-not-exist", "--format", "json"])
+
+        assert result.exit_code == 1
+        output = result.stdout.lower() + (result.stderr or "").lower()
+        assert "does-not-exist" in output
+
+    def test_plugins_list_json_subprocess_stdout_stderr_separation(self) -> None:
+        """Real subprocess output keeps JSON on stdout and success stderr empty."""
+        completed = subprocess.run(
+            [sys.executable, "-m", "elspeth.cli", "plugins", "list", "--format", "json"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert completed.returncode == 0
+        assert completed.stderr == ""
+        assert completed.stdout.startswith("{")
+        json.loads(completed.stdout)

@@ -97,6 +97,10 @@ EXECUTOR_ONLY_FIELDS = {
 ENGINE_INTERNAL_METHODS = {
     "record_transform_error",
     "pop_pending_quarantine_validation_error_id",
+    # Executors clone an operation-scoped context (e.g. sink primary/failsink
+    # row contracts) so per-operation attribution cannot leak through the
+    # shared context. Plugins receive the scoped copy; they never call this.
+    "for_contract",
 }
 
 

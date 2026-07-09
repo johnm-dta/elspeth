@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -65,6 +64,46 @@ class _StateRecord:
 class _SessionRecord:
     id: UUID
     user_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionServiceFake:
+    session_record: _SessionRecord
+    state_record: _StateRecord
+
+    async def get_current_state(self, session_id: UUID) -> _StateRecord:
+        assert session_id == self.state_record.session_id
+        return self.state_record
+
+    async def get_session(self, session_id: UUID) -> _SessionRecord:
+        assert session_id == self.session_record.id
+        return self.session_record
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionServiceFake:
+    validation: ValidationResult
+
+    async def validate(self, *_args: Any, **_kwargs: Any) -> ValidationResult:
+        return self.validation
+
+    async def validate_state(self, *_args: Any, **_kwargs: Any) -> ValidationResult:
+        return self.validation
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadinessServiceFake:
+    readiness: AuditReadinessSnapshot
+
+    async def compute_snapshot(self, *, session_id: UUID, user_id: str) -> AuditReadinessSnapshot:
+        assert str(session_id) == self.readiness.session_id
+        assert user_id
+        return self.readiness
+
+
+@dataclass(frozen=True, slots=True)
+class _ShareReviewSettingsFake:
+    shareable_link_lifetime_seconds: int
 
 
 @pytest.fixture
@@ -212,19 +251,10 @@ def _build_service_with_fresh_telemetry(  # type: ignore[no-untyped-def]
     in via the constructor — this just keeps the reference handy at
     test scope).
     """
-    session_service = MagicMock()
-    session_service.get_current_state = AsyncMock(return_value=state_record)
-    session_service.get_session = AsyncMock(return_value=session_record)
-
-    execution_service = MagicMock()
-    execution_service.validate = AsyncMock(return_value=_ok_validation())
-    execution_service.validate_state = AsyncMock(return_value=_ok_validation())
-
-    readiness_service = MagicMock()
-    readiness_service.compute_snapshot = AsyncMock(return_value=readiness)
-
-    settings = MagicMock()
-    settings.shareable_link_lifetime_seconds = 30 * 24 * 3600
+    session_service = _SessionServiceFake(session_record=session_record, state_record=state_record)
+    execution_service = _ExecutionServiceFake(validation=_ok_validation())
+    readiness_service = _ReadinessServiceFake(readiness=readiness)
+    settings = _ShareReviewSettingsFake(shareable_link_lifetime_seconds=30 * 24 * 3600)
 
     telemetry = build_sessions_telemetry()
 

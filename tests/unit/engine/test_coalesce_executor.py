@@ -13,8 +13,9 @@ import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Literal
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -36,7 +37,14 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.engine.clock import MockClock
-from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome, _BranchEntry, _PendingCoalesce
+from elspeth.engine.coalesce_executor import (
+    CoalesceExecutor,
+    CoalesceMergePlan,
+    CoalesceOutcome,
+    _BranchEntry,
+    _PendingCoalesce,
+    build_coalesce_merge,
+)
 from elspeth.testing import make_field, make_row
 
 # ---------------------------------------------------------------------------
@@ -77,6 +85,61 @@ _state_counter = itertools.count(1)
 
 def _next_state_id() -> str:
     return f"state_{next(_state_counter):04d}"
+
+
+def _restore_reads_from_execution_double(execution: MagicMock) -> SimpleNamespace:
+    return SimpleNamespace(
+        get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+        has_completed_row_for_node=execution.has_completed_row_for_node,
+    )
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, side_effect: Any = None) -> None:
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if self.side_effect is None:
+            return None
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        return self.side_effect(*args, **kwargs)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _TokenManagerDouble:
+    def __init__(self) -> None:
+        self.coalesce_tokens = _CallRecorder(_coalesce_tokens_impl)
+
+
+class _SpanFactorySentinel:
+    pass
+
+
+def _coalesce_tokens_impl(parents: list[TokenInfo], merged_data: PipelineRow, node_id: NodeID, run_id: str) -> TokenInfo:
+    return TokenInfo(
+        row_id=parents[0].row_id,
+        token_id=f"merged_{uuid4().hex[:8]}",
+        row_data=merged_data,
+        join_group_id=f"join_{uuid4().hex[:8]}",
+    )
 
 
 def _make_contract(
@@ -126,29 +189,20 @@ def _make_token(
 
 def _make_executor(
     clock: MockClock | None = None, max_completed_keys: int = 10000
-) -> tuple[CoalesceExecutor, MagicMock, MagicMock, MagicMock, MockClock]:
+) -> tuple[CoalesceExecutor, MagicMock, MagicMock, _TokenManagerDouble, MockClock]:
     """Build a CoalesceExecutor with mocked dependencies.
 
     Returns (executor, execution, data_flow, token_manager, clock).
     """
     execution = MagicMock(spec=ExecutionRepository)
-    execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
+    execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id=_next_state_id())
     # Default: Landscape returns no completed coalesces (unit tests don't have a real DB).
     # Tests that exercise Landscape-based restoration override this per-test.
     execution.get_completed_row_ids_for_nodes.return_value = set()
+    execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
-    span_factory = MagicMock()
-    token_manager = MagicMock()
-
-    def coalesce_tokens_impl(parents, merged_data, node_id, run_id):
-        return TokenInfo(
-            row_id=parents[0].row_id,
-            token_id=f"merged_{uuid4().hex[:8]}",
-            row_data=merged_data,
-            join_group_id=f"join_{uuid4().hex[:8]}",
-        )
-
-    token_manager.coalesce_tokens.side_effect = coalesce_tokens_impl
+    span_factory = _SpanFactorySentinel()
+    token_manager = _TokenManagerDouble()
 
     if clock is None:
         clock = MockClock(start=100.0)
@@ -165,30 +219,22 @@ def _make_executor(
         clock=clock,
         max_completed_keys=max_completed_keys,
         data_flow=data_flow,
+        barrier_restore_reads=_restore_reads_from_execution_double(execution),
     )
     return executor, execution, data_flow, token_manager, clock
 
 
 def _make_raw_executor(
     clock: MockClock | None = None, max_completed_keys: int = 10000
-) -> tuple[CoalesceExecutor, MagicMock, MagicMock, MagicMock, MockClock]:
+) -> tuple[CoalesceExecutor, MagicMock, MagicMock, _TokenManagerDouble, MockClock]:
     """Build the production CoalesceExecutor without the test on_success shim."""
     execution = MagicMock(spec=ExecutionRepository)
-    execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
+    execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id=_next_state_id())
     execution.get_completed_row_ids_for_nodes.return_value = set()
+    execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
-    span_factory = MagicMock()
-    token_manager = MagicMock()
-
-    def coalesce_tokens_impl(parents, merged_data, node_id, run_id):
-        return TokenInfo(
-            row_id=parents[0].row_id,
-            token_id=f"merged_{uuid4().hex[:8]}",
-            row_data=merged_data,
-            join_group_id=f"join_{uuid4().hex[:8]}",
-        )
-
-    token_manager.coalesce_tokens.side_effect = coalesce_tokens_impl
+    span_factory = _SpanFactorySentinel()
+    token_manager = _TokenManagerDouble()
 
     if clock is None:
         clock = MockClock(start=100.0)
@@ -205,6 +251,7 @@ def _make_raw_executor(
         clock=clock,
         max_completed_keys=max_completed_keys,
         data_flow=data_flow,
+        barrier_restore_reads=_restore_reads_from_execution_double(execution),
     )
     return executor, execution, data_flow, token_manager, clock
 
@@ -249,6 +296,25 @@ def _assert_collision_fingerprints(
 
 # Reference instant for journal-restore tests (tz-aware, like barrier_blocked_at).
 _JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+
+
+def _make_pending(
+    *entries: tuple[str, TokenInfo, float, str],
+    first_arrival: float = 100.0,
+    lost_branches: dict[str, str] | None = None,
+) -> _PendingCoalesce:
+    return _PendingCoalesce(
+        branches={
+            branch: _BranchEntry(
+                token=token,
+                arrival_time=arrival_time,
+                state_id=state_id,
+            )
+            for branch, token, arrival_time, state_id in entries
+        },
+        first_arrival=first_arrival,
+        lost_branches=lost_branches or {},
+    )
 
 
 def _journal_payload(data: dict[str, Any], contract: SchemaContract | None = None) -> str:
@@ -301,6 +367,100 @@ def _blocked_item(
         coalesce_name=coalesce_name,
         barrier_blocked_at=blocked_at,
     )
+
+
+# ===========================================================================
+# build_coalesce_merge
+# ===========================================================================
+
+
+class TestBuildCoalesceMerge:
+    def test_union_first_wins_plan_contains_data_metadata_and_consumed_tokens(self) -> None:
+        settings = _settings(
+            branches=["a", "b"],
+            merge="union",
+            union_collision_policy="first_wins",
+        )
+        output_schema = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        token_b = _make_token(
+            branch_name="b",
+            token_id="t_b",
+            data={"shared": "from_b", "b_only": 2},
+            contract=_make_contract(
+                fields=[
+                    make_field("shared", original_name="B Shared", python_type=str, required=False, source="inferred"),
+                    make_field("b_only", original_name="B Only", python_type=int, required=False, source="inferred"),
+                ],
+                mode="OBSERVED",
+            ),
+        )
+        token_a = _make_token(
+            branch_name="a",
+            token_id="t_a",
+            data={"shared": "from_a", "a_only": 1},
+            contract=_make_contract(
+                fields=[
+                    make_field("shared", original_name="A Shared", python_type=str, required=False, source="inferred"),
+                    make_field("a_only", original_name="A Only", python_type=int, required=False, source="inferred"),
+                ],
+                mode="OBSERVED",
+            ),
+        )
+        pending = _make_pending(
+            ("b", token_b, 100.0, "state_b"),
+            ("a", token_a, 101.0, "state_a"),
+            first_arrival=100.0,
+        )
+
+        plan = build_coalesce_merge(
+            settings=settings,
+            pending=pending,
+            coalesce_name="merge",
+            now=105.0,
+            output_schema=output_schema,
+            branch_expected_fields=None,
+        )
+
+        assert isinstance(plan, CoalesceMergePlan)
+        assert plan.merged_data.to_dict() == {"shared": "from_a", "a_only": 1, "b_only": 2}
+        assert plan.consumed_tokens == (token_b, token_a)
+        assert plan.metadata.wait_duration_ms == 5000.0
+        assert [entry.branch for entry in plan.metadata.arrival_order] == ["b", "a"]
+        assert plan.metadata.union_field_origins == {"shared": "a", "a_only": "a", "b_only": "b"}
+        assert plan.metadata.union_field_collision_values is not None
+        _assert_collision_fingerprints(
+            list(plan.metadata.union_field_collision_values["shared"]),
+            ["a", "b"],
+        )
+
+    def test_nested_plan_records_lost_branch_expected_fields(self) -> None:
+        settings = _settings(
+            branches=["a", "b"],
+            policy="best_effort",
+            merge="nested",
+            timeout_seconds=5.0,
+        )
+        token_a = _make_token(branch_name="a", token_id="t_a", data={"present": 42})
+        pending = _make_pending(
+            ("a", token_a, 100.0, "state_a"),
+            first_arrival=100.0,
+            lost_branches={"b": "error_routed"},
+        )
+
+        plan = build_coalesce_merge(
+            settings=settings,
+            pending=pending,
+            coalesce_name="merge",
+            now=102.5,
+            output_schema=None,
+            branch_expected_fields={"b": ("lost_optional",)},
+        )
+
+        assert isinstance(plan, CoalesceMergePlan)
+        assert plan.merged_data.to_dict() == {"a": {"present": 42}}
+        assert plan.consumed_tokens == (token_a,)
+        assert plan.metadata.lost_branch_expected_fields == {"b": ("lost_optional",)}
+        assert plan.metadata.branches_lost == {"b": "error_routed"}
 
 
 # ===========================================================================
@@ -534,6 +694,20 @@ class TestRequireAllPolicy:
         for c in outcome_calls:
             assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
             assert c.kwargs["path"] == TerminalPath.COALESCED
+
+    def test_registered_output_schema_slot_missing_crashes_before_merge(self):
+        """A registered coalesce must not silently downgrade a lost output-schema slot."""
+        executor, _, _, tm, _ = _make_raw_executor()
+        settings = _settings(branches=["a", "b"], policy="require_all", merge="union")
+        observed_contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        executor.register_coalesce(settings, "node_1", output_schema=observed_contract)
+        del executor._output_schemas["merge"]
+
+        executor.accept(_make_token(branch_name="a", token_id="t1", contract=observed_contract), "merge")
+        with pytest.raises(OrchestrationInvariantError, match=r"output schema.*merge"):
+            executor.accept(_make_token(branch_name="b", token_id="t2", contract=observed_contract), "merge")
+
+        assert tm.coalesce_tokens.call_count == 0
 
     def test_non_terminal_coalesce_records_absorbed_branches_without_sink_witness(self):
         """Downstream coalesce flows have no terminal sink witness at merge time."""
@@ -1152,9 +1326,11 @@ class TestUnionMerge:
         executor.register_coalesce(s, "node_1")
 
         # Inject audit-DB compromise at the first step inside the merge try-body.
-        executor._merge_data = Mock(  # type: ignore[method-assign]
-            side_effect=AuditIntegrityError("audit DB unreadable mid-merge")
-        )
+        def fail_merge_data(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise AuditIntegrityError("audit DB unreadable mid-merge")
+
+        executor._merge_data = fail_merge_data
 
         t1 = _make_token(branch_name="a", token_id="t1", data={"x": 1})
         t2 = _make_token(branch_name="b", token_id="t2", data={"y": 2})
@@ -2075,35 +2251,52 @@ class TestAuditTrailDetails:
 
 
 class TestDefaultClock:
+    def test_requires_barrier_restore_read_model(self):
+        execution = MagicMock(spec=ExecutionRepository)
+        execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id="s1")
+
+        with pytest.raises(OrchestrationInvariantError, match="barrier_restore_reads is required"):
+            CoalesceExecutor(
+                execution,
+                _SpanFactorySentinel(),
+                _TokenManagerDouble(),
+                "run_1",
+                step_resolver=lambda n: 0,
+                clock=None,
+                data_flow=MagicMock(spec=DataFlowRepository),
+            )
+
     def test_uses_default_clock_when_none(self):
         """Constructor should use DEFAULT_CLOCK when clock=None."""
         from elspeth.engine.clock import DEFAULT_CLOCK
 
         execution = MagicMock(spec=ExecutionRepository)
-        execution.begin_node_state.side_effect = lambda **kw: Mock(state_id="s1")
+        execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id="s1")
         executor = CoalesceExecutor(
             execution,
-            MagicMock(),
-            MagicMock(),
+            _SpanFactorySentinel(),
+            _TokenManagerDouble(),
             "run_1",
             step_resolver=lambda n: 0,
             clock=None,
             data_flow=MagicMock(spec=DataFlowRepository),
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
         assert executor._clock is DEFAULT_CLOCK
 
     def test_uses_injected_clock(self):
         clock = MockClock(start=42.0)
         execution = MagicMock(spec=ExecutionRepository)
-        execution.begin_node_state.side_effect = lambda **kw: Mock(state_id="s1")
+        execution.begin_node_state.side_effect = lambda **kw: SimpleNamespace(state_id="s1")
         executor = CoalesceExecutor(
             execution,
-            MagicMock(),
-            MagicMock(),
+            _SpanFactorySentinel(),
+            _TokenManagerDouble(),
             "run_1",
             step_resolver=lambda n: 0,
             clock=clock,
             data_flow=MagicMock(spec=DataFlowRepository),
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
         assert executor._clock is clock
 
@@ -2381,6 +2574,17 @@ class TestLostBranchExpectedFields:
         assert result.merged_token is not None
         assert result.coalesce_metadata.lost_branch_expected_fields == {"b": ("field_y", "field_z")}
 
+    def test_registered_branch_expected_fields_slot_missing_crashes_before_loss_merge(self):
+        """A registered branch-schema map must not disappear into absent metadata."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="best_effort", timeout_seconds=1.0)
+        executor.register_coalesce(s, "node_1", {"a": ("field_x",), "b": ("field_y",)})
+        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
+        del executor._branch_expected_fields["merge"]
+
+        with pytest.raises(OrchestrationInvariantError, match=r"branch expected fields.*merge"):
+            executor.notify_branch_lost("merge", "row_1", "b", "diverted")
+
     def test_merge_metadata_no_lost_branches_has_none_expected_fields(self):
         """When no branches are lost, lost_branch_expected_fields is None."""
         executor, *_ = _make_executor()
@@ -2636,13 +2840,17 @@ class TestLandscapeCompletedKeys:
         assert ("merge", "row_1") in executor._completed_keys
         assert ("merge", "row_2") in executor._completed_keys
 
-        # Late arrival for evicted row_0 — Landscape fallback should catch it
-        execution.get_completed_row_ids_for_nodes.return_value = {("node_1", "row_0")}
+        # Late arrival for evicted row_0 — exact Landscape fallback should catch it
+        # without materializing every completed row for node_1.
+        execution.reset_mock()
+        execution.has_completed_row_for_node.return_value = True
         late = _make_token(branch_name="a", token_id="t_late", row_id="row_0")
         outcome = executor.accept(late, "merge")
 
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
+        execution.has_completed_row_for_node.assert_called_once_with(run_id="run_1", node_id="node_1", row_id="row_0")
+        execution.get_completed_row_ids_for_nodes.assert_not_called()
         # Key should now be in the FIFO cache (backfilled from Landscape)
         assert ("merge", "row_0") in executor._completed_keys
 
@@ -2927,6 +3135,29 @@ class TestRestoreFromJournal:
         assert outcome.held is False
         assert outcome.merged_token is not None
 
+    def test_restore_from_journal_preserves_loss_only_pending_key(self) -> None:
+        """A zero-arrival pending key with durable branch loss must survive restore."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="best_effort", timeout_seconds=60.0)
+        executor.register_coalesce(s, NodeID("co-1"))
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"a": "error_routed"})},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        pending = executor._pending[("merge", "row_1")]
+        assert pending.branches == {}
+        assert pending.lost_branches == {"a": "error_routed"}
+
+        outcome = executor.accept(_make_token(row_id="row_1", branch_name="b", token_id="t2"), "merge")
+        assert outcome.held is False
+        assert outcome.merged_token is not None
+
     def test_restore_from_journal_groups_items_per_pending_key(self) -> None:
         """Items group by (coalesce_name, row_id) — keys restore independently."""
         executor, *_ = _make_executor()
@@ -2970,14 +3201,16 @@ class TestRestoreFromJournal:
         assert executor._pending[("merge", "row_1")].lost_branches == {}
 
     def test_restore_from_journal_ignores_stale_scalars(self) -> None:
-        """A scalars entry whose key has NO journal items is stale — ignored, never rejected.
+        """A completed scalars-only key is stale — ignored, never rejected.
 
-        Window: that pending key flushed/completed after the checkpoint was
-        written (checkpoint older than the journal — legitimate under D3's
-        staleness model). Mirrors aggregation's drop-stale-scalars arm.
+        Window: that pending key completed after the checkpoint was written
+        (checkpoint older than the journal — legitimate under D3's staleness
+        model). Landscape completion distinguishes it from a live zero-arrival
+        loss-only pending key.
         """
-        executor, *_ = _make_executor()
+        executor, execution, *_ = _make_executor()
         executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", "row_gone")}
 
         executor.restore_from_journal(
             items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
@@ -3041,6 +3274,23 @@ class TestRestoreFromJournal:
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
         assert outcome.outcomes_recorded is True
+
+    def test_restore_from_journal_keeps_completed_keys_bounded(self) -> None:
+        """Restore seeds the FIFO cache through the bounded completion path."""
+        executor, execution, _, _, _ = _make_executor(max_completed_keys=2)
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", f"row_{i}") for i in range(5)}
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert len(executor._completed_keys) == 2
 
     # --- corruption guards (journal/audit disagreement = crash, no coercion) ---
 
@@ -3148,6 +3398,77 @@ class TestRestoreFromJournal:
                 resume_checkpoint_id="cp-0",
                 now=_JOURNAL_T0,
             )
+
+    def test_restore_from_journal_unknown_branch_is_corruption(self) -> None:
+        """A journal branch outside the coalesce's configured allowlist = corruption.
+
+        The live accept() path rejects unknown branches; restore must apply
+        the same allowlist (elspeth-a840cb774a) — a rogue branch inflates
+        quorum/best_effort arrival counts while contributing no merge data.
+        """
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="branch 'rogue'"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="rogue", blocked_at=_JOURNAL_T0)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
+    def test_restore_from_journal_unknown_lost_branch_on_journal_key_is_corruption(self) -> None:
+        """lost_branches scalars for a journal-arrival key must be configured branches."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+                scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"rogue": "error_routed"})},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
+    def test_restore_from_journal_unknown_lost_branch_scalar_only_is_corruption(self) -> None:
+        """A scalar-only lost_branches key outside the allowlist on a configured,
+        non-completed coalesce is corruption, not staleness."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            executor.restore_from_journal(
+                items=[],
+                scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"rogue": "error_routed"})},
+                state_ids={},
+                attempt_offsets={},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
+    def test_restore_from_journal_branch_both_arrived_and_lost_is_corruption(self) -> None:
+        """A branch cannot both arrive (journal row) and be lost (scalars) —
+        mirrors the live notify_branch_lost invariant."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="both arrived and lost"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+                scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"a": "error_routed"})},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
 
     def test_restore_from_journal_missing_attempt_offset_is_corruption(self) -> None:
         """Every journal item must have an audit-derived attempt offset."""
@@ -3394,6 +3715,61 @@ class TestNotifyBranchLostEvaluateAfterLoss:
 
     # --- first policy ---
 
+    def test_first_policy_all_lost_no_arrivals_fails_and_cleans_up(self):
+        """first: if all branches are lost before any arrival, fail without leaving pending state."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=60.0)
+        executor.register_coalesce(s, "node_1")
+
+        result_a = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result_a is None
+        assert ("merge", "row_1") in executor._pending
+
+        result_b = executor.notify_branch_lost("merge", "row_1", "b", "error_b")
+        assert result_b is not None
+        assert result_b.held is False
+        assert result_b.merged_token is None
+        assert result_b.failure_reason == "all_branches_lost"
+        assert result_b.outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+        assert ("merge", "row_1") in executor._completed_keys
+
+    def test_first_policy_flush_zero_arrivals_from_loss_fails_and_cleans_up(self):
+        """first: EOF flush of a loss-only pending row fails gracefully instead of raising."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=60.0)
+        executor.register_coalesce(s, "node_1")
+
+        result = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result is None
+
+        results = executor.flush_pending()
+        assert len(results) == 1
+        assert results[0].held is False
+        assert results[0].merged_token is None
+        assert results[0].failure_reason == "all_branches_lost"
+        assert results[0].outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+
+    def test_first_policy_timeout_zero_arrivals_from_loss_fails_and_cleans_up(self):
+        """first: timeout of a loss-only pending row fails gracefully instead of raising."""
+        executor, _execution, _data_flow, _, clock = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=5.0)
+        executor.register_coalesce(s, "node_1")
+
+        result = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result is None
+
+        clock.advance(6.0)
+        results = executor.check_timeouts("merge")
+        assert len(results) == 1
+        assert results[0].held is False
+        assert results[0].merged_token is None
+        assert results[0].failure_reason == "first_timeout_no_arrivals"
+        assert results[0].outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+        assert ("merge", "row_1") in executor._completed_keys
+
     def test_first_policy_loss_returns_none(self):
         """first: branch loss has no effect — merge should have happened on first arrival."""
         executor, *_ = _make_executor()
@@ -3579,6 +3955,74 @@ class TestPrecomputedOutputSchema:
         # Verify contract matches DAG schema, not runtime merge
         merged_contract = outcome_b.merged_token.row_data.contract
         assert merged_contract == precomputed_schema, "Runtime contract should match pre-computed DAG schema, not runtime merge"
+
+    def test_partial_union_precomputed_schema_keeps_lost_branch_optional_fields(self):
+        """Partial union must not crash when precomputed schema includes lost-branch fields."""
+        executor, *_ = _make_executor()
+
+        precomputed_schema = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field(
+                    "present",
+                    original_name="present",
+                    python_type=int,
+                    required=False,
+                    source="declared",
+                    nullable=False,
+                ),
+                make_field(
+                    "lost_optional",
+                    original_name="lost_optional",
+                    python_type=str,
+                    required=False,
+                    source="declared",
+                    nullable=True,
+                ),
+            ),
+            locked=True,
+        )
+        settings = _settings(
+            branches=["a", "b"],
+            policy="best_effort",
+            merge="union",
+            timeout_seconds=5.0,
+        )
+        executor.register_coalesce(settings, "node_1", output_schema=precomputed_schema)
+
+        contract_a = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field(
+                    "present",
+                    original_name="Present Header",
+                    python_type=int,
+                    required=False,
+                    source="declared",
+                    nullable=False,
+                ),
+            ),
+            locked=True,
+        )
+        token_a = _make_token(branch_name="a", token_id="t1", data={"present": 42}, contract=contract_a)
+
+        assert executor.accept(token_a, "merge").held is True
+        outcome = executor.notify_branch_lost("merge", "row_1", "b", "error_routed")
+
+        assert outcome is not None
+        assert outcome.merged_token is not None
+        assert outcome.merged_token.row_data.to_dict() == {"present": 42}
+        assert outcome.coalesce_metadata.union_field_origins == {"present": "a"}
+
+        merged_contract = outcome.merged_token.row_data.contract
+        present = merged_contract.get_field("present")
+        lost_optional = merged_contract.get_field("lost_optional")
+        assert present is not None
+        assert lost_optional is not None
+        assert present.original_name == "Present Header"
+        assert lost_optional.original_name == "lost_optional"
+        assert lost_optional.required is False
+        assert lost_optional.nullable is True
 
     def test_union_merge_falls_back_to_runtime_merge_when_no_schema(self):
         """Without pre-computed schema, runtime merge() is used (backward compat)."""

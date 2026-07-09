@@ -9,6 +9,7 @@ we add concurrency in a later task.
 from __future__ import annotations
 
 import socket
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, Mock, patch
@@ -61,6 +62,7 @@ _SSRF_BLOCKED_CASES: tuple[tuple[str, str, str], ...] = (
     # ALWAYS_BLOCKED_RANGES (unconditional — no allowlist bypass)
     ("aws_metadata_v4", "169.254.169.254", "Always-blocked IP range"),
     ("ipv4_mapped_metadata", "::ffff:169.254.169.254", "Always-blocked IP range"),
+    ("aws_metadata_v6", "fd00:ec2::254", "Always-blocked IP range"),
     ("ipv6_link_local", "fe80::1", "Always-blocked IP range"),
     ("broadcast_v4", "255.255.255.255", "Always-blocked IP range"),
     ("multicast_v4", "224.0.0.1", "Always-blocked IP range"),
@@ -124,6 +126,10 @@ def _create_http_response() -> httpx.Response:
     )
 
 
+def _set_stream_response(client: Mock, response: httpx.Response) -> None:
+    client.stream.return_value = nullcontext(response)
+
+
 def _create_audit_call() -> Call:
     return Call(
         call_id="test-call-id",
@@ -157,7 +163,7 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         ):
             mock_response = _create_http_response()
             mock_client_instance = MagicMock(spec_set=_HTTPX_CLIENT_CLASS)
-            mock_client_instance.get.return_value = mock_response
+            _set_stream_response(mock_client_instance, mock_response)
             mock_client_instance.__enter__.return_value = mock_client_instance
             mock_client_instance.__exit__.return_value = False
             mock_client_class.return_value = mock_client_instance
@@ -316,7 +322,68 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         # store, and httpx client must not see this request.
         _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
-        mock_httpx.return_value.get.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
+
+    def test_validation_error_redacts_attacker_controlled_url(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        mock_httpx: Mock,
+    ) -> None:
+        """URL validation failures must not copy raw attacker URLs into row errors."""
+        token = "sk-" + ("W" * 24)
+        raw_url = f"ftp://operator:{token}@example.com/private?token={token}#fragment"
+
+        result = transform.process(make_pipeline_row({"url": raw_url}), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["error_type"] == "SSRFBlockedError"
+
+        error_text = result.reason["error"]
+        assert "Forbidden URL scheme 'ftp'" in error_text
+        assert "host='example.com'" in error_text
+        assert "url_sha256=" in error_text
+        assert raw_url not in error_text
+        assert token not in error_text
+        assert "operator:" not in error_text
+        assert "private" not in error_text
+        assert "fragment" not in error_text
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
+
+    def test_parser_validation_error_redacts_attacker_controlled_url(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        mock_httpx: Mock,
+    ) -> None:
+        """Parser-level URL validation failures must not leak raw attacker URLs."""
+        token = "sk-" + ("P" * 24)
+        raw_url = f"http://operator:{token}@\uff0fevil.com/private?token={token}#fragment"
+
+        result = transform.process(make_pipeline_row({"url": raw_url}), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["error_type"] == "SSRFBlockedError"
+
+        error_text = result.reason["error"]
+        assert "Malformed URL" in error_text
+        assert "url_sha256=" in error_text
+        assert raw_url not in error_text
+        assert token not in error_text
+        assert "operator:" not in error_text
+        assert "private" not in error_text
+        assert "fragment" not in error_text
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
 
     def test_response_without_request_crashes_before_payload_storage(
         self,
@@ -373,7 +440,7 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
         _context_mock(ctx.rate_limit_registry, "rate limit registry").get_limiter.assert_not_called()
-        mock_httpx.return_value.get.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
 
     def test_response_request_without_host_crashes_before_payload_storage(
         self,
@@ -449,10 +516,13 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         error_type: str,
     ) -> None:
         """Non-retryable HTTP failures are audited fetches, not successful rows."""
-        mock_httpx.return_value.get.return_value = httpx.Response(
-            status_code,
-            content=b"<html><body>not ok</body></html>",
-            request=httpx.Request("GET", "https://93.184.216.34/contract-test"),
+        _set_stream_response(
+            mock_httpx.return_value,
+            httpx.Response(
+                status_code,
+                content=b"<html><body>not ok</body></html>",
+                request=httpx.Request("GET", "https://93.184.216.34/contract-test"),
+            ),
         )
 
         result = transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)

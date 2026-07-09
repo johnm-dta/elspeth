@@ -13,6 +13,7 @@ from elspeth.core.security.web import (
     SSRFBlockedError,
     _validate_ip_address,
     validate_url_for_ssrf,
+    validate_url_scheme,
 )
 
 
@@ -73,6 +74,94 @@ class TestSSRFDnsFailureBranches:
             validate_url_for_ssrf("https://example.com")
 
 
+class TestURLSchemeErrorRedaction:
+    """Scheme-validation diagnostics must not echo attacker-controlled URLs."""
+
+    def test_missing_scheme_error_omits_raw_url_query_fragment_and_secret(self) -> None:
+        token = "sk-" + ("M" * 24)
+        raw_url = f"example.com/path?api_key={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "URL is missing a scheme" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "api_key" not in message
+        assert "fragment" not in message
+
+    def test_forbidden_scheme_error_omits_userinfo_query_fragment_and_secret(self) -> None:
+        token = "sk-" + ("F" * 24)
+        raw_url = f"ftp://operator:{token}@example.com/download?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "Forbidden URL scheme 'ftp'" in message
+        assert "host='example.com'" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "download" not in message
+        assert "fragment" not in message
+
+    def test_embedded_credentials_are_rejected_without_echoing_secret(self) -> None:
+        token = "sk-" + ("C" * 24)
+        raw_url = f"https://operator:{token}@example.com/private?token={token}"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "URL credentials are not allowed" in message
+        assert "host='example.com'" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "private" not in message
+
+    def test_parser_error_omits_raw_netloc_userinfo_and_secret(self) -> None:
+        token = "sk-" + ("P" * 24)
+        raw_url = f"http://operator:{token}@\uff0fevil.com/private?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_scheme(raw_url)
+
+        message = str(exc_info.value)
+        assert "Malformed URL" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "private" not in message
+        assert "fragment" not in message
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    def test_ssrf_validator_parser_error_omits_raw_netloc_userinfo_and_secret(self) -> None:
+        token = "sk-" + ("V" * 24)
+        raw_url = f"http://operator:{token}@\uff0fevil.com/private?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_for_ssrf(raw_url)
+
+        message = str(exc_info.value)
+        assert "Malformed URL" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "operator:" not in message
+        assert "private" not in message
+        assert "fragment" not in message
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+
 # ===========================================================================
 # Bug 7.5: DNS timeout effectiveness (daemon thread cleanup)
 # ===========================================================================
@@ -116,6 +205,204 @@ class TestDnsTimeoutEffectiveness:
         assert _dns_pool._max_workers == _DNS_POOL_SIZE
         assert _DNS_POOL_SIZE <= 16, "Pool size should be modest to prevent resource exhaustion"
 
+    def test_timed_out_dns_tasks_do_not_leave_unbounded_queued_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Timed-out resolver tasks must apply backpressure before executor queue growth."""
+        import threading
+
+        from elspeth.core.security import web as web_security
+
+        class _NeverCompletingFuture:
+            def __init__(self) -> None:
+                self.cancel_attempts = 0
+                self._callbacks = []
+
+            def result(self, timeout: float | None = None) -> list[str]:
+                raise TimeoutError
+
+            def cancel(self) -> bool:
+                self.cancel_attempts += 1
+                return False
+
+            def add_done_callback(self, callback: object) -> None:
+                self._callbacks.append(callback)
+
+        class _RecordingPool:
+            def __init__(self) -> None:
+                self.futures: list[_NeverCompletingFuture] = []
+
+            def submit(self, fn: object, hostname: str) -> _NeverCompletingFuture:
+                future = _NeverCompletingFuture()
+                self.futures.append(future)
+                return future
+
+        pool = _RecordingPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(
+            web_security,
+            "_dns_capacity",
+            threading.BoundedSemaphore(web_security._DNS_POOL_SIZE),
+            raising=False,
+        )
+
+        for index in range(web_security._DNS_POOL_SIZE):
+            with pytest.raises(NetworkError, match="DNS resolution timeout"):
+                validate_url_for_ssrf(f"https://example-{index}.com/path", timeout=0.001)
+
+        with pytest.raises(NetworkError, match="DNS resolution capacity exhausted"):
+            validate_url_for_ssrf("https://overflow.example.com/path", timeout=0.001)
+
+        assert len(pool.futures) == web_security._DNS_POOL_SIZE
+        assert all(future.cancel_attempts == 1 for future in pool.futures)
+
+    def test_dns_capacity_releases_after_successful_future(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Completed resolver futures must release capacity for later requests."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _SuccessfulPool:
+            def __init__(self) -> None:
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> Future[list[str]]:
+                self.submitted += 1
+                future: Future[list[str]] = Future()
+                future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _SuccessfulPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        assert web_security._submit_dns_resolution("first.example.com").result() == ["93.184.216.34"]
+        assert web_security._submit_dns_resolution("second.example.com").result() == ["93.184.216.34"]
+        assert pool.submitted == 2
+
+    def test_dns_capacity_releases_after_exception_future(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Resolver futures that complete with an exception must release capacity."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _ExceptionThenSuccessPool:
+            def __init__(self) -> None:
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> Future[list[str]]:
+                self.submitted += 1
+                future: Future[list[str]] = Future()
+                if self.submitted == 1:
+                    future.set_exception(NetworkError("resolver failure"))
+                else:
+                    future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _ExceptionThenSuccessPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        with pytest.raises(NetworkError, match="resolver failure"):
+            web_security._submit_dns_resolution("first.example.com").result()
+
+        assert web_security._submit_dns_resolution("second.example.com").result() == ["93.184.216.34"]
+        assert pool.submitted == 2
+
+    def test_dns_capacity_releases_when_submit_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A submit failure after capacity acquisition must not leak capacity."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _FailOncePool:
+            def __init__(self) -> None:
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> Future[list[str]]:
+                self.submitted += 1
+                if self.submitted == 1:
+                    raise RuntimeError("submit failed")
+                future: Future[list[str]] = Future()
+                future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _FailOncePool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            web_security._submit_dns_resolution("first.example.com")
+
+        assert web_security._submit_dns_resolution("second.example.com").result() == ["93.184.216.34"]
+        assert pool.submitted == 2
+
+    def test_dns_capacity_releases_when_queued_timeout_cancels(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cancelled queued timeout must release capacity through the done callback."""
+        import threading
+        from concurrent.futures import Future
+
+        from elspeth.core.security import web as web_security
+
+        class _CancellableTimeoutFuture:
+            def __init__(self) -> None:
+                self.cancel_attempts = 0
+                self._callbacks = []
+
+            def result(self, timeout: float | None = None) -> list[str]:
+                raise TimeoutError
+
+            def cancel(self) -> bool:
+                self.cancel_attempts += 1
+                for callback in self._callbacks:
+                    callback(self)
+                return True
+
+            def add_done_callback(self, callback: object) -> None:
+                self._callbacks.append(callback)
+
+        class _TimeoutThenSuccessPool:
+            def __init__(self) -> None:
+                self.timeout_future = _CancellableTimeoutFuture()
+                self.submitted = 0
+
+            def submit(self, fn: object, hostname: str) -> object:
+                self.submitted += 1
+                if self.submitted == 1:
+                    return self.timeout_future
+                future: Future[list[str]] = Future()
+                future.set_result(["93.184.216.34"])
+                return future
+
+        pool = _TimeoutThenSuccessPool()
+        monkeypatch.setattr(web_security, "_dns_pool", pool)
+        monkeypatch.setattr(web_security, "_dns_capacity", threading.BoundedSemaphore(1), raising=False)
+
+        with pytest.raises(NetworkError, match="DNS resolution timeout"):
+            validate_url_for_ssrf("https://first.example.com/path", timeout=0.001)
+
+        result = validate_url_for_ssrf("https://second.example.com/path", timeout=0.001)
+
+        assert result.resolved_ip == "93.184.216.34"
+        assert pool.timeout_future.cancel_attempts == 1
+        assert pool.submitted == 2
+
 
 # ===========================================================================
 # Bug 7.6: Port parsing
@@ -129,6 +416,24 @@ class TestPortParsing:
         """Port 0 is falsy but must be explicitly blocked."""
         with pytest.raises(SSRFBlockedError, match="Port 0"):
             validate_url_for_ssrf("https://example.com:0/path")
+
+    def test_invalid_port_error_omits_secret_from_exception_chain(self) -> None:
+        token = "sk-" + ("I" * 24)
+        raw_url = f"https://example.com:{token}/private?token={token}#fragment"
+
+        with pytest.raises(SSRFBlockedError) as exc_info:
+            validate_url_for_ssrf(raw_url)
+
+        message = str(exc_info.value)
+        assert "Invalid port in URL" in message
+        assert "host='example.com'" in message
+        assert "url_sha256=" in message
+        assert raw_url not in message
+        assert token not in message
+        assert "private" not in message
+        assert "fragment" not in message
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
     def test_explicit_port_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Explicit port (non-zero) should be used in the request."""
@@ -172,6 +477,12 @@ class TestAlwaysBlockedRanges:
         with pytest.raises(SSRFBlockedError, match="Always-blocked"):
             _validate_ip_address("169.254.169.254", allowed_ranges=allow_private)
 
+    def test_aws_ipv6_metadata_blocked_even_with_broad_ipv6_allowlist(self) -> None:
+        """fd00:ec2::254 blocked even when allowed_ranges covers IPv6."""
+        broad_ipv6 = (ipaddress.ip_network("::/0"),)
+        with pytest.raises(SSRFBlockedError, match="Always-blocked"):
+            _validate_ip_address("fd00:ec2::254", allowed_ranges=broad_ipv6)
+
     def test_ipv6_link_local_always_blocked(self) -> None:
         """fe80:: addresses are always blocked (IPv6 link-local)."""
         allow_private = (ipaddress.ip_network("0.0.0.0/0"), ipaddress.ip_network("::/0"))
@@ -200,6 +511,7 @@ class TestAlwaysBlockedRanges:
         """Verify ALWAYS_BLOCKED_RANGES has all documented entries."""
         range_strs = {str(r) for r in ALWAYS_BLOCKED_RANGES}
         assert "169.254.0.0/16" in range_strs
+        assert "fd00:ec2::254/128" in range_strs
         assert "fe80::/10" in range_strs
         assert "255.255.255.255/32" in range_strs
         assert "224.0.0.0/4" in range_strs

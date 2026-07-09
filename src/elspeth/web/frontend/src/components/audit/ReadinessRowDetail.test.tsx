@@ -65,7 +65,7 @@ describe("ReadinessRowDetail", () => {
     const selectNode = vi.fn();
     useSessionStore.setState({ selectNode } as never);
     render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
-    const btn = screen.getByRole("button", { name: /Jump to select_columns/ });
+    const btn = screen.getByRole("button", { name: /Jump to the "pick the columns you need" step/ });
     await user.click(btn);
     expect(selectNode).toHaveBeenCalledWith("select_columns");
   });
@@ -76,7 +76,7 @@ describe("ReadinessRowDetail", () => {
     window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
     try {
       render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
-      await user.click(screen.getByRole("button", { name: /Jump to select_columns/ }));
+      await user.click(screen.getByRole("button", { name: /Jump to the "pick the columns you need" step/ }));
       expect(handler).toHaveBeenCalledTimes(1);
     } finally {
       window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
@@ -133,7 +133,7 @@ describe("ReadinessRowDetail", () => {
     };
     render(<ReadinessRowDetail row={ROW_MIXED} onClose={() => {}} />);
     // select_columns resolves → Jump button.
-    expect(screen.getByRole("button", { name: /Jump to select_columns/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Jump to the "pick the columns you need" step/ })).toBeInTheDocument();
     // api_key does not resolve → plain text, no button.
     expect(screen.getByText("api_key")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Jump to api_key/ })).not.toBeInTheDocument();
@@ -191,11 +191,72 @@ describe("ReadinessRowDetail", () => {
     const onClose = vi.fn();
     render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={onClose} />);
     await user.click(
-      screen.getByRole("button", { name: /Jump to select_columns/ }),
+      screen.getByRole("button", { name: /Jump to the "pick the columns you need" step/ }),
     );
     expect(onClose).not.toHaveBeenCalled();
     // Drawer still present.
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  // ── elspeth-901a404926: the validation row re-humanises its findings ──────
+  const VALIDATION_ROW: ReadinessRow = {
+    id: "validation",
+    label: "Validation",
+    status: "error",
+    summary: "1 problem to fix — see details",
+    detail: "Add an output step so your pipeline has somewhere to send its results.",
+    component_ids: [],
+  };
+
+  it("renders a reframed settings finding as a plain line — no pydantic leak, no Technical-details disclosure", () => {
+    render(
+      <ReadinessRowDetail
+        row={VALIDATION_ROW}
+        validationErrors={[
+          {
+            component_id: null,
+            component_type: null,
+            message: "Add an output step so your pipeline has somewhere to send its results.",
+            suggestion: null,
+            error_code: "missing_sink",
+          },
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Add an output step/)).toBeInTheDocument();
+    // The clean finding carries no raw dump, so no disclosure appears.
+    expect(screen.queryByText("Technical details")).toBeNull();
+    expect(screen.queryByText(/Field required/)).toBeNull();
+    expect(screen.queryByText(/errors\.pydantic\.dev/)).toBeNull();
+  });
+
+  it("humanises an engine dump in the validation row and tucks the raw text behind Technical details", () => {
+    const rawDump =
+      "Schema contract violation: 'select_columns' -> 'out'. " +
+      "Consumer (csv) requires fields: [score]. Producer (llm) guarantees: [body].";
+    const { container } = render(
+      <ReadinessRowDetail
+        row={{ ...VALIDATION_ROW, detail: rawDump }}
+        validationErrors={[
+          {
+            component_id: "select_columns",
+            component_type: "transform",
+            message: rawDump,
+            suggestion: null,
+            error_code: null,
+          },
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    // Humanised headline shows, mapped through the gloss.
+    expect(screen.getByText(/connected correctly/i)).toBeInTheDocument();
+    // The raw engine dump is NOT a top-level body line — it lives behind the
+    // Technical-details disclosure.
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+    const pre = container.querySelector("pre.readiness-row-detail-raw-text");
+    expect(pre?.textContent).toContain("Schema contract violation");
   });
 
   // Test 5.C SKIPPED — documented skip.

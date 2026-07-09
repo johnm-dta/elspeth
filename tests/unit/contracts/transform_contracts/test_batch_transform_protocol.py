@@ -54,7 +54,6 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
@@ -269,6 +268,22 @@ class CollectingOutputPort(OutputPort):
             return list(self.results)
 
 
+class _BatchContractLandscape:
+    """Minimal audit writer used by batch contract contexts."""
+
+    def __init__(self) -> None:
+        self.allocated_state_ids: list[str] = []
+        self.recorded_calls: list[dict[str, Any]] = []
+
+    def allocate_call_index(self, state_id: str) -> int:
+        self.allocated_state_ids.append(state_id)
+        return len(self.allocated_state_ids) - 1
+
+    def record_call(self, **kwargs: Any) -> dict[str, Any]:
+        self.recorded_calls.append(kwargs)
+        return kwargs
+
+
 class BatchTransformContractTestBase(ABC):
     """Abstract base class for batch transform contract verification.
 
@@ -307,20 +322,19 @@ class BatchTransformContractTestBase(ABC):
         def _make_ctx() -> PluginContext:
             nonlocal counter
             counter += 1
-            ctx = Mock(spec=PluginContext)
-            ctx.run_id = "test-run-001"
-            ctx.state_id = f"state-{counter:03d}"
-            ctx.node_id = "test-batch-transform"
-            ctx.landscape = Mock()
-            ctx.landscape.record_call = Mock()
-            ctx.landscape.allocate_call_index = Mock(return_value=0)
             contract = make_contract(mode="FLEXIBLE")
-            ctx.token = TokenInfo(
-                token_id=f"token-{counter:03d}",
-                row_id=f"row-{counter:03d}",
-                row_data=make_row(valid_input.copy(), contract=contract),
+            return PluginContext(
+                run_id="test-run-001",
+                config={},
+                landscape=_BatchContractLandscape(),
+                state_id=f"state-{counter:03d}",
+                node_id="test-batch-transform",
+                token=TokenInfo(
+                    token_id=f"token-{counter:03d}",
+                    row_id=f"row-{counter:03d}",
+                    row_data=make_row(valid_input.copy(), contract=contract),
+                ),
             )
-            return ctx
 
         return _make_ctx
 
@@ -463,10 +477,13 @@ class BatchTransformContractTestBase(ABC):
         valid_input: dict[str, Any],
     ) -> None:
         """Contract: accept() MUST fail if ctx.token is None."""
-        ctx = Mock(spec=PluginContext)
-        ctx.run_id = "test-run"
-        ctx.state_id = "state-001"
-        ctx.token = None  # No token!
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=_BatchContractLandscape(),
+            state_id="state-001",
+            token=None,
+        )
 
         with pytest.raises(ValueError, match="token"):
             pipeline_row = make_pipeline_row(valid_input)

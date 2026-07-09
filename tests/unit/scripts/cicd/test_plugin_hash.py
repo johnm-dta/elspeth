@@ -140,13 +140,13 @@ class TestComputeHash:
     def test_compute_hash_normalizes_angle_bracket_placeholder(self, tmp_path: Path) -> None:
         """Placeholders like "sha256:<computed>" must also normalize."""
         source_a = """\
-            class MyPlugin:
+            class MyPlugin(BaseSource):
                 name = "my-plugin"
                 plugin_version = "1.0.0"
                 source_file_hash = "sha256:<computed>"
         """
         source_b = """\
-            class MyPlugin:
+            class MyPlugin(BaseSource):
                 name = "my-plugin"
                 plugin_version = "1.0.0"
                 source_file_hash = "sha256:abcdef0123456789"
@@ -251,7 +251,7 @@ class TestExtractPluginAttributes:
     def test_extract_class_attribute_simple(self, tmp_path: Path) -> None:
         """Basic extraction of name, plugin_version, source_file_hash."""
         source = """\
-            class MyPlugin:
+            class MyPlugin(BaseSource):
                 name = "my-plugin"
                 plugin_version = "1.0.0"
                 source_file_hash = "sha256:abcdef0123456789"
@@ -270,7 +270,7 @@ class TestExtractPluginAttributes:
     def test_extract_class_attribute_annotated(self, tmp_path: Path) -> None:
         """Annotated assignment form: source_file_hash: str = "sha256:..."."""
         source = """\
-            class MyPlugin:
+            class MyPlugin(BaseSource):
                 name = "my-plugin"
                 plugin_version: str = "2.0.0"
                 source_file_hash: str = "sha256:1111222233334444"
@@ -287,7 +287,7 @@ class TestExtractPluginAttributes:
     def test_extract_class_attribute_none_default(self, tmp_path: Path) -> None:
         """source_file_hash = None is detected (value is None)."""
         source = """\
-            class MyPlugin:
+            class MyPlugin(BaseSource):
                 name = "my-plugin"
                 plugin_version = "1.0.0"
                 source_file_hash = None
@@ -305,7 +305,7 @@ class TestExtractPluginAttributes:
         source = """\
             PLUGIN_NAME = "dynamic"
 
-            class DynamicSource:
+            class DynamicSource(BaseSource):
                 name = PLUGIN_NAME
                 plugin_version = "1.0.0"
                 source_file_hash = None
@@ -318,6 +318,27 @@ class TestExtractPluginAttributes:
         assert attrs.class_name == "DynamicSource"
         assert attrs.source_file_hash is None
 
+    def test_extract_resolves_module_constants_for_version_and_hash(self, tmp_path: Path) -> None:
+        """Module-level constants must resolve for every plugin metadata attribute."""
+        source = """\
+            PLUGIN_VERSION = "2.1.0"
+            PLUGIN_HASH = "sha256:1111222233334444"
+
+            class DynamicSource(BaseSource):
+                name = "dynamic"
+                plugin_version = PLUGIN_VERSION
+                source_file_hash: str | None = PLUGIN_HASH
+        """
+        file_path = _write_plugin(tmp_path, source)
+        results = extract_plugin_attributes(file_path)
+
+        assert len(results) == 1
+        attrs = results[0]
+        assert attrs.class_name == "DynamicSource"
+        assert attrs.plugin_version == "2.1.0"
+        assert attrs.source_file_hash == "sha256:1111222233334444"
+        assert attrs.hash_line_number is not None
+
     def test_extract_ignores_non_plugin_classes(self, tmp_path: Path) -> None:
         """Classes without a `name` class attribute are not plugin classes."""
         source = """\
@@ -329,7 +350,10 @@ class TestExtractPluginAttributes:
                 def name(self):
                     return "method, not attribute"
 
-            class IsAPlugin:
+            class HelperSpec:
+                name = "not-a-plugin"
+
+            class IsAPlugin(BaseSource):
                 name = "real-plugin"
                 plugin_version = "1.0.0"
                 source_file_hash = "sha256:abcdef0123456789"
@@ -339,6 +363,16 @@ class TestExtractPluginAttributes:
 
         assert len(results) == 1
         assert results[0].class_name == "IsAPlugin"
+
+    def test_extract_ignores_named_helper_without_plugin_base(self, tmp_path: Path) -> None:
+        """Literal `name` alone is not enough for runtime plugin discovery."""
+        source = """\
+            class HelperSpec:
+                name = "not-a-plugin"
+        """
+        file_path = _write_plugin(tmp_path, source)
+
+        assert extract_plugin_attributes(file_path) == []
 
 
 # =============================================================================
@@ -471,7 +505,7 @@ class TestBOMHandling:
     def _write_bom_plugin(self, tmp_path: Path) -> Path:
         file_path = tmp_path / "bom_plugin.py"
         content = b"\xef\xbb\xbf" + textwrap.dedent("""\
-            class BomPlugin:
+            class BomPlugin(BaseSource):
                 name = "bom"
                 plugin_version = "1.0.0"
                 source_file_hash: str | None = "sha256:0000000000000000"

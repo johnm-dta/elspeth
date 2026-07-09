@@ -1,9 +1,10 @@
 """GateExecutor - wraps config-driven gates with audit recording and routing."""
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -24,6 +25,7 @@ from elspeth.contracts.enums import (
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.node_state_context import GateEvaluationContext
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
 from elspeth.core.config import GateSettings
@@ -43,6 +45,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 slog = structlog.get_logger(__name__)
+
+_GATE_VALUE_PREVIEW_CHARS = 80
+
+
+def _describe_untrusted_gate_value(value: Any) -> str:
+    """Return bounded metadata for row-derived gate expression results."""
+    if isinstance(value, str):
+        raw_text = value
+    else:
+        try:
+            raw_text = repr(value)
+        except Exception:
+            raw_text = f"<unrepresentable {type(value).__name__}>"
+    scrubbed = scrub_text_for_audit(raw_text)
+    if len(scrubbed) > _GATE_VALUE_PREVIEW_CHARS:
+        preview = scrubbed[:_GATE_VALUE_PREVIEW_CHARS] + "..."
+    else:
+        preview = scrubbed
+    digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"type={type(value).__name__}, length={len(raw_text)}, sha256={digest}, preview={preview!r}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +140,7 @@ class GateExecutor:
         self._step_resolver = step_resolver
         self._edge_map = edge_map or {}
         self._route_resolution_map = route_resolution_map or {}
+        self._condition_parser_cache: dict[tuple[str, str, str], ExpressionParser] = {}
 
     def _resolve_route_destination(self, *, node_id: str, route_label: str) -> RouteDestination:
         """Resolve route label to concrete destination or fail closed."""
@@ -125,6 +148,16 @@ class GateExecutor:
             return self._route_resolution_map[(NodeID(node_id), route_label)]
         except KeyError as exc:
             raise MissingEdgeError(node_id=NodeID(node_id), label=route_label) from exc
+
+    def _get_condition_parser(self, *, gate_config: GateSettings, node_id: str) -> ExpressionParser:
+        """Return the parsed condition for this gate identity and condition."""
+        cache_key = (node_id, gate_config.name, gate_config.condition)
+        try:
+            return self._condition_parser_cache[cache_key]
+        except KeyError:
+            parser = ExpressionParser(gate_config.condition)
+            self._condition_parser_cache[cache_key] = parser
+            return parser
 
     def _dispatch_resolved_destination(
         self,
@@ -139,21 +172,8 @@ class GateExecutor:
         reason: RoutingReason | None,
         mode: RoutingMode,
         fork_branches: list[str] | None,
-        continue_as_route: bool,
     ) -> _RouteDispatchOutcome:
-        """Dispatch CONTINUE/FORK/SINK/PROCESSING_NODE destinations."""
-        if destination.kind == RouteDestinationKind.CONTINUE:
-            if continue_as_route:
-                action = RoutingAction.route("continue", mode=mode, reason=reason)
-            else:
-                action = RoutingAction.continue_(reason=reason)
-            self._record_routing(
-                state_id=state_id,
-                node_id=node_id,
-                action=action,
-            )
-            return _RouteDispatchOutcome(action=action)
-
+        """Dispatch FORK/SINK/PROCESSING_NODE/DISCARD destinations."""
         if destination.kind == RouteDestinationKind.FORK:
             if fork_branches is None:
                 raise OrchestrationInvariantError(
@@ -186,15 +206,21 @@ class GateExecutor:
                 discarded=True,
             )
 
-        route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
-        self._record_routing(
-            state_id=state_id,
-            node_id=node_id,
-            action=route_action,
-        )
         if destination.kind == RouteDestinationKind.SINK:
+            route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
+            self._record_routing(
+                state_id=state_id,
+                node_id=node_id,
+                action=route_action,
+            )
             return _RouteDispatchOutcome(action=route_action, sink_name=destination.sink_name)
         if destination.kind == RouteDestinationKind.PROCESSING_NODE:
+            route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
+            self._record_routing(
+                state_id=state_id,
+                node_id=node_id,
+                action=route_action,
+            )
             return _RouteDispatchOutcome(action=route_action, next_node_id=destination.next_node_id)
 
         raise OrchestrationInvariantError(f"Unsupported route destination kind '{destination.kind}' for gate {node_id}")
@@ -266,7 +292,7 @@ class GateExecutor:
             ):
                 start = time.perf_counter()
                 try:
-                    parser = ExpressionParser(gate_config.condition)
+                    parser = self._get_condition_parser(gate_config=gate_config, node_id=node_id)
                     # Pass PipelineRow directly - it implements __getitem__ and .get()
                     # This preserves dual-name access (normalized and original field names)
                     eval_result = parser.evaluate(token.row_data)
@@ -282,15 +308,16 @@ class GateExecutor:
                 route_label = eval_result
             else:
                 raise TypeError(
-                    f"Gate '{gate_config.name}' expression returned {type(eval_result).__name__} "
-                    f"({eval_result!r}), expected bool or str. "
+                    f"Gate '{gate_config.name}' expression returned unsupported route value "
+                    f"({_describe_untrusted_gate_value(eval_result)}), expected bool or str. "
                     f"Expression: {gate_config.condition}"
                 )
 
             # Look up destination in routes config
             if route_label not in gate_config.routes:
                 raise ValueError(
-                    f"Gate '{gate_config.name}' condition returned '{route_label}' which is not in routes: {list(gate_config.routes.keys())}"
+                    f"Gate '{gate_config.name}' condition returned unconfigured route label "
+                    f"({_describe_untrusted_gate_value(route_label)}); configured routes: {list(gate_config.routes.keys())}"
                 )
 
             # Build routing action and process based on destination
@@ -307,7 +334,6 @@ class GateExecutor:
                 reason=reason,
                 mode=RoutingMode.MOVE,
                 fork_branches=gate_config.fork_to,
-                continue_as_route=False,
             )
             action = dispatch.action
             child_tokens = dispatch.child_tokens

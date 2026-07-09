@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +15,11 @@ from elspeth.testing.pytest_xdist_auto import pytest_cmdline_main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
+ACTIONLINT_CONFIG = REPO_ROOT / ".github" / "actionlint.yaml"
 JUDGE_GATES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "enforce-allowlist-judge-gates.yaml"
+CODEQL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "codeql.yaml"
+CODEQL_CONFIG = REPO_ROOT / ".github" / "codeql" / "codeql-config.yml"
+_SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|"})
 
 
 def _workflow(path: Path) -> dict[str, Any]:
@@ -41,18 +47,101 @@ def _step(job: dict[str, Any], step_name: str) -> dict[str, Any]:
     raise AssertionError(f"Missing CI step {step_name!r}")
 
 
+def _step_index(job: dict[str, Any], step_name: str) -> int:
+    for index, step in enumerate(job["steps"]):
+        if step.get("name") == step_name:
+            return index
+    raise AssertionError(f"Missing CI step {step_name!r}")
+
+
+def _pytest_args(run: str) -> list[str]:
+    lexer = shlex.shlex(run.replace("\\\n", " "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    tokens = list(lexer)
+    for index in range(len(tokens)):
+        if tokens[index : index + 3] == ["uv", "run", "pytest"]:
+            start = index + 3
+        elif tokens[index : index + 5] == ["uv", "run", "python", "-m", "pytest"]:
+            start = index + 5
+        else:
+            continue
+
+        args: list[str] = []
+        for token in tokens[start:]:
+            if token in _SHELL_CONTROL_TOKENS:
+                break
+            args.append(token)
+        return args
+    raise AssertionError("Missing pytest invocation")
+
+
+def _pytest_numprocesses_values(run: str) -> list[str]:
+    values: list[str] = []
+    args = _pytest_args(run)
+    for index, arg in enumerate(args):
+        if arg == "-n" and index + 1 < len(args):
+            values.append(args[index + 1])
+        elif arg.startswith("-n") and arg != "-n":
+            values.append(arg[2:])
+        elif arg == "--numprocesses" and index + 1 < len(args):
+            values.append(args[index + 1])
+        elif arg.startswith("--numprocesses="):
+            values.append(arg.split("=", 1)[1])
+    return values
+
+
+@pytest.mark.parametrize(
+    ("flag_args", "expected"),
+    (
+        ("-n0", "0"),
+        ("-n 0", "0"),
+        ("--numprocesses 0", "0"),
+        ("--numprocesses=0", "0"),
+        ("-nauto", "auto"),
+        ("-n auto", "auto"),
+        ("--numprocesses auto", "auto"),
+        ("--numprocesses=auto", "auto"),
+    ),
+)
+def test_pytest_numprocesses_values_tokenizes_supported_cli_forms(flag_args: str, expected: str) -> None:
+    run = f"uv run pytest tests/ {flag_args}"
+
+    assert _pytest_numprocesses_values(run) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("run", "expected_args"),
+    (
+        ("uv run pytest tests/ -n 0|| status=$?", ["tests/", "-n", "0"]),
+        ("uv run pytest tests/ -n auto&& echo done", ["tests/", "-n", "auto"]),
+        ("uv run pytest tests/ --numprocesses=auto; echo done", ["tests/", "--numprocesses=auto"]),
+    ),
+)
+def test_pytest_args_stop_at_attached_shell_control_operators(run: str, expected_args: list[str]) -> None:
+    assert _pytest_args(run) == expected_args
+
+
 def test_python_matrix_ci_does_not_hard_disable_xdist() -> None:
-    """Remote Python test lanes must leave xdist available instead of forcing ``-n0``."""
+    """Remote Python test lanes must leave xdist available instead of forcing ``-n 0``."""
     workflow = _ci_workflow()
     test_job = workflow["jobs"]["test"]
 
     coverage_run = _step_run(test_job, "Run tests with coverage")
     no_coverage_run = _step_run(test_job, "Run tests without coverage")
 
-    assert "-n0" not in coverage_run
-    assert "--numprocesses=0" not in coverage_run
-    assert "-n0" not in no_coverage_run
-    assert "--numprocesses=0" not in no_coverage_run
+    assert "0" not in _pytest_numprocesses_values(coverage_run)
+    assert "0" not in _pytest_numprocesses_values(no_coverage_run)
+
+
+def test_integration_lane_does_not_force_parallel_xdist() -> None:
+    """Integration lane stays sequential by omitting explicit xdist process flags."""
+    workflow = _ci_workflow()
+    integration_job = workflow["jobs"]["integration"]
+
+    run = _step_run(integration_job, "Run integration tests")
+
+    assert _pytest_numprocesses_values(run) == []
 
 
 def test_python_matrix_documents_coverage_lane_choice() -> None:
@@ -73,6 +162,21 @@ def test_judge_gates_workflow_mirrors_ci_concurrency_policy() -> None:
     assert judge_workflow["concurrency"] == ci_workflow["concurrency"]
 
 
+def test_judge_gates_required_context_matches_emitted_check_name() -> None:
+    """Branch-protection docs must name the check context GitHub emits."""
+    workflow_text = JUDGE_GATES_WORKFLOW.read_text(encoding="utf-8")
+    required_context = re.search(
+        r"Branch protection MUST require ``(?P<context>[^`]+)``",
+        workflow_text,
+    )
+    assert required_context is not None, "workflow header must document the required context"
+
+    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
+    aggregate_job = judge_workflow["jobs"]["judge-gates-success"]
+
+    assert required_context.group("context") == aggregate_job["name"]
+
+
 def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
     """Judge-gate jobs must not inherit GitHub's six-hour default timeout."""
     judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
@@ -80,6 +184,25 @@ def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
     for job_name in ("check-override-rate",):
         job = judge_workflow["jobs"][job_name]
         assert job["timeout-minutes"] == 15
+
+
+def test_codeql_security_suites_do_not_filter_by_problem_severity() -> None:
+    """Security suites must not drop security queries whose problem severity is warning.
+
+    security-extended carries the complete security query set, including
+    warning-severity queries; security-and-quality only adds non-security
+    quality queries on top of it, so dropping that suite (1a524d260) does
+    not filter security coverage by problem severity.
+    """
+    workflow = _workflow(CODEQL_WORKFLOW)
+    init_step = _step(workflow["jobs"]["analyze"], "Initialize CodeQL")
+    queries = init_step["with"]["queries"]
+    assert "security-extended" in queries
+
+    config = _workflow(CODEQL_CONFIG)
+    for query_filter in config.get("query-filters", ()):
+        exclude = query_filter.get("exclude", {})
+        assert "problem.severity" not in exclude
 
 
 def test_override_rate_workflow_pins_threshold_policy() -> None:
@@ -202,6 +325,33 @@ def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
     assert "scripts/cicd/generate_skill_inventory.py --check" in run
 
 
+def test_static_analysis_runs_actionlint_with_repo_policy_config() -> None:
+    """Workflow syntax and self-hosted runner labels must be checked in CI."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    step = _step(static_analysis, "Check GitHub workflows (actionlint)")
+    assert step["shell"] == "bash"
+    env = step.get("env")
+    assert isinstance(env, dict), "actionlint step must pin version and checksum"
+    assert env["ACTIONLINT_VERSION"] == "1.7.12"
+    assert env["ACTIONLINT_SHA256"] == "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+    run = _step_run(static_analysis, "Check GitHub workflows (actionlint)")
+    assert "sha256sum -c -" in run
+    assert "-config-file .github/actionlint.yaml" in run
+    assert ".github/workflows/*.yml" in run
+    assert ".github/workflows/*.yaml" in run
+
+
+def test_actionlint_policy_declares_self_hosted_runner_labels() -> None:
+    policy = _workflow(ACTIONLINT_CONFIG)
+
+    labels = policy["self-hosted-runner"]["labels"]
+
+    assert {"nyx-ci", "trusted"} <= set(labels)
+
+
 def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() -> None:
     """Signed allowlist loaders verify with secrets when available and degrade for forks."""
     workflow = _ci_workflow()
@@ -223,6 +373,29 @@ def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() ->
         assert "github.event.pull_request.head.repo.full_name != github.repository" in verify_mode
         assert "shape-only-when-key-missing" in verify_mode
         assert "required" in verify_mode
+
+
+def test_static_analysis_fork_prs_reject_unverified_signed_allowlist_edits() -> None:
+    """Fork PRs must not use keyless shape-only CI to forge signed allowlist entries."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    step = _step(static_analysis, "Reject unverified fork PR signed allowlist edits")
+    assert (
+        step.get("if") == "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}"
+    )
+
+    run = _step_run(static_analysis, "Reject unverified fork PR signed allowlist edits")
+    assert "git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}" in run
+    assert "check-judge-coverage" in run
+    assert "--forbid-unverified-judge-metadata" in run
+    assert "--allowlist-root config/cicd/enforce_tier_model" in run
+    assert "--allowlist-root config/cicd/enforce_trust_boundary_honesty" in run
+    assert "--baseline-ref ${{ github.event.pull_request.base.sha }}" in run
+
+    gate_index = _step_index(static_analysis, "Reject unverified fork PR signed allowlist edits")
+    assert gate_index < _step_index(static_analysis, "Run trust-tier elspeth-lints rule")
+    assert gate_index < _step_index(static_analysis, "Run trust-boundary honesty-gate elspeth-lints rules")
 
 
 def test_trust_tier_ci_failure_points_to_signature_diagnosis_command() -> None:

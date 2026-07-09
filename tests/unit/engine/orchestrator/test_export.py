@@ -11,38 +11,110 @@ The schema reconstruction functions are pure logic — no mocks needed.
 
 from __future__ import annotations
 
+import ast
 import csv
+import json
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
-    _json_schema_to_python_type,
+    _write_json_export_batches,
     export_landscape,
-    reconstruct_schema_from_json,
 )
+from elspeth.engine.orchestrator.schema_reconstruction import _json_schema_to_python_type, reconstruct_schema_from_json
 
 
 @contextmanager
 def _noop_track_operation(*_args: Any, **_kwargs: Any) -> Any:
     """Stub for track_operation that wires ctx.operation_id without touching the DB."""
-    yield Mock()
+    yield SimpleNamespace(operation_id="op-export")
 
 
-def _make_sink_and_factory(*, config: dict[str, Any] | None = None, **overrides: Any) -> tuple[Mock, Any]:
-    """Create a mock sink and a factory that returns it."""
-    sink = Mock()
-    sink.config = config or {}
-    sink.node_id = None
+class _CallRecorder:
+    def __init__(self, return_value: Any = None, side_effect: BaseException | None = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    @property
+    def call_args(self) -> SimpleNamespace:
+        assert self.calls
+        args, kwargs = self.calls[-1]
+        return SimpleNamespace(args=args, kwargs=kwargs)
+
+    def assert_called_once(self) -> None:
+        assert len(self.calls) == 1
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+    def assert_not_called(self) -> None:
+        assert self.calls == []
+
+
+class _SinkDouble:
+    name = "export_sink"
+    plugin_version = "test"
+    source_file_hash = "0" * 64
+
+    def __init__(self, *, config: dict[str, Any] | None = None, **overrides: Any) -> None:
+        self.config = config or {}
+        self.node_id = None
+        self.on_start = _CallRecorder()
+        self.write = _CallRecorder()
+        self.flush = _CallRecorder()
+        self.on_complete = _CallRecorder()
+        self.close = _CallRecorder()
+        for k, v in overrides.items():
+            setattr(self, k, v)
+
+
+class _ExporterDouble:
+    def __init__(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
+        self.export_run_grouped = _CallRecorder(return_value=grouped)
+        self.iter_run_records_by_type = _CallRecorder(return_value=self._iter_run_records_by_type(grouped))
+
+    @staticmethod
+    def _iter_run_records_by_type(grouped: dict[str, list[dict[str, Any]]]) -> Any:
+        for record_type, records in grouped.items():
+            for record in records:
+                yield record_type, record
+
+
+def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
+    return SimpleNamespace(
+        landscape=SimpleNamespace(
+            export=SimpleNamespace(
+                format=fmt,
+                sign=sign,
+                sink=sink,
+                include_raw_error_rows=include_raw_error_rows,
+            )
+        )
+    )
+
+
+def _make_sink_and_factory(*, config: dict[str, Any] | None = None, **overrides: Any) -> tuple[_SinkDouble, Any]:
+    """Create a sink double and a factory that returns it."""
+    sink = _SinkDouble(config=config, **overrides)
     for k, v in overrides.items():
         setattr(sink, k, v)
     return sink, lambda name: sink
@@ -63,16 +135,29 @@ def _mock_recorder_factory():
 class TestExportLandscapeJSON:
     """Tests for export_landscape with JSON format."""
 
-    def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output") -> Mock:
-        settings = Mock()
-        settings.landscape.export.format = fmt
-        settings.landscape.export.sign = sign
-        settings.landscape.export.sink = sink
-        return settings
+    def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
+        return _make_settings(fmt=fmt, sign=sign, sink=sink, include_raw_error_rows=include_raw_error_rows)
+
+    def test_jsonl_export_helpers_do_not_probe_sink_shape_with_getattr(self) -> None:
+        import inspect
+
+        from elspeth.engine.orchestrator import export as export_module
+
+        helper_sources = "\n".join(
+            inspect.getsource(helper)
+            for helper in (
+                export_module._jsonl_export_staging_target,
+                export_module._jsonl_filesystem_sink_path,
+                export_module._close_sink_file_if_open,
+                export_module._sink_supports_incremental_json_export_writes,
+            )
+        )
+
+        assert "getattr(" not in helper_sources
 
     def test_json_export_writes_records_to_sink(self) -> None:
         """JSON format exports all records through sink.write()."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
 
@@ -93,7 +178,7 @@ class TestExportLandscapeJSON:
 
     def test_json_export_skips_write_when_no_records(self) -> None:
         """Empty export produces no sink.write() call."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
 
@@ -111,9 +196,117 @@ class TestExportLandscapeJSON:
         sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
 
+    def test_jsonl_export_writes_records_in_bounded_batches(self) -> None:
+        """Large JSONL exports write bounded batches instead of one full-run list."""
+        db = object()
+        settings = self._make_settings()
+        sink, factory = _make_sink_and_factory(_format="jsonl")
+        records = [{"record_type": "row", "index": i} for i in range(1001)]
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
+            exporter = MockExporter.return_value
+            exporter.export_run.return_value = records
+
+            export_landscape(db, "run-1", settings, factory)
+
+        assert [len(call[0][0]) for call in sink.write.calls] == [1000, 1]
+
+    def test_json_array_export_writes_real_file_once_for_multi_batch_export(self, tmp_path: Path) -> None:
+        """JSON array audit export publishes one final file, not one cumulative rewrite per batch."""
+        from elspeth.plugins.sinks import json_sink as json_sink_module
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_path = tmp_path / "audit.json"
+        sink = JSONSink({"path": str(output_path), "format": "json", "schema": {"mode": "observed"}})
+        ctx = PluginContext(run_id="run-1", config={}, landscape=None, payload_store=None, node_id="export:json")
+        records = ({"record_type": "row", "index": i} for i in range(1001))
+        replace_calls: list[tuple[Any, Any]] = []
+        original_replace = json_sink_module.os.replace
+
+        def counting_replace(src: Any, dst: Any) -> None:
+            replace_calls.append((src, dst))
+            original_replace(src, dst)
+
+        with patch("elspeth.plugins.sinks.json_sink.os.replace", counting_replace):
+            record_count, batches_written = _write_json_export_batches(
+                sink=sink,
+                ctx=ctx,
+                records=records,
+                batch_size=1000,
+            )
+
+        sink.close()
+
+        assert record_count == 1001
+        assert batches_written == 1
+        assert len(replace_calls) == 1
+        assert len(json.loads(output_path.read_text())) == 1001
+
+    def test_jsonl_export_failure_removes_staged_partial_file(self, tmp_path: Path) -> None:
+        """A failed multi-batch JSONL export must not leave a truncated final artifact."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_path = tmp_path / "audit.jsonl"
+        sink = JSONSink({"path": str(output_path), "format": "jsonl", "schema": {"mode": "observed"}})
+        ctx = PluginContext(run_id="run-1", config={}, landscape=None, payload_store=None, node_id="export:json")
+        original_write = sink.write
+        write_calls = 0
+
+        def fail_on_second_batch(rows: list[dict[str, Any]], ctx_arg: PluginContext) -> Any:
+            nonlocal write_calls
+            write_calls += 1
+            if write_calls == 2:
+                raise OSError("disk full")
+            return original_write(rows, ctx_arg)
+
+        sink.write = fail_on_second_batch  # type: ignore[method-assign]
+
+        try:
+            with pytest.raises(OSError, match="disk full"):
+                _write_json_export_batches(
+                    sink=sink,
+                    ctx=ctx,
+                    records=({"record_type": "row", "index": i} for i in range(1001)),
+                    batch_size=1000,
+                )
+        finally:
+            sink.close()
+
+        assert write_calls == 2
+        assert not output_path.exists()
+        assert not output_path.with_suffix(output_path.suffix + ".tmp").exists()
+
+    def test_json_export_records_count_as_operation_output(self) -> None:
+        """JSON record_count is captured after streaming, not pre-counted as input."""
+        db = object()
+        settings = self._make_settings()
+        _sink, factory = _make_sink_and_factory()
+        captured: list[dict[str, Any]] = []
+
+        @contextmanager
+        def capture_track_operation(*_args: Any, **kwargs: Any) -> Any:
+            handle = SimpleNamespace(operation_id="op-export", output_data=None)
+            captured.append({"kwargs": kwargs, "handle": handle})
+            yield handle
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", capture_track_operation),
+        ):
+            exporter = MockExporter.return_value
+            exporter.export_run.return_value = [{"record_type": "run"}, {"record_type": "node"}]
+
+            export_landscape(db, "run-1", settings, factory)
+
+        assert captured[0]["kwargs"]["input_data"] == {"export_format": "json"}
+        assert captured[0]["handle"].output_data == {"record_count": 2, "batches_written": 1}
+
     def test_missing_sink_raises_valueerror(self) -> None:
         """Referencing non-existent sink raises clear error."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sink="nonexistent")
 
         def bad_factory(name: str) -> Any:
@@ -130,7 +323,7 @@ class TestExportLandscapeJSON:
 
     def test_signing_reads_env_key(self) -> None:
         """Signing enabled reads ELSPETH_SIGNING_KEY from env."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sign=True)
         _sink, factory = _make_sink_and_factory()
 
@@ -144,11 +337,30 @@ class TestExportLandscapeJSON:
 
             export_landscape(db, "run-1", settings, factory)
 
-        MockExporter.assert_called_once_with(db, signing_key=b"test-key-123")
+        MockExporter.assert_called_once_with(db, signing_key=b"test-key-123", include_raw_error_rows=False)
+
+    def test_raw_error_rows_opt_in_threads_to_exporter(self) -> None:
+        """The export-config classification flag reaches the exporter
+        (elspeth-384184c6ab): default False redacts raw failing rows from
+        error records; the explicit opt-in restores them."""
+        db: Any = object()
+        settings = self._make_settings(include_raw_error_rows=True)
+        _sink, factory = _make_sink_and_factory()
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
+            exporter = MockExporter.return_value
+            exporter.export_run.return_value = []
+
+            export_landscape(db, "run-1", settings, factory)
+
+        MockExporter.assert_called_once_with(db, signing_key=None, include_raw_error_rows=True)
 
     def test_signing_without_env_key_raises(self) -> None:
         """Signing enabled without ELSPETH_SIGNING_KEY raises ValueError."""
-        db = Mock()
+        db = object()
         settings = self._make_settings(sign=True)
         _sink, factory = _make_sink_and_factory()
 
@@ -158,9 +370,22 @@ class TestExportLandscapeJSON:
         ):
             export_landscape(db, "run-1", settings, factory)
 
+    @pytest.mark.parametrize("key_value", ["", "   "])
+    def test_signing_with_empty_env_key_raises(self, key_value: str) -> None:
+        """Signing enabled with an empty ELSPETH_SIGNING_KEY raises ValueError."""
+        db = object()
+        settings = self._make_settings(sign=True)
+        _sink, factory = _make_sink_and_factory()
+
+        with (
+            patch.dict("os.environ", {"ELSPETH_SIGNING_KEY": key_value}, clear=True),
+            pytest.raises(ValueError, match="ELSPETH_SIGNING_KEY"),
+        ):
+            export_landscape(db, "run-1", settings, factory)
+
     def test_sink_close_called_when_write_raises(self) -> None:
         """sink.close() must be called even when sink.write() raises."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
         sink.write.side_effect = RuntimeError("write failed")
@@ -180,7 +405,7 @@ class TestExportLandscapeJSON:
 
     def test_sink_close_called_when_flush_raises(self) -> None:
         """sink.close() must be called even when sink.flush() raises."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         sink, factory = _make_sink_and_factory()
         sink.flush.side_effect = RuntimeError("flush failed")
@@ -208,16 +433,12 @@ class TestExportLandscapeJSON:
 class TestExportLandscapeCSV:
     """Tests for export_landscape with CSV format."""
 
-    def _make_settings(self, *, sink: str = "output", sign: bool = False) -> Mock:
-        settings = Mock()
-        settings.landscape.export.format = "csv"
-        settings.landscape.export.sign = sign
-        settings.landscape.export.sink = sink
-        return settings
+    def _make_settings(self, *, sink: str = "output", sign: bool = False) -> Any:
+        return _make_settings(fmt="csv", sign=sign, sink=sink)
 
     def test_csv_export_requires_path_in_sink_config(self) -> None:
         """CSV export needs file-based sink with 'path' config."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         _sink, factory = _make_sink_and_factory()
 
@@ -229,7 +450,7 @@ class TestExportLandscapeCSV:
 
     def test_csv_export_calls_multifile(self, tmp_path: Path) -> None:
         """CSV format delegates to _export_csv_multifile."""
-        db = Mock()
+        db = object()
         settings = self._make_settings()
         _sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
 
@@ -243,6 +464,44 @@ class TestExportLandscapeCSV:
         call_kwargs = mock_csv.call_args
         assert call_kwargs.kwargs["run_id"] == "run-1"
 
+    def test_csv_export_uses_sink_lifecycle_around_multifile_writer(self, tmp_path: Path) -> None:
+        """CSV export keeps sink lifecycle even when the writer owns multi-file output."""
+        db = object()
+        settings = self._make_settings()
+        sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+            patch("elspeth.engine.orchestrator.export._export_csv_multifile"),
+        ):
+            export_landscape(db, "run-1", settings, factory)
+
+        sink.on_start.assert_called_once()
+        sink.flush.assert_called_once()
+        sink.on_complete.assert_called_once()
+        sink.close.assert_called_once()
+
+    def test_export_landscape_does_not_read_csv_sink_path_directly(self) -> None:
+        """Path extraction belongs behind the CSV audit-export writer boundary."""
+        repo_root = Path(__file__).parents[4]
+        path = repo_root / "src/elspeth/engine/orchestrator/export.py"
+        tree = ast.parse(path.read_text(), filename=str(path))
+        export_func = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "export_landscape")
+
+        offenders: list[str] = []
+        for node in ast.walk(export_func):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "sink"
+                and node.value.attr == "config"
+            ):
+                offenders.append(f"{path.relative_to(repo_root)}:{node.lineno}:sink.config[...]")
+
+        assert offenders == []
+
 
 # =============================================================================
 # _export_csv_multifile
@@ -255,8 +514,7 @@ class TestExportCSVMultifile:
     def test_creates_export_directory(self, tmp_path: Path) -> None:
         """Export creates the target directory."""
         export_dir = tmp_path / "audit_export"
-        exporter = Mock()
-        exporter.export_run_grouped.return_value = {}
+        exporter = _ExporterDouble({})
         _export_csv_multifile(
             exporter=exporter,
             run_id="run-1",
@@ -269,8 +527,7 @@ class TestExportCSVMultifile:
     def test_strips_file_extension_from_path(self, tmp_path: Path) -> None:
         """If path has an extension, it's stripped (treated as directory name)."""
         export_path = tmp_path / "output.csv"
-        exporter = Mock()
-        exporter.export_run_grouped.return_value = {}
+        exporter = _ExporterDouble({})
         _export_csv_multifile(
             exporter=exporter,
             run_id="run-1",
@@ -287,25 +544,21 @@ class TestExportCSVMultifile:
         """Each record type gets its own CSV file."""
         export_dir = tmp_path / "export"
 
-        # Mock formatter to pass through dicts
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r  # Pass through
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "runs": [{"run_id": "r1", "status": "completed"}],
                 "nodes": [
                     {"node_id": "n1", "type": "source"},
                     {"node_id": "n2", "type": "sink"},
                 ],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         # Check files exist
         assert (export_dir / "runs.csv").exists()
@@ -324,25 +577,52 @@ class TestExportCSVMultifile:
             rows = list(reader)
         assert len(rows) == 2
 
+    def test_streams_csv_records_without_grouped_materializer(self, tmp_path: Path) -> None:
+        """CSV export consumes typed records instead of whole-run grouped lists."""
+        export_dir = tmp_path / "export"
+        exporter = _ExporterDouble(
+            {
+                "rows": [
+                    {"row_id": "r1", "source_data_hash": "h1"},
+                    {"row_id": "r2", "source_data_hash": "h2"},
+                ]
+            }
+        )
+        exporter.export_run_grouped.side_effect = AssertionError("export_run_grouped materializes the full run")
+
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
+
+        exporter.iter_run_records_by_type.assert_called_once_with("run-1", sign=False)
+        with open(export_dir / "rows.csv") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        assert rows == [
+            {"row_id": "r1", "source_data_hash": "h1"},
+            {"row_id": "r2", "source_data_hash": "h2"},
+        ]
+
     def test_empty_record_types_skipped(self, tmp_path: Path) -> None:
         """Record types with empty lists don't produce files."""
         export_dir = tmp_path / "export"
 
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "runs": [{"run_id": "r1"}],
                 "empty_type": [],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         assert (export_dir / "runs.csv").exists()
         assert not (export_dir / "empty_type.csv").exists()
@@ -351,20 +631,17 @@ class TestExportCSVMultifile:
         """CSV headers are sorted alphabetically for deterministic output."""
         export_dir = tmp_path / "export"
 
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "data": [{"zebra": "z", "alpha": "a", "mid": "m"}],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         with open(export_dir / "data.csv") as f:
             reader = csv.reader(f)
@@ -375,28 +652,84 @@ class TestExportCSVMultifile:
         """Records with different keys produce union of all keys as headers."""
         export_dir = tmp_path / "export"
 
-        with patch("elspeth.core.landscape.formatters.CSVFormatter") as MockFormatter:
-            formatter = MockFormatter.return_value
-            formatter.format.side_effect = lambda r: r
-
-            exporter = Mock()
-            exporter.export_run_grouped.return_value = {
+        exporter = _ExporterDouble(
+            {
                 "mixed": [
                     {"common": "c1", "only_a": "a1"},
                     {"common": "c2", "only_b": "b1"},
                 ],
             }
-            _export_csv_multifile(
-                exporter=exporter,
-                run_id="run-1",
-                artifact_path=str(export_dir),
-                sign=False,
-            )
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
 
         with open(export_dir / "mixed.csv") as f:
             reader = csv.reader(f)
             headers = next(reader)
         assert sorted(headers) == ["common", "only_a", "only_b"]
+
+    def test_csv_cells_neutralize_spreadsheet_formula_prefixes(self, tmp_path: Path) -> None:
+        """CSV audit export neutralizes untrusted strings that spreadsheets execute."""
+        export_dir = tmp_path / "export"
+        dangerous_values = {
+            "row_data_json": '=HYPERLINK("https://example.test","click")',
+            "error_details_json": "+SUM(1,2)",
+            "negative": "-10+2",
+            "mention": "@cmd",
+            "tabbed": "\t=SUM(1,1)",
+            "carriage_return": "\r=SUM(1,1)",
+            "line_feed": "\n=SUM(1,1)",
+        }
+
+        exporter = _ExporterDouble(
+            {
+                "validation_errors": [
+                    {
+                        **dangerous_values,
+                        "nested": {"message": '=cmd|"/C calc"!A0'},
+                        "safe": "ordinary audit text",
+                        "count": 3,
+                    }
+                ],
+            }
+        )
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id="run-1",
+            artifact_path=str(export_dir),
+            sign=False,
+        )
+
+        with open(export_dir / "validation_errors.csv", newline="") as f:
+            reader = csv.DictReader(f)
+            row = next(reader)
+
+        for field, value in dangerous_values.items():
+            assert row[field] == f"'{value}"
+        assert row["nested.message"] == '\'=cmd|"/C calc"!A0'
+        assert row["safe"] == "ordinary audit text"
+        assert row["count"] == "3"
+
+
+def test_export_module_does_not_define_resume_schema_reconstruction_helpers() -> None:
+    """Resume schema reconstruction lives outside the post-run export module."""
+    repo_root = Path(__file__).parents[4]
+    path = repo_root / "src/elspeth/engine/orchestrator/export.py"
+    tree = ast.parse(path.read_text(), filename=str(path))
+    schema_helper_names = {
+        "reconstruct_schema_from_json",
+        "_create_schema_model",
+        "_model_name_for_field",
+        "_json_schema_to_python_type",
+    }
+
+    offenders = [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in schema_helper_names]
+
+    assert offenders == []
 
 
 # =============================================================================

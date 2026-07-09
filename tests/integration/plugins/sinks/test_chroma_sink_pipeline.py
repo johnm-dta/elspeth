@@ -5,9 +5,10 @@ Uses persistent mode with tmp_path for deterministic CI behaviour.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import chromadb
 import pytest
@@ -15,6 +16,54 @@ import pytest
 from elspeth.contracts.errors import DuplicateDocumentError
 from elspeth.plugins.sinks.chroma_sink import ChromaSink
 from tests.fixtures.base_classes import inject_write_failure
+
+
+@dataclass(frozen=True)
+class RecordedCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+@dataclass
+class CallRecorder:
+    calls: list[RecordedCall] = field(default_factory=list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.calls.append(RecordedCall(args=args, kwargs=kwargs))
+
+    @property
+    def call_args(self) -> RecordedCall:
+        assert self.calls
+        return self.calls[-1]
+
+    def assert_called_once(self) -> None:
+        assert len(self.calls) == 1
+
+
+def _ignore_telemetry(_event: Any) -> None:
+    pass
+
+
+@dataclass
+class FakeLifecycleContext:
+    run_id: str = "integration-test-run"
+    node_id: str | None = None
+    operation_id: str | None = None
+    landscape: Any = None
+    payload_store: Any = None
+    rate_limit_registry: Any = None
+    telemetry_emit: Callable[[Any], None] = _ignore_telemetry
+    concurrency_config: Any = None
+    shutdown_event: Any = None
+
+
+@dataclass
+class FakeSinkContext:
+    run_id: str = "integration-test-run"
+    contract: Any = None
+    landscape: Any = None
+    operation_id: str | None = None
+    record_call: CallRecorder = field(default_factory=CallRecorder)
 
 
 class TestChromaSinkIntegration:
@@ -45,10 +94,7 @@ class TestChromaSinkIntegration:
 
         sink = inject_write_failure(ChromaSink(config))
 
-        start_ctx = MagicMock()
-        start_ctx.run_id = "integration-test-run"
-        start_ctx.telemetry_emit = MagicMock()
-
+        start_ctx = FakeLifecycleContext()
         sink.on_start(start_ctx)
 
         rows = [
@@ -69,10 +115,7 @@ class TestChromaSinkIntegration:
             },
         ]
 
-        write_ctx = MagicMock()
-        write_ctx.run_id = "integration-test-run"
-        write_ctx.record_call = MagicMock()
-
+        write_ctx = FakeSinkContext()
         result = sink.write(rows, write_ctx)
 
         # Verify artifact
@@ -115,14 +158,10 @@ class TestChromaSinkIntegration:
 
         for _ in range(3):
             sink = inject_write_failure(ChromaSink(config))
-            ctx = MagicMock()
-            ctx.run_id = "idem-run"
-            ctx.telemetry_emit = MagicMock()
+            ctx = FakeLifecycleContext(run_id="idem-run")
             sink.on_start(ctx)
 
-            write_ctx = MagicMock()
-            write_ctx.run_id = "idem-run"
-            write_ctx.record_call = MagicMock()
+            write_ctx = FakeSinkContext(run_id="idem-run")
             sink.write([{"id": "d1", "text": "Hello"}], write_ctx)
             sink.close()
 
@@ -145,23 +184,17 @@ class TestChromaSinkIntegration:
 
         # First write
         sink = inject_write_failure(ChromaSink(config))
-        ctx = MagicMock()
-        ctx.run_id = "run-1"
-        ctx.telemetry_emit = MagicMock()
+        ctx = FakeLifecycleContext(run_id="run-1")
         sink.on_start(ctx)
-        write_ctx = MagicMock()
-        write_ctx.run_id = "run-1"
+        write_ctx = FakeSinkContext(run_id="run-1")
         sink.write([{"id": "d1", "text": "Original"}], write_ctx)
         sink.close()
 
         # Second write with same ID — should be skipped
         sink2 = inject_write_failure(ChromaSink(config))
-        ctx2 = MagicMock()
-        ctx2.run_id = "run-2"
-        ctx2.telemetry_emit = MagicMock()
+        ctx2 = FakeLifecycleContext(run_id="run-2")
         sink2.on_start(ctx2)
-        write_ctx2 = MagicMock()
-        write_ctx2.run_id = "run-2"
+        write_ctx2 = FakeSinkContext(run_id="run-2")
         sink2.write([{"id": "d1", "text": "Updated"}, {"id": "d2", "text": "New"}], write_ctx2)
         sink2.close()
 
@@ -193,12 +226,9 @@ class TestChromaSinkIntegration:
 
         for _ in range(2):
             sink = inject_write_failure(ChromaSink(config))
-            ctx = MagicMock()
-            ctx.run_id = "hash-run"
-            ctx.telemetry_emit = MagicMock()
+            ctx = FakeLifecycleContext(run_id="hash-run")
             sink.on_start(ctx)
-            write_ctx = MagicMock()
-            write_ctx.run_id = "hash-run"
+            write_ctx = FakeSinkContext(run_id="hash-run")
 
             try:
                 result = sink.write(rows, write_ctx)
@@ -226,23 +256,17 @@ class TestChromaSinkIntegration:
 
         # First write: d1 and d2 both new
         sink = inject_write_failure(ChromaSink(config))
-        ctx = MagicMock()
-        ctx.run_id = "run-1"
-        ctx.telemetry_emit = MagicMock()
+        ctx = FakeLifecycleContext(run_id="run-1")
         sink.on_start(ctx)
-        write_ctx = MagicMock()
-        write_ctx.run_id = "run-1"
+        write_ctx = FakeSinkContext(run_id="run-1")
         result1 = sink.write([{"id": "d1", "text": "Hello"}, {"id": "d2", "text": "World"}], write_ctx)
         sink.close()
 
         # Second write: d1 already exists, only d3 is new
         sink2 = inject_write_failure(ChromaSink(config))
-        ctx2 = MagicMock()
-        ctx2.run_id = "run-2"
-        ctx2.telemetry_emit = MagicMock()
+        ctx2 = FakeLifecycleContext(run_id="run-2")
         sink2.on_start(ctx2)
-        write_ctx2 = MagicMock()
-        write_ctx2.run_id = "run-2"
+        write_ctx2 = FakeSinkContext(run_id="run-2")
         result2 = sink2.write([{"id": "d1", "text": "Hello"}, {"id": "d3", "text": "New"}], write_ctx2)
         sink2.close()
 

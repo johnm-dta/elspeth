@@ -71,7 +71,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -80,6 +80,10 @@ from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
+
+
+async def _clean_advisor_checkpoint(*_args: object, **_kwargs: object) -> AdvisorCheckpointVerdict:
+    return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
 
 
 @pytest.fixture(autouse=True)
@@ -95,8 +99,7 @@ def _stub_advisor_end_gate_clean(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Patching the *method* (not the inner ``_call_advisor_with_audit``) keeps
     the per-call ``llm_calls`` audit counts stable — the gate becomes a no-op
-    that always returns CLEAN. A fresh ``AsyncMock`` per test avoids
-    cross-test call-count leakage. Tests that legitimately exercise the gate
+    that always returns CLEAN. Tests that legitimately exercise the gate
     override ``service._run_advisor_checkpoint`` per-instance (instance attr
     wins over the class patch), so this default never weakens a real gate
     assertion.
@@ -108,7 +111,7 @@ def _stub_advisor_end_gate_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ComposerServiceImpl,
         "_run_advisor_checkpoint",
-        AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")),
+        _clean_advisor_checkpoint,
         raising=True,
     )
 

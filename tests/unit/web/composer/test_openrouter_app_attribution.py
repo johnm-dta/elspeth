@@ -19,7 +19,7 @@ OpenRouter honours.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -100,7 +100,7 @@ async def test_wrapper_forwards_identity_headers_to_litellm() -> None:
         captured.update(kwargs)
         return "ok"
 
-    with patch("litellm.acompletion", new=AsyncMock(side_effect=_fake_acompletion)):
+    with patch("litellm.acompletion", new=_fake_acompletion):
         result = await _litellm_acompletion(
             model="openrouter/openai/gpt-5.4-mini",
             messages=[{"role": "user", "content": "hi"}],

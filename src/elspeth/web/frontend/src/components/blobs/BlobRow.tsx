@@ -1,7 +1,8 @@
 // src/components/blobs/BlobRow.tsx
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { previewBlobContentSnippet } from "@/api/client";
 import type { BlobMetadata } from "@/types/api";
+import { describeStructuralSummary, summarizeContentStructure } from "@/utils/contentStructure";
 
 const PREVIEWABLE_MIME_TYPES = new Set([
   "text/plain",
@@ -39,16 +40,20 @@ function creatorBadge(createdBy: string): string {
   }
 }
 
-function statusIndicator(status: string): { color: string; label: string } {
+// Each status carries a distinct *shape* glyph alongside its hue, so the
+// ready/pending/error distinction survives colour-vision deficiency
+// (WCAG 1.4.1): filled disc, hollow ring, and warning triangle are
+// unmistakable regardless of colour.
+function statusIndicator(status: string): { color: string; label: string; glyph: string } {
   switch (status) {
     case "ready":
-      return { color: "var(--color-success)", label: "Ready" };
+      return { color: "var(--color-success)", label: "Ready", glyph: "●" };
     case "pending":
-      return { color: "var(--color-warning)", label: "Pending" };
+      return { color: "var(--color-warning)", label: "Pending", glyph: "○" };
     case "error":
-      return { color: "var(--color-error)", label: "Error" };
+      return { color: "var(--color-error)", label: "Error", glyph: "▲" };
     default:
-      return { color: "var(--color-text-muted)", label: status };
+      return { color: "var(--color-text-muted)", label: status, glyph: "◌" };
   }
 }
 
@@ -99,6 +104,18 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
       ? previewContent.slice(0, MAX_PREVIEW_CHARS)
       : previewContent;
 
+  // Structural self-disclosure (T-3): static introspection of the preview
+  // content already fetched above — no additional network call. Honest by
+  // design: a truncated/ragged/oversized/unparseable body surfaces a plain
+  // caveat instead of a guessed row count (see contentStructure.ts).
+  const structuralSummary = useMemo(() => {
+    if (previewContent === null) return null;
+    return summarizeContentStructure(blob.mime_type, previewContent, { truncated });
+  }, [previewContent, truncated, blob.mime_type]);
+  const structuralSummaryLine = structuralSummary
+    ? describeStructuralSummary(structuralSummary)
+    : null;
+
   return (
     <div>
       <div
@@ -107,14 +124,18 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
           borderBottom: previewOpen ? "none" : "1px solid var(--color-border)",
         }}
       >
-        {/* Status dot */}
+        {/* Status indicator — shape glyph (non-colour cue) + accessible name */}
         <span
           className="blob-row-status-dot"
+          role="img"
+          aria-label={status.label}
           title={status.label}
           style={{
-            backgroundColor: status.color,
+            color: status.color,
           }}
-        />
+        >
+          {status.glyph}
+        </span>
 
         {/* Creator badge */}
         <span className="blob-row-creator" title={`Created by ${blob.created_by}`}>
@@ -191,6 +212,19 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
               {previewError}
             </div>
           )}
+          {structuralSummary &&
+            structuralSummary.format !== "unsupported" &&
+            !previewLoading &&
+            !previewError && (
+              <div className="blob-row-structure" data-testid="blob-row-structure">
+                {structuralSummary.caveat && (
+                  <p className="blob-row-structure-caveat">{structuralSummary.caveat}</p>
+                )}
+                {structuralSummaryLine && (
+                  <p className="blob-row-structure-summary">{structuralSummaryLine}</p>
+                )}
+              </div>
+            )}
           {displayContent !== null && !previewLoading && (
             <pre className="blob-row-preview-pre">
               {displayContent}

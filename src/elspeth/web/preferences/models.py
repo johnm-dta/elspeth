@@ -39,6 +39,16 @@ from pydantic import BaseModel, ConfigDict
 
 ComposerMode = Literal["guided", "freeform"]
 
+# First-run tutorial resume stage (elspeth-918f4434b3). Mirrors the frontend
+# ``TutorialStep`` union (tutorialMachine.ts) minus ``"welcome"`` — the
+# Welcome bookend is never persisted (nothing has started; ``None`` is the
+# no-in-progress-tutorial state). Extending this set requires updating the
+# Literal here, the ``ck_user_preferences_tutorial_stage`` CHECK in
+# ``sessions/models.py``, and the Tier-1 read guard in
+# ``PreferencesService._row_to_prefs`` in lockstep — same rule as
+# ``ComposerMode`` above.
+TutorialStage = Literal["guided", "run", "audit", "graduation"]
+
 
 class ComposerPreferences(BaseModel):
     """The full preferences payload returned by GET and PATCH.
@@ -57,6 +67,14 @@ class ComposerPreferences(BaseModel):
     default_mode: ComposerMode
     banner_dismissed_at: datetime | None
     tutorial_completed_at: datetime | None
+    # In-progress tutorial resume state. All four are NULL when no tutorial
+    # is in progress. ``tutorial_run_id`` / ``tutorial_source_data_hash``
+    # are recorded once the tutorial run completes so the audit step can
+    # resume without re-executing the pipeline.
+    tutorial_stage: TutorialStage | None
+    tutorial_session_id: str | None
+    tutorial_run_id: str | None
+    tutorial_source_data_hash: str | None
     updated_at: datetime | None
 
 
@@ -88,6 +106,16 @@ class UpdateComposerPreferencesRequest(BaseModel):
 
     This field uses ``model_fields_set`` in the service so the reset
     affordance can distinguish "not mentioned" from "clear it".
+
+    Tutorial resume fields (``tutorial_stage`` / ``tutorial_session_id`` /
+    ``tutorial_run_id`` / ``tutorial_source_data_hash``) follow the same
+    absent-vs-explicit-null discrimination via ``model_fields_set``. They
+    interact with ``tutorial_completed_at`` through the service's
+    completion-clears-progress rule: a PATCH that sets OR clears
+    ``tutorial_completed_at`` also clears any resume fields it does not
+    itself supply, because completing (or resetting for a retake — the e2e
+    harness recipe) terminates any in-progress tutorial. See
+    ``PreferencesService.update_composer_preferences``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -95,3 +123,7 @@ class UpdateComposerPreferencesRequest(BaseModel):
     default_mode: ComposerMode | None = None
     banner_dismissed_at: datetime | None = None
     tutorial_completed_at: datetime | None = None
+    tutorial_stage: TutorialStage | None = None
+    tutorial_session_id: str | None = None
+    tutorial_run_id: str | None = None
+    tutorial_source_data_hash: str | None = None

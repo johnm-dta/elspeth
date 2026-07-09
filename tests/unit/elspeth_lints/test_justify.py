@@ -24,8 +24,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -70,12 +71,128 @@ class Widget:
 '''
 
 
+_DRIFTED_AFTER_SCAN_SOURCE = '''\
+"""Synthetic module used in justify tests."""
+
+
+class Widget:
+    def lookup(self, payload: dict) -> str:
+        # R1: dict.get on Tier-2 data — the kind of finding an agent
+        # might want to suppress with judge approval.
+        return payload.get("name", "anonymous")
+        unreachable = "source changed after the scanner selected the finding"
+'''
+
+
 # ---------- helpers ----------
 
 
 _OVERRIDE_TOKEN_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN"
 _OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
 _OVERRIDE_TEST_TOKEN = "test-operator-override-token-2026-05-24"
+
+
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+        effect = self.side_effect
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
+class _ConstructorRecorder:
+    def __init__(self) -> None:
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        return None
+
+    def assert_not_called(self) -> None:
+        assert len(self.call_args_list) == 0
+
+
+class _CompletionMessageDouble:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _CompletionChoiceDouble:
+    def __init__(self, message: _CompletionMessageDouble, *, finish_reason: str) -> None:
+        self.message = message
+        self.finish_reason = finish_reason
+
+
+class _UsageDetailsDouble:
+    def __init__(self, cached_tokens: int) -> None:
+        self.cached_tokens = cached_tokens
+
+
+class _UsageDouble:
+    def __init__(self, *, prompt_tokens: int, prompt_tokens_details: _UsageDetailsDouble | None) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.prompt_tokens_details = prompt_tokens_details
+
+
+class _CompletionDouble:
+    def __init__(
+        self,
+        *,
+        content: str,
+        prompt_tokens: int,
+        cached_tokens: int | None,
+        served_model: str | None,
+        finish_reason: str,
+    ) -> None:
+        self.choices = [
+            _CompletionChoiceDouble(
+                _CompletionMessageDouble(content),
+                finish_reason=finish_reason,
+            )
+        ]
+        self.model = served_model
+        details = None if cached_tokens is None else _UsageDetailsDouble(cached_tokens)
+        self.usage = _UsageDouble(prompt_tokens=prompt_tokens, prompt_tokens_details=details)
+
+
+class _OpenAIClientDouble:
+    def __init__(self, completion: _CompletionDouble | None = None, *, side_effect: BaseException | None = None) -> None:
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                create=_CallRecorder(return_value=completion, side_effect=side_effect),
+            )
+        )
 
 
 def _build_source_tree(tmp_path: Path) -> tuple[Path, Path]:
@@ -108,7 +225,7 @@ def _set_operator_override_authority(monkeypatch: pytest.MonkeyPatch, *, token: 
     monkeypatch.setenv(_OVERRIDE_TOKEN_SHA256_ENV, hashlib.sha256(token.encode("utf-8")).hexdigest())
 
 
-def test_justify_symbol_help_names_unique_current_finding_requirement(capsys: object) -> None:
+def test_justify_symbol_help_names_unique_current_finding_requirement(capsys: pytest.CaptureFixture[str]) -> None:
     """`--symbol` help must explain the uniqueness contract before runtime failure."""
     with pytest.raises(SystemExit) as exc:
         main(["justify", "--help"])
@@ -210,7 +327,7 @@ def _mock_openrouter_completion(
     cached_tokens: int | None = 0,
     served_model: str | None = DEFAULT_JUDGE_MODEL,
     finish_reason: str = "stop",
-) -> MagicMock:
+) -> _CompletionDouble:
     """Build a mock OpenAI-SDK ``chat.completions.create`` return value.
 
     The judge routes through OpenRouter via the OpenAI SDK, so the mock
@@ -223,8 +340,7 @@ def _mock_openrouter_completion(
     cached count (caching off, or transport omitted it). ``0`` simulates
     caching-on with no hit; a positive int simulates a cache hit.
     """
-    message = MagicMock()
-    message.content = json.dumps(
+    content = json.dumps(
         {
             "verdict": verdict,
             "rationale": rationale,
@@ -232,35 +348,13 @@ def _mock_openrouter_completion(
             "should_use_decorator": should_use_decorator,
         }
     )
-    choice = MagicMock()
-    choice.message = message
-    choice.finish_reason = finish_reason
-    completion = MagicMock()
-    completion.choices = [choice]
-    # Explicitly set ``completion.model`` so existing happy-path tests
-    # (which assert the version-pinned ``judge_model`` survives
-    # the YAML round-trip) keep passing now that ``call_judge`` records
-    # the SERVED model id (not the requested one). Tests that need to
-    # exercise routing-divergence or absent-served-id paths pass
-    # ``served_model=`` explicitly. See the C1-1 (elspeth-0e1d0978fa)
-    # tests below.
-    completion.model = served_model
-    # Usage shape: total + optional details. cached_tokens=None means
-    # the field on details is absent (we model this by setting details
-    # to None directly, which judge._extract_cache_accounting treats as
-    # "no count reported").
-    if cached_tokens is None:
-        completion.usage = MagicMock(
-            prompt_tokens=prompt_tokens,
-            prompt_tokens_details=None,
-        )
-    else:
-        details = MagicMock(cached_tokens=cached_tokens)
-        completion.usage = MagicMock(
-            prompt_tokens=prompt_tokens,
-            prompt_tokens_details=details,
-        )
-    return completion
+    return _CompletionDouble(
+        content=content,
+        prompt_tokens=prompt_tokens,
+        cached_tokens=cached_tokens,
+        served_model=served_model,
+        finish_reason=finish_reason,
+    )
 
 
 @contextmanager
@@ -272,7 +366,7 @@ def _mock_judge_call(
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
     served_model: str | None = DEFAULT_JUDGE_MODEL,
-) -> Iterator[MagicMock]:
+) -> Iterator[Any]:
     """Patch ``openai.OpenAI`` so tests run offline.
 
     Yields the patched client class so callers can introspect how it was
@@ -287,8 +381,7 @@ def _mock_judge_call(
         cached_tokens=cached_tokens,
         served_model=served_model,
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(
             os.environ,
@@ -312,7 +405,7 @@ def _mock_judge_call_without_hmac(
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
     served_model: str | None = DEFAULT_JUDGE_MODEL,
-) -> Iterator[MagicMock]:
+) -> Iterator[Any]:
     """Patch the judge client while leaving metadata signing unconfigured."""
     fake_completion = _mock_openrouter_completion(
         verdict=verdict,
@@ -322,8 +415,7 @@ def _mock_judge_call_without_hmac(
         cached_tokens=cached_tokens,
         served_model=served_model,
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
@@ -379,16 +471,14 @@ def test_call_judge_crashes_on_malformed_json() -> None:
         rationale="...",
         surrounding_code="...",
     )
-    # OpenAI-shape mock with non-JSON content.
-    bad_message = MagicMock()
-    bad_message.content = "not json at all { ::: }"
-    bad_choice = MagicMock()
-    bad_choice.message = bad_message
-    bad_completion = MagicMock()
-    bad_completion.choices = [bad_choice]
-    bad_completion.usage = MagicMock(prompt_tokens=100, prompt_tokens_details=None)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = bad_completion
+    bad_completion = _CompletionDouble(
+        content="not json at all { ::: }",
+        prompt_tokens=100,
+        cached_tokens=None,
+        served_model=DEFAULT_JUDGE_MODEL,
+        finish_reason="stop",
+    )
+    fake_client = _OpenAIClientDouble(bad_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -434,8 +524,7 @@ def test_call_judge_rejects_invalid_confidence(confidence: Any) -> None:
             "should_use_decorator": None,
         }
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -464,8 +553,7 @@ def test_call_judge_rejects_extra_output_schema_fields() -> None:
             "fix": "rewrite the code",
         }
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
         patch("openai.OpenAI", return_value=fake_client),
@@ -507,8 +595,7 @@ def test_call_judge_rejects_length_truncated_completion() -> None:
         rationale="ok",
         finish_reason="length",
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = fake_completion
+    fake_client = _OpenAIClientDouble(fake_completion)
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -530,8 +617,7 @@ def test_call_judge_wraps_raw_httpx_connect_error() -> None:
         rationale="...",
         surrounding_code="...",
     )
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = httpx.ConnectError("connection refused")
+    fake_client = _OpenAIClientDouble(side_effect=httpx.ConnectError("connection refused"))
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -563,8 +649,7 @@ def test_call_judge_wraps_openrouter_status_errors(error_cls: str, status: int) 
     )
     response = httpx.Response(status, request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"))
     exc = getattr(openai, error_cls)(f"status {status}", response=response, body={"error": "test"})
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = exc
+    fake_client = _OpenAIClientDouble(side_effect=exc)
 
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
@@ -645,6 +730,48 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert entry.judge_confidence == pytest.approx(0.91)
     assert entry.judge_recorded_at is not None
     assert entry.judge_recorded_at.tzinfo is not None
+
+
+def test_justify_refuses_when_excerpt_snapshot_differs_from_scanner_snapshot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from elspeth_lints.core import source_excerpt as source_excerpt_module
+
+    root, target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    real_extract_safe_excerpt = source_excerpt_module.extract_safe_excerpt
+
+    def drift_then_extract(**kwargs: Any) -> Any:
+        target.write_text(_DRIFTED_AFTER_SCAN_SOURCE, encoding="utf-8")
+        return real_extract_safe_excerpt(**kwargs)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "payload is Tier-3 external data from upstream tool-call",
+        "--owner",
+        "test-agent-snapshot-drift",
+    ]
+    with (
+        patch("elspeth_lints.core.source_excerpt.extract_safe_excerpt", side_effect=drift_then_extract),
+        _mock_judge_call(verdict="ACCEPTED", rationale="judge saw the drifted source") as client_class,
+    ):
+        exit_code = main(argv)
+
+    assert exit_code == 2
+    client_class.assert_not_called()
+    assert not (allowlist_dir / "plugins.yaml").exists()
+    captured = capsys.readouterr()
+    assert "changed between scanner and judge excerpt" in captured.err
 
 
 def test_justify_writes_judge_transport(tmp_path: Path) -> None:
@@ -1614,15 +1741,14 @@ def test_justify_malformed_judge_response_exits_2_without_traceback(
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
 
-    bad_message = MagicMock()
-    bad_message.content = "not json at all { ::: }"
-    bad_choice = MagicMock()
-    bad_choice.message = bad_message
-    bad_completion = MagicMock()
-    bad_completion.choices = [bad_choice]
-    bad_completion.usage = MagicMock(prompt_tokens=100, prompt_tokens_details=None)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.return_value = bad_completion
+    bad_completion = _CompletionDouble(
+        content="not json at all { ::: }",
+        prompt_tokens=100,
+        cached_tokens=None,
+        served_model=DEFAULT_JUDGE_MODEL,
+        finish_reason="stop",
+    )
+    fake_client = _OpenAIClientDouble(bad_completion)
 
     exit_code = _run_justify_with_client(
         root=root,
@@ -1648,8 +1774,9 @@ def test_justify_transport_error_exits_2_without_traceback(
 
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = APIConnectionError(request=MagicMock())
+    import httpx
+
+    fake_client = _OpenAIClientDouble(side_effect=APIConnectionError(request=httpx.Request("POST", "https://openrouter.ai")))
 
     exit_code = _run_justify_with_client(
         root=root,
@@ -1670,7 +1797,7 @@ def _run_justify_with_client(
     *,
     root: Path,
     allowlist_dir: Path,
-    fake_client: MagicMock,
+    fake_client: _OpenAIClientDouble,
     rationale: str,
 ) -> int:
     argv = [
@@ -1748,7 +1875,7 @@ class Widget:
     ]
     # Set the API key so we definitely don't fall out via the
     # configuration check — the ambiguity error must fire first.
-    judge_called = MagicMock()
+    judge_called = _ConstructorRecorder()
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False), patch("openai.OpenAI", judge_called):
         exit_code = main(argv)
 
@@ -2683,7 +2810,7 @@ def test_justify_rule_mismatch_crashes_before_calling_judge(tmp_path: Path, caps
     # Provide the API key + a no-op client so the only failure mode
     # available is the --rule mismatch (not a config error or a call
     # going through).
-    judge_called = MagicMock()
+    judge_called = _ConstructorRecorder()
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False), patch("openai.OpenAI", judge_called):
         exit_code = main(argv)
     assert exit_code == 2
@@ -2798,10 +2925,9 @@ def test_justify_rule_default_package_id_remains_no_op(tmp_path: Path) -> None:
 # =============================================================================
 #
 # The justify writer is the only production producer of judge-gated allowlist
-# entries. To close the C8-3 quartet-transplant attack we need the writer to
-# emit both binding fields (file_fingerprint + ast_path) so the loader can
-# verify the binding still holds at every subsequent load. These tests pin
-# the writer-side half of that contract; the loader-side tests live in
+# entries. To close the v2 quartet-transplant attack we need the writer to emit
+# scope_fingerprint + ast_path and sign them into the v2 payload. These tests pin
+# the writer-side half of that contract; the loader/match-side tests live in
 # test_allowlist_judge_metadata_integrity.py under the "C8-3" header.
 # =============================================================================
 
@@ -2956,3 +3082,165 @@ def test_build_yaml_entry_text_refuses_whitespace_only_rationale(blank_rationale
             judge_transport="openrouter",
             ast_path="Module.body[0]",
         )
+
+
+def test_pop_last_allow_hits_entry_leaves_loadable_empty_list(tmp_path: Path) -> None:
+    """Popping a file's only entry must not brick every later allowlist load.
+
+    A bare ``allow_hits:`` header parses as None and fails the loader's
+    "allow_hits must be a list" shape check — which is exactly what stalled the
+    2026-07-08 re-sign campaign on ``__init__.yaml`` (single-entry file, drift
+    repair pops the row, justify's similarity scan then cannot load the dir).
+    """
+    import yaml
+
+    from elspeth_lints.core.cli import _pop_allow_hits_entry
+
+    target_yaml = tmp_path / "__init__.yaml"
+    key = "__init__.py:R6:_module_:fp=abc123"
+    target_yaml.write_text(
+        f"allow_hits:\n- key: {key}\n  owner: john\n  reason: only entry\n",
+        encoding="utf-8",
+    )
+
+    removed = _pop_allow_hits_entry(target_yaml, key)
+
+    assert f"- key: {key}" in removed
+    written = target_yaml.read_text(encoding="utf-8")
+    assert "allow_hits: []" in written
+    assert yaml.safe_load(written)["allow_hits"] == []
+
+
+def test_append_entry_reopens_explicit_empty_allow_hits(tmp_path: Path) -> None:
+    """Appending into ``allow_hits: []`` reopens the block instead of duplicating the key."""
+    import yaml
+
+    target_yaml = tmp_path / "__init__.yaml"
+    target_yaml.write_text(
+        "allow_hits: []\nper_file_rules:\n- pattern: widget.py\n  rules:\n  - R5\n  max_hits: 1\n",
+        encoding="utf-8",
+    )
+    key = "__init__.py:R6:_module_:fp=abc123"
+
+    _append_entry_to_yaml(target_yaml, f"- key: {key}\n  owner: john\n  reason: restored entry\n")
+
+    written = target_yaml.read_text(encoding="utf-8")
+    assert written.count("allow_hits") == 1
+    data = yaml.safe_load(written)
+    assert [entry["key"] for entry in data["allow_hits"]] == [key]
+    assert data["per_file_rules"][0]["pattern"] == "widget.py"
+
+
+def test_pop_then_restore_round_trip_on_single_entry_file(tmp_path: Path) -> None:
+    """The signer's pop -> justify-fails -> restore path must round-trip a single-entry file."""
+    import yaml
+
+    from elspeth_lints.core.cli import _pop_allow_hits_entry
+
+    target_yaml = tmp_path / "__init__.yaml"
+    key = "__init__.py:R6:_module_:fp=abc123"
+    original = f"allow_hits:\n- key: {key}\n  owner: john\n  reason: only entry\n"
+    target_yaml.write_text(original, encoding="utf-8")
+
+    removed = _pop_allow_hits_entry(target_yaml, key)
+    _append_entry_to_yaml(target_yaml, removed)
+
+    written = target_yaml.read_text(encoding="utf-8")
+    data = yaml.safe_load(written)
+    assert [entry["key"] for entry in data["allow_hits"]] == [key]
+    assert data["allow_hits"][0]["reason"] == "only entry"
+
+
+def test_justify_readonly_tools_scrubs_judge_rationale_before_persist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-07-09 policy: readonly tools are allowed on the signing path, and the
+    no-secrets-in-YAML invariant moves to the OUTPUT — a judge rationale that
+    quotes raw tool-read bytes is secret-scrubbed before it is persisted."""
+    import elspeth_lints.core.judge as judge_mod
+    from elspeth_lints.core.judge import TRANSPORT_AGENT as agent_transport
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    secret = "AKIAIOSFODNN7EXAMPLE"  # secret-scan: allow-this-line (AWS docs example key; exercises the rationale scrubber)
+
+    def fake_call_judge(request: Any, **kwargs: Any) -> Any:
+        return judge_mod.JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id="claude-opus-4-7",
+            judge_rationale=f"boundary is honest; config file showed {secret} beside the client init",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.9,
+            prompt_tokens_total=100,
+            prompt_tokens_cached=None,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport=agent_transport,
+        )
+
+    monkeypatch.setattr(judge_mod, "call_judge", fake_call_judge)
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", "test-judge-metadata-hmac-key-2026-05-24")
+
+    exit_code = main(
+        [
+            "justify",
+            "--root",
+            str(root),
+            "--allowlist-dir",
+            str(allowlist_dir),
+            "--file-path",
+            "plugins/widget.py",
+            "--symbol",
+            "Widget.lookup",
+            "--rationale",
+            "payload is Tier-3 external data from upstream tool-call",
+            "--owner",
+            "test-agent-readonly",
+            "--judge-transport",
+            "agent",
+            "--judge-tools",
+            "readonly",
+        ]
+    )
+
+    assert exit_code == 0
+    text = (allowlist_dir / "plugins.yaml").read_text(encoding="utf-8")
+    assert secret not in text
+    assert "[REDACTED-SECRET-" in text
+    assert "boundary is honest" in text
+
+
+def test_append_refuses_duplicate_allow_hits_blocks(tmp_path: Path) -> None:
+    """A file with two allow_hits blocks must abort, not append into the dead one.
+
+    YAML keeps only the LAST duplicate mapping key, so rows appended under an
+    earlier block silently vanish from every load (observed 2026-07-09: three
+    freshly judge-signed tui.yaml rows landed in an invisible first block).
+    """
+    from elspeth_lints.core.cli import _append_entry_to_yaml
+
+    target_yaml = tmp_path / "tui.yaml"
+    target_yaml.write_text(
+        "allow_hits:\n- key: a.py:R1:f:fp=aaa\n  owner: john\n  reason: old\n\nallow_hits:\n- key: b.py:R1:g:fp=bbb\n  owner: john\n  reason: older\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="2 allow_hits blocks"):
+        _append_entry_to_yaml(target_yaml, "- key: c.py:R1:h:fp=ccc\n  owner: john\n  reason: new\n")
+    # Both blocks untouched — no partial write.
+    assert target_yaml.read_text(encoding="utf-8").count("allow_hits:") == 2
+
+
+def test_pop_refuses_duplicate_allow_hits_blocks(tmp_path: Path) -> None:
+    """Popping from a duplicate-block file must abort before any surgery."""
+    from elspeth_lints.core.cli import _pop_allow_hits_entry
+
+    target_yaml = tmp_path / "tui.yaml"
+    target_yaml.write_text(
+        "allow_hits: []\n\nallow_hits:\n- key: b.py:R1:g:fp=bbb\n  owner: john\n  reason: only\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="2 allow_hits blocks"):
+        _pop_allow_hits_entry(target_yaml, "b.py:R1:g:fp=bbb")

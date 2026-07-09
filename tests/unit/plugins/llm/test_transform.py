@@ -9,7 +9,7 @@ tracer wiring, and multi-query partial failure atomicity.
 from __future__ import annotations
 
 import threading
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -38,20 +38,62 @@ from elspeth.testing import make_pipeline_row
 DYNAMIC_SCHEMA = {"mode": "observed"}
 
 
+class _CallRecorder:
+    def __init__(self, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            if callable(self.side_effect):
+                return self.side_effect(*args, **kwargs)
+            raise self.side_effect
+        return self.return_value
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+    def assert_not_called(self) -> None:
+        assert self.calls == []
+
+
+class _ExecutorDouble:
+    def __init__(self) -> None:
+        self.execute_batch = _CallRecorder()
+
+
+class _RegistryDouble:
+    def __init__(self) -> None:
+        self.limiter = object()
+        self.get_limiter = _CallRecorder(return_value=self.limiter)
+
+
+class _LangfuseClientDouble:
+    def __init__(self, **_: Any) -> None:
+        pass
+
+
+def _noop_tracer() -> Any:
+    from elspeth.plugins.transforms.llm.langfuse import NoOpLangfuseTracer
+
+    return NoOpLangfuseTracer()
+
+
 def _make_row(data: dict[str, Any] | None = None) -> PipelineRow:
     """Create a test PipelineRow with OBSERVED contract."""
     return make_pipeline_row(data or {"text": "hello"})
 
 
-def _make_ctx() -> Mock:
-    """Create a minimal mock PluginContext."""
-    ctx = Mock()
-    ctx.state_id = "state-123"
-    ctx.run_id = "run-123"
-    ctx.token = Mock()
-    ctx.token.token_id = "token-1"
-    ctx.shutdown_event = None
-    return ctx
+def _make_ctx() -> SimpleNamespace:
+    """Create a minimal transform context double."""
+    return SimpleNamespace(
+        state_id="state-123",
+        run_id="run-123",
+        token=SimpleNamespace(token_id="token-1"),
+        shutdown_event=None,
+    )
 
 
 def _identity_contract(contract: SchemaContract) -> SchemaContract:
@@ -149,7 +191,7 @@ class TestTransformProperties:
 
         transform = LLMTransform(_make_config())
         with pytest.raises(NotImplementedError, match="accept"):
-            transform.process(Mock(), Mock())
+            transform.process(object(), object())  # type: ignore[arg-type]
 
     def test_llm_transform_requires_runtime_preflight(self) -> None:
         """LLM transforms must opt into engine-time provider checks."""
@@ -159,8 +201,7 @@ class TestTransformProperties:
 
     def test_runtime_preflight_delegates_to_provider_with_operation_parent(self) -> None:
         transform, mock_provider = _make_transform_with_mock_provider()
-        ctx = Mock()
-        ctx.operation_id = "op-runtime-preflight"
+        ctx = SimpleNamespace(operation_id="op-runtime-preflight")
 
         transform.runtime_preflight(ctx)
 
@@ -172,8 +213,7 @@ class TestTransformProperties:
     def test_runtime_preflight_wraps_provider_failure(self) -> None:
         transform, mock_provider = _make_transform_with_mock_provider()
         mock_provider.runtime_preflight.side_effect = LLMClientError("401 unauthorized", retryable=False)
-        ctx = Mock()
-        ctx.operation_id = "op-runtime-preflight"
+        ctx = SimpleNamespace(operation_id="op-runtime-preflight")
 
         with pytest.raises(RuntimePreflightFailedError, match=r"pre_flight_failed.*401 unauthorized"):
             transform.runtime_preflight(ctx)
@@ -287,6 +327,27 @@ class TestSingleQuerySuccess:
         assert result.row is not None
         assert result.row["llm_response"] == "classified as: positive"
         assert result.row["llm_response_model"] == "gpt-4o"
+
+    def test_blank_required_input_field_fails_before_provider_call(self) -> None:
+        """A declared required input field that renders blank is a row fault, not
+        permission to ask the model to infer from weaker fields.
+        """
+        transform, mock_provider = _make_transform_with_mock_provider()
+        mock_provider.execute_query.return_value = LLMQueryResult(
+            content="fabricated answer",
+            usage=TokenUsage.known(10, 5),
+            model="gpt-4o",
+            finish_reason=FinishReason.STOP,
+        )
+
+        result = transform._process_row(_make_row({"text": "   ", "url": "https://example.invalid"}), _make_ctx())
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.reason is not None
+        assert result.reason["reason"] == "required_input_field_blank"
+        assert result.reason["field"] == "text"
+        mock_provider.execute_query.assert_not_called()
 
     def test_contract_propagation_single_query(self) -> None:
         """Single-query mode uses propagate_contract on input contract."""
@@ -594,12 +655,9 @@ class TestTracerWiring:
         from elspeth.plugins.transforms.llm.langfuse import ActiveLangfuseTracer
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
-        # Mock the langfuse package at the import level used by create_langfuse_tracer
-        mock_langfuse = Mock()
-        mock_langfuse_cls = Mock()
-        mock_langfuse.Langfuse = mock_langfuse_cls
+        langfuse_module = SimpleNamespace(Langfuse=_LangfuseClientDouble)
 
-        with patch.dict("sys.modules", {"langfuse": mock_langfuse}):
+        with patch.dict("sys.modules", {"langfuse": langfuse_module}):
             config = _make_config(
                 tracing={
                     "provider": "langfuse",
@@ -643,7 +701,7 @@ class TestTemplateTierPolicy:
 
         # Strategy should have pre-compiled template
         strategy = transform._strategy
-        assert hasattr(strategy, "_query_templates")
+        assert "_query_templates" in dir(strategy)
         assert "quality" in strategy._query_templates
 
     def test_pre_compiled_per_query_template_renders_correctly(self) -> None:
@@ -1195,11 +1253,10 @@ class TestLimiterDispatch:
 
         transform = LLMTransform(_make_config(provider="azure"))
 
-        mock_registry = Mock()
-        mock_registry.get_limiter.return_value = Mock()
+        mock_registry = _RegistryDouble()
 
         ctx = _make_ctx()
-        ctx.landscape = Mock()
+        ctx.landscape = object()
         ctx.rate_limit_registry = mock_registry
         ctx.telemetry_emit = lambda event: None
 
@@ -1213,11 +1270,10 @@ class TestLimiterDispatch:
 
         transform = LLMTransform(_make_config(provider="openrouter"))
 
-        mock_registry = Mock()
-        mock_registry.get_limiter.return_value = Mock()
+        mock_registry = _RegistryDouble()
 
         ctx = _make_ctx()
-        ctx.landscape = Mock()
+        ctx.landscape = object()
         ctx.rate_limit_registry = mock_registry
         ctx.telemetry_emit = lambda event: None
 
@@ -2508,12 +2564,12 @@ class TestAzureAITracingSetup:
         assert isinstance(transform._tracing_config, AzureAITracingConfig)
 
 
-def _make_lifecycle_ctx() -> Mock:
-    """Create a mock LifecycleContext for on_start() tests."""
+def _make_lifecycle_ctx() -> SimpleNamespace:
+    """Create a lifecycle context double for on_start() tests."""
     ctx = _make_ctx()
-    ctx.landscape = Mock()
+    ctx.landscape = object()
     ctx.rate_limit_registry = None
-    ctx.telemetry_emit = Mock()
+    ctx.telemetry_emit = _CallRecorder()
     ctx.node_id = "node-1"
     ctx.concurrency_config = None
     return ctx
@@ -2688,7 +2744,7 @@ class TestParallelErrorReasonNotFabricated:
         from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
 
         # Create a minimal strategy with a fake executor
-        mock_executor = Mock()
+        mock_executor = _ExecutorDouble()
 
         query_specs = [
             QuerySpec(name="quality", input_fields=MappingProxyType({"text_content": "text"})),
@@ -2740,7 +2796,7 @@ class TestParallelErrorReasonNotFabricated:
         ctx = _make_ctx()
 
         with pytest.raises(FrameworkBugError, match="reason=None"):
-            strategy.execute(row, ctx, provider=Mock(), tracer=Mock())
+            strategy.execute(row, ctx, provider=object(), tracer=_noop_tracer())  # type: ignore[arg-type]
 
 
 class TestParallelAuditMetadataThreadSafety:
@@ -2771,7 +2827,7 @@ class TestParallelAuditMetadataThreadSafety:
             def __exit__(self, *args: Any) -> None:
                 pass
 
-        mock_executor = Mock()
+        mock_executor = _ExecutorDouble()
         query_specs = [
             QuerySpec(name="sentiment", input_fields=MappingProxyType({"text": "text"})),
             QuerySpec(name="topic", input_fields=MappingProxyType({"text": "text"})),
@@ -2827,7 +2883,7 @@ class TestParallelAuditMetadataThreadSafety:
 
         # Patch threading.Lock to use our counting lock
         with patch("elspeth.plugins.transforms.llm.transform.threading.Lock", return_value=CountingLock()):
-            result = strategy.execute(row, ctx, provider=mock_provider, tracer=Mock())
+            result = strategy.execute(row, ctx, provider=mock_provider, tracer=_noop_tracer())
 
         assert result.status == "success"
         # Each successful query writes to audit_metadata_by_index under the lock.
@@ -2855,7 +2911,7 @@ class TestParallelAuditMetadataThreadSafety:
         NUM_QUERIES = 8
         barrier = threading.Barrier(NUM_QUERIES)
 
-        mock_executor = Mock()
+        mock_executor = _ExecutorDouble()
         query_specs = [QuerySpec(name=f"q{i}", input_fields=MappingProxyType({"text": "text"})) for i in range(NUM_QUERIES)]
         template = PromptTemplate("Analyze: {{ row.text }}")
         strategy = MultiQueryStrategy(
@@ -2918,7 +2974,7 @@ class TestParallelAuditMetadataThreadSafety:
         row = make_pipeline_row({"text": "hello"})
         ctx = _make_ctx()
 
-        result = strategy.execute(row, ctx, provider=mock_provider, tracer=Mock())
+        result = strategy.execute(row, ctx, provider=mock_provider, tracer=_noop_tracer())
 
         assert result.status == "success", f"Expected success, got error: {result.reason}"
         # The key assertion: all 8 queries' audit metadata survived concurrent writes.
@@ -2972,7 +3028,7 @@ class TestMultiQueryFinishReasonAudit:
         row = make_pipeline_row({"text": "hello"})
         ctx = _make_ctx()
 
-        result = strategy.execute(row, ctx, provider=mock_provider, tracer=Mock())
+        result = strategy.execute(row, ctx, provider=mock_provider, tracer=_noop_tracer())
         assert result.status == "success"
         assert result.success_reason is not None
         metadata = result.success_reason["metadata"]
@@ -3018,7 +3074,7 @@ class TestMultiQueryFinishReasonAudit:
         row = make_pipeline_row({"text": "hello"})
         ctx = _make_ctx()
 
-        result = strategy.execute(row, ctx, provider=mock_provider, tracer=Mock())
+        result = strategy.execute(row, ctx, provider=mock_provider, tracer=_noop_tracer())
         assert result.status == "success"
         assert result.success_reason is not None
         metadata = result.success_reason["metadata"]
@@ -3073,7 +3129,7 @@ class TestSequentialErrorReasonNotFabricated:
             patch.object(MultiQueryStrategy, "_execute_one_query", return_value=bogus_error_result),
             pytest.raises(FrameworkBugError, match="reason=None"),
         ):
-            strategy.execute(row, ctx, provider=Mock(), tracer=Mock())
+            strategy.execute(row, ctx, provider=object(), tracer=_noop_tracer())  # type: ignore[arg-type]
 
 
 class TestQuerySuccessPostFreezeMutationGuards:

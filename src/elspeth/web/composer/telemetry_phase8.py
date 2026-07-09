@@ -89,7 +89,6 @@ __all__ = [
     "record_share_link_expiry_hit",
     "record_share_token_verify_failure",
     "record_source_dynamic_created",
-    "record_tutorial_completed",
     "record_tutorial_started",
 ]
 
@@ -247,22 +246,6 @@ def record_tutorial_started(tel: SessionsTelemetry) -> None:
     """
     try:
         tel.tutorial_started_total.add(1, attributes={})
-    except Exception:
-        return None
-    return None
-
-
-def record_tutorial_completed(tel: SessionsTelemetry) -> None:
-    """Composer first-run tutorial completed.
-
-    Phase 4 emit site; helper shipped in Phase 8 for forward-fit.
-    NOTE: there is no ``record_tutorial_replayed`` counterpart —
-    ``composer.tutorial.replayed_total`` is Phase 9 deferred per
-    Decision 2 / Option C. See
-    ``docs/composer/ux-redesign-2026-05/21-phase-9-followups.md``.
-    """
-    try:
-        tel.tutorial_completed_total.add(1, attributes={})
     except Exception:
         return None
     return None

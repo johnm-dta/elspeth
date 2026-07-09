@@ -2,15 +2,44 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from dataclasses import dataclass, field
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+
+
+@dataclass
+class _FakeAuthProvider:
+    identity: UserIdentity = field(
+        default_factory=lambda: UserIdentity(
+            user_id="alice",
+            username="alice",
+        )
+    )
+    error: AuthenticationError | None = None
+    authenticated_tokens: list[str] = field(default_factory=list)
+
+    async def authenticate(self, token: str) -> UserIdentity:
+        self.authenticated_tokens.append(token)
+        if self.error is not None:
+            raise self.error
+        return self.identity
+
+    async def get_user_info(self, token: str) -> UserProfile:
+        raise NotImplementedError
+
+
+@dataclass
+class _FakeCounter:
+    additions: list[tuple[int, dict[str, str]]] = field(default_factory=list)
+
+    def add(self, amount: int, attributes: dict[str, str]) -> None:
+        self.additions.append((amount, attributes))
 
 
 class _NoopAuthAuditRecorder:
@@ -81,22 +110,18 @@ class TestGetCurrentUser:
     pytestmark = pytest.mark.asyncio
 
     async def test_valid_bearer_token(self) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(
-            user_id="alice",
-            username="alice",
-        )
-        request = _make_request(mock_provider, "Bearer valid-token-here")
+        provider = _FakeAuthProvider()
+        request = _make_request(provider, "Bearer valid-token-here")
 
         user = await get_current_user(request)
 
         assert user.user_id == "alice"
         assert request.state.auth_token == "valid-token-here"
-        mock_provider.authenticate.assert_awaited_once_with("valid-token-here")
+        assert provider.authenticated_tokens == ["valid-token-here"]
 
     async def test_missing_authorization_header(self) -> None:
-        mock_provider = AsyncMock()
-        request = _make_request(mock_provider)
+        provider = _FakeAuthProvider()
+        request = _make_request(provider)
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(request)
@@ -105,15 +130,15 @@ class TestGetCurrentUser:
         assert exc_info.value.detail == "Missing or invalid Authorization header"
 
     async def test_missing_authorization_header_rate_limits_audit_writes(self) -> None:
-        mock_provider = AsyncMock()
+        provider = _FakeAuthProvider()
         recorder = _CountingAuthAuditRecorder()
-        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+        app = _make_app(provider, recorder=recorder, auth_rate_limit=1)
 
-        first_request = _make_request(mock_provider, app=app)
+        first_request = _make_request(provider, app=app)
         with pytest.raises(HTTPException) as first_exc_info:
             await get_current_user(first_request)
 
-        second_request = _make_request(mock_provider, app=app)
+        second_request = _make_request(provider, app=app)
         with pytest.raises(HTTPException) as second_exc_info:
             await get_current_user(second_request)
 
@@ -125,29 +150,27 @@ class TestGetCurrentUser:
     async def test_rate_limited_audit_write_emits_suppression_telemetry(self, monkeypatch) -> None:
         """Over-limit auth failures are not silently dropped: the skipped audit
         write increments a telemetry counter, attributed by failure category."""
-        from unittest.mock import MagicMock
-
         import elspeth.web.auth.middleware as middleware_module
 
-        counter = MagicMock()
+        counter = _FakeCounter()
         monkeypatch.setattr(middleware_module, "_AUTH_FAILURE_AUDIT_SUPPRESSED_TOTAL", counter)
 
-        mock_provider = AsyncMock()
+        provider = _FakeAuthProvider()
         recorder = _CountingAuthAuditRecorder()
-        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+        app = _make_app(provider, recorder=recorder, auth_rate_limit=1)
 
         with pytest.raises(HTTPException):  # first attempt: 401, records the row
-            await get_current_user(_make_request(mock_provider, app=app))
+            await get_current_user(_make_request(provider, app=app))
         with pytest.raises(HTTPException) as over_limit:
-            await get_current_user(_make_request(mock_provider, app=app))
+            await get_current_user(_make_request(provider, app=app))
 
         assert over_limit.value.status_code == 429
         assert len(recorder.failures) == 1  # over-limit write was capped
-        counter.add.assert_called_once_with(1, {"failure_category": "missing_authorization_header"})
+        assert counter.additions == [(1, {"failure_category": "missing_authorization_header"})]
 
     async def test_non_bearer_scheme(self) -> None:
-        mock_provider = AsyncMock()
-        request = _make_request(mock_provider, "Basic dXNlcjpwYXNz")
+        provider = _FakeAuthProvider()
+        request = _make_request(provider, "Basic dXNlcjpwYXNz")
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(request)
@@ -155,15 +178,15 @@ class TestGetCurrentUser:
         assert exc_info.value.status_code == 401
 
     async def test_invalid_authorization_header_rate_limits_audit_writes(self) -> None:
-        mock_provider = AsyncMock()
+        provider = _FakeAuthProvider()
         recorder = _CountingAuthAuditRecorder()
-        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+        app = _make_app(provider, recorder=recorder, auth_rate_limit=1)
 
-        first_request = _make_request(mock_provider, "Basic dXNlcjpwYXNz", app=app)
+        first_request = _make_request(provider, "Basic dXNlcjpwYXNz", app=app)
         with pytest.raises(HTTPException) as first_exc_info:
             await get_current_user(first_request)
 
-        second_request = _make_request(mock_provider, "Basic dXNlcjpwYXNz", app=app)
+        second_request = _make_request(provider, "Basic dXNlcjpwYXNz", app=app)
         with pytest.raises(HTTPException) as second_exc_info:
             await get_current_user(second_request)
 
@@ -173,8 +196,8 @@ class TestGetCurrentUser:
         assert recorder.failures[0]["failure_category"] == "invalid_authorization_header"
 
     async def test_bearer_with_no_token(self) -> None:
-        mock_provider = AsyncMock()
-        request = _make_request(mock_provider, "Bearer")
+        provider = _FakeAuthProvider()
+        request = _make_request(provider, "Bearer")
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(request)
@@ -182,9 +205,8 @@ class TestGetCurrentUser:
         assert exc_info.value.status_code == 401
 
     async def test_invalid_token_returns_401_with_detail(self) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthenticationError("Token expired")
-        request = _make_request(mock_provider, "Bearer expired-token")
+        provider = _FakeAuthProvider(error=AuthenticationError("Token expired"))
+        request = _make_request(provider, "Bearer expired-token")
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(request)
@@ -193,16 +215,15 @@ class TestGetCurrentUser:
         assert exc_info.value.detail == "Token expired"
 
     async def test_authentication_error_rate_limits_audit_writes(self) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthenticationError("Token expired")
+        provider = _FakeAuthProvider(error=AuthenticationError("Token expired"))
         recorder = _CountingAuthAuditRecorder()
-        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+        app = _make_app(provider, recorder=recorder, auth_rate_limit=1)
 
-        first_request = _make_request(mock_provider, "Bearer expired-token", app=app)
+        first_request = _make_request(provider, "Bearer expired-token", app=app)
         with pytest.raises(HTTPException) as first_exc_info:
             await get_current_user(first_request)
 
-        second_request = _make_request(mock_provider, "Bearer expired-token", app=app)
+        second_request = _make_request(provider, "Bearer expired-token", app=app)
         with pytest.raises(HTTPException) as second_exc_info:
             await get_current_user(second_request)
 
@@ -212,25 +233,21 @@ class TestGetCurrentUser:
         assert recorder.failures[0]["failure_category"] == "authentication_error"
 
     async def test_valid_bearer_token_does_not_consume_auth_failure_limiter(self) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(
-            user_id="alice",
-            username="alice",
-        )
+        provider = _FakeAuthProvider()
         recorder = _CountingAuthAuditRecorder()
-        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+        app = _make_app(provider, recorder=recorder, auth_rate_limit=1)
 
-        first_user = await get_current_user(_make_request(mock_provider, "Bearer valid-token-one", app=app))
-        second_user = await get_current_user(_make_request(mock_provider, "Bearer valid-token-two", app=app))
+        first_user = await get_current_user(_make_request(provider, "Bearer valid-token-one", app=app))
+        second_user = await get_current_user(_make_request(provider, "Bearer valid-token-two", app=app))
 
         assert first_user.user_id == "alice"
         assert second_user.user_id == "alice"
+        assert provider.authenticated_tokens == ["valid-token-one", "valid-token-two"]
         assert recorder.failures == []
 
     async def test_provider_unavailable_returns_503_with_detail(self) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthProviderUnavailable("JWKS unavailable: ConnectError")
-        request = _make_request(mock_provider, "Bearer maybe-valid-token")
+        provider = _FakeAuthProvider(error=AuthProviderUnavailable("JWKS unavailable: ConnectError"))
+        request = _make_request(provider, "Bearer maybe-valid-token")
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(request)
@@ -239,8 +256,8 @@ class TestGetCurrentUser:
         assert exc_info.value.detail == "JWKS unavailable: ConnectError"
 
     async def test_bearer_with_whitespace_only_token(self) -> None:
-        mock_provider = AsyncMock()
-        request = _make_request(mock_provider, "Bearer   ")
+        provider = _FakeAuthProvider()
+        request = _make_request(provider, "Bearer   ")
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(request)

@@ -278,12 +278,21 @@ class ComposerChatTurn:
     error_class: str | None = None
 
     def __post_init__(self) -> None:
+        _require_non_empty_str(self.step, "step")
+        _require_non_empty_str(self.user_message_hash, "user_message_hash")
+        _require_non_empty_str(self.assistant_message_hash, "assistant_message_hash")
+        _require_non_empty_str(self.model, "model")
+        _require_datetime(self.started_at, "started_at")
+        _require_datetime(self.finished_at, "finished_at")
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at must be >= started_at")
         require_int(self.chat_turn_seq, "chat_turn_seq", min_value=0)
         require_int(self.latency_ms, "latency_ms", min_value=0)
         if type(self.initiator) is not ComposerChatInitiator:
             raise TypeError(f"initiator must be ComposerChatInitiator, got {type(self.initiator).__name__}")
         if type(self.status) is not ComposerChatTurnStatus:
             raise TypeError(f"status must be ComposerChatTurnStatus, got {type(self.status).__name__}")
+        _require_non_empty_str(self.error_class, "error_class", optional=True)
         if self.status is ComposerChatTurnStatus.SUCCESS and self.error_class is not None:
             raise ValueError("error_class must be None when status is SUCCESS")
         failed_statuses = (

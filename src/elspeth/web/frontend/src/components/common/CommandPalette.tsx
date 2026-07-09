@@ -17,6 +17,7 @@ import { useExecutionStore } from "@/stores/executionStore";
 import { requestValidate } from "@/stores/subscriptions";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { fuzzyMatch } from "@/utils/fuzzyScore";
+import { hasCompositionContent } from "@/utils/compositionState";
 import {
   OPEN_GRAPH_MODAL_EVENT,
   OPEN_YAML_MODAL_EVENT,
@@ -154,6 +155,10 @@ export function CommandPalette({
       title: "Export YAML",
       category: "navigation",
       shortcut: "Ctrl+Shift+Y",
+      // Same hasCompositionContent gate ExportYamlButton applies — an empty
+      // pipeline has nothing to export, and this command was a leftover
+      // path into the near-empty modal (elspeth-bff8043d33 residual).
+      enabled: hasCompositionContent(compositionState),
       action: () => {
         window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
         onClose();

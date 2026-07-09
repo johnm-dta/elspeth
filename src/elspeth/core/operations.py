@@ -22,9 +22,10 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import elspeth.contracts.errors as contract_errors
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 
 if TYPE_CHECKING:
-    from elspeth.contracts import Operation
+    from elspeth.contracts import Operation, OperationType
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.landscape.execution_repository import ExecutionRepository
 
@@ -32,14 +33,26 @@ logger = logging.getLogger(__name__)
 
 
 def _render_exception(exc: BaseException) -> str:
-    """Render an exception to a non-empty audit message."""
-    # Preserve KeyError's quoted rendering, but otherwise prefer
-    # BaseException.__str__ so a broken custom __str__ override cannot
-    # derail audit completion.
-    if type(exc) is KeyError:
-        message = str(exc)
-    else:
-        message = BaseException.__str__(exc)
+    """Render an exception to a non-empty, secret-scrubbed audit message.
+
+    The returned string is persisted verbatim as ``operations.error_message``
+    (``track_operation`` -> ``complete_operation``), a Tier-1 audit record. This
+    is the single chokepoint through which *every* operation error is rendered,
+    so the scrub here guarantees no operation error message reaches the audit
+    trail unscrubbed — regardless of which exception type failed. Provider and
+    runtime exceptions can interpolate bearer tokens / API keys into their
+    message text (e.g. ``RuntimePreflightFailedError`` embeds the underlying
+    client error), and ``str(exc)`` would otherwise persist that secret raw.
+
+    Best-effort: ``scrub_text_for_audit`` is pattern-based, so a novel secret
+    format absent from its rule set can still slip through — mitigation, not a
+    guarantee. If rendering *or* scrubbing fails, fall back to the (secret-free)
+    exception type name rather than risk leaking an unscrubbed string.
+    """
+    try:
+        message = scrub_text_for_audit(str(exc))
+    except BaseException:
+        return type(exc).__name__
     return message if message else type(exc).__name__
 
 
@@ -75,7 +88,7 @@ def track_operation(
     recorder: ExecutionRepository,
     run_id: str,
     node_id: str,
-    operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
+    operation_type: OperationType,
     ctx: PluginContext,
     *,
     input_data: dict[str, Any] | None = None,
@@ -130,11 +143,12 @@ def track_operation(
     Yields:
         OperationHandle with the Operation object and mutable output_data field
     """
+    scrubbed_input_data = scrub_payload_for_audit(input_data) if input_data is not None else None
     operation = recorder.begin_operation(
         run_id=run_id,
         node_id=node_id,
         operation_type=operation_type,
-        input_data=input_data,
+        input_data=scrubbed_input_data,
     )
 
     handle = OperationHandle(operation=operation)
@@ -167,10 +181,11 @@ def track_operation(
     finally:
         duration_ms = (time.perf_counter() - start_time) * 1000
         try:
+            scrubbed_output_data = scrub_payload_for_audit(handle.output_data) if handle.output_data is not None else None
             recorder.complete_operation(
                 operation_id=operation.operation_id,
                 status=status,
-                output_data=handle.output_data,
+                output_data=scrubbed_output_data,
                 error=error_msg,
                 duration_ms=duration_ms,
             )
@@ -181,7 +196,7 @@ def track_operation(
                 "Failed to complete operation - audit trail incomplete",
                 extra={
                     "operation_id": operation.operation_id,
-                    "db_error": str(db_error),
+                    "db_error": _render_exception(db_error),
                     "db_error_type": type(db_error).__name__,
                     "original_status": status,
                     "original_error": error_msg,

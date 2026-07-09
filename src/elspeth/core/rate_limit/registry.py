@@ -8,11 +8,11 @@ import threading
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from elspeth.core.rate_limit.limiter import RateLimiter
+from elspeth.core.rate_limit.limiter import RateLimiter, validate_limiter_timeout, validate_limiter_weight
 
-# Mirror of RateLimiter's accepted-name grammar (limiter.py _VALID_NAME_PATTERN):
-# a name matching this is already a valid bucket key and is returned unchanged.
+# Mirror of RateLimiter's accepted-name grammar (limiter.py _VALID_NAME_PATTERN).
 _VALID_LIMITER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_REWRITTEN_LIMITER_PREFIX = "elspeth_rl_"
 
 
 def _sanitize_limiter_name(service_name: str) -> str:
@@ -24,29 +24,32 @@ def _sanitize_limiter_name(service_name: str) -> str:
     distinct services like ``api.example`` and ``api_example`` both became
     ``api_example`` and silently shared one persistent quota bucket (elspeth-2af4e98ee2).
 
-    This is now injective AND edge-only:
-    - A name that ALREADY matches the grammar is returned byte-identical, so the
-      common case keeps its existing bucket (no migration).
-    - A name that must be rewritten gets a short hash discriminator derived from the
-      ORIGINAL name appended, so two raw names cannot sanitize to the same bucket.
-      The only buckets whose persisted name changes are exactly the special-char
-      names that were sharing the buggy collided bucket.
+    This is now injective and keeps existing buckets for ordinary valid names:
+    - A name that already matches the grammar and does not use ELSPETH's reserved
+      rewrite namespace is returned byte-identical.
+    - A name that must be rewritten gets a reserved prefix, a namespace marker,
+      and a hash discriminator derived from the original name.
+    - A valid raw name inside the reserved rewrite namespace is escaped into its
+      own namespace so it cannot intentionally collide with a rewritten invalid
+      service name.
     """
-    if _VALID_LIMITER_NAME.match(service_name):
+    is_valid_name = _VALID_LIMITER_NAME.match(service_name) is not None
+    if is_valid_name and not service_name.startswith(_REWRITTEN_LIMITER_PREFIX):
         return service_name
 
-    # Rewrite: replace non-alphanumerics, ensure a leading letter, then append a
-    # discriminator from the ORIGINAL name to restore injectivity within the
-    # limiter-name charset. Hex keeps the suffix in-grammar.
+    # Rewrite into a reserved namespace. The namespace marker separates invalid
+    # raw names from valid raw names that intentionally use the reserved prefix.
     sanitized = re.sub(r"[^a-zA-Z0-9]", "_", service_name)
     if not sanitized or not sanitized[0].isalpha():
         sanitized = "svc_" + sanitized
-    suffix = hashlib.sha256(service_name.encode()).hexdigest()[:8]
-    return f"{sanitized}_{suffix}"
+    namespace = "valid" if is_valid_name else "invalid"
+    suffix = hashlib.sha256(service_name.encode()).hexdigest()[:16]
+    return f"{_REWRITTEN_LIMITER_PREFIX}{namespace}_{sanitized}_{suffix}"
 
 
 if TYPE_CHECKING:
     from elspeth.contracts.config.protocols import RuntimeRateLimitProtocol
+    from elspeth.contracts.contexts import LimiterProtocol
 
 
 class NoOpLimiter:
@@ -60,12 +63,15 @@ class NoOpLimiter:
         """No-op acquire (always succeeds instantly).
 
         Args:
-            weight: Number of tokens to acquire (ignored)
-            timeout: Maximum wait time in seconds (ignored - always instant)
+            weight: Number of tokens to acquire (validated, then ignored)
+            timeout: Maximum wait time in seconds (validated, then ignored)
         """
+        validate_limiter_weight(weight)
+        validate_limiter_timeout(timeout)
 
     def try_acquire(self, weight: int = 1) -> bool:
         """No-op try_acquire (always succeeds)."""
+        validate_limiter_weight(weight)
         return True
 
     def close(self) -> None:
@@ -118,7 +124,7 @@ class RateLimitRegistry:
         self._lock = threading.Lock()
         self._noop_limiter = NoOpLimiter()
 
-    def get_limiter(self, service_name: str) -> RateLimiter | NoOpLimiter:
+    def get_limiter(self, service_name: str) -> LimiterProtocol:
         """Get or create a rate limiter for a service.
 
         Thread-safe: multiple threads can call this concurrently.

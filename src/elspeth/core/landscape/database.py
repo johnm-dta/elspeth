@@ -5,6 +5,7 @@ with appropriate settings for each.
 """
 
 import os
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,9 +18,11 @@ from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.url import SENSITIVE_PARAMS, _scrub_odbc_connect_value
 from elspeth.core.landscape.journal import LandscapeJournal
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
 
@@ -27,15 +30,16 @@ from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
 #
 # ``Tier1Engine`` is a NewType wrapper around :class:`sqlalchemy.engine.Engine`
 # that carries a static guarantee: the engine was created through
-# :class:`LandscapeDB` and passed the PRAGMA integrity probe
-# (:meth:`LandscapeDB._verify_sqlite_pragmas`).  The wrapper has zero runtime
+# :class:`LandscapeDB` and passed the backend-appropriate audit-integrity
+# checks. For SQLite that includes the PRAGMA integrity probe
+# (:meth:`LandscapeDB._verify_sqlite_pragmas`). The wrapper has zero runtime
 # overhead (``NewType`` is erased at runtime); it is a type-checker signal only.
 #
 # Only :meth:`LandscapeDB.engine` may mint a ``Tier1Engine`` via ``cast()``.
 # Call sites that accept ``Tier1Engine`` (e.g.
 # :class:`~elspeth.core.landscape.scheduler_repository.TokenSchedulerRepository`)
-# are guaranteed to receive a probe-verified engine — any call site that tries
-# to pass a bare :class:`Engine` will be caught by mypy.
+# are guaranteed to receive a Tier-1 engine — any call site that tries to pass
+# a bare :class:`Engine` will be caught by mypy.
 Tier1Engine = NewType("Tier1Engine", Engine)
 
 # Execution-option key that marks a connection's next transaction as carrying
@@ -52,6 +56,8 @@ Tier1Engine = NewType("Tier1Engine", Engine)
 # dashboard connections never carry it, so they never contend for the write
 # lock at BEGIN.
 WRITE_INTENT_OPTION = "elspeth_write_intent"
+
+_JOURNAL_WORKER_SUFFIX_RE = re.compile(r"[0-9a-f]+")
 
 # Canonical SQLite PRAGMA invariants for the Landscape audit DB.
 #
@@ -89,6 +95,38 @@ _SQLITE_PRAGMA_INVARIANTS_MEMORY: tuple[tuple[str, str], ...] = (
 )
 
 
+def verify_sqlite_tier1_pragmas(engine: Engine, *, owner: str) -> None:
+    """Refuse SQLite engines that bypassed LandscapeDB's PRAGMA gate.
+
+    Repository constructors use this as a runtime defense against casts or
+    type ignores that smuggle a bare SQLite engine past the ``Tier1Engine``
+    type. Non-SQLite engines deliberately skip this probe: PostgreSQL has no
+    SQLite PRAGMA surface, and issuing these statements there is a backend
+    syntax error.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.connect() as conn:
+        fk_result = conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one_or_none()
+        jm_result = conn.exec_driver_sql("PRAGMA journal_mode").scalar_one_or_none()
+
+    foreign_keys = "" if fk_result is None else str(fk_result).lower()
+    journal_mode = "" if jm_result is None else str(jm_result).lower()
+
+    violations: list[str] = []
+    if foreign_keys != "1":
+        violations.append(f"PRAGMA foreign_keys: expected '1', observed {foreign_keys!r}")
+    if journal_mode not in ("wal", "memory"):
+        violations.append(f"PRAGMA journal_mode: expected 'wal' (or 'memory' for :memory: DBs), observed {journal_mode!r}")
+
+    if violations:
+        raise AuditIntegrityError(
+            f"{owner} received an engine that does not meet Tier-1 audit-integrity "
+            "requirements; the engine was not opened through LandscapeDB. " + "; ".join(violations)
+        )
+
+
 class SchemaCompatibilityError(Exception):
     """Raised when the Landscape database schema is incompatible with current code."""
 
@@ -96,6 +134,33 @@ class SchemaCompatibilityError(Exception):
 
 
 ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+
+
+def _query_base_param_name(key: str) -> str:
+    """Return the base query parameter name for diagnostic scrubbing."""
+    return key.split("[", 1)[0].split(".", 1)[0]
+
+
+def _safe_database_descriptor(connection_string: str) -> str:
+    """Return a diagnostic database URL with credentials removed."""
+    try:
+        parsed = make_url(connection_string)
+    except (ArgumentError, TypeError, ValueError):
+        return "<unparseable database URL redacted>"
+
+    safe_query: dict[str, str | tuple[str, ...]] = {}
+    for key, value in parsed.query.items():
+        base_key = _query_base_param_name(key).lower()
+        if base_key in SENSITIVE_PARAMS:
+            continue
+        if base_key == "odbc_connect":
+            values = value if isinstance(value, tuple) else (value,)
+            scrubbed_values = tuple(_scrub_odbc_connect_value(connect_value)[0] for connect_value in values)
+            safe_query[key] = scrubbed_values if isinstance(value, tuple) else scrubbed_values[0]
+            continue
+        safe_query[key] = value
+
+    return parsed.set(query=safe_query).render_as_string(hide_password=True)
 
 
 # StaticPool engines (``LandscapeDB.in_memory()``, tests only) share ONE DBAPI
@@ -227,6 +292,8 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Batch membership run ownership - enables composite FK enforcement to both
     # batches and tokens so cross-run batch contamination fails at the database.
     ("batch_members", "run_id"),
+    # Routing decisions must bind the chosen state and edge to the same audit run.
+    ("routing_events", "run_id"),
     # Retry lineage exactness - retry_batch() must deduplicate per failed batch.
     ("batches", "retry_of_batch_id"),
     # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
@@ -379,6 +446,8 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("transform_errors", ("transform_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("artifacts", ("produced_by_state_id", "run_id"), "node_states", ("state_id", "run_id")),
     ("artifacts", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("routing_events", ("state_id", "run_id"), "node_states", ("state_id", "run_id")),
+    ("routing_events", ("edge_id", "run_id"), "edges", ("edge_id", "run_id")),
     ("run_sources", ("source_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_state_id", "run_id"), "node_states", ("state_id", "run_id")),
@@ -391,6 +460,18 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("token_work_items", ("coalesce_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("scheduler_events", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("scheduler_events", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+)
+
+# Foreign keys that belonged to older schema shapes but are incompatible with
+# current runtime semantics. Exact matches must fail startup validation.
+_FORBIDDEN_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...], str], ...] = (
+    (
+        "node_states",
+        ("resume_checkpoint_id",),
+        "checkpoints",
+        ("checkpoint_id",),
+        "resume_checkpoint_id is marker-only; checkpoints are deletable progress state",
+    ),
 )
 
 # Required check constraints for audit integrity.
@@ -511,7 +592,7 @@ class LandscapeDB:
 
         Args:
             connection_string: SQLAlchemy connection string
-                e.g., "sqlite:///./state/audit.db"
+                e.g., "sqlite:///./data/audit.db"
                       "postgresql://user@host/dbname"
             passphrase: SQLCipher encryption passphrase. When provided, the
                 database is opened with AES-256 encryption via sqlcipher3.
@@ -529,7 +610,10 @@ class LandscapeDB:
         self._require_existing_schema = False
         self._read_only = False
         if dump_to_jsonl:
-            journal_path = dump_to_jsonl_path or self._derive_journal_path(connection_string)
+            journal_path = self._resolve_journal_path(
+                connection_string,
+                explicit_path=dump_to_jsonl_path,
+            )
             self._journal = LandscapeJournal(
                 journal_path,
                 fail_on_error=dump_to_jsonl_fail_on_error,
@@ -711,7 +795,7 @@ class LandscapeDB:
             )
 
     @staticmethod
-    def _create_sqlcipher_engine(url: str, passphrase: str) -> Engine:
+    def _create_sqlcipher_engine(url: str, passphrase: str, *, read_only: bool = False) -> Engine:
         """Create a SQLAlchemy engine backed by SQLCipher (AES-256 encryption).
 
         Uses the creator callback pattern to keep the passphrase out of the
@@ -722,8 +806,9 @@ class LandscapeDB:
         (used by _configure_sqlite for WAL/FK/busy_timeout) fires afterwards.
 
         Args:
-            url: SQLAlchemy SQLite URL (e.g., "sqlite:///./state/audit.db")
+            url: SQLAlchemy SQLite URL (e.g., "sqlite:///./data/audit.db")
             passphrase: Encryption passphrase for PRAGMA key
+            read_only: Open the encrypted SQLite file through a mode=ro URI.
 
         Returns:
             Configured SQLAlchemy Engine
@@ -790,12 +875,16 @@ class LandscapeDB:
                 # URI-style param (mode, cache, immutable, vfs, etc.)
                 uri_params[key] = value
 
+        if read_only:
+            uri_params["mode"] = "ro"
+            uri_params.pop("immutable", None)
+
         # When URI params are present, build a file: URI and enable uri=True
         # so that SQLite interprets them via the URI interface.
         if uri_params:
             from urllib.parse import quote, urlencode
 
-            file_uri = f"file:{quote(resolved_path)}?{urlencode(uri_params)}"
+            file_uri = f"file:{quote(resolved_path, safe='/:')}?{urlencode(uri_params)}"
             connect_kwargs["uri"] = True
         else:
             file_uri = None
@@ -874,7 +963,7 @@ class LandscapeDB:
                 f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
                 "This database was created or stamped by a newer ELSPETH version. "
                 "Upgrade ELSPETH to open this database.\n\n"
-                f"Database: {self.connection_string}"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
         if current_epoch < SQLITE_SCHEMA_EPOCH:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
@@ -907,7 +996,7 @@ class LandscapeDB:
                     "  1. The correct passphrase is set in the configured environment variable\n"
                     "     (landscape.encryption_key_env in settings.yaml, default: ELSPETH_AUDIT_KEY)\n"
                     "  2. backend: sqlcipher is set in settings.yaml\n\n"
-                    f"Database: {self.connection_string}"
+                    f"Database: {_safe_database_descriptor(self.connection_string)}"
                 ) from e
             raise
         expected_tables = set(metadata.tables.keys())
@@ -925,7 +1014,7 @@ class LandscapeDB:
                 "Database does not contain any Landscape tables.\n\n"
                 "This does not appear to be an ELSPETH audit database. "
                 "Verify the database path is correct.\n\n"
-                f"Database: {self.connection_string}"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
         missing_tables = sorted((expected_tables - existing_tables) - _ADDITIVE_TABLE_NAMES) if present_landscape_tables else []
 
@@ -971,6 +1060,23 @@ class LandscapeDB:
             if not has_correct_fk:
                 missing_composite_fks.append((table_name, constrained_columns, referenced_table, referenced_columns))
 
+        forbidden_fks: list[tuple[str, tuple[str, ...], str, tuple[str, ...], str]] = []
+
+        for table_name, constrained_columns, referenced_table, referenced_columns, reason in _FORBIDDEN_FOREIGN_KEYS:
+            if table_name not in existing_tables:
+                continue
+
+            fks = inspector.get_foreign_keys(table_name)
+            has_forbidden_fk = any(
+                tuple(fk["constrained_columns"]) == constrained_columns
+                and fk["referred_table"] == referenced_table
+                and tuple(fk["referred_columns"]) == referenced_columns
+                for fk in fks
+            )
+
+            if has_forbidden_fk:
+                forbidden_fks.append((table_name, constrained_columns, referenced_table, referenced_columns, reason))
+
         # Check for required check constraints (Tier 1 audit integrity)
         missing_checks: list[tuple[str, str]] = []
 
@@ -1006,6 +1112,7 @@ class LandscapeDB:
             or token_outcomes_shape_errors
             or missing_fks
             or missing_composite_fks
+            or forbidden_fks
             or missing_checks
             or missing_indexes
             or epoch_incompatible
@@ -1037,6 +1144,13 @@ class LandscapeDB:
                 )
                 error_parts.append(f"Missing composite foreign keys: {missing_composite_fk_str}")
 
+            if forbidden_fks:
+                forbidden_fk_str = ", ".join(
+                    f"{table}({', '.join(columns)}) → {ref_table}({', '.join(ref_columns)}) [{reason}]"
+                    for table, columns, ref_table, ref_columns, reason in forbidden_fks
+                )
+                error_parts.append(f"Forbidden foreign keys: {forbidden_fk_str}")
+
             if missing_checks:
                 missing_checks_str = ", ".join(f"{t}.{name}" for t, name in missing_checks)
                 error_parts.append(f"Missing check constraints: {missing_checks_str}")
@@ -1062,7 +1176,7 @@ class LandscapeDB:
                 f"To fix this, either:\n"
                 f"  1. Delete the database file and let ELSPETH recreate it, or\n"
                 f"  2. Run: elspeth landscape migrate (when available)\n\n"
-                f"Database: {self.connection_string}"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
 
     @property
@@ -1071,7 +1185,8 @@ class LandscapeDB:
 
         ``Tier1Engine`` is a :func:`typing.NewType` over
         :class:`~sqlalchemy.engine.Engine` that carries the static guarantee
-        that the engine passed the PRAGMA integrity probe
+        that the engine passed backend-appropriate audit-integrity checks. For
+        SQLite, that includes the PRAGMA integrity probe
         (:meth:`_verify_sqlite_pragmas`).  The only place in the codebase that
         may produce a ``Tier1Engine`` is this property — the ``cast()`` here
         is the single gated mint point.
@@ -1227,7 +1342,7 @@ class LandscapeDB:
             raise ValueError("read_only=True cannot enable dump_to_jsonl")
 
         if passphrase is not None:
-            engine = cls._create_sqlcipher_engine(url, passphrase)
+            engine = cls._create_sqlcipher_engine(url, passphrase, read_only=read_only)
             cls._configure_sqlite(engine, read_only=read_only)
             if not read_only:
                 # Tier-1 PRAGMA probe — see _verify_sqlite_pragmas docstring.
@@ -1243,7 +1358,11 @@ class LandscapeDB:
 
         journal: LandscapeJournal | None = None
         if dump_to_jsonl:
-            journal_path = dump_to_jsonl_path or cls._derive_journal_path(url, dump_to_jsonl_worker_suffix)
+            journal_path = cls._resolve_journal_path(
+                url,
+                explicit_path=dump_to_jsonl_path,
+                worker_suffix=dump_to_jsonl_worker_suffix,
+            )
             journal = LandscapeJournal(
                 journal_path,
                 fail_on_error=dump_to_jsonl_fail_on_error,
@@ -1270,6 +1389,37 @@ class LandscapeDB:
             instance._create_additive_indexes()
             instance._sync_sqlite_schema_epoch()
         return instance
+
+    @staticmethod
+    def _resolve_journal_path(
+        connection_string: str,
+        *,
+        explicit_path: str | None,
+        worker_suffix: str | None = None,
+    ) -> str:
+        """Resolve the JSONL journal path at the database boundary."""
+        url = make_url(connection_string)
+        explicit_path = explicit_path or None
+        if not url.drivername.startswith("sqlite"):
+            if explicit_path is None:
+                raise ValueError("dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases")
+            return explicit_path
+
+        db_path = LandscapeDB._journal_sqlite_db_path(url)
+        if explicit_path is None:
+            return LandscapeDB._derive_journal_path(connection_string, worker_suffix)
+
+        allowed_root = db_path.parent.resolve()
+        raw_path = Path(explicit_path)
+        candidate = raw_path if raw_path.is_absolute() else allowed_root / raw_path
+        resolved_path = candidate.resolve()
+        try:
+            resolved_path.relative_to(allowed_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"dump_to_jsonl_path escapes allowed journal root {allowed_root}: {explicit_path!r} -> {resolved_path}"
+            ) from exc
+        return str(resolved_path)
 
     @property
     def is_read_only(self) -> bool:
@@ -1312,17 +1462,23 @@ class LandscapeDB:
             future release.
         """
         url = make_url(connection_string)
+        db_path = LandscapeDB._journal_sqlite_db_path(url)
+        if worker_suffix is None:
+            # N=1 leader path: byte-for-byte unchanged.
+            return str(db_path.with_suffix(".journal.jsonl"))
+        if _JOURNAL_WORKER_SUFFIX_RE.fullmatch(worker_suffix) is None:
+            raise ValueError("dump_to_jsonl_worker_suffix must be a non-empty lowercase hex string")
+        # N>1 follower path: embed the hex suffix before the extension.
+        return str(db_path.parent / f"{db_path.stem}.journal.{worker_suffix}.jsonl")
+
+    @staticmethod
+    def _journal_sqlite_db_path(url: Any) -> Path:
         if not url.drivername.startswith("sqlite"):
             raise ValueError("dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases")
         database = url.database
         if database is None or database == ":memory:":
             raise ValueError("dump_to_jsonl requires a file-backed SQLite database")
-        db_path = Path(database)
-        if worker_suffix is None:
-            # N=1 leader path: byte-for-byte unchanged.
-            return str(db_path.with_suffix(".journal.jsonl"))
-        # N>1 follower path: embed the hex suffix before the extension.
-        return str(db_path.parent / f"{db_path.stem}.journal.{worker_suffix}.jsonl")
+        return Path(database)
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:
@@ -1375,11 +1531,11 @@ class LandscapeDB:
         For SQLite, sets PRAGMA query_only = ON at the connection level and,
         on writable engines only, resets it to OFF in the finally block so the
         pooled DBAPI connection is returned in a writable state. Read-only
-        engines (``from_url(read_only=True)``) keep query_only armed: it is
-        the only write barrier on SQLCipher read-only opens, which have no
-        mode=ro file-level backstop. For PostgreSQL, marks the current
-        transaction READ ONLY. Unsupported backends fail closed instead of
-        yielding a writable transaction.
+        engines (``from_url(read_only=True)``) keep query_only armed; SQLite
+        file-backed read-only handles also open through a ``mode=ro`` URI, so
+        query_only is defense in depth rather than the sole write barrier. For
+        PostgreSQL, marks the current transaction READ ONLY. Unsupported
+        backends fail closed instead of yielding a writable transaction.
         """
         dialect_name = self.engine.dialect.name
         with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:

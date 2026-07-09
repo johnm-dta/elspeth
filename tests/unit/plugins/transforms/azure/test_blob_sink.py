@@ -2,8 +2,9 @@
 
 import hashlib
 from collections.abc import Generator
+from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -32,6 +33,83 @@ TEST_CLIENT_ID = "00000000-0000-0000-0000-000000000002"
 TEST_CLIENT_SECRET = "test-secret-value"
 
 
+@dataclass(frozen=True)
+class _RecordedCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args=args, kwargs=kwargs))
+        if self.side_effect is None:
+            return self.return_value
+
+        effect = self.side_effect
+        if isinstance(effect, list):
+            effect = effect.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def called(self) -> bool:
+        return bool(self.call_args_list)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        self.assert_called_once()
+        assert self.call_args.args == args
+        assert self.call_args.kwargs == kwargs
+
+
+class _BlobClient:
+    def __init__(self) -> None:
+        self.exists = _CallRecorder(return_value=False)
+        self.upload_blob = _CallRecorder()
+
+
+class _ContainerClient:
+    def __init__(self, blob_client: _BlobClient) -> None:
+        self.get_blob_client = _CallRecorder(return_value=blob_client)
+        self.close = _CallRecorder()
+
+
+def _install_blob_client(mock_container_client: Any) -> tuple[_BlobClient, _ContainerClient]:
+    blob_client = _BlobClient()
+    container = _ContainerClient(blob_client)
+    mock_container_client.return_value = container
+    return blob_client, container
+
+
 @pytest.fixture
 def ctx() -> PluginContext:
     """Create a plugin context with proper operation records for Azure blob audit trail."""
@@ -45,8 +123,8 @@ def ctx() -> PluginContext:
 
 
 @pytest.fixture
-def mock_container_client() -> Generator[MagicMock, None, None]:
-    """Create a mock container client for testing."""
+def mock_container_client() -> Generator[Any, None, None]:
+    """Patch container client creation for testing."""
     with patch("elspeth.plugins.sinks.azure_blob_sink.AzureBlobSink._get_container_client") as mock:
         yield mock
 
@@ -113,7 +191,7 @@ def _make_sink(**kwargs: Any) -> AzureBlobSink:
 class TestAzureBlobSinkProtocol:
     """Tests for AzureBlobSink protocol compliance."""
 
-    def test_has_required_attributes(self, mock_container_client: MagicMock) -> None:
+    def test_has_required_attributes(self, mock_container_client: Any) -> None:
         """AzureBlobSink has name and input_schema."""
         assert AzureBlobSink.name == "azure_blob"
         sink = _make_sink()
@@ -224,12 +302,9 @@ class TestAzureBlobSinkConfigValidation:
 class TestAzureBlobSinkWriteCSV:
     """Tests for CSV writing to Azure Blob."""
 
-    def test_write_csv_to_blob(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_write_csv_to_blob(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Basic CSV writing to blob."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink()
         rows = [
@@ -254,12 +329,9 @@ class TestAzureBlobSinkWriteCSV:
         assert result.artifact.content_hash == hashlib.sha256(uploaded_content).hexdigest()
         assert result.artifact.size_bytes == len(uploaded_content)
 
-    def test_csv_with_custom_delimiter(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_with_custom_delimiter(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """CSV with custom delimiter works correctly."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(csv_options={"delimiter": ";"})
         rows = [{"id": 1, "name": "alice"}]
@@ -270,12 +342,9 @@ class TestAzureBlobSinkWriteCSV:
         assert b"id;name" in uploaded_content
         assert b"1;alice" in uploaded_content
 
-    def test_csv_without_header(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_without_header(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """CSV without header row when include_header=False."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(csv_options={"include_header": False})
         rows = [{"id": 1, "name": "alice"}]
@@ -288,12 +357,9 @@ class TestAzureBlobSinkWriteCSV:
         assert len(lines) == 1
         assert "1,alice" in lines[0]
 
-    def test_csv_display_headers(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_display_headers(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """CSV display headers map header names only."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(headers={"id": "ID", "name": "Full Name"})
         rows = [{"id": 1, "name": "alice"}]
@@ -305,12 +371,9 @@ class TestAzureBlobSinkWriteCSV:
         assert lines[0].startswith("ID,Full Name")
         assert "1,alice" in lines[1]
 
-    def test_csv_restore_source_headers(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_restore_source_headers(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """headers='original' uses field resolution mapping for headers."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(headers="original")
         sink.set_resume_field_resolution({"User ID": "user_id", "Amount $": "amount"})
@@ -322,12 +385,9 @@ class TestAzureBlobSinkWriteCSV:
         lines = uploaded_content.decode().strip().split("\n")
         assert lines[0].startswith("User ID,Amount $")
 
-    def test_csv_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_csv_multiple_writes_uploads_cumulative_content(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Repeated writes should upload all rows seen so far, not only latest batch."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="csv")
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -342,14 +402,11 @@ class TestAzureBlobSinkWriteCSV:
 
     def test_csv_multiple_writes_flexible_schema_includes_new_late_columns(
         self,
-        mock_container_client: MagicMock,
+        mock_container_client: Any,
         ctx: PluginContext,
     ) -> None:
         """Late columns in later batches must not crash cumulative CSV uploads."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(
             format="csv",
@@ -368,12 +425,9 @@ class TestAzureBlobSinkWriteCSV:
 class TestAzureBlobSinkWriteJSON:
     """Tests for JSON writing to Azure Blob."""
 
-    def test_write_json_to_blob(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_write_json_to_blob(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """JSON array writing to blob."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="json")
         rows = [
@@ -395,12 +449,9 @@ class TestAzureBlobSinkWriteJSON:
         assert isinstance(result.artifact, ArtifactDescriptor)
         assert result.artifact.content_hash == hashlib.sha256(uploaded_content).hexdigest()
 
-    def test_json_display_headers(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_json_display_headers(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """JSON display headers map field names in output."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="json", headers={"id": "ID", "name": "Full Name"})
         rows = [
@@ -415,12 +466,9 @@ class TestAzureBlobSinkWriteJSON:
         parsed = json.loads(uploaded_content.decode())
         assert parsed == [{"ID": 1, "Full Name": "alice"}]
 
-    def test_json_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_json_multiple_writes_uploads_cumulative_content(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """JSON format should rewrite blob with cumulative array content."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="json")
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -437,12 +485,9 @@ class TestAzureBlobSinkWriteJSON:
 class TestAzureBlobSinkWriteJSONL:
     """Tests for JSONL writing to Azure Blob."""
 
-    def test_write_jsonl_to_blob(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_write_jsonl_to_blob(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """JSONL (newline-delimited) writing to blob."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="jsonl")
         rows = [
@@ -466,12 +511,9 @@ class TestAzureBlobSinkWriteJSONL:
         # Verify ArtifactDescriptor
         assert isinstance(result.artifact, ArtifactDescriptor)
 
-    def test_jsonl_display_headers(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_jsonl_display_headers(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """JSONL display headers map field names in output."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="jsonl", headers={"id": "ID", "name": "Name"})
         rows = [
@@ -486,12 +528,9 @@ class TestAzureBlobSinkWriteJSONL:
 
         assert json.loads(lines[0]) == {"ID": 1, "Name": "alice"}
 
-    def test_jsonl_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_jsonl_multiple_writes_uploads_cumulative_content(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """JSONL format should rewrite blob with cumulative line-delimited content."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="jsonl")
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -510,12 +549,9 @@ class TestAzureBlobSinkWriteJSONL:
 class TestAzureBlobSinkPathTemplating:
     """Tests for Jinja2 path templating."""
 
-    def test_blob_path_with_run_id_template(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_blob_path_with_run_id_template(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Blob path with {{ run_id }} template renders correctly."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        _mock_blob_client, mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(blob_path="results/{{ run_id }}/output.csv")
         rows = [{"id": 1, "name": "alice"}]
@@ -530,12 +566,9 @@ class TestAzureBlobSinkPathTemplating:
         # Verify artifact descriptor uses rendered path
         assert "test-run-123" in result.artifact.path_or_uri
 
-    def test_blob_path_with_timestamp_template(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_blob_path_with_timestamp_template(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Blob path with {{ timestamp }} template renders correctly."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        _mock_blob_client, mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(blob_path="results/{{ timestamp }}/output.csv")
         rows = [{"id": 1, "name": "alice"}]
@@ -548,12 +581,9 @@ class TestAzureBlobSinkPathTemplating:
         assert rendered_path.startswith("results/20")
         assert "T" in rendered_path  # ISO format has T separator
 
-    def test_blob_path_with_timestamp_template_is_frozen_across_writes(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_blob_path_with_timestamp_template_is_frozen_across_writes(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Timestamp templates should resolve once so repeated writes target one blob."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        _mock_blob_client, mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(blob_path="results/{{ timestamp }}/output.csv")
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -568,13 +598,10 @@ class TestAzureBlobSinkPathTemplating:
 class TestAzureBlobSinkOverwriteBehavior:
     """Tests for overwrite behavior."""
 
-    def test_overwrite_true_succeeds_when_blob_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_overwrite_true_succeeds_when_blob_exists(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """With overwrite=True, writing succeeds even if blob exists."""
-        mock_blob_client = MagicMock()
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
         mock_blob_client.exists.return_value = True
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
 
         sink = _make_sink(overwrite=True)
         rows = [{"id": 1, "name": "alice"}]
@@ -588,22 +615,19 @@ class TestAzureBlobSinkOverwriteBehavior:
         call_kwargs = mock_blob_client.upload_blob.call_args[1]
         assert call_kwargs["overwrite"] is True
 
-    def test_overwrite_false_raises_if_blob_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_overwrite_false_raises_if_blob_exists(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """With overwrite=False, raises ValueError if blob exists.
 
         Azure SDK raises ResourceExistsError atomically from upload_blob(overwrite=False),
         which blob_sink converts to ValueError for a consistent API.
         """
-        ctx.record_call = MagicMock()  # type: ignore[method-assign]
+        ctx.record_call = _CallRecorder()  # type: ignore[method-assign]
 
         # Create a fake ResourceExistsError (avoid importing azure SDK in tests)
         resource_exists = type("ResourceExistsError", (Exception,), {})("Blob already exists")
 
-        mock_blob_client = MagicMock()
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
         mock_blob_client.upload_blob.side_effect = resource_exists
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
 
         sink = _make_sink(overwrite=False)
         rows = [{"id": 1, "name": "alice"}]
@@ -617,12 +641,9 @@ class TestAzureBlobSinkOverwriteBehavior:
         assert call_kwargs["request_data"]["operation"] == "upload_blob"
         assert call_kwargs["error"]["reason"] == "blob_exists"
 
-    def test_overwrite_false_succeeds_if_blob_not_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_overwrite_false_succeeds_if_blob_not_exists(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """With overwrite=False, succeeds if blob does not exist."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(overwrite=False)
         rows = [{"id": 1, "name": "alice"}]
@@ -633,12 +654,9 @@ class TestAzureBlobSinkOverwriteBehavior:
         mock_blob_client.upload_blob.assert_called_once()
         assert mock_blob_client.upload_blob.call_args[1]["overwrite"] is False
 
-    def test_overwrite_false_second_write_uses_overwrite_true(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_overwrite_false_second_write_uses_overwrite_true(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """With overwrite=False, first write guards existing blob and second write can rewrite cumulative output."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(overwrite=False)
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -652,12 +670,9 @@ class TestAzureBlobSinkOverwriteBehavior:
 class TestAzureBlobSinkArtifactDescriptor:
     """Tests for ArtifactDescriptor correctness."""
 
-    def test_returns_artifact_descriptor_with_hash(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_returns_artifact_descriptor_with_hash(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Write returns ArtifactDescriptor with correct content hash."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink()
         rows = [{"id": 1, "name": "alice"}]
@@ -674,12 +689,9 @@ class TestAzureBlobSinkArtifactDescriptor:
         assert "azure://" in result.artifact.path_or_uri
         assert TEST_CONTAINER in result.artifact.path_or_uri
 
-    def test_artifact_descriptor_contains_rendered_path(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_artifact_descriptor_contains_rendered_path(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """ArtifactDescriptor path_or_uri contains rendered blob path."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        _mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(blob_path="data/{{ run_id }}/file.csv")
         rows = [{"id": 1}]
@@ -694,7 +706,7 @@ class TestAzureBlobSinkArtifactDescriptor:
 class TestAzureBlobSinkEmptyRows:
     """Tests for empty rows edge case."""
 
-    def test_empty_rows_returns_empty_descriptor(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_empty_rows_returns_empty_descriptor(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Empty rows list returns descriptor with empty content hash."""
         sink = _make_sink()
         rows: list[dict[str, Any]] = []
@@ -712,13 +724,10 @@ class TestAzureBlobSinkEmptyRows:
 class TestAzureBlobSinkErrors:
     """Tests for error handling."""
 
-    def test_upload_error_propagates_with_context(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_upload_error_propagates_with_context(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Azure upload errors propagate as RuntimeError with context message."""
-        mock_blob_client = MagicMock()
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
         mock_blob_client.upload_blob.side_effect = Exception("Network error")
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
 
         sink = _make_sink()
         rows = [{"id": 1}]
@@ -730,13 +739,10 @@ class TestAzureBlobSinkErrors:
         assert exc_info.value.__cause__ is not None
         assert "Network error" in str(exc_info.value.__cause__)
 
-    def test_retry_after_failed_upload_does_not_duplicate_rows(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_retry_after_failed_upload_does_not_duplicate_rows(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Failed upload must not mutate cumulative buffer before a retry."""
-        mock_blob_client = MagicMock()
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
         mock_blob_client.upload_blob.side_effect = [Exception("Network error"), None]
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
 
         sink = _make_sink(format="csv")
         rows = [{"id": 1, "name": "alice"}]
@@ -759,19 +765,14 @@ class TestAzureBlobSinkErrors:
 
     def test_retry_after_post_upload_recording_failure_does_not_duplicate_rows(
         self,
-        mock_container_client: MagicMock,
+        mock_container_client: Any,
         ctx: PluginContext,
     ) -> None:
         """Audit recording failure after upload keeps retries idempotent."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         # First success record raises; error record succeeds; retry succeeds.
-        ctx.record_call = MagicMock(  # type: ignore[method-assign]
-            side_effect=[Exception("Audit DB unavailable"), None, None]
-        )
+        ctx.record_call = _CallRecorder(side_effect=[Exception("Audit DB unavailable"), None, None])
 
         sink = _make_sink(format="csv", overwrite=False)
         rows = [{"id": 1, "name": "alice"}]
@@ -795,7 +796,7 @@ class TestAzureBlobSinkErrors:
         assert len(second_upload_lines) == 2
         assert sink._buffered_rows == [{"id": 1, "name": "alice"}]
 
-    def test_connection_error_propagates(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_connection_error_propagates(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Connection errors propagate to caller."""
         mock_container_client.side_effect = Exception("Connection refused")
 
@@ -809,25 +810,22 @@ class TestAzureBlobSinkErrors:
 class TestAzureBlobSinkLifecycle:
     """Tests for sink lifecycle methods."""
 
-    def test_close_is_idempotent(self, mock_container_client: MagicMock) -> None:
+    def test_close_is_idempotent(self, mock_container_client: Any) -> None:
         """close() can be called multiple times."""
         sink = _make_sink()
         sink.close()
         sink.close()  # Should not raise
 
-    def test_close_clears_client(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_close_clears_client(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """close() clears the container client reference."""
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        _mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink()
         sink.write([{"id": 1}], ctx)  # Populate client
         sink.close()
         assert sink._container_client is None
 
-    def test_flush_is_noop(self, mock_container_client: MagicMock) -> None:
+    def test_flush_is_noop(self, mock_container_client: Any) -> None:
         """flush() is a no-op (uploads are synchronous)."""
         sink = _make_sink()
         sink.flush()  # Should not raise
@@ -853,13 +851,13 @@ class TestAzureBlobSinkImportError:
 class TestAzureBlobSinkAuthMethods:
     """Tests for Azure authentication methods."""
 
-    def test_auth_connection_string(self, mock_container_client: MagicMock) -> None:
+    def test_auth_connection_string(self, mock_container_client: Any) -> None:
         """Connection string auth creates sink successfully."""
         sink = _make_sink(connection_string=TEST_CONNECTION_STRING)
         assert sink._auth_config.auth_method == "connection_string"
         assert sink._auth_config.connection_string == TEST_CONNECTION_STRING
 
-    def test_auth_managed_identity(self, mock_container_client: MagicMock) -> None:
+    def test_auth_managed_identity(self, mock_container_client: Any) -> None:
         """Managed identity auth creates sink successfully."""
         sink = _make_sink(
             connection_string=None,
@@ -870,7 +868,7 @@ class TestAzureBlobSinkAuthMethods:
         assert sink._auth_config.use_managed_identity is True
         assert sink._auth_config.account_url == TEST_ACCOUNT_URL
 
-    def test_auth_service_principal(self, mock_container_client: MagicMock) -> None:
+    def test_auth_service_principal(self, mock_container_client: Any) -> None:
         """Service principal auth creates sink successfully."""
         sink = _make_sink(
             connection_string=None,
@@ -1016,9 +1014,9 @@ class TestAzureBlobSinkAuthClientCreation:
             patch("azure.identity.DefaultAzureCredential") as mock_credential_cls,
             patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls,
         ):
-            mock_credential = MagicMock()
+            mock_credential = object()
             mock_credential_cls.return_value = mock_credential
-            mock_service_client = MagicMock()
+            mock_service_client = object()
             mock_service_client_cls.return_value = mock_service_client
 
             # Trigger client creation
@@ -1044,9 +1042,9 @@ class TestAzureBlobSinkAuthClientCreation:
             patch("azure.identity.ClientSecretCredential") as mock_credential_cls,
             patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls,
         ):
-            mock_credential = MagicMock()
+            mock_credential = object()
             mock_credential_cls.return_value = mock_credential
-            mock_service_client = MagicMock()
+            mock_service_client = object()
             mock_service_client_cls.return_value = mock_service_client
 
             # Trigger client creation
@@ -1067,7 +1065,7 @@ class TestAzureBlobSinkAuthClientCreation:
 
         # Mock the azure.storage.blob import
         with patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls:
-            mock_service_client = MagicMock()
+            mock_service_client = object()
             mock_service_client_cls.from_connection_string.return_value = mock_service_client
 
             # Trigger client creation
@@ -1106,10 +1104,7 @@ class TestAzureBlobSinkSchemaValidation:
 
         # Mock the Azure client
         with patch.object(sink, "_get_container_client") as mock_get_client:
-            mock_blob_client = MagicMock()
-            mock_container = MagicMock()
-            mock_container.get_blob_client.return_value = mock_blob_client
-            mock_get_client.return_value = mock_container
+            mock_blob_client, _mock_container = _install_blob_client(mock_get_client)
 
             # Write row with declared field + two extras
             sink.write([{"id": 1, "name": "alice", "llm_response": "classification"}], ctx)
@@ -1148,10 +1143,7 @@ class TestAzureBlobSinkSchemaValidation:
 
         # Mock the Azure client
         with patch.object(sink, "_get_container_client") as mock_get_client:
-            mock_blob_client = MagicMock()
-            mock_container = MagicMock()
-            mock_container.get_blob_client.return_value = mock_blob_client
-            mock_get_client.return_value = mock_container
+            mock_blob_client, _mock_container = _install_blob_client(mock_get_client)
 
             # Row has extras interspersed
             sink.write([{"extra1": "a", "id": 1, "extra2": "b", "name": "alice"}], ctx)
@@ -1195,10 +1187,7 @@ class TestAzureBlobSinkSchemaValidation:
 
         # Mock the Azure client
         with patch.object(sink, "_get_container_client") as mock_get_client:
-            mock_blob_client = MagicMock()
-            mock_container = MagicMock()
-            mock_container.get_blob_client.return_value = mock_blob_client
-            mock_get_client.return_value = mock_container
+            mock_blob_client, _mock_container = _install_blob_client(mock_get_client)
 
             # Write row with only declared fields (extras would be rejected by schema)
             sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -1219,7 +1208,7 @@ class TestAzureBlobSinkSchemaValidation:
 class TestAzureBlobSinkDisplayHeaders:
     """Tests for display header integration via shared module (B1, W3)."""
 
-    def test_contract_priority_over_landscape(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_contract_priority_over_landscape(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """Contract-based headers take priority over Landscape field resolution.
 
         B1 review finding: When headers='original' and ctx.contract provides
@@ -1228,10 +1217,7 @@ class TestAzureBlobSinkDisplayHeaders:
         """
         from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="jsonl", headers="original")
 
@@ -1268,16 +1254,13 @@ class TestAzureBlobSinkDisplayHeaders:
         # Assert output uses CONTRACT original names, not normalized
         assert parsed == {"User ID": "alice", "Amount $": 99.5}
 
-    def test_resume_field_resolution_maps_headers(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+    def test_resume_field_resolution_maps_headers(self, mock_container_client: Any, ctx: PluginContext) -> None:
         """set_resume_field_resolution provides display headers for resume path.
 
         W3 review finding: Resume path injects field resolution before
         validate_output_target(). Verify that output uses the resolved names.
         """
-        mock_blob_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.get_blob_client.return_value = mock_blob_client
-        mock_container_client.return_value = mock_container
+        mock_blob_client, _mock_container = _install_blob_client(mock_container_client)
 
         sink = _make_sink(format="csv", headers="original")
         # CLI resume injects field resolution mapping (original → normalized)

@@ -175,6 +175,37 @@ def test_post_emission_check_records_all_failing_emitted_rows() -> None:
     assert tuple(tuple(entry["missing"]) for entry in violations) == (("new_b",), ("new_a",))
 
 
+def test_post_emission_check_bounds_violation_evidence() -> None:
+    contract = DeclaredOutputFieldsContract()
+    inputs = PostEmissionInputs(
+        plugin=_plugin(declared_output_fields=frozenset({"required_field"})),
+        node_id="n-1",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        input_row=_row(("source",)),
+        static_contract=frozenset({"required_field"}),
+        effective_input_fields=frozenset({"source"}),
+    )
+    noisy_fields = tuple(f"field_{idx:02d}" for idx in range(30))
+    outputs = PostEmissionOutputs(emitted_rows=tuple(_row(noisy_fields) for _ in range(12)))
+
+    with pytest.raises(DeclaredOutputFieldsViolation) as exc_info:
+        contract.post_emission_check(inputs, outputs)
+
+    payload = exc_info.value.payload
+    assert payload["violation_count"] == 12
+    assert payload["violations_truncated"] is True
+    assert len(payload["violations"]) == 10
+    assert [entry["emitted_index"] for entry in payload["violations"]] == list(range(10))
+
+    first = payload["violations"][0]
+    assert first["missing"] == ("required_field",)
+    assert len(first["runtime_observed"]) == 20
+    assert first["runtime_observed_count"] == 30
+    assert first["runtime_observed_truncated"] is True
+
+
 def test_batch_flush_check_records_all_failing_emitted_rows() -> None:
     contract = DeclaredOutputFieldsContract()
     token_row = _row(("source",))

@@ -1,3 +1,0 @@
-{
-  "content": "Quick technical change before we run — operator note here, not Linda. Please switch the LLM transform's model from anthropic/claude-3.5-sonnet to openai/gpt-4o-mini. The previous model identifier wasn't recognised by the OpenRouter API at runtime (HTTP 404 on every row). Same provider (openrouter), just a different model. Don't change anything else about the workflow.\n"
-}

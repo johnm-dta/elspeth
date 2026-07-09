@@ -8,12 +8,54 @@ verify_audit_trail are deferred to integration tier.
 
 import json
 from pathlib import Path
+from types import SimpleNamespace, TracebackType
 from typing import Any
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+class _HttpResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_HttpResponse":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+
+class _HttpOpener:
+    def __init__(
+        self,
+        *,
+        response: _HttpResponse | None = None,
+        error: BaseException | None = None,
+        requested_urls: list[str] | None = None,
+    ) -> None:
+        self._response = response
+        self._error = error
+        self._requested_urls = requested_urls
+
+    def open(self, url: str, timeout: int | None = None) -> _HttpResponse:
+        if self._requested_urls is not None:
+            self._requested_urls.append(url)
+        if self._error is not None:
+            raise self._error
+        if self._response is None:
+            raise AssertionError("No HTTP response configured")
+        return self._response
 
 
 class TestCLIBasics:
@@ -308,8 +350,6 @@ class TestExplainSecretLoading:
 
     def test_explain_uses_secret_loading_path(self, tmp_path: Path) -> None:
         """explain --settings should call _load_settings_with_secrets, not load_settings."""
-        from unittest.mock import MagicMock
-
         from elspeth.cli import app
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape import LandscapeDB
@@ -328,8 +368,7 @@ class TestExplainSecretLoading:
         settings_file.write_text("source:\n  plugin: csv\n  options:\n    file: test.csv\n")
 
         # Patch _load_settings_with_secrets to verify it's called
-        mock_settings = MagicMock()
-        mock_settings.landscape = None
+        mock_settings = SimpleNamespace(landscape=None)
         with patch(
             "elspeth.cli._load_settings_with_secrets",
             return_value=(mock_settings, []),
@@ -487,18 +526,16 @@ class TestHealthCommand:
         when --check-web is specified (web containers).
         """
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         # Mock build_opener to return a mock opener that raises URLError on .open()
         # The implementation uses build_opener(...).open(...), not urlopen directly,
         # to bypass HTTP_PROXY in corporate environments.
-        mock_opener = MagicMock()
-        mock_opener.open.side_effect = urllib.error.URLError("connection refused")
+        opener = _HttpOpener(error=urllib.error.URLError("connection refused"))
 
         def mock_build_opener(*args, **kwargs):
-            return mock_opener
+            return opener
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -555,20 +592,14 @@ class TestHealthCommand:
         This tests the happy path by mocking the no-proxy opener.
         """
         import json
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         # Mock build_opener to return a mock opener that returns success
-        mock_response = MagicMock()
-        mock_response.read.return_value = b'{"status": "ok"}'
-        mock_response.__enter__ = lambda self: self
-        mock_response.__exit__ = lambda self, *args: None
+        response = _HttpResponse(b'{"status": "ok"}')
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-            mock_opener.open.return_value = mock_response
-            return mock_opener
+            return _HttpOpener(response=response)
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -581,7 +612,6 @@ class TestHealthCommand:
     def test_health_web_check_uses_env_vars(self, monkeypatch) -> None:
         """web check reads host/port from ELSPETH_WEB__* env vars."""
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
@@ -593,14 +623,10 @@ class TestHealthCommand:
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -629,7 +655,6 @@ class TestHealthCommand:
     def test_health_port_option_overrides_env(self, monkeypatch) -> None:
         """--port takes precedence over ELSPETH_WEB__PORT env var."""
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
@@ -640,14 +665,10 @@ class TestHealthCommand:
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -661,7 +682,6 @@ class TestHealthCommand:
     def test_health_host_option_overrides_env(self, monkeypatch) -> None:
         """--host takes precedence over ELSPETH_WEB__HOST env var."""
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
@@ -672,14 +692,10 @@ class TestHealthCommand:
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -698,21 +714,16 @@ class TestHealthCommand:
         health checks in web deployments.
         """
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -730,21 +741,16 @@ class TestHealthCommand:
         health checks in web deployments.
         """
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -762,21 +768,13 @@ class TestHealthCommand:
         only applies when skip_web is at its default value.
         """
         import json
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise Exception("Should not be called")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(error=AssertionError("Should not be called"), requested_urls=requested_urls)
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -797,21 +795,16 @@ class TestHealthCommand:
         urllib can't distinguish port from IPv6 address components.
         """
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -860,21 +853,16 @@ class TestHealthCommand:
         not at 0.0.0.0:8451.
         """
         import urllib.error
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
         requested_urls: list[str] = []
 
         def mock_build_opener(*handlers):
-            mock_opener = MagicMock()
-
-            def mock_open(url, timeout=None):
-                requested_urls.append(url)
-                raise urllib.error.URLError("connection refused")
-
-            mock_opener.open.side_effect = mock_open
-            return mock_opener
+            return _HttpOpener(
+                error=urllib.error.URLError("connection refused"),
+                requested_urls=requested_urls,
+            )
 
         monkeypatch.setattr("urllib.request.build_opener", mock_build_opener)
 
@@ -904,7 +892,6 @@ class TestHealthCommand:
         a direct-connect opener that ignores proxy environment variables.
         """
         import urllib.request
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
@@ -918,13 +905,7 @@ class TestHealthCommand:
         def capturing_build_opener(*handlers):
             captured_handlers.extend(handlers)
             # Return a mock opener that simulates success
-            mock_opener = MagicMock()
-            mock_response = MagicMock()
-            mock_response.read.return_value = b'{"status": "ok"}'
-            mock_response.__enter__ = lambda self: self
-            mock_response.__exit__ = lambda self, *args: None
-            mock_opener.open.return_value = mock_response
-            return mock_opener
+            return _HttpOpener(response=_HttpResponse(b'{"status": "ok"}'))
 
         monkeypatch.setattr("urllib.request.build_opener", capturing_build_opener)
 
@@ -951,7 +932,6 @@ class TestHealthCommand:
         the target.
         """
         import urllib.request
-        from unittest.mock import MagicMock
 
         from elspeth.cli import app
 
@@ -963,13 +943,7 @@ class TestHealthCommand:
 
         def capturing_build_opener(*handlers):
             captured_handlers.extend(handlers)
-            mock_opener = MagicMock()
-            mock_response = MagicMock()
-            mock_response.read.return_value = b'{"status": "ok"}'
-            mock_response.__enter__ = lambda self: self
-            mock_response.__exit__ = lambda self, *args: None
-            mock_opener.open.return_value = mock_response
-            return mock_opener
+            return _HttpOpener(response=_HttpResponse(b'{"status": "ok"}'))
 
         monkeypatch.setattr("urllib.request.build_opener", capturing_build_opener)
 

@@ -13,7 +13,7 @@
 }
 
 .progress-ws-banner {
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   margin-bottom: var(--space-sm);
   background-color: var(--color-warning-bg);
   color: var(--color-warning);
@@ -29,15 +29,12 @@
   margin-bottom: var(--space-sm);
 }
 
-.progress-status-label {
-  font-weight: 600;
-  text-transform: uppercase;
-  font-size: var(--font-size-xs);
-  color: var(--color-text);
-}
+/* Status text is now rendered by the ui/StatusBadge primitive
+   (.status-badge* in styles/shared.css); the old .progress-status-label
+   rule was retired with the hand-rolled span (elspeth-e1c5ad0b53). */
 
 .progress-cancel-btn {
-  padding: var(--space-xs) 10px;
+  padding: var(--space-xs) var(--space-2-5);
   font-size: var(--font-size-xs);
 }
 
@@ -58,7 +55,7 @@
 .progress-counter-label {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
 }
 
 .progress-counter-value {
@@ -99,7 +96,7 @@
 }
 
 .progress-accounting-item dd {
-  margin: 2px 0 0;
+  margin: var(--space-2xs) 0 0;
   font-weight: 600;
   color: var(--color-text);
 }

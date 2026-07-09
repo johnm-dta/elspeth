@@ -91,3 +91,9 @@ class GateOutcome:
                 raise ValueError(f"GateOutcome invariant: FORK_TO_PATHS action cannot have next_node_id={self.next_node_id!r}")
             if self.discarded:
                 raise ValueError("GateOutcome invariant: FORK_TO_PATHS action cannot have discarded=True")
+            destination_count = len(self.result.action.destinations)
+            if len(self.child_tokens) != destination_count:
+                raise ValueError(
+                    "GateOutcome invariant: FORK_TO_PATHS action destinations "
+                    f"({destination_count}) must match child_tokens ({len(self.child_tokens)})"
+                )

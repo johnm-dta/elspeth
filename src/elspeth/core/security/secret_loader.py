@@ -105,6 +105,15 @@ def _get_keyvault_client(vault_url: str) -> SecretClient:
     return SecretClient(vault_url=vault_url, credential=credential)
 
 
+def _is_azure_resource_not_found(exc: Exception) -> bool:
+    """Return whether an exception is Azure's 404 type without eager Azure imports."""
+    try:
+        from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
+    except ImportError:
+        return False
+    return isinstance(exc, AzureResourceNotFoundError)
+
+
 class EnvSecretLoader:
     """Load secrets from environment variables.
 
@@ -133,93 +142,6 @@ class EnvSecretLoader:
         # (they have the fingerprint key, we don't)
         ref = SecretRef(name=name, fingerprint="", source="env")
         return value, ref
-
-
-class KeyVaultSecretLoader:
-    """Load secrets from Azure Key Vault with built-in caching.
-
-    This loader caches secrets to prevent repeated Key Vault API calls.
-    Each secret is fetched at most once per KeyVaultSecretLoader instance.
-
-    Caching behavior:
-    - Successful lookups are cached forever (until clear_cache() or process restart)
-    - Failed lookups (SecretNotFoundError) are NOT cached (allows retry after fix)
-    """
-
-    def __init__(self, vault_url: str) -> None:
-        """Initialize the Key Vault loader.
-
-        Args:
-            vault_url: The Key Vault URL (e.g., https://my-vault.vault.azure.net)
-        """
-        self._vault_url = vault_url
-        self._client: SecretClient | None = None
-        self._cache: dict[str, str] = {}
-        self._lock = threading.Lock()
-
-    def _get_client(self) -> SecretClient:
-        """Get or create the Key Vault client (lazy initialization).
-
-        Caller must hold self._lock.
-        """
-        if self._client is None:
-            self._client = _get_keyvault_client(self._vault_url)
-        return self._client
-
-    def get_secret(self, name: str) -> tuple[str, SecretRef]:
-        """Load a secret from Azure Key Vault (with caching).
-
-        Thread-safe: uses a lock to ensure at-most-once fetch per secret.
-
-        Args:
-            name: The secret name in Key Vault
-
-        Returns:
-            Tuple of (secret_value, SecretRef)
-
-        Raises:
-            SecretNotFoundError: If the secret doesn't exist or has no value
-            azure.core.exceptions.ClientAuthenticationError: If authentication fails
-            azure.core.exceptions.HttpResponseError: For HTTP errors (rate limiting, server errors)
-            azure.core.exceptions.ServiceRequestError: For network/connectivity issues
-        """
-        with self._lock:
-            # Check cache first (inside lock to prevent duplicate fetches)
-            if name in self._cache:
-                ref = SecretRef(name=name, fingerprint="", source="keyvault")
-                return self._cache[name], ref
-
-            # _get_client() raises the helpful ImportError when the Azure SDK is
-            # absent, before any API call. Once it returns, azure-keyvault-secrets
-            # (and its azure-core dependency) are installed, so importing the Azure
-            # exception type here cannot fail in any real environment.
-            client = self._get_client()
-            from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
-
-            try:
-                secret = client.get_secret(name)
-            except AzureResourceNotFoundError as e:
-                # HTTP 404 - secret genuinely doesn't exist in Key Vault.
-                # This is the ONLY Azure exception that triggers fallback; all
-                # other Azure exceptions (auth errors, rate limits, network issues)
-                # propagate. Do NOT catch Exception - operational failures must
-                # fail fast, not silently fall back.
-                raise SecretNotFoundError(f"Secret '{name}' not found in Key Vault ({self._vault_url})") from e
-
-            value: str | None = secret.value
-            if value is None:
-                raise SecretNotFoundError(f"Key Vault secret '{name}' has no value")
-
-            # Cache the result
-            self._cache[name] = value
-
-            ref = SecretRef(name=name, fingerprint="", source="keyvault")
-            return value, ref
-
-    def clear_cache(self) -> None:
-        """Clear the secret cache, forcing refetch on next access."""
-        with self._lock:
-            self._cache.clear()
 
 
 class CachedSecretLoader:
@@ -265,6 +187,99 @@ class CachedSecretLoader:
         """Clear the cache."""
         with self._lock:
             self._cache.clear()
+
+
+class _KeyVaultBackendAdapter:
+    """Adapter that exposes uncached Key Vault retrieval to CachedSecretLoader."""
+
+    def __init__(self, loader: KeyVaultSecretLoader) -> None:
+        self._loader = loader
+
+    def get_secret(self, name: str) -> tuple[str, SecretRef]:
+        return self._loader._fetch_secret(name)
+
+
+class KeyVaultSecretLoader:
+    """Load secrets from Azure Key Vault through the generic cache wrapper.
+
+    The Azure-specific path only handles client creation, Key Vault exception
+    translation, and SecretRef construction. Cache policy lives in
+    CachedSecretLoader so every secret backend uses one cache implementation.
+
+    Caching behavior:
+    - Successful lookups are cached forever (until clear_cache() or process restart)
+    - Failed lookups (SecretNotFoundError) are NOT cached (allows retry after fix)
+    """
+
+    def __init__(self, vault_url: str) -> None:
+        """Initialize the Key Vault loader.
+
+        Args:
+            vault_url: The Key Vault URL (e.g., https://my-vault.vault.azure.net)
+        """
+        self._vault_url = vault_url
+        self._client: SecretClient | None = None
+        self._client_lock = threading.Lock()
+        self._cache_loader = CachedSecretLoader(_KeyVaultBackendAdapter(self))
+
+    def _get_client(self) -> SecretClient:
+        """Get or create the Key Vault client (lazy initialization).
+
+        Caller must hold self._client_lock.
+        """
+        if self._client is None:
+            self._client = _get_keyvault_client(self._vault_url)
+        return self._client
+
+    def get_secret(self, name: str) -> tuple[str, SecretRef]:
+        """Load a secret from Azure Key Vault (with caching).
+
+        Thread-safe: uses a lock to ensure at-most-once fetch per secret.
+
+        Args:
+            name: The secret name in Key Vault
+
+        Returns:
+            Tuple of (secret_value, SecretRef)
+
+        Raises:
+            SecretNotFoundError: If the secret doesn't exist or has no value
+            azure.core.exceptions.ClientAuthenticationError: If authentication fails
+            azure.core.exceptions.HttpResponseError: For HTTP errors (rate limiting, server errors)
+            azure.core.exceptions.ServiceRequestError: For network/connectivity issues
+        """
+        return self._cache_loader.get_secret(name)
+
+    def _fetch_secret(self, name: str) -> tuple[str, SecretRef]:
+        """Fetch a Key Vault secret without cache lookup or storage."""
+        with self._client_lock:
+            # _get_client() raises the helpful ImportError when the Azure SDK is
+            # absent, before any API call. Tests may patch _get_client() without
+            # installing azure-core, so classify Azure 404s lazily by helper.
+            client = self._get_client()
+
+            try:
+                secret = client.get_secret(name)
+            except Exception as e:
+                # HTTP 404 - secret genuinely doesn't exist in Key Vault.
+                # This is the ONLY Azure exception that triggers fallback; all
+                # other Azure exceptions (auth errors, rate limits, network issues)
+                # propagate unchanged. Operational failures must fail fast, not
+                # silently fall back.
+                if _is_azure_resource_not_found(e):
+                    raise SecretNotFoundError(f"Secret '{name}' not found in Key Vault ({self._vault_url})") from e
+                raise
+
+            value: str | None = secret.value
+            if value is None:
+                raise SecretNotFoundError(f"Key Vault secret '{name}' has no value")
+
+            ref = SecretRef(name=name, fingerprint="", source="keyvault")
+            return value, ref
+
+    def clear_cache(self) -> None:
+        """Clear the secret cache, forcing refetch on next access."""
+        self._cache_loader.clear_cache()
 
 
 class CompositeSecretLoader:

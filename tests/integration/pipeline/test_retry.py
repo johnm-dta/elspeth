@@ -13,7 +13,6 @@ This verifies the full retry audit chain:
 """
 
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
@@ -198,10 +197,7 @@ class TestRetryAuditTrail:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        # Create a noop span factory
-        span_factory = Mock(spec=SpanFactory)
-        span_factory.transform_span.return_value.__enter__ = Mock(return_value=None)
-        span_factory.transform_span.return_value.__exit__ = Mock(return_value=None)
+        span_factory = SpanFactory()
 
         return {
             "db": db,

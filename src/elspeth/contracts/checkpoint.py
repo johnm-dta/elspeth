@@ -17,6 +17,39 @@ from elspeth.contracts.types import NodeID
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointDraft:
+    """Persistence-ready checkpoint input.
+
+    The topology hash is computed before this reaches the repository layer so
+    checkpoint persistence can stay decoupled from graph topology and hashing
+    policy.
+    """
+
+    run_id: str
+    sequence_number: int
+    upstream_topology_hash: str
+    barrier_scalars: BarrierScalars | None = None
+    format_version: int = Checkpoint.CURRENT_FORMAT_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str):
+            raise TypeError(f"CheckpointDraft.run_id must be str, got {type(self.run_id).__name__}: {self.run_id!r}")
+        if not self.run_id:
+            raise ValueError("CheckpointDraft.run_id must not be empty")
+        require_int(self.sequence_number, "CheckpointDraft.sequence_number", min_value=0)
+        if not isinstance(self.upstream_topology_hash, str):
+            raise TypeError(
+                "CheckpointDraft.upstream_topology_hash must be str, "
+                f"got {type(self.upstream_topology_hash).__name__}: {self.upstream_topology_hash!r}"
+            )
+        if not self.upstream_topology_hash:
+            raise ValueError("CheckpointDraft.upstream_topology_hash must not be empty")
+        if self.barrier_scalars is not None and not isinstance(self.barrier_scalars, BarrierScalars):
+            raise TypeError(f"CheckpointDraft.barrier_scalars must be BarrierScalars or None, got {type(self.barrier_scalars).__name__}")
+        require_int(self.format_version, "CheckpointDraft.format_version", min_value=0)
+
+
+@dataclass(frozen=True, slots=True)
 class ResumeCheck:
     """Result of checking if a run can be resumed.
 

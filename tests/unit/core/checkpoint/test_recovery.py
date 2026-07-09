@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ConfigDict
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, select, update
 
 from elspeth.contracts import (
     Checkpoint,
@@ -27,6 +28,7 @@ from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
+from elspeth.core.checkpoint import recovery as recovery_module
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
 from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS, IncompleteTokenSpec
 from elspeth.core.dag import ExecutionGraph
@@ -42,6 +44,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from tests.fixtures.landscape import make_landscape_db
+from tests.helpers.checkpoint import checkpoint_draft
 
 
 @pytest.fixture
@@ -80,6 +83,24 @@ def _create_graph(*, node_id: str = "checkpoint-node", config: dict[str, Any] | 
     graph = ExecutionGraph()
     graph.add_node(node_id, node_type=NodeType.TRANSFORM, plugin_name="test", config=config or {})
     return graph
+
+
+def _create_checkpoint(
+    checkpoint_manager: CheckpointManager,
+    *,
+    run_id: str,
+    sequence_number: int,
+    graph: ExecutionGraph,
+    barrier_scalars: BarrierScalars | None = None,
+) -> Checkpoint:
+    return checkpoint_manager.create_checkpoint(
+        draft=checkpoint_draft(
+            run_id=run_id,
+            sequence_number=sequence_number,
+            graph=graph,
+            barrier_scalars=barrier_scalars,
+        )
+    )
 
 
 def _insert_run(
@@ -286,7 +307,8 @@ def _create_failed_run_with_checkpoint(
         _insert_row(conn, run_id, "row-0", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-0", "row-0")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=barrier_scalars,
@@ -407,6 +429,20 @@ def test_can_resume_returns_reason_when_checkpoint_format_is_incompatible(
     check = recovery_manager.can_resume("run-incompatible", _create_graph())
     assert check.can_resume is False
     assert check.reason == "bad checkpoint format"
+
+
+def test_get_unprocessed_rows_rejects_incompatible_checkpoint_format(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    run_id = "run-workset-incompatible-format"
+    _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
+    with db.engine.begin() as conn:
+        conn.execute(update(checkpoints_table).where(checkpoints_table.c.run_id == run_id).values(format_version=None))
+
+    with pytest.raises(IncompatibleCheckpointError, match="missing format_version"):
+        recovery_manager.get_unprocessed_rows(run_id)
 
 
 def test_can_resume_rejects_topology_mismatch(
@@ -543,7 +579,8 @@ def test_get_unprocessed_rows_orders_by_ingest_sequence(
         conn.execute(rows_table.update().where(rows_table.c.row_id == "row-a").values(ingest_sequence=10))
         conn.execute(rows_table.update().where(rows_table.c.row_id == "row-b").values(ingest_sequence=5))
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -582,7 +619,8 @@ def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
             completed=True,
         )
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -633,7 +671,8 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         _insert_token(conn, run_id, "tok-mixed-pending", "row-mixed-buffering")
         _insert_blocked_work_item(conn, run_id, "tok-mixed-buffered", "row-mixed-buffering", barrier_key="agg-node")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=10,
         barrier_scalars=None,
@@ -642,6 +681,56 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
 
     unprocessed = recovery_manager.get_unprocessed_rows(run_id)
     assert unprocessed == ["row-delegation-only", "row-child-pending", "row-mixed-buffering"]
+
+
+def test_get_resume_workset_shares_row_and_token_recovery_queries(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """The resume path should compute row and token continuation work together."""
+    run_id = "run-resume-workset"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "checkpoint-node")
+
+        _insert_row(conn, run_id, "row-completed", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-completed", "row-completed")
+        _insert_terminal_outcome(conn, run_id, "tok-completed", outcome=TerminalOutcome.SUCCESS)
+
+        _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-pending", "row-pending")
+
+        _insert_row(conn, run_id, "row-buffered", row_index=2, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-buffered", "row-buffered")
+        _insert_blocked_work_item(conn, run_id, "tok-buffered", "row-buffered", barrier_key="agg-node")
+
+        _insert_row(conn, run_id, "row-mixed", row_index=3, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-mixed-buffered", "row-mixed")
+        _insert_token(conn, run_id, "tok-mixed-pending", "row-mixed")
+        _insert_blocked_work_item(conn, run_id, "tok-mixed-buffered", "row-mixed", barrier_key="agg-node")
+
+        _insert_row(conn, run_id, "row-queued", row_index=4, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-queued", "row-queued")
+        _insert_blocked_work_item(conn, run_id, "tok-queued", "row-queued", barrier_key=None, queue_key="llm-rate-limit")
+
+    _create_checkpoint(
+        checkpoint_manager,
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=None,
+        graph=graph,
+    )
+
+    workset = recovery_manager.get_resume_workset(run_id)
+
+    assert workset.row_ids == ("row-pending", "row-mixed", "row-queued")
+    assert workset.buffered_token_ids == frozenset({"tok-buffered", "tok-mixed-buffered"})
+    assert {spec.token_id for spec in workset.incomplete_by_row["row-pending"]} == {"tok-pending"}
+    assert {spec.token_id for spec in workset.incomplete_by_row["row-mixed"]} == {"tok-mixed-pending"}
+    assert {spec.token_id for spec in workset.incomplete_by_row["row-queued"]} == {"tok-queued"}
+    assert "row-buffered" not in workset.incomplete_by_row
 
 
 def test_get_unprocessed_rows_chunks_buffered_token_query(
@@ -678,7 +767,8 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
         _insert_token(conn, run_id, "tok-c", "row-c")
         _insert_blocked_work_item(conn, run_id, "tok-c", "row-c", barrier_key="agg-node")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -712,7 +802,8 @@ def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
         _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-pending", "row-pending")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -749,7 +840,8 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
         _insert_row(conn, run_id, "row-free", row_index=2, source_data_ref=None)
         _insert_token(conn, run_id, "tok-free", "row-free")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -779,7 +871,8 @@ def test_get_unprocessed_rows_coalesce_multi_branch_collects_all_tokens(
         _insert_blocked_work_item(conn, run_id, "tok-branch-a", "row-multi", barrier_key="merge1")
         _insert_blocked_work_item(conn, run_id, "tok-branch-b", "row-multi", barrier_key="merge1")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -811,7 +904,8 @@ def test_buffered_exclusion_reads_journal_not_blob(
         _insert_token(conn, run_id, "t1", "r1")
         _insert_blocked_work_item(conn, run_id, "t1", "r1", barrier_key="agg-node")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -841,7 +935,8 @@ def test_queue_held_token_stays_in_redrive_work_set(
         _insert_token(conn, run_id, "tok-queued", "row-queued")
         _insert_blocked_work_item(conn, run_id, "tok-queued", "row-queued", barrier_key=None, queue_key="llm-rate-limit")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -873,7 +968,8 @@ def test_post_checkpoint_buffered_token_is_restored_not_redriven(
         _insert_token(conn, run_id, "tok-late-buffer", "row-late-buffer")
 
     # Checkpoint (the resume baseline, with scalars) predates the BLOCKED row.
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=BarrierScalars(
@@ -906,7 +1002,8 @@ def test_get_incomplete_tokens_by_row_excludes_journal_blocked_tokens(
         _insert_token(conn, run_id, "tok-live", "row-mixed")
         _insert_blocked_work_item(conn, run_id, "tok-held", "row-mixed", barrier_key="merge1")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -943,6 +1040,58 @@ def test_count_blocked_barrier_items_counts_only_barrier_holds(
 
     assert recovery_manager.count_blocked_barrier_items(run_id) == 2
     assert recovery_manager.count_blocked_barrier_items("other-run") == 0
+
+
+def test_recovery_uses_scheduler_barrier_resume_boundary(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeBarrierJournalRepository:
+        def __init__(self, engine: Any, *, events: Any) -> None:
+            assert engine is db.engine
+
+        def blocked_barrier_token_ids(self, *, run_id: str) -> frozenset[str]:
+            calls.append(("ids", run_id))
+            return frozenset({"tok-held"})
+
+        def count_blocked_barrier_items(self, *, run_id: str) -> int:
+            calls.append(("count", run_id))
+            return 7
+
+    monkeypatch.setattr(recovery_module, "BarrierJournalRepository", FakeBarrierJournalRepository)
+
+    assert recovery_manager._get_buffered_journal_token_ids("run-boundary") == {"tok-held"}
+    assert recovery_manager.count_blocked_barrier_items("run-boundary") == 7
+    assert calls == [("ids", "run-boundary"), ("count", "run-boundary")]
+
+
+def test_recovery_barrier_resume_boundary_supports_read_only_handles(tmp_path: Path) -> None:
+    db_path = tmp_path / "landscape.db"
+    writable = LandscapeDB.from_url(f"sqlite:///{db_path}")
+    try:
+        run_id = "run-read-only-boundary"
+        with writable.connection() as conn:
+            _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+            _insert_row(conn, run_id, "row-1", row_index=0, source_data_ref=None)
+            _insert_token(conn, run_id, "tok-barrier", "row-1")
+            _insert_token(conn, run_id, "tok-queue", "row-1")
+            _insert_blocked_work_item(conn, run_id, "tok-barrier", "row-1", barrier_key="agg-node")
+            _insert_blocked_work_item(conn, run_id, "tok-queue", "row-1", barrier_key=None, queue_key="llm-rate-limit")
+    finally:
+        writable.close()
+
+    read_only = LandscapeDB.from_url(f"sqlite:///{db_path}", read_only=True, create_tables=False)
+    try:
+        assert read_only.is_read_only is True
+        recovery = RecoveryManager(read_only, CheckpointManager(read_only))
+
+        assert recovery._get_buffered_journal_token_ids(run_id) == {"tok-barrier"}
+        assert recovery.count_blocked_barrier_items(run_id) == 1
+    finally:
+        read_only.close()
 
 
 class _SimpleSchema(PluginSchema):
@@ -1044,6 +1193,50 @@ def test_get_unprocessed_row_data_chunked_lookup_and_type_restoration(
     assert rows == [
         ResumedRow(row_id="row-a", row_index=2, source_node_id=NodeID("source-node"), row_data={"id": 1}),
         ResumedRow(row_id="row-b", row_index=5, source_node_id=NodeID("source-node"), row_data={"id": 2}),
+    ]
+
+
+def test_unprocessed_row_data_paths_share_payload_restoration_helper(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with db.connection() as conn:
+        _insert_run(conn, "run-shared-restore", status=RunStatus.FAILED)
+        _insert_node(conn, "run-shared-restore", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, "run-shared-restore", "row-1", row_index=3, source_data_ref="payload-ref")
+
+    calls: list[tuple[str, str, PayloadStore, type[PluginSchema]]] = []
+
+    def restore_row_data(
+        row_id: str,
+        source_data_ref: str,
+        payload_store_arg: PayloadStore,
+        source_schema_class: type[PluginSchema],
+    ) -> dict[str, Any]:
+        calls.append((row_id, source_data_ref, payload_store_arg, source_schema_class))
+        return {"id": 99}
+
+    monkeypatch.setattr(recovery_manager, "_restore_row_data", restore_row_data)
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+
+    single_source_rows = recovery_manager.get_unprocessed_row_data(
+        "run-shared-restore",
+        payload_store,
+        source_schema_class=_SimpleSchema,
+    )
+    multi_source_rows = recovery_manager.get_unprocessed_row_data_by_source(
+        "run-shared-restore",
+        payload_store,
+        source_schema_classes={NodeID("source-node"): _SimpleSchema},
+    )
+
+    assert single_source_rows == [ResumedRow(row_id="row-1", row_index=3, source_node_id=NodeID("source-node"), row_data={"id": 99})]
+    assert multi_source_rows == single_source_rows
+    assert calls == [
+        ("row-1", "payload-ref", payload_store, _SimpleSchema),
+        ("row-1", "payload-ref", payload_store, _SimpleSchema),
     ]
 
 
@@ -1187,7 +1380,8 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
         _insert_token(conn, run_id, "tok-child", "row-forked-complete")
         _insert_terminal_outcome(conn, run_id, "tok-child", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -1245,6 +1439,52 @@ def test_get_unprocessed_row_data_non_dict_json_raises_audit_integrity(
         recovery_manager.get_unprocessed_row_data("run-non-dict", payload_store, source_schema_class=_SimpleSchema)
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_get_unprocessed_row_data_rejects_non_finite_json_constant(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+) -> None:
+    payload_ref = payload_store.store(f'{{"id": {constant}}}'.encode())
+    with db.connection() as conn:
+        _insert_run(conn, f"run-non-finite-{constant}", status=RunStatus.FAILED)
+        _insert_node(conn, f"run-non-finite-{constant}", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, f"run-non-finite-{constant}", "row-1", row_index=0, source_data_ref=payload_ref)
+
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+    with pytest.raises(AuditIntegrityError, match="non-finite JSON constant"):
+        recovery_manager.get_unprocessed_row_data(
+            f"run-non-finite-{constant}",
+            payload_store,
+            source_schema_class=_SimpleSchema,
+        )
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_get_unprocessed_row_data_by_source_rejects_non_finite_json_constant(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+) -> None:
+    payload_ref = payload_store.store(f'{{"id": {constant}}}'.encode())
+    with db.connection() as conn:
+        _insert_run(conn, f"run-by-source-non-finite-{constant}", status=RunStatus.FAILED)
+        _insert_node(conn, f"run-by-source-non-finite-{constant}", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, f"run-by-source-non-finite-{constant}", "row-1", row_index=0, source_data_ref=payload_ref)
+
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+    with pytest.raises(AuditIntegrityError, match="non-finite JSON constant"):
+        recovery_manager.get_unprocessed_row_data_by_source(
+            f"run-by-source-non-finite-{constant}",
+            payload_store,
+            source_schema_classes={NodeID("source-node"): _SimpleSchema},
+        )
+
+
 def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
@@ -1253,7 +1493,8 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
 ) -> None:
     run_id = "run-latest-checkpoint"
     graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=99,
         barrier_scalars=None,
@@ -1323,7 +1564,8 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
         _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-pending", "row-pending")
 
-    checkpoint_manager.create_checkpoint(
+    _create_checkpoint(
+        checkpoint_manager,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,

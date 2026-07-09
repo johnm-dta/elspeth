@@ -7,9 +7,10 @@ Uses v2 fixtures and production assembly path (BUG-LINEAGE-01).
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -22,7 +23,8 @@ from elspeth.core.config import ElspethSettings, RetrySettings, SinkSettings, So
 from elspeth.core.landscape.schema import rows_table, run_sources_table
 from elspeth.engine.orchestrator import PipelineConfig
 from elspeth.engine.orchestrator.core import Orchestrator
-from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters, LoopContext
+from elspeth.engine.orchestrator.run_state import LoopContext
+from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.llm import RateLimitError
 from elspeth.testing import make_pipeline_row, make_source_row
@@ -213,6 +215,55 @@ class RuntimePreflightTransientTransform(PassTransform):
             )
 
 
+class _IdleTimeoutProcessorFake:
+    """Placeholder processor for idle-timeout tests where timeout flushing is patched."""
+
+
+def _idle_polling_config(**overrides: Any) -> PipelineConfig:
+    kwargs: dict[str, Any] = {
+        "sources": {"primary": as_source(ListSource([]))},
+        "transforms": (),
+        "sinks": {"default": as_sink(CollectSink())},
+    }
+    kwargs.update(overrides)
+    return PipelineConfig(**kwargs)
+
+
+class _NodeIdRecordingSource(ListSource):
+    def __init__(self, data: list[dict[str, Any]] | None = None, *, name: str = "csv", on_success: str = "output") -> None:
+        self._node_id: str | None = None
+        self.node_id_assignments: list[str | None] = []
+        super().__init__(data or [], name=name, on_success=on_success)
+
+    @property
+    def node_id(self) -> str | None:
+        return self._node_id
+
+    @node_id.setter
+    def node_id(self, value: str | None) -> None:
+        self.node_id_assignments.append(value)
+        self._node_id = value
+
+
+class _NodeIdRecordingSink(CollectSink):
+    determinism = Determinism.IO_WRITE
+
+    def __init__(self, name: str) -> None:
+        self._node_id: str | None = None
+        self.node_id_assignments: list[str | None] = []
+        super().__init__(name)
+        self.node_id_assignments.clear()
+
+    @property
+    def node_id(self) -> str | None:
+        return self._node_id
+
+    @node_id.setter
+    def node_id(self, value: str | None) -> None:
+        self.node_id_assignments.append(value)
+        self._node_id = value
+
+
 def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeypatch: pytest.MonkeyPatch) -> None:
     """A source generator in flight must keep source node/operation attribution during idle timeout flushes."""
     orchestrator = Orchestrator(make_landscape_db())
@@ -242,15 +293,11 @@ def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeyp
         "elspeth.engine.orchestrator.source_iteration.check_aggregation_timeouts",
         fake_check_aggregation_timeouts,
     )
-    config = PipelineConfig(
-        sources={"primary": MagicMock()},
-        transforms=(),
-        sinks={"default": MagicMock()},
-    )
+    config = _idle_polling_config()
     loop_ctx = LoopContext(
         counters=ExecutionCounters(),
         pending_tokens={"default": []},
-        processor=MagicMock(),
+        processor=_IdleTimeoutProcessorFake(),
         ctx=source_ctx,
         config=config,
         agg_transform_lookup={},
@@ -310,13 +357,9 @@ def test_initial_source_pull_uses_idle_timeout_polling(monkeypatch: pytest.Monke
     loop_ctx = LoopContext(
         counters=ExecutionCounters(),
         pending_tokens={"default": []},
-        processor=MagicMock(),
+        processor=_IdleTimeoutProcessorFake(),
         ctx=source_ctx,
-        config=PipelineConfig(
-            sources={"primary": MagicMock()},
-            transforms=(),
-            sinks={"default": MagicMock()},
-        ),
+        config=_idle_polling_config(),
         agg_transform_lookup={},
         coalesce_executor=None,
         coalesce_node_map={},
@@ -345,10 +388,7 @@ def test_coalesce_timeouts_enable_idle_polling_without_aggregation_triggers() ->
     from elspeth.core.config import CoalesceSettings
 
     orchestrator = Orchestrator(make_landscape_db())
-    config = PipelineConfig(
-        sources={"primary": MagicMock()},
-        transforms=(),
-        sinks={"default": MagicMock()},
+    config = _idle_polling_config(
         coalesce_settings=[
             CoalesceSettings(
                 name="merge_branches",
@@ -464,11 +504,25 @@ class TestOrchestrator:
         )
 
         orchestrator = Orchestrator(landscape_db)
-        with pytest.raises(RuntimeError, match="pre_flight_failed: provider auth exploded"):
+        with (
+            patch.object(source, "on_complete", wraps=source.on_complete) as source_on_complete,
+            patch.object(source, "close", wraps=source.close) as source_close,
+            patch.object(transform, "on_complete", wraps=transform.on_complete) as transform_on_complete,
+            patch.object(transform, "close", wraps=transform.close) as transform_close,
+            patch.object(sink, "on_complete", wraps=sink.on_complete) as sink_on_complete,
+            patch.object(sink, "close", wraps=sink.close) as sink_close,
+            pytest.raises(RuntimeError, match="pre_flight_failed: provider auth exploded"),
+        ):
             orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store, run_id=run_id)
 
         assert source.load_started is False
         assert sink.results == []
+        source_on_complete.assert_called_once()
+        source_close.assert_called_once()
+        transform_on_complete.assert_called_once()
+        transform_close.assert_called_once()
+        sink_on_complete.assert_called_once()
+        sink_close.assert_called_once()
 
         factory = make_factory(landscape_db)
         run_row = factory.run_lifecycle.get_run(run_id)
@@ -526,7 +580,15 @@ class TestOrchestrator:
         operations = factory.execution.get_operations_for_run(run_id)
         runtime_preflight_ops = [op for op in operations if op.operation_type == "runtime_preflight"]
         assert len(runtime_preflight_ops) == 1
-        assert runtime_preflight_ops[0].status == "completed"
+        operation = runtime_preflight_ops[0]
+        assert operation.status == "completed"
+        assert operation.output_data_ref is not None
+        output_metadata = json.loads(payload_store.retrieve(operation.output_data_ref).decode("utf-8"))
+        assert output_metadata == {
+            "attempt_count": 2,
+            "retry_count": 1,
+            "retry_errors": [{"attempt": 0, "error_type": "RuntimePreflightFailedError"}],
+        }
 
     def test_first_row_inferred_source_contract_persisted_before_processing_failure(self, landscape_db: LandscapeDB, payload_store) -> None:
         """A first-valid-row contract must reach run_sources before process_row can fail.
@@ -777,6 +839,7 @@ class TestOrchestrator:
             source_id_map={"primary": source_id},
             transform_id_map=graph.get_transform_id_map(),
             sink_id_map=graph.get_sink_id_map(),
+            aggregation_node_ids=frozenset(graph.get_aggregation_id_map().values()),
         )
 
         graph_step_map = graph.build_step_map()
@@ -929,8 +992,6 @@ class TestOrchestratorAcceptsGraph:
 
     def test_orchestrator_uses_graph_node_ids(self, landscape_db: LandscapeDB, plugin_manager, payload_store) -> None:
         """Orchestrator uses node IDs from graph, not generated IDs."""
-        from unittest.mock import MagicMock, PropertyMock
-
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
         from elspeth.core.dag import ExecutionGraph
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -966,44 +1027,13 @@ class TestOrchestratorAcceptsGraph:
             coalesce_settings=settings.coalesce,
         )
 
-        # Use PropertyMock to track node_id setter calls
-        mock_source = MagicMock()
-        mock_source.name = "csv"
-        mock_source.determinism = Determinism.IO_READ
-        mock_source.plugin_version = "1.0.0"
-        mock_source.source_file_hash = None
-        mock_source.config = {}
-        mock_source._on_validation_failure = "discard"
-
-        source_node_id_setter = PropertyMock()
-        type(mock_source).node_id = source_node_id_setter
-
-        schema_mock = MagicMock()
-        schema_mock.model_json_schema.return_value = {"type": "object"}
-        mock_source.output_schema = schema_mock
-        mock_source.load.return_value = iter([])
-        mock_source.get_field_resolution.return_value = None
-        mock_source.get_schema_contract.return_value = None
-
-        mock_sink = MagicMock()
-        mock_sink.name = "csv"
-        mock_sink.determinism = Determinism.IO_WRITE
-        mock_sink.plugin_version = "1.0.0"
-        mock_sink.source_file_hash = None
-        mock_sink._on_write_failure = "discard"
-        mock_sink._reset_diversion_log = MagicMock()
-
-        sink_node_id_setter = PropertyMock()
-        type(mock_sink).node_id = sink_node_id_setter
-
-        schema_mock = MagicMock()
-        schema_mock.model_json_schema.return_value = {"type": "object"}
-        mock_sink.input_schema = schema_mock
+        source = _NodeIdRecordingSource(name="csv", on_success="output")
+        sink = _NodeIdRecordingSink(name="csv")
 
         pipeline_config = PipelineConfig(
-            sources={"primary": mock_source},
+            sources={"primary": as_source(source)},
             transforms=[],
-            sinks={"output": mock_sink},
+            sinks={"output": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(landscape_db)
@@ -1011,17 +1041,15 @@ class TestOrchestratorAcceptsGraph:
 
         # Verify orchestrator called the node_id setter with correct value from graph
         expected_source_id = graph.get_sources()[0]
-        source_node_id_setter.assert_called_once_with(expected_source_id)
+        assert source.node_id_assignments == [expected_source_id]
 
         # Verify sink node_id was set with correct value from graph's sink_id_map
         sink_id_map = graph.get_sink_id_map()
         expected_sink_id = sink_id_map[SinkName("output")]
-        sink_node_id_setter.assert_called_once_with(expected_sink_id)
+        assert sink.node_id_assignments == [expected_sink_id]
 
     def test_orchestrator_assigns_unique_node_ids_to_multiple_sinks(self, landscape_db: LandscapeDB, plugin_manager, payload_store) -> None:
         """Each sink should get a unique node_id from the graph, not shared."""
-        from unittest.mock import MagicMock, PropertyMock
-
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
         from elspeth.core.dag import ExecutionGraph
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -1060,59 +1088,14 @@ class TestOrchestratorAcceptsGraph:
             coalesce_settings=settings.coalesce,
         )
 
-        # Track node_id assignments with PropertyMock
-        mock_source = MagicMock()
-        mock_source.name = "csv"
-        mock_source.determinism = Determinism.IO_READ
-        mock_source.plugin_version = "1.0.0"
-        mock_source.source_file_hash = None
-        mock_source.config = {}
-        mock_source._on_validation_failure = "discard"
-
-        source_node_id_setter = PropertyMock()
-        type(mock_source).node_id = source_node_id_setter
-
-        schema_mock = MagicMock()
-        schema_mock.model_json_schema.return_value = {"type": "object"}
-        mock_source.output_schema = schema_mock
-        mock_source.load.return_value = iter([])
-        mock_source.get_field_resolution.return_value = None
-        mock_source.get_schema_contract.return_value = None
-
-        mock_sink_a = MagicMock()
-        mock_sink_a.name = "output_a"
-        mock_sink_a.determinism = Determinism.IO_WRITE
-        mock_sink_a.plugin_version = "1.0.0"
-        mock_sink_a.source_file_hash = None
-        mock_sink_a._on_write_failure = "discard"
-        mock_sink_a._reset_diversion_log = MagicMock()
-
-        sink_a_node_id_setter = PropertyMock()
-        type(mock_sink_a).node_id = sink_a_node_id_setter
-
-        schema_mock = MagicMock()
-        schema_mock.model_json_schema.return_value = {"type": "object"}
-        mock_sink_a.input_schema = schema_mock
-
-        mock_sink_b = MagicMock()
-        mock_sink_b.name = "output_b"
-        mock_sink_b.determinism = Determinism.IO_WRITE
-        mock_sink_b.plugin_version = "1.0.0"
-        mock_sink_b.source_file_hash = None
-        mock_sink_b._on_write_failure = "discard"
-        mock_sink_b._reset_diversion_log = MagicMock()
-
-        sink_b_node_id_setter = PropertyMock()
-        type(mock_sink_b).node_id = sink_b_node_id_setter
-
-        schema_mock = MagicMock()
-        schema_mock.model_json_schema.return_value = {"type": "object"}
-        mock_sink_b.input_schema = schema_mock
+        source = _NodeIdRecordingSource(name="csv", on_success="output_a")
+        sink_a = _NodeIdRecordingSink(name="output_a")
+        sink_b = _NodeIdRecordingSink(name="output_b")
 
         pipeline_config = PipelineConfig(
-            sources={"primary": mock_source},
+            sources={"primary": as_source(source)},
             transforms=[],
-            sinks={"output_a": mock_sink_a, "output_b": mock_sink_b},
+            sinks={"output_a": as_sink(sink_a), "output_b": as_sink(sink_b)},
         )
 
         orchestrator = Orchestrator(landscape_db)
@@ -1123,8 +1106,9 @@ class TestOrchestratorAcceptsGraph:
         expected_sink_a_id = sink_id_map[SinkName("output_a")]
         expected_sink_b_id = sink_id_map[SinkName("output_b")]
 
-        sink_a_node_id_setter.assert_called_once_with(expected_sink_a_id)
-        sink_b_node_id_setter.assert_called_once_with(expected_sink_b_id)
+        assert source.node_id_assignments == [graph.get_sources()[0]]
+        assert sink_a.node_id_assignments == [expected_sink_a_id]
+        assert sink_b.node_id_assignments == [expected_sink_b_id]
 
         # Verify node IDs are different
         assert expected_sink_a_id != expected_sink_b_id, "Sinks should have unique node IDs"

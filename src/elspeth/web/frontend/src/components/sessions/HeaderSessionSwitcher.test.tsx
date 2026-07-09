@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HeaderSessionSwitcher } from "./HeaderSessionSwitcher";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -25,8 +25,8 @@ describe("HeaderSessionSwitcher", () => {
   it("opens a menu of all sessions when clicked", async () => {
     render(<HeaderSessionSwitcher />);
     await userEvent.click(screen.getByRole("button", { name: /first/i }));
-    expect(screen.getByRole("menuitem", { name: /^first$/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /^second$/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^first\b/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^second\b/i })).toBeInTheDocument();
   });
 
   it("calls selectSession when a menu item is clicked", async () => {
@@ -34,7 +34,7 @@ describe("HeaderSessionSwitcher", () => {
     useSessionStore.setState({ selectSession } as never);
     render(<HeaderSessionSwitcher />);
     await userEvent.click(screen.getByRole("button", { name: /first/i }));
-    await userEvent.click(screen.getByRole("menuitem", { name: /^second$/i }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /^second\b/i }));
     expect(selectSession).toHaveBeenCalledWith("s2");
   });
 
@@ -99,18 +99,21 @@ describe("HeaderSessionSwitcher", () => {
     render(<HeaderSessionSwitcher />);
     await userEvent.click(screen.getByRole("button", { name: /first/i }));
     expect(
-      screen.getByRole("menuitem", { name: /^second$/i }),
+      screen.getByRole("menuitem", { name: /^second\b/i }),
     ).toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     expect(
-      screen.queryByRole("menuitem", { name: /^second$/i }),
+      screen.queryByRole("menuitem", { name: /^second\b/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("renders 'untitled' fallback when no session is active", () => {
+  it("renders 'No session' when no session is active (no competing 'Untitled' default)", () => {
+    // elspeth-ef8c18a6cb: one naming convention. The switcher must not mint
+    // its own "Untitled" default alongside the server's "Session — <date>".
     useSessionStore.setState({ activeSessionId: null } as never);
     render(<HeaderSessionSwitcher />);
-    expect(screen.getByRole("button")).toHaveTextContent(/untitled/i);
+    expect(screen.getByRole("button")).toHaveTextContent(/no session/i);
+    expect(screen.getByRole("button")).not.toHaveTextContent(/untitled/i);
   });
 
   it("shows 'New session' even when the sessions list is empty (just-archived edge)", async () => {
@@ -239,9 +242,9 @@ describe("HeaderSessionSwitcher", () => {
     await user.click(screen.getByRole("button", { name: /tender review/i }));
     await user.type(screen.getByRole("textbox", { name: /find a session/i }), "weather");
 
-    expect(screen.getByRole("menuitem", { name: /^weather monitor$/i })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /^tender review$/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /^document qa pipeline$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^weather monitor\b/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^tender review\b/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^document qa pipeline\b/i })).not.toBeInTheDocument();
   });
 
   it("hides archived sessions by default and shows them when toggled", async () => {
@@ -258,12 +261,12 @@ describe("HeaderSessionSwitcher", () => {
     await user.click(screen.getByRole("button", { name: /active session/i }));
 
     // Archived session is hidden by default.
-    expect(screen.getByRole("menuitem", { name: /^active session$/i })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /^old archived session$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^active session\b/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^old archived session\b/i })).not.toBeInTheDocument();
 
     // Toggle shows the archived session.
     await user.click(screen.getByRole("checkbox", { name: /show archived/i }));
-    expect(screen.getByRole("menuitem", { name: /^old archived session$/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^old archived session\b/i })).toBeInTheDocument();
   });
 
   // Q9: backend archive failure must surface an error region AND preserve the
@@ -303,7 +306,7 @@ describe("HeaderSessionSwitcher", () => {
 
     // Row is still present (no optimistic removal on failure).
     await user.click(screen.getByRole("button", { name: /tender review/i }));
-    expect(screen.getByRole("menuitem", { name: /^tender review$/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^tender review\b/i })).toBeInTheDocument();
   });
 
   it("uses the generic fallback when archive rejects with a non-Error value", async () => {
@@ -397,5 +400,81 @@ describe("HeaderSessionSwitcher", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/please try again/i);
     expect(alert.textContent).not.toContain("not-an-error-instance");
+  });
+
+  it("keeps the menu open on Shift+Tab so filter controls stay reachable (C4, elspeth-0730f27017)", async () => {
+    render(<HeaderSessionSwitcher />);
+    await userEvent.click(screen.getByRole("button", { name: /first/i }));
+    // The filter input was previously keyboard-unreachable because Tab/Shift+Tab
+    // both closed the menu. It must remain present after a Shift+Tab.
+    expect(screen.getByRole("textbox", { name: /find a session/i })).toBeInTheDocument();
+    const item = screen.getByRole("menuitem", { name: /^first\b/i });
+    fireEvent.keyDown(item, { key: "Tab", shiftKey: true });
+    expect(
+      screen.queryByRole("textbox", { name: /find a session/i }),
+    ).toBeInTheDocument();
+    // Plain (forward) Tab still dismisses the menu.
+    fireEvent.keyDown(item, { key: "Tab" });
+    expect(
+      screen.queryByRole("textbox", { name: /find a session/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  // ── elspeth-ef8c18a6cb: switcher metadata + action/entry distinction ──────
+
+  it("shows last-modified relative time as secondary text on each session row", async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    useSessionStore.setState({
+      sessions: [{ id: "s1", title: "First", updated_at: yesterday } as never],
+      activeSessionId: "s1",
+    } as never);
+    render(<HeaderSessionSwitcher />);
+    await userEvent.click(screen.getByRole("button", { name: /first/i }));
+    const item = screen.getByRole("menuitem", { name: /^first\b/i });
+    expect(item).toHaveTextContent(/yesterday/i);
+  });
+
+  it("separates the '+ New session' action from session entries with a menu separator", async () => {
+    render(<HeaderSessionSwitcher />);
+    await userEvent.click(screen.getByRole("button", { name: /first/i }));
+    const menu = screen.getByRole("menu");
+    expect(
+      menu.querySelector("[role='separator']"),
+    ).toBeInTheDocument();
+    // The separator sits between the action and the first session entry.
+    const children = Array.from(menu.children).map((el) =>
+      el.getAttribute("role"),
+    );
+    expect(children[0]).toBe("menuitem"); // + New session
+    expect(children[1]).toBe("separator");
+  });
+
+  // elspeth-d49f8ad511 residual: the rename error must be programmatically
+  // associated with the input (aria-invalid + aria-describedby), matching
+  // the LoginPage/SecretsPanel idiom.
+  it("associates the rename error with the input via aria-invalid/aria-describedby", async () => {
+    const renameSession = vi
+      .fn()
+      .mockRejectedValue(new Error("title contains forbidden character"));
+    useSessionStore.setState({ renameSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^rename first$/i }));
+    const input = screen.getByRole("textbox", { name: /^rename session$/i });
+
+    // No error yet — no aria-invalid noise on the pristine input.
+    expect(input).not.toHaveAttribute("aria-invalid");
+    expect(input).not.toHaveAttribute("aria-describedby");
+
+    await user.clear(input);
+    await user.type(input, "Updated title");
+    await user.click(screen.getByRole("button", { name: /save session name/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input.getAttribute("aria-describedby")).toBe(alert.id);
+    expect(alert.id).not.toBe("");
   });
 });

@@ -165,6 +165,69 @@ class TestSQLCipherWALMode:
             db.close()
 
 
+class TestSQLCipherReadOnly:
+    """SQLCipher read-only handles must use a file-level SQLite read-only URI."""
+
+    def test_sqlcipher_read_only_open_does_not_create_missing_database(self, tmp_path: Path) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db_path = tmp_path / "missing-read-only.db"
+
+        with pytest.raises((OperationalError, sqlcipher3.OperationalError)):
+            LandscapeDB.from_url(
+                f"sqlite:///{db_path}",
+                passphrase="read-only-passphrase",
+                read_only=True,
+                create_tables=False,
+            )
+
+        assert not db_path.exists()
+
+    def test_sqlcipher_read_only_open_rejects_writes_after_query_only_is_disabled(self, tmp_path: Path) -> None:
+        from sqlalchemy import insert
+        from sqlalchemy.exc import OperationalError
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import runs_table
+
+        db_path = tmp_path / "read-only.db"
+        passphrase = "read-only-passphrase"
+        writable = LandscapeDB.from_url(f"sqlite:///{db_path}", passphrase=passphrase)
+        writable.close()
+
+        read_only = LandscapeDB.from_url(
+            f"sqlite:///{db_path}",
+            passphrase=passphrase,
+            read_only=True,
+            create_tables=False,
+        )
+        try:
+            with (
+                pytest.raises(
+                    (OperationalError, sqlcipher3.OperationalError),
+                    match=r"readonly|read-only|attempt to write",
+                ),
+                read_only.engine.begin() as conn,
+            ):
+                conn.exec_driver_sql("PRAGMA query_only=OFF")
+                conn.execute(
+                    insert(runs_table).values(
+                        run_id="write-should-fail",
+                        status="RUNNING",
+                        started_at=datetime.now(UTC),
+                        config_hash="abc123",
+                        settings_json="{}",
+                        canonical_version="1.0.0",
+                        openrouter_catalog_sha256="0" * 64,
+                        openrouter_catalog_source="bundled",
+                    )
+                )
+        finally:
+            read_only.close()
+
+
 class TestSQLCipherForeignKeys:
     """FK violations are rejected on encrypted connections."""
 

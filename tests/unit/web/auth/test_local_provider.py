@@ -59,6 +59,39 @@ class TestCreateUser:
         with pytest.raises(ValueError, match="display_name must not be empty"):
             provider.create_user("alice", "password123", display_name="")
 
+    @pytest.mark.asyncio
+    async def test_unverified_user_cannot_login_until_email_token_is_verified(self, provider) -> None:
+        provider.create_user(
+            "alice",
+            "password123",
+            display_name="Alice",
+            email="alice@example.com",
+            email_verified=False,
+        )
+        token = provider.create_email_verification_token("alice")
+
+        with pytest.raises(AuthenticationError, match="Email verification required"):
+            await provider.login("alice", "password123")
+
+        identity = provider.verify_email_token(token)
+        assert identity == UserIdentity(user_id="alice", username="alice")
+        login_token = await provider.login("alice", "password123")
+        assert len(login_token.split(".")) == 3
+
+        with pytest.raises(AuthenticationError, match="already used"):
+            provider.verify_email_token(token)
+
+    @pytest.mark.asyncio
+    async def test_delete_user_removes_account_and_invalidates_tokens(self, provider) -> None:
+        provider.create_user("alice", "password123", display_name="Alice")
+        token = await provider.login("alice", "password123")
+
+        assert provider.delete_user("alice") is True
+        assert provider.delete_user("alice") is False
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
 
 class TestLogin:
     """Tests for username/password login."""

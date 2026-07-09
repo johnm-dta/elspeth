@@ -21,6 +21,22 @@ _JOIN_NOW = datetime(2026, 6, 13, 12, 0, 0, tzinfo=UTC)
 _JOIN_WINDOW = 80.0
 
 
+class _CallRecorder:
+    def __init__(self, return_value=None, side_effect=None):
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    def assert_called_once(self):
+        assert len(self.calls) == 1
+
+
 class TestCLIIntegration:
     """End-to-end CLI integration tests."""
 
@@ -588,7 +604,7 @@ class TestJoinCommand:
         # drain loop exits immediately.  This tests: admission → worker_id minted
         # → follower built → run() called → clean departure path → exit 0.
         # build_follower_processor would otherwise fail because the seeded run
-        # has no registered edges (the full run_core.py pipeline is not invoked).
+        # has no registered edges (the full processor_factory.py pipeline is not invoked).
         from unittest.mock import create_autospec
 
         from elspeth.engine.orchestrator.follower import FollowerProcessor
@@ -613,7 +629,7 @@ class TestJoinCommand:
     def test_join_startup_failure_departs_admitted_worker_and_cleans_plugins(self, tmp_path: Path) -> None:
         """A follower plugin on_start failure after admission must still depart and tear down."""
         from types import SimpleNamespace
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from sqlalchemy import select
 
@@ -671,9 +687,10 @@ class TestJoinCommand:
 
         failing_sink = SimpleNamespace(
             name="failing_sink",
-            on_start=MagicMock(side_effect=RuntimeError("sink startup failed")),
-            on_complete=MagicMock(),
-            close=MagicMock(),
+            node_id="sink-failing",
+            on_start=_CallRecorder(side_effect=RuntimeError("sink startup failed")),
+            on_complete=_CallRecorder(),
+            close=_CallRecorder(),
         )
         plugins = SimpleNamespace(
             sources={"primary": object()},
@@ -682,12 +699,11 @@ class TestJoinCommand:
             aggregations={},
             sinks={"default": failing_sink},
         )
-        execution_graph = MagicMock()
-        execution_graph.get_aggregation_id_map.return_value = {}
+        execution_graph = SimpleNamespace(get_aggregation_id_map=_CallRecorder({}))
 
         with (
             patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=plugins),
-            patch("elspeth.cli._build_resume_graphs", return_value=(MagicMock(), execution_graph)),
+            patch("elspeth.cli._build_resume_graphs", return_value=(object(), execution_graph)),
             patch("elspeth.engine.orchestrator.follower.build_follower_processor") as mock_build_follower,
         ):
             result = runner.invoke(
@@ -850,7 +866,8 @@ class TestRunResumeEviction:
         PRE-FIX behaviour: exit 4, event=error (falls through to except Exception).
         POST-FIX behaviour: exit 3, event=evicted (dedicated arm before TIER_1_ERRORS).
         """
-        from unittest.mock import MagicMock, patch
+        from types import SimpleNamespace
+        from unittest.mock import patch
 
         from elspeth.cli import app
         from elspeth.contracts.checkpoint import ResumeCheck
@@ -869,9 +886,7 @@ class TestRunResumeEviction:
 
         eviction_exc = RunWorkerEvictedError(worker_id="worker:resume-x:xyz", run_id=run_id)
 
-        mock_resume_point = MagicMock()
-        mock_resume_point.sequence_number = 0
-        mock_resume_point.barrier_scalars = None
+        mock_resume_point = SimpleNamespace(sequence_number=0, barrier_scalars=None)
 
         with (
             patch(
@@ -916,3 +931,64 @@ class TestRunResumeEviction:
         # Must NOT emit event=error or a Python traceback.
         assert '"event": "error"' not in combined and '"event":"error"' not in combined, f"Must not emit event=error.\nOutput:\n{combined}"
         assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
+
+
+class TestRunSchemaCompatibility:
+    """Schema epoch mismatches are actionable operator errors, not framework tracebacks."""
+
+    def test_run_schema_compatibility_error_is_human_friendly(self, tmp_path: Path) -> None:
+        """``elspeth run`` reports stale audit DB guidance without a traceback."""
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.core.landscape.database import SchemaCompatibilityError
+
+        settings_path = _make_minimal_settings(tmp_path)
+        stale_schema = SchemaCompatibilityError(
+            "Landscape database schema is outdated.\n\n"
+            "schema epoch is incompatible:\n"
+            "Database epoch: 21\n"
+            "Current epoch: 22\n\n"
+            "To fix this, either:\n"
+            "  1. Delete the database file and let ELSPETH recreate it, or\n"
+            "  2. Run: elspeth landscape migrate (when available)\n\n"
+            f"Database: sqlite:///{tmp_path / 'landscape.db'}"
+        )
+
+        with patch("elspeth.cli._execute_pipeline_with_instances", side_effect=stale_schema):
+            result = runner.invoke(app, ["run", "--settings", str(settings_path), "--execute"])
+
+        assert result.exit_code == 1
+        combined = result.output
+        assert "Landscape database schema is outdated" in combined
+        assert "schema epoch is incompatible" in combined
+        assert "Delete the database file" in combined
+        assert "SchemaCompatibilityError" not in combined
+        assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
+
+    def test_run_schema_compatibility_error_json_is_agent_friendly(self, tmp_path: Path) -> None:
+        """JSON mode emits a structured stale-schema event without traceback fields."""
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.core.landscape.database import SchemaCompatibilityError
+
+        settings_path = _make_minimal_settings(tmp_path)
+        stale_schema = SchemaCompatibilityError(
+            "Landscape database schema is outdated.\n\nschema epoch is incompatible:\nDatabase epoch: 21\nCurrent epoch: 22"
+        )
+
+        with patch("elspeth.cli._execute_pipeline_with_instances", side_effect=stale_schema):
+            result = runner.invoke(app, ["run", "--settings", str(settings_path), "--execute", "--format", "json"])
+
+        assert result.exit_code == 1
+        event_lines = [line for line in result.output.splitlines() if '"event"' in line]
+        assert event_lines, f"Expected a JSON event line.\nOutput:\n{result.output}"
+        event = json.loads(event_lines[0])
+        assert event == {
+            "event": "schema_compatibility_error",
+            "error_type": "SchemaCompatibilityError",
+            "message": str(stale_schema),
+        }
+        assert "traceback" not in event
+        assert "Traceback" not in result.output, f"Must not emit a traceback.\nOutput:\n{result.output}"

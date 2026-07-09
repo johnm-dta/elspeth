@@ -19,11 +19,14 @@ the TOCTOU (Time-of-Check to Time-of-Use) vulnerability in traditional SSRF defe
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import socket
+import threading
 import urllib.parse
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from ipaddress import IPv4Network, IPv6Network
 
@@ -75,16 +78,74 @@ BLOCKED_IP_RANGES = [
 ALWAYS_BLOCKED_RANGES = (
     ipaddress.ip_network("169.254.0.0/16"),  # IPv4 link-local (AWS/Azure/GCP metadata)
     ipaddress.ip_network("::ffff:169.254.0.0/112"),  # IPv4-mapped metadata endpoint
+    ipaddress.ip_network("fd00:ec2::254/128"),  # AWS EC2 IPv6 metadata endpoint
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local (same attack surface)
     ipaddress.ip_network("255.255.255.255/32"),  # IPv4 broadcast
     ipaddress.ip_network("224.0.0.0/4"),  # IPv4 multicast
     ipaddress.ip_network("ff00::/8"),  # IPv6 multicast
 )
 
-# Bounded thread pool for DNS resolution.  Caps concurrent getaddrinfo threads
-# so repeated timeouts (e.g. blackholed resolver) cannot exhaust OS threads.
+# Bounded thread pool for DNS resolution. Caps concurrent getaddrinfo threads
+# and outstanding resolver work so repeated timeouts (e.g. blackholed resolver)
+# cannot exhaust OS threads or accumulate an unbounded executor queue.
 _DNS_POOL_SIZE = 8
 _dns_pool = ThreadPoolExecutor(max_workers=_DNS_POOL_SIZE, thread_name_prefix="dns_resolve")
+_dns_capacity = threading.BoundedSemaphore(_DNS_POOL_SIZE)
+
+
+def _url_sha256(url: str) -> str:
+    """Return a stable diagnostic hash for a user-supplied URL."""
+    return hashlib.sha256(url.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _safe_url_diagnostic_from_parts(url: str, *, scheme: str, host: str) -> str:
+    return f"scheme={scheme!r}, host={host!r}, url_sha256={_url_sha256(url)}"
+
+
+def _safe_unparsed_scheme_hint(url: str) -> str:
+    if url[:6].lower().startswith("https:"):
+        return "https"
+    if url[:5].lower().startswith("http:"):
+        return "http"
+    return "invalid"
+
+
+def _safe_unparsed_url_diagnostic(url: str) -> str:
+    return _safe_url_diagnostic_from_parts(url, scheme=_safe_unparsed_scheme_hint(url), host="invalid")
+
+
+def _safe_url_diagnostic(url: str, parsed: urllib.parse.ParseResult) -> str:
+    """Return URL diagnostics without userinfo, path, query, fragment, or raw input."""
+    scheme = parsed.scheme.lower() if parsed.scheme else "missing"
+    try:
+        host = parsed.hostname or "unknown"
+    except ValueError:
+        host = "invalid"
+    return _safe_url_diagnostic_from_parts(url, scheme=scheme, host=host)
+
+
+def _parse_url_for_validation(url: str) -> urllib.parse.ParseResult:
+    try:
+        return urllib.parse.urlparse(url)
+    except ValueError:
+        pass
+    raise SSRFBlockedError(f"Malformed URL; {_safe_unparsed_url_diagnostic(url)}.")
+
+
+def _validated_url_hostname(url: str, parsed: urllib.parse.ParseResult) -> str | None:
+    try:
+        return parsed.hostname
+    except ValueError:
+        pass
+    raise SSRFBlockedError(f"Malformed URL; {_safe_url_diagnostic(url, parsed)}.")
+
+
+def _validated_url_port(url: str, parsed: urllib.parse.ParseResult) -> int | None:
+    try:
+        return parsed.port
+    except ValueError:
+        pass
+    raise SSRFBlockedError(f"Invalid port in URL; {_safe_url_diagnostic(url, parsed)}.")
 
 
 def validate_url_scheme(url: str) -> None:
@@ -98,18 +159,22 @@ def validate_url_scheme(url: str) -> None:
         SSRFBlockedError: If scheme is not in allowlist
     """
     if type(url) is not str:
-        raise TypeError(f"url must be str, got {type(url).__name__}: {url!r}")
+        raise TypeError(f"url must be str, got {type(url).__name__}")
 
-    parsed = urllib.parse.urlparse(url)
+    parsed = _parse_url_for_validation(url)
     scheme = parsed.scheme.lower()
-    if scheme in ALLOWED_SCHEMES:
-        return
     if not scheme:
         raise SSRFBlockedError(
             f"URL is missing a scheme (expected 'https://' or 'http://' prefix); "
-            f"got {url!r}. Add the scheme to the input value, e.g. 'https://{url}'."
+            f"{_safe_url_diagnostic(url, parsed)}. Add an explicit 'https://' or 'http://' prefix."
         )
-    raise SSRFBlockedError(f"Forbidden URL scheme {parsed.scheme!r} — only http and https are allowed; got {url!r}.")
+    if scheme in ALLOWED_SCHEMES:
+        if parsed.username is not None or parsed.password is not None:
+            raise SSRFBlockedError(f"URL credentials are not allowed; {_safe_url_diagnostic(url, parsed)}.")
+        return
+    raise SSRFBlockedError(
+        f"Forbidden URL scheme {parsed.scheme!r} — only http and https are allowed; {_safe_url_diagnostic(url, parsed)}."
+    )
 
 
 def _resolve_hostname(hostname: str) -> list[str]:
@@ -148,6 +213,22 @@ def _resolve_hostname(hostname: str) -> list[str]:
         # not IDNA-encodable (Tier 3 external input). Both are recoverable external
         # boundary failures, surfaced as the documented NetworkError — never crashed.
         raise NetworkError(f"DNS resolution failed: {hostname}: {e}") from e
+
+
+def _submit_dns_resolution(hostname: str) -> Future[list[str]]:
+    """Submit a DNS resolution task only when resolver capacity is available."""
+    capacity = _dns_capacity
+    if not capacity.acquire(blocking=False):
+        raise NetworkError(f"DNS resolution capacity exhausted: {hostname}")
+
+    try:
+        future = _dns_pool.submit(_resolve_hostname, hostname)
+    except BaseException:
+        capacity.release()
+        raise
+
+    future.add_done_callback(lambda _future: capacity.release())
+    return future
 
 
 def _validate_ip_address(
@@ -302,18 +383,15 @@ def validate_url_for_ssrf(
     validate_url_scheme(url)
 
     # Step 2: Parse URL components
-    parsed = urllib.parse.urlparse(url)
-    hostname = parsed.hostname
+    parsed = _parse_url_for_validation(url)
+    hostname = _validated_url_hostname(url, parsed)
     if not hostname:
         raise SSRFBlockedError("URL has no hostname")
 
     # Determine port (explicit or default)
     # parsed.port can raise ValueError for out-of-range ports (e.g. 99999).
     # Port 0 is falsy but must be explicitly rejected (not a valid HTTP port).
-    try:
-        explicit_port = parsed.port
-    except ValueError as e:
-        raise SSRFBlockedError(f"Invalid port in URL: {e}") from e
+    explicit_port = _validated_url_port(url, parsed)
 
     if explicit_port is not None:
         if explicit_port == 0:
@@ -329,22 +407,25 @@ def validate_url_for_ssrf(
     if parsed.fragment:
         path = f"{path}#{parsed.fragment}"
 
-    # Step 3: Resolve DNS with timeout via bounded thread pool.
+    # Step 3: Resolve DNS with timeout via bounded thread pool and a bounded
+    # outstanding-task semaphore.
     # Using a shared ThreadPoolExecutor (max _DNS_POOL_SIZE workers) instead
     # of spawning one daemon thread per call.  Under repeated timeouts (e.g.
     # blackholed DNS resolver), at most _DNS_POOL_SIZE threads are blocked in
-    # getaddrinfo; additional requests queue and time out without creating new
-    # threads.
+    # getaddrinfo, and additional requests fail fast instead of accumulating in
+    # the executor's unbounded internal queue.
     #
     # Future.result(timeout=) re-raises the worker's exception with its original
     # type, so SSRFBlockedError / NetworkError propagate unchanged and any other
     # exception (a bug in our own resolver code) crashes rather than being
-    # laundered into NetworkError. On timeout the worker keeps running in the
-    # pool (bounded), and control returns to the caller immediately.
-    future = _dns_pool.submit(_resolve_hostname, hostname)
+    # laundered into NetworkError. On timeout we try to cancel the future; if it
+    # is already running, the capacity slot is released by the completion
+    # callback when the resolver eventually returns.
+    future = _submit_dns_resolution(hostname)
     try:
         ip_list = future.result(timeout=timeout)
-    except TimeoutError as exc:
+    except FutureTimeoutError as exc:
+        future.cancel()
         raise NetworkError(f"DNS resolution timeout ({timeout}s): {hostname}") from exc
 
     if not ip_list:

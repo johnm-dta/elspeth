@@ -1,4 +1,4 @@
-# Roadmap — ELSPETH                     Updated: 2026-06-14 (PDR-0001)
+# Roadmap — ELSPETH                     Updated: 2026-07-07 (PDR-0001)
 
 > Sequencing, WSJF / cost-of-delay, and dated forecasts are produced by
 > /axiom-program-management. This file records bets as INTENT, not a delivery
@@ -14,13 +14,11 @@
   elspeth-0fd9dfcb7e, elspeth-16ddaa7d02, elspeth-248536c9e6 · metric: north-star
   (run assurance completeness) + Web-GA input metric.
 
-- **Ship the 0.6.0 line** *(in-flight delivery)* — multi-worker coordination
-  (option-c "One-Host WAL Pack", slices 1–6 landed, ADR-030) plus the
-  plugins-subsystem remediation now on the active branch. · branch:
-  fix/plugins-subsystem-remediation (off release/0.6.0) · tracker:
-  elspeth-cde984c657; plugin criticals elspeth-ebe13515f4 / elspeth-e62478e5db /
-  elspeth-a46c6e361f (fixed-in-branch, awaiting tracker close — see drift) ·
-  metric: audit-integrity guardrail.
+- **Ship the 0.7.0 line** *(in-flight delivery)* — LLM-primary composer work,
+  CLI/TUI operator-surface refresh, and release hardening on the active
+  release line. · branch: release/0.7.0 and feature worktrees · tracker:
+  elspeth-82c3914f95 for the CLI/TUI refresh · metric: audit-integrity and
+  operator explainability guardrails.
 
 ## Next (shaped, decreasing certainty)
 
@@ -41,5 +39,3 @@
   in README. · tracker: none yet.
 - **Plugin expansion (web research pipeline)** — OpenSearch, browser scrape,
   report sink, Chroma upgrade. · tracker: elspeth-868c55d712.
-- **Auditor-focused TUI** — interactive lineage/node TUI for auditors.
-  · tracker: elspeth-5bb9dfc9fa (critical-path cluster).

@@ -56,7 +56,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_COMPONENT_ID,
     pipeline_decision_artifact_hash,
     prompt_structure_hash_from_options,
-    validate_pipeline_decision_semantics,
+    validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
@@ -260,6 +260,23 @@ def _assert_parent_assistant_message(
         )
 
 
+def _assert_assistant_row_has_audit_content(
+    *,
+    content: str,
+    raw_content: str | None,
+    tool_calls: Any,
+    caller: str,
+) -> None:
+    """Reject assistant rows that carry no auditable model output."""
+    if content.strip():
+        return
+    if raw_content is not None and raw_content.strip():
+        return
+    if tool_calls:
+        return
+    raise AuditIntegrityError(f"{caller}: refusing to persist empty assistant audit row with no raw_content and no tool_calls")
+
+
 def _validate_tool_call_id_set_equality(
     *,
     redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
@@ -325,6 +342,27 @@ def _enveloped_state_column(value: Any) -> Any:
     if raw is None:
         return None
     return {"_version": 1, "data": raw}
+
+
+def _strip_guided_profile_in_meta(composer_meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Reset a forked GuidedSession's WorkflowProfile to the empty profile.
+
+    ``composer_meta`` is copied verbatim on fork. A tutorial profile must not
+    leak into an ordinary forked session, so the strip lives inside
+    ``fork_session`` where the composer_meta copies happen.
+    """
+    from elspeth.web.composer.guided.profile import EMPTY_PROFILE
+
+    if composer_meta is None:
+        return None
+    thawed: dict[str, Any] = dict(deep_thaw(composer_meta))
+    guided_raw = thawed.get("guided_session")
+    if not isinstance(guided_raw, dict) or "profile" not in guided_raw:
+        return thawed
+    guided_copy = dict(guided_raw)
+    guided_copy["profile"] = EMPTY_PROFILE.to_dict()
+    thawed["guided_session"] = guided_copy
+    return thawed
 
 
 def _current_adr019_counter_subsets_hold(
@@ -637,6 +675,25 @@ def _find_interpretation_review_node(
     raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
 
 
+def _node_specs_from_state_record(state_record: CompositionStateRecord) -> tuple[Any, ...]:
+    from elspeth.web.composer.state import NodeSpec
+
+    return tuple(NodeSpec.from_dict(dict(n)) for n in state_record.nodes or ())
+
+
+def _find_node_spec_from_state_record(
+    state_record: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    context: str,
+) -> tuple[Any, tuple[Any, ...]]:
+    all_nodes_spec = _node_specs_from_state_record(state_record)
+    target = next((n for n in all_nodes_spec if n.id == affected_node_id), None)
+    if target is None:
+        raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
+    return target, all_nodes_spec
+
+
 def _pipeline_decision_artifact_hash_from_state_record(
     state_record: CompositionStateRecord,
     *,
@@ -652,15 +709,34 @@ def _pipeline_decision_artifact_hash_from_state_record(
     exactly the hash that preflight will recompute later.
     """
 
-    from elspeth.web.composer.state import NodeSpec
-
-    all_nodes_spec: tuple[NodeSpec, ...] = tuple(NodeSpec.from_dict(dict(n)) for n in state_record.nodes or ())
-    target = next((n for n in all_nodes_spec if n.id == affected_node_id), None)
-    if target is None:
-        raise InterpretationNodeMissingError(
-            f"_pipeline_decision_artifact_hash_from_state_record: node {affected_node_id!r} is not present in the composition state's nodes"
-        )
+    target, all_nodes_spec = _find_node_spec_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
+        context="_pipeline_decision_artifact_hash_from_state_record",
+    )
     return pipeline_decision_artifact_hash(target, all_nodes_spec, user_term=user_term)
+
+
+def _validate_pipeline_decision_semantics_from_state_record(
+    state_record: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    user_term: str,
+    draft: str | None,
+    context: str,
+) -> None:
+    target, all_nodes_spec = _find_node_spec_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
+        context=context,
+    )
+    validate_pipeline_decision_node_semantics(
+        node=target,
+        all_nodes=all_nodes_spec,
+        user_term=user_term,
+        draft=draft,
+        context=context,
+    )
 
 
 def _matching_pending_requirement_index(
@@ -1288,10 +1364,9 @@ def _resolve_pipeline_decision_review(
         raise InterpretationPlaceholderConsumedError(
             "resolve_interpretation_event: pipeline_decision event draft does not match the node review requirement draft"
         )
-    validate_pipeline_decision_semantics(
-        node_id=affected_node_id,
-        plugin=node["plugin"] if "plugin" in node else None,
-        options=options,
+    _validate_pipeline_decision_semantics_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
         user_term=user_term,
         draft=draft,
         context="resolve_interpretation_event",
@@ -1702,6 +1777,13 @@ class SessionServiceImpl:
                 conn,
                 parent_assistant_id=parent_assistant_id,
                 session_id=session_id,
+                caller="_insert_chat_message",
+            )
+        elif role == "assistant":
+            _assert_assistant_row_has_audit_content(
+                content=content,
+                raw_content=raw_content,
+                tool_calls=tool_calls,
                 caller="_insert_chat_message",
             )
         msg_id = str(uuid.uuid4())
@@ -2865,10 +2947,9 @@ class SessionServiceImpl:
                         raise ValueError(
                             "create_pending_interpretation_event: pipeline_decision event draft does not match the node review requirement draft"
                         )
-                    validate_pipeline_decision_semantics(
-                        node_id=affected_node_id,
-                        plugin=node["plugin"] if "plugin" in node else None,
-                        options=options,
+                    _validate_pipeline_decision_semantics_from_state_record(
+                        state_record,
+                        affected_node_id=affected_node_id,
                         user_term=user_term,
                         draft=draft,
                         context="create_pending_interpretation_event",
@@ -4311,37 +4392,51 @@ class SessionServiceImpl:
         rid = str(run_id)
         payload = deep_thaw(dict(data))
 
-        def _sync() -> None:
+        def _sync() -> tuple[str, int]:
             with self._engine.begin() as conn:
-                conn.execute(
-                    insert(run_events_table).values(
-                        id=str(event_id),
-                        run_id=rid,
-                        timestamp=timestamp,
-                        event_type=event_type,
-                        data=payload,
+                session_id = conn.execute(select(runs_table.c.session_id).where(runs_table.c.id == rid)).scalar_one_or_none()
+                if session_id is None:
+                    raise ValueError(f"Run {run_id} not found")
+                session_id = str(session_id)
+                with self._session_write_lock(conn, session_id):
+                    sequence = (
+                        int(
+                            conn.execute(
+                                select(func.coalesce(func.max(run_events_table.c.sequence), 0)).where(run_events_table.c.run_id == rid)
+                            ).scalar_one()
+                        )
+                        + 1
                     )
-                )
+                    conn.execute(
+                        insert(run_events_table).values(
+                            id=str(event_id),
+                            run_id=rid,
+                            sequence=sequence,
+                            timestamp=timestamp,
+                            event_type=event_type,
+                            data=payload,
+                        )
+                    )
+                return session_id, sequence
 
-        await self._run_sync(_sync)
+        _session_id, sequence = await self._run_sync(_sync)
         return RunEventRecord(
             id=event_id,
             run_id=run_id,
+            sequence=sequence,
             timestamp=timestamp,
             event_type=event_type,
             data=cast(Mapping[str, Any], payload),
         )
 
     async def list_run_events(self, run_id: UUID) -> list[RunEventRecord]:
-        """List persisted run events in timestamp order."""
+        """List persisted run events in durable insertion order."""
         rid = str(run_id)
 
         def _sync() -> Any:
             with self._engine.connect() as conn:
                 return conn.execute(
-                    select(run_events_table)
-                    .where(run_events_table.c.run_id == rid)
-                    .order_by(run_events_table.c.timestamp, run_events_table.c.id)
+                    select(run_events_table).where(run_events_table.c.run_id == rid).order_by(run_events_table.c.sequence)
                 ).fetchall()
 
         rows = await self._run_sync(_sync)
@@ -4909,6 +5004,14 @@ class SessionServiceImpl:
                 source_session_id,
             )
 
+        # Profile strip (finding 10, rev 4): never let a tutorial WorkflowProfile
+        # leak into a forked session. Computed once, used by BOTH verbatim
+        # composer_meta copies below (the :5150 persist copy and the :5227 return
+        # copy). The route-layer blob-rewrite save preserves composer_meta
+        # verbatim and never strips the profile (and is not in this service
+        # method's path), so the strip must live here — independent of rewritten.
+        forked_composer_meta = _strip_guided_profile_in_meta(source_state_record.composer_meta) if source_state_record is not None else None
+
         # Prepare IDs and timestamps upfront
         new_session_id = uuid.uuid4()
         new_session_id_str = str(new_session_id)
@@ -5073,7 +5176,7 @@ class SessionServiceImpl:
                                     metadata_=source_state_record.metadata_,
                                     is_valid=source_state_record.is_valid,
                                     validation_errors=source_state_record.validation_errors,
-                                    composer_meta=source_state_record.composer_meta,
+                                    composer_meta=forked_composer_meta,
                                 ),
                                 derived_from_state_id=None,
                             ),
@@ -5150,7 +5253,7 @@ class SessionServiceImpl:
                 validation_errors=source_state_record.validation_errors,
                 created_at=now,
                 derived_from_state_id=None,
-                composer_meta=source_state_record.composer_meta,
+                composer_meta=forked_composer_meta,
             )
 
         return new_session, new_messages, copied_state
@@ -5226,6 +5329,7 @@ class SessionServiceImpl:
         return RunEventRecord(
             id=UUID(row.id),
             run_id=UUID(row.run_id),
+            sequence=int(row.sequence),
             timestamp=self._ensure_utc(row.timestamp),
             event_type=cast(SessionRunEventType, row.event_type),
             data=cast(Mapping[str, Any], row.data),

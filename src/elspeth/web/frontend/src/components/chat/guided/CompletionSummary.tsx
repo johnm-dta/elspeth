@@ -30,17 +30,20 @@ import type { TerminalState } from "@/types/guided";
 
 interface CompletionSummaryProps {
   terminal: TerminalState;
+  // Concern B: in a tutorial the "Open freeform editor" action is suppressed
+  // (the only path out of a tutorial is graduation, never freeform).
+  isTutorial?: boolean;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function CompletionSummary({ terminal }: CompletionSummaryProps) {
+export function CompletionSummary({ terminal, isTutorial }: CompletionSummaryProps) {
   // Guard: only render in the completed+yaml-present state.
   if (terminal.kind !== "completed" || terminal.pipeline_yaml === null) {
     return null;
   }
 
-  return <CompletionSummaryInner yaml={terminal.pipeline_yaml} />;
+  return <CompletionSummaryInner yaml={terminal.pipeline_yaml} isTutorial={isTutorial} />;
 }
 
 // ── Inner component (separated so hooks run unconditionally) ──────────────────
@@ -51,9 +54,10 @@ export function CompletionSummary({ terminal }: CompletionSummaryProps) {
 
 interface CompletionSummaryInnerProps {
   yaml: string;
+  isTutorial?: boolean;
 }
 
-function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
+function CompletionSummaryInner({ yaml, isTutorial }: CompletionSummaryInnerProps) {
   const reactId = useId();
   const headingId = `${reactId}-heading`;
   const preId = `${reactId}-pre`;
@@ -90,8 +94,19 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
 
       {/* YAML preview -- syntax-highlighted via prism-react-renderer.
           Theme-aware: dark/light resolved via useTheme() to match YamlView.
-          The pre id is used for distinctness testing across instances. */}
-      <div className="guided-completion-yaml-container">
+          The pre id is used for distinctness testing across instances.
+          role=region + tabIndex: the container scrolls (max-height 400px,
+          overflow:auto) and holds no focusable content, so without a tab stop
+          its overflow is keyboard-unreachable (WCAG 2.1.1; axe
+          scrollable-region-focusable, caught live — jsdom never lays out, so
+          the a11y suite cannot see scrollability). A role is required for the
+          accessible name to be exposed (elspeth-37293a3b7c). */}
+      <div
+        className="guided-completion-yaml-container"
+        role="region"
+        aria-label="Pipeline YAML"
+        tabIndex={0}
+      >
         <Highlight theme={highlightTheme} code={yaml} language="yaml">
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre id={preId} className="guided-completion-pre">
@@ -108,13 +123,15 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
       </div>
 
       <div className="guided-completion-actions">
-        <button
-          type="button"
-          className="guided-completion-save-btn"
-          onClick={handleExit}
-        >
-          Open freeform editor
-        </button>
+        {!isTutorial && (
+          <button
+            type="button"
+            className="guided-completion-save-btn"
+            onClick={handleExit}
+          >
+            Open freeform editor
+          </button>
+        )}
         <button
           type="button"
           className="guided-completion-edit-btn"

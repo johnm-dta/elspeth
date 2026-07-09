@@ -29,6 +29,22 @@ def _make_observed_schema() -> dict[str, str]:
 # ── Invalid configs that both paths must reject ─────────────────────────
 
 _TRANSFORM_REJECTION_CASES = [
+    # ── azure_document_intelligence ──────────────────────────────────────
+    pytest.param(
+        "azure_document_intelligence",
+        {
+            "schema": _make_observed_schema(),
+            "endpoint": "https://di.cognitiveservices.azure.com",
+            "api_key": "k",
+            "model_id": "prebuilt-layout",
+            "source_mode": "url",
+            "source_field": "doc_url",
+            "content_field": "dup",
+            "extract": {"tables": "dup"},  # collides with content_field output name
+        },
+        "Duplicate output field names",
+        id="azure_document_intelligence-duplicate-output-fields",
+    ),
     # ── batch_stats ───────────────────────────────────────────────────────
     pytest.param(
         "batch_stats",
@@ -273,6 +289,31 @@ _TRANSFORM_REJECTION_CASES = [
         },
         "content_field and fingerprint_field must differ",
         id="web_scrape-field-collision",
+    ),
+    # ── blob_fetch ───────────────────────────────────────────────────────
+    pytest.param(
+        "blob_fetch",
+        {
+            "schema": _make_observed_schema(),
+            "url_field": "blob_ref",  # collides with default blob_ref output field
+            "http": {
+                "abuse_contact": "admin@example.com",
+                "fetch_reason": "testing",
+            },
+        },
+        "url_field.*collides",
+        id="blob_fetch-url-field-output-collision",
+    ),
+    # ── blob_csv_expand ──────────────────────────────────────────────────
+    pytest.param(
+        "blob_csv_expand",
+        {
+            "schema": _make_observed_schema(),
+            "blob_ref_field": "blob_ref",
+            "row_index_field": "blob_ref",  # collides with input blob reference
+        },
+        "row_index_field.*collides",
+        id="blob_csv_expand-row-index-blob-ref-collision",
     ),
     # ── report_assemble ───────────────────────────────────────────────────
     pytest.param(

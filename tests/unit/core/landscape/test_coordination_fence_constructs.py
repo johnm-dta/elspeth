@@ -38,6 +38,7 @@ from elspeth.core.landscape.run_coordination_repository import (
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
     active_worker_fence_clause,
+    claim_verb_fence_clause,
     nodes_table,
     rows_table,
     run_coordination_table,
@@ -142,6 +143,19 @@ def _seed_ready_item(db: LandscapeDB, run_id: str, *, sequence: int = 0) -> str:
         )
 
 
+def _seed_pending_sink_item(db: LandscapeDB, run_id: str, *, sequence: int = 0) -> str:
+    from elspeth.contracts.scheduler import TokenWorkStatus
+
+    work_item_id = _seed_ready_item(db, run_id, sequence=sequence)
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(token_work_items_table)
+            .where(token_work_items_table.c.work_item_id == work_item_id)
+            .values(status=TokenWorkStatus.PENDING_SINK.value, updated_at=NOW + timedelta(seconds=1))
+        )
+    return work_item_id
+
+
 class TestActiveWorkerFenceClause:
     """Design :257-265, :411 — the CONSTRUCT only (compilation is slice 4)."""
 
@@ -170,6 +184,78 @@ class TestActiveWorkerFenceClause:
             assert literal in check_sql
         clause_sql = str(active_worker_fence_clause(worker_id="w", run_id="r").compile(compile_kwargs={"literal_binds": True}))
         assert "'active'" in clause_sql
+
+
+class TestClaimVerbFenceClause:
+    """Claim verbs are lenient only for true N=0 registry compatibility."""
+
+    @pytest.mark.parametrize(
+        ("registered_worker", "caller", "expected_rowcount"),
+        [
+            (None, "worker-absent", 1),  # N=0 unit-test mode remains allowed
+            ("worker-active", "worker-active", 1),  # active registered caller
+            ("worker-active", "worker-absent", 0),  # absent caller cannot bypass active registry
+            ("worker-evicted", "worker-absent", 0),  # absent caller cannot bypass any non-empty registry
+            ("worker-evicted", "worker-evicted", 0),  # non-active caller remains fenced
+        ],
+    )
+    def test_claim_verb_allows_absent_worker_only_when_run_has_no_workers(
+        self,
+        db: LandscapeDB,
+        registered_worker: str | None,
+        caller: str,
+        expected_rowcount: int,
+    ) -> None:
+        _insert_run(db, RUN_1)
+        if registered_worker is not None:
+            status = "evicted" if registered_worker == "worker-evicted" else "active"
+            _insert_worker(db, worker_id=registered_worker, run_id=RUN_1, status=status)
+        work_item_id = _seed_ready_item(db, RUN_1)
+
+        with begin_write(db.engine) as conn:
+            result = conn.execute(
+                update(token_work_items_table)
+                .where(
+                    token_work_items_table.c.work_item_id == work_item_id,
+                    token_work_items_table.c.status == "ready",
+                    claim_verb_fence_clause(worker_id=caller, run_id=RUN_1),
+                )
+                .values(updated_at=NOW + timedelta(seconds=1))
+            )
+
+        assert result.rowcount == expected_rowcount
+
+    def test_claim_ready_absent_worker_does_not_claim_when_run_has_active_workers(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        work_item_id = _seed_ready_item(db, RUN_1)
+        repo = TokenSchedulerRepository(db.engine)
+
+        claimed = repo.claim_ready(run_id=RUN_1, lease_owner="worker-absent", lease_seconds=60, now=NOW)
+
+        assert claimed is None
+        with db.engine.connect() as conn:
+            row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+        assert row["status"] == TokenWorkStatus.READY.value
+        assert row["lease_owner"] is None
+
+    def test_claim_pending_sink_absent_worker_does_not_claim_when_run_has_active_workers(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        work_item_id = _seed_pending_sink_item(db, RUN_1)
+        repo = TokenSchedulerRepository(db.engine)
+
+        claimed = repo.claim_pending_sink(run_id=RUN_1, lease_owner="worker-absent", lease_seconds=60, now=NOW)
+
+        assert claimed is None
+        with db.engine.connect() as conn:
+            row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+        assert row["status"] == TokenWorkStatus.PENDING_SINK.value
+        assert row["lease_owner"] is None
 
     @pytest.mark.parametrize(
         ("caller", "caller_run", "expected_rowcount"),
@@ -338,3 +424,135 @@ class TestVerifyAndExtendLeaderFence:
             raise _Boom
 
         assert self._expiry(db) == before, "the successful verify rolled back with the payload"
+
+
+class TestDispositionMembershipFence:
+    """ADR-030 §G parity for DISPOSITION verbs (filigree elspeth-ba7b2cc25d).
+
+    ``claim_ready`` / ``claim_pending_sink`` / ``enqueue_ready`` gained the
+    membership fence in slices 4-5; the disposition verbs (``mark_blocked`` /
+    ``mark_terminal`` / ``mark_failed`` / ``mark_pending_sink``) were the lone
+    unfenced exception. When the caller threads ``worker_id``, the LENIENT
+    ``claim_verb_fence_clause`` rides the same UPDATE WHERE: an evicted or
+    departed worker is refused with ``RunWorkerEvictedError`` and ZERO
+    mutation, while the N=0 OR-branch (no registered workers at all) keeps
+    unregistered/unit-test dispositions working.
+    """
+
+    def _leased_item(self, db: LandscapeDB, *, worker_id: str, sequence: int = 0) -> tuple[TokenSchedulerRepository, str]:
+        work_item_id = _seed_ready_item(db, RUN_1, sequence=sequence)
+        repo = TokenSchedulerRepository(db.engine)
+        claimed = repo.claim_ready(run_id=RUN_1, lease_owner=worker_id, lease_seconds=60, now=NOW)
+        assert claimed is not None and claimed.work_item_id == work_item_id
+        return repo, work_item_id
+
+    @staticmethod
+    def _set_worker_status(db: LandscapeDB, worker_id: str, status: str) -> None:
+        with db.engine.begin() as conn:
+            conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.worker_id == worker_id)
+                .values(status=status, evicted_at=NOW if status == "evicted" else None)
+            )
+
+    @staticmethod
+    def _item_state(db: LandscapeDB, work_item_id: str) -> tuple[str, str | None]:
+        with db.engine.connect() as conn:
+            row = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.work_item_id == work_item_id
+                )
+            ).one()
+        return str(row.status), row.lease_owner
+
+    def test_evicted_worker_is_refused_on_every_disposition_verb_with_zero_mutation(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.errors import RunWorkerEvictedError
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        self._set_worker_status(db, "worker-a", "evicted")
+
+        dispositions = {
+            "mark_terminal": lambda: repo.mark_terminal(
+                work_item_id=work_item_id, now=NOW, expected_lease_owner="worker-a", worker_id="worker-a"
+            ),
+            "mark_failed": lambda: repo.mark_failed(
+                work_item_id=work_item_id, now=NOW, expected_lease_owner="worker-a", worker_id="worker-a"
+            ),
+            "mark_blocked": lambda: repo.mark_blocked(
+                work_item_id=work_item_id,
+                queue_key=None,
+                barrier_key="barrier-1",
+                now=NOW,
+                expected_lease_owner="worker-a",
+                worker_id="worker-a",
+            ),
+            "mark_pending_sink": lambda: repo.mark_pending_sink(
+                work_item_id=work_item_id,
+                row_payload_json="{}",
+                sink_name="sink-a",
+                outcome="success",
+                path="completed",
+                error_hash=None,
+                error_message=None,
+                now=NOW,
+                expected_lease_owner="worker-a",
+                worker_id="worker-a",
+            ),
+        }
+        for verb, disposition in dispositions.items():
+            with pytest.raises(RunWorkerEvictedError) as exc_info:
+                disposition()
+            assert exc_info.value.worker_id == "worker-a", verb
+            assert exc_info.value.run_id == RUN_1, verb
+            status, lease_owner = self._item_state(db, work_item_id)
+            assert status == TokenWorkStatus.LEASED.value, f"{verb} mutated status after eviction"
+            assert lease_owner == "worker-a", f"{verb} mutated lease_owner after eviction"
+
+    def test_departed_worker_is_refused_too(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        self._set_worker_status(db, "worker-a", "departed")
+        with pytest.raises(RunWorkerEvictedError):
+            repo.mark_terminal(work_item_id=work_item_id, now=NOW, expected_lease_owner="worker-a", worker_id="worker-a")
+
+    def test_fenced_disposition_succeeds_when_run_has_no_workers(self, db: LandscapeDB) -> None:
+        """The LENIENT clause's N=0 OR-branch: a disposition WITH worker_id
+        supplied still succeeds when the run has no registered workers at all
+        (the reason this fence uses claim_verb_fence_clause, NOT the strict
+        active_worker_fence_clause)."""
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        repo, work_item_id = self._leased_item(db, worker_id="worker-unregistered")
+        item = repo.mark_terminal(
+            work_item_id=work_item_id, now=NOW, expected_lease_owner="worker-unregistered", worker_id="worker-unregistered"
+        )
+        assert item.status is TokenWorkStatus.TERMINAL
+
+    def test_active_worker_disposition_succeeds_with_fence(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        item = repo.mark_terminal(work_item_id=work_item_id, now=NOW, expected_lease_owner="worker-a", worker_id="worker-a")
+        assert item.status is TokenWorkStatus.TERMINAL
+
+    def test_unfenced_disposition_keeps_legacy_behavior_when_worker_id_omitted(self, db: LandscapeDB) -> None:
+        """Default ``worker_id=None`` keeps the fence OFF — the processor gates
+        the fence on ``_scheduler_lease_owner_registered``, so legacy/N=0
+        callers that never thread an identity are unaffected."""
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        self._set_worker_status(db, "worker-a", "evicted")
+        item = repo.mark_terminal(work_item_id=work_item_id, now=NOW, expected_lease_owner="worker-a")
+        assert item.status is TokenWorkStatus.TERMINAL

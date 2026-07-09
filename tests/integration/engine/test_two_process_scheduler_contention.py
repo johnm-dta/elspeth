@@ -107,7 +107,7 @@ JOIN_TIMEOUT_SECONDS = 60.0
 
 # ---------------------------------------------------------------------------
 # Seeding (local copies of the canonical unit-fixture shapes from
-# tests/unit/engine/test_rc6_lease_recovery_sweep.py — deliberately NOT
+# tests/unit/engine/test_lease_recovery_sweep.py — deliberately NOT
 # imported from a unit-test module).
 # ---------------------------------------------------------------------------
 

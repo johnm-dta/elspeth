@@ -1,6 +1,11 @@
 // src/components/chat/MessageBubble.tsx
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { ChatMessage, CompositionProposal, InlineSourceSummary } from "@/types/api";
+import type {
+  ChatMessage,
+  CompositionProposal,
+  CompositionState,
+  InlineSourceSummary,
+} from "@/types/api";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
@@ -11,6 +16,11 @@ interface MessageBubbleProps {
   onRetry?: (messageId: string) => void;
   onFork?: (messageId: string, newContent: string) => void;
   proposalsByToolCallId?: Map<string, CompositionProposal>;
+  /**
+   * Current composition state, threaded through to ToolCallCard as the
+   * "before" side of pending-proposal diffs (elspeth-10f76f9250).
+   */
+  compositionState?: CompositionState | null;
   staleProposalIds?: string[];
   proposalActionPendingIds?: string[];
   onAcceptProposal?: (proposalId: string) => void;
@@ -34,6 +44,7 @@ export function MessageBubble({
   onRetry,
   onFork,
   proposalsByToolCallId,
+  compositionState = null,
   staleProposalIds = [],
   proposalActionPendingIds = [],
   onAcceptProposal = () => undefined,
@@ -93,9 +104,15 @@ export function MessageBubble({
     }
   }, [isEditing]);
 
+  // Author attribution for assistive tech. The bubble distinguishes
+  // user/assistant/system VISUALLY (alignment, colour, edge accent), but a
+  // screen reader hears a flat run of messages with no idea who said what — on
+  // an AI surface, "did ELSPETH or I say this" is load-bearing (WCAG 1.3.1 / AI
+  // legibility). An sr-only label, read first, supplies it. (elspeth-f700d8d8a5)
+  const authorLabel = isUser ? "You said:" : isSystem ? "System note:" : "ELSPETH said:";
+
   // System messages: centre-aligned full-width banner, muted colour,
-  // italic text, no sender label. Used for audit markers like
-  // "Pipeline reverted to version N."
+  // italic text. Used for audit markers like "Pipeline reverted to version N."
   if (isSystem) {
     return (
       <div
@@ -105,6 +122,7 @@ export function MessageBubble({
           className="bubble bubble-system"
           role="status"
         >
+          <span className="sr-only">{authorLabel}</span>
           <MarkdownRenderer content={message.content} />
         </div>
       </div>
@@ -118,6 +136,10 @@ export function MessageBubble({
       <div
         className={`bubble ${isUser ? "bubble-user" : "bubble-assistant"} message-bubble-content${isUser ? " message-bubble-content--user" : ""}`}
       >
+        {/* Author attribution, read first by assistive tech (DOM order). The
+            copy button below is an absolutely-positioned overlay, so this stays
+            the first thing announced. */}
+        <span className="sr-only">{authorLabel}</span>
         {/* Copy button — visible on hover via CSS, always accessible on touch */}
         {!isSystem && (
           <button
@@ -219,6 +241,7 @@ export function MessageBubble({
                   <ToolCallCard
                     key={tc.id ?? i}
                     toolCall={tc}
+                    currentState={compositionState}
                     proposal={
                       tc.id
                         ? proposalsByToolCallId?.get(tc.id) ?? null

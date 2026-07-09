@@ -29,6 +29,7 @@ import type {
   RunDiagnosticsEvaluation,
   RunOutputArtifactPreview,
   RunOutputsResponse,
+  WebSocketTicketResponse,
   SecretInventoryItem,
   Session,
   UserProfile,
@@ -42,6 +43,7 @@ import type {
   GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  TutorialSampleResponse,
 } from "@/types/guided";
 import type {
   InterpretationEvent,
@@ -54,6 +56,7 @@ import type {
 import type { RecoveryTranscriptRow } from "@/types/recovery";
 import type {
   RunAuditStoryResponse,
+  TutorialCancelResponse,
   TutorialOrphanCleanupResponse,
   TutorialRunRequest,
   TutorialRunResponse,
@@ -306,7 +309,13 @@ export async function fetchCurrentUser(): Promise<UserProfile> {
 
 /** Return boot-time system readiness for the web UX. */
 export async function fetchSystemStatus(): Promise<SystemStatus> {
-  const response = await fetch("/api/system/status");
+  // Health probe must be snappy: during a network drop a bare fetch can hang
+  // for the OS connect timeout (30-120s), which made the outage banner's
+  // Retry button look dead (operator-observed). 5s is generous for a
+  // same-origin health endpoint.
+  const response = await fetch("/api/system/status", {
+    signal: AbortSignal.timeout(5000),
+  });
   return parseResponse<SystemStatus>(response);
 }
 
@@ -325,12 +334,17 @@ export async function fetchSessions(includeArchived = true): Promise<Session[]> 
   return parseResponse<Session[]>(response);
 }
 
-/** Create a new session. */
+/** Create a new session.
+ *
+ * No title is sent: the backend mints the app-wide default
+ * ("Session — 2 Jul 2026", auto-disambiguated per user) so every client
+ * shares one naming convention (elspeth-ef8c18a6cb).
+ */
 export async function createSession(): Promise<Session> {
   const response = await fetch("/api/sessions", {
     method: "POST",
     headers: authHeaders("application/json"),
-    body: JSON.stringify({ title: "New session" }),
+    body: JSON.stringify({}),
   });
   return parseResponse<Session>(response);
 }
@@ -372,6 +386,41 @@ export async function runTutorialPipeline(
     signal,
   });
   return parseResponse<TutorialRunResponse>(response);
+}
+
+/** Best-effort server-side cancel of an active tutorial run.
+ *
+ * Idempotent: `cancelled: false` means there was no active run left to stop.
+ * `keepalive` lets the request survive the user closing the tab immediately
+ * after clicking Cancel (the auth is a bearer header, so this cannot be a
+ * `navigator.sendBeacon` — beacons carry no custom headers). */
+export async function cancelTutorialRun(
+  sessionId: string,
+): Promise<TutorialCancelResponse> {
+  const response = await fetch("/api/tutorial/cancel", {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ session_id: sessionId }),
+    keepalive: true,
+  });
+  return parseResponse<TutorialCancelResponse>(response);
+}
+
+/** Fire the tutorial-abandoned telemetry beacon (POST /api/tutorial/abandon).
+ *
+ * Best-effort and fire-and-forget: called from a `pagehide` handler while the
+ * page is being torn down, so failures are swallowed — there is nowhere left
+ * to surface them. The endpoint requires the bearer header, which
+ * `navigator.sendBeacon` cannot carry, so this is a keepalive fetch (the
+ * browser lets it outlive the page). */
+export function sendTutorialAbandonBeacon(): void {
+  void fetch("/api/tutorial/abandon", {
+    method: "POST",
+    headers: authHeaders(),
+    keepalive: true,
+  }).catch(() => {
+    // Best-effort telemetry: the page is going away; nothing to surface.
+  });
 }
 
 /** Read the audit-story projection for a completed tutorial run. */
@@ -607,6 +656,51 @@ export async function getGuided(
 }
 
 /**
+ * Fetch the runtime-derived synthetic-scrape sample URLs for the active
+ * TUTORIAL session's resolved origin (p4 Task 8a GET surface).
+ *
+ * Consumed by `TutorialGuidedShell`: the URLs are computed server-side from the
+ * resolved base at request time (they cannot ride the frozen profile
+ * constants), so the shell fetches them and appends them to the locked STEP_1
+ * prompt. The synthetic pages are publicly hosted, so the tutorial's web_scrape
+ * node carries no SSRF allowlist (it uses the plugin default `public_only`).
+ */
+export async function getTutorialSample(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<TutorialSampleResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/guided/tutorial-sample`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  return parseResponse<TutorialSampleResponse>(response);
+}
+
+/**
+ * Seed a guided session with a server-owned WorkflowProfile.
+ *
+ * The `profileKind` is a closed-enum discriminator ("live" | "tutorial"); the
+ * SERVER constructs the concrete profile object and persists the GuidedSession.
+ * Idempotent (D16): a second call for a session that already has a persisted
+ * guided session returns the existing session unchanged.
+ */
+export async function startGuidedSession(
+  sessionId: string,
+  profileKind: "live" | "tutorial",
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ profile: profileKind }),
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
  * Post a user response to the active guided turn.
  *
  * Server consumes the response, advances the state machine, and returns
@@ -746,11 +840,81 @@ export async function revertToVersion(
 }
 
 /** Fetch the generated YAML for the current composition state. */
-export async function fetchYaml(sessionId: string): Promise<{ yaml: string }> {
+/**
+ * Fetch the current composition's exported YAML. For a source whose options
+ * point into session blob storage, the backend returns a `source_blob_ids`
+ * sidecar (source name -> blob UUID) alongside the YAML: the blob UUIDs are
+ * stripped from the public YAML body, so this sidecar is the ONLY channel by
+ * which the frontend learns them. It must be preserved for the import
+ * round-trip (importCompositionYaml's third arg) — dropping it strands a
+ * re-imported blob-backed source as unbound. Omitted when no source is
+ * blob-backed.
+ */
+export async function fetchYaml(
+  sessionId: string,
+): Promise<{ yaml: string; source_blob_ids?: Record<string, string> }> {
   const response = await fetch(`/api/sessions/${sessionId}/state/yaml`, {
     headers: authHeaders(),
   });
-  return parseResponse<{ yaml: string }>(response);
+  return parseResponse<{ yaml: string; source_blob_ids?: Record<string, string> }>(
+    response,
+  );
+}
+
+/** Request body for POST /api/sessions/{id}/state/yaml. */
+export interface ImportCompositionYamlRequest {
+  /** Raw YAML text, 1..262144 chars (backend-enforced). */
+  yaml: string;
+  /**
+   * Optional source-name -> blob-UUID map, only needed when the YAML's
+   * source options point into session blob storage (the replay-of-export
+   * case). Omitted entirely when not needed -- the backend 400s a
+   * blob-storage-path source that has no entry here rather than assuming one.
+   */
+  source_blob_ids?: Record<string, string>;
+}
+
+/**
+ * Composition state as returned by the YAML-import endpoint
+ * (`CompositionStateResponse`, sessions/schemas.py:234). Deliberately a
+ * narrow local type rather than the frontend's `CompositionState` (types/
+ * index.ts) -- this route's response additionally carries `is_valid` /
+ * `validation_errors`, and `edges` is always `[]` here (graph routing
+ * derives from node on_success/on_error/routes, not a persisted edge list).
+ * Callers that need the full canonical state re-fetch it (e.g. via
+ * `selectSession`); this type only covers what an import confirmation needs
+ * to render immediately.
+ */
+export interface ImportedCompositionState {
+  id: string;
+  version: number;
+  is_valid: boolean;
+  validation_errors: string[] | null;
+}
+
+/**
+ * Import (replace) a session's composition state from hand-edited or
+ * previously-exported YAML (elspeth-24c56585f9 T-1). This REPLACES the
+ * current composition -- the backend does not merge -- and always resets
+ * the session's guided_session to null server-side, landing the session in
+ * freeform. The prior version remains reachable via `fetchStateVersions` /
+ * `revertToVersion`. A 200 response does not imply the imported pipeline is
+ * runnable: check `is_valid`/`validation_errors` on the result.
+ */
+export async function importCompositionYaml(
+  sessionId: string,
+  yamlText: string,
+  sourceBlobIds?: Record<string, string>,
+): Promise<ImportedCompositionState> {
+  const body: ImportCompositionYamlRequest = sourceBlobIds
+    ? { yaml: yamlText, source_blob_ids: sourceBlobIds }
+    : { yaml: yamlText };
+  const response = await fetch(`/api/sessions/${sessionId}/state/yaml`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+  });
+  return parseResponse<ImportedCompositionState>(response);
 }
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
@@ -806,8 +970,14 @@ export async function getPluginSchema(
  */
 export async function validatePipeline(
   sessionId: string,
+  stateId?: string,
 ): Promise<ValidationResult> {
-  const response = await fetch(`/api/sessions/${sessionId}/validate`, {
+  const params = new URLSearchParams();
+  if (stateId) {
+    params.set("state_id", stateId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/sessions/${sessionId}/validate${query}`, {
     method: "POST",
     headers: authHeaders("application/json"),
   });
@@ -822,7 +992,13 @@ export async function validatePipeline(
 export async function executePipeline(
   sessionId: string,
   fanoutAck?: ExecutionFanoutAck,
+  stateId?: string,
 ): Promise<{ run_id: string }> {
+  const params = new URLSearchParams();
+  if (stateId) {
+    params.set("state_id", stateId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   const init: RequestInit = {
     method: "POST",
     headers: authHeaders("application/json"),
@@ -830,7 +1006,7 @@ export async function executePipeline(
   if (fanoutAck) {
     init.body = JSON.stringify({ fanout_ack_token: fanoutAck.token });
   }
-  const response = await fetch(`/api/sessions/${sessionId}/execute`, init);
+  const response = await fetch(`/api/sessions/${sessionId}/execute${query}`, init);
   return parseResponse<{ run_id: string }>(response);
 }
 
@@ -849,6 +1025,17 @@ export async function cancelRun(runId: string): Promise<CancelRunResponse> {
     headers: authHeaders("application/json"),
   });
   return parseResponse<CancelRunResponse>(response);
+}
+
+/** Issue a short-lived one-use ticket for the run progress WebSocket. */
+export async function createRunWebSocketTicket(
+  runId: string,
+): Promise<WebSocketTicketResponse> {
+  const response = await fetch(`/api/runs/${runId}/ws-ticket`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+  });
+  return parseResponse<WebSocketTicketResponse>(response);
 }
 
 /** Get the results/summary of a completed run. */
@@ -1290,3 +1477,52 @@ export {
   fetchAuditReadiness,
   fetchAuditReadinessExplain,
 } from "./auditReadiness";
+
+export interface AuthTokenResponse {
+  access_token: string;
+  token_type?: string;
+}
+
+export type RegisterResponse =
+  | AuthTokenResponse
+  | { status: "verification_required"; email: string };
+
+/**
+ * Register a new local-auth account. Open registration returns a JWT and
+ * email-verified registration returns a pending-verification response.
+ * display_name defaults to the username; the minimal sign-up form does not
+ * collect a separate one.
+ */
+export async function register(
+  username: string,
+  password: string,
+  email?: string,
+): Promise<RegisterResponse> {
+  const body: {
+    username: string;
+    password: string;
+    display_name: string;
+    email?: string;
+  } = { username, password, display_name: username };
+  if (email !== undefined) {
+    body.email = email;
+  }
+  const response = await fetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseResponse<RegisterResponse>(response);
+}
+
+/**
+ * Consume an email-verification token and return a normal local-auth JWT.
+ */
+export async function verifyEmail(token: string): Promise<AuthTokenResponse> {
+  const response = await fetch("/api/auth/verify-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  return parseResponse<AuthTokenResponse>(response, { logoutOnUnauthorized: false });
+}

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +30,37 @@ from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
 
 DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, side_effect: Any = None) -> None:
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return None
+
+
+class _AzureOpenAIClientDouble:
+    def __init__(self, create_response: Any) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CallRecorder(create_response)))
+        self.close = _CallRecorder()
 
 
 def make_full_config() -> dict[str, Any]:
@@ -197,47 +229,38 @@ Assess this case against the criterion.
 @contextmanager
 def mock_azure_openai_multi_query(
     responses: list[dict[str, Any]],
-) -> Generator[Mock, None, None]:
+) -> Generator[_AzureOpenAIClientDouble, None, None]:
     """Context manager to mock Azure OpenAI for multi-query processing.
 
     Args:
         responses: List of response dicts to return in order (cycles if exhausted)
 
     Yields:
-        Mock client instance for assertions
+        Client double for assertions
     """
     call_count = [0]
 
-    def make_response(**kwargs: Any) -> Mock:
+    def make_response(**_kwargs: Any) -> SimpleNamespace:
         content = json.dumps(responses[call_count[0] % len(responses)])
         call_count[0] += 1
-
-        mock_usage = Mock()
-        mock_usage.prompt_tokens = 50
-        mock_usage.completion_tokens = 20
-
-        mock_message = Mock()
-        mock_message.content = content
-
-        mock_choice = Mock()
-        mock_choice.message = mock_message
-
-        mock_response = Mock()
-        mock_response.choices = [mock_choice]
-        mock_response.model = "gpt-4o"
-        mock_response.usage = mock_usage
-        mock_response.model_dump = Mock(
-            return_value={
-                "model": "gpt-4o",
-                "choices": [{"finish_reason": "stop", "message": {"content": content}}],
-            }
+        raw_response = {
+            "model": "gpt-4o",
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+        }
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=content),
+                )
+            ],
+            model="gpt-4o",
+            usage=SimpleNamespace(prompt_tokens=50, completion_tokens=20),
+            model_dump=lambda *_args, **_kwargs: raw_response,
         )
 
-        return mock_response
-
     with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = make_response
+        mock_client = _AzureOpenAIClientDouble(make_response)
         mock_azure_class.return_value = mock_client
         yield mock_client
 
@@ -332,8 +355,13 @@ class TestMultiQueryIntegration:
                     }
                 )
 
-        with mock_azure_openai_multi_query(responses) as mock_client:
-            transform = LLMTransform(make_full_config())
+        with (
+            mock_azure_openai_multi_query(responses) as mock_client,
+            # closing() guarantees the batch runtime's worker threads shut down
+            # even when an assertion fails — leaked non-daemon threads block
+            # interpreter exit and hang the whole pytest run.
+            closing(LLMTransform(make_full_config())) as transform,
+        ):
             transform.node_id = node_id
             transform.on_error = "discard"
 
@@ -400,16 +428,18 @@ class TestMultiQueryIntegration:
                     assert f"{query_name}_score" in output, f"Missing {query_name}_score"
                     assert f"{query_name}_rationale" in output, f"Missing {query_name}_rationale"
 
-            # Verify audit trail - LLM calls were recorded via AuditedLLMClient
+            # Verify audit trail - LLM calls were recorded via AuditedLLMClient.
+            # execute_transform scopes ctx.state_id for the duration of the
+            # operation and restores it afterwards (plugin_context_scope), so
+            # resolve the real state from the audit trail via the token.
             from elspeth.contracts import CallStatus, CallType
 
-            assert ctx.state_id is not None
-            calls = factory.query.get_calls(ctx.state_id)
+            states = factory.query.get_node_states_for_token(token.token_id)
+            assert len(states) == 1, f"Expected one node state for token, got {len(states)}"
+            calls = factory.query.get_calls(states[0].state_id)
             llm_calls = [c for c in calls if c.call_type == CallType.LLM]
             assert len(llm_calls) == 10, f"Expected 10 LLM calls recorded, got {len(llm_calls)}"
             assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
-
-            transform.close()
 
     def test_multiple_rows_through_multi_query(
         self,
@@ -454,8 +484,12 @@ class TestMultiQueryIntegration:
             {"score": 90},
         ]
 
-        with mock_azure_openai_multi_query(responses) as mock_client:
-            transform = LLMTransform(config)
+        with (
+            mock_azure_openai_multi_query(responses) as mock_client,
+            # closing() guarantees worker-thread shutdown even on assertion
+            # failure; without it a failed run hangs pytest at exit.
+            closing(LLMTransform(config)) as transform,
+        ):
             transform.node_id = node_id
             transform.on_error = "discard"
 
@@ -503,13 +537,18 @@ class TestMultiQueryIntegration:
                 assert "case_quality_score" in result.row
                 assert "case_safety_score" in result.row
 
-            # Verify audit trail - LLM calls recorded for at least the last state
+            # Verify audit trail - every row's node state recorded its 2 LLM
+            # calls. ctx.state_id is scoped per operation and restored after
+            # execute_transform (plugin_context_scope), so resolve each row's
+            # state from the audit trail via its token.
             from elspeth.contracts import CallStatus, CallType
 
-            assert ctx.state_id is not None
-            calls = factory.query.get_calls(ctx.state_id)
-            llm_calls = [c for c in calls if c.call_type == CallType.LLM]
-            assert len(llm_calls) == 2, f"Expected 2 LLM calls for last row, got {len(llm_calls)}"
-            assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
+            for i in range(len(rows)):
+                states = factory.query.get_node_states_for_token(f"token-{i}")
+                assert len(states) == 1, f"Expected one node state for token-{i}, got {len(states)}"
+                calls = factory.query.get_calls(states[0].state_id)
+                llm_calls = [c for c in calls if c.call_type == CallType.LLM]
+                assert len(llm_calls) == 2, f"Expected 2 LLM calls for row {i}, got {len(llm_calls)}"
+                assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
 
             transform.close()

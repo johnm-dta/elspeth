@@ -25,7 +25,7 @@ from elspeth.core.config import (
     SourceSettings,
 )
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.dag.models import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.testing import make_pipeline_row

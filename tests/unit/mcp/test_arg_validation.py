@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.mcp.server import _ToolDef, _validate_tool_args
+from elspeth.mcp.limits import MCP_RESULT_LIMIT_MAX
+from elspeth.mcp.server import _TOOLS, _ToolDef, _validate_tool_args
 
 
 class TestRequiredStringFields:
@@ -74,6 +75,69 @@ class TestOptionalStringDefaults:
             _validate_tool_args("get_errors", {"run_id": "r1", "error_type": 123})
 
 
+class TestAdvertisedEnumFields:
+    """String enum constraints must be enforced before analyzer dispatch."""
+
+    @pytest.mark.parametrize(
+        ("tool_name", "base_args", "field_name", "valid_value"),
+        [
+            ("list_runs", {}, "status", "running"),
+            ("list_operations", {"run_id": "r1"}, "operation_type", "source_load"),
+            ("list_operations", {"run_id": "r1"}, "status", "open"),
+            ("get_errors", {"run_id": "r1"}, "error_type", "validation"),
+            ("get_node_states", {"run_id": "r1"}, "status", "completed"),
+        ],
+    )
+    def test_validator_accepts_values_from_advertised_enum(
+        self,
+        tool_name: str,
+        base_args: dict[str, object],
+        field_name: str,
+        valid_value: str,
+    ) -> None:
+        assert valid_value in _TOOLS[tool_name].schema_properties[field_name]["enum"]
+
+        args = _validate_tool_args(tool_name, {**base_args, field_name: valid_value})
+
+        assert args[field_name] == valid_value
+
+    @pytest.mark.parametrize(
+        ("tool_name", "base_args", "field_name"),
+        [
+            ("list_runs", {}, "status"),
+            ("list_operations", {"run_id": "r1"}, "operation_type"),
+            ("list_operations", {"run_id": "r1"}, "status"),
+            ("get_errors", {"run_id": "r1"}, "error_type"),
+            ("get_node_states", {"run_id": "r1"}, "status"),
+        ],
+    )
+    def test_validator_rejects_values_outside_advertised_enum(
+        self,
+        tool_name: str,
+        base_args: dict[str, object],
+        field_name: str,
+    ) -> None:
+        bad_value = "__not_a_valid_enum_value__"
+        assert bad_value not in _TOOLS[tool_name].schema_properties[field_name]["enum"]
+
+        with pytest.raises(ValueError, match=rf"{field_name}.*must be one of"):
+            _validate_tool_args(tool_name, {**base_args, field_name: bad_value})
+
+    @pytest.mark.parametrize(
+        ("tool_name", "field_name"),
+        [
+            ("list_runs", "status"),
+            ("list_operations", "operation_type"),
+            ("list_operations", "status"),
+            ("get_node_states", "status"),
+        ],
+    )
+    def test_nullable_enum_fields_still_accept_null(self, tool_name: str, field_name: str) -> None:
+        args = _validate_tool_args(tool_name, {"run_id": "r1", field_name: None})
+
+        assert args[field_name] is None
+
+
 class TestOptionalIntFields:
     """Optional integer fields with defaults."""
 
@@ -109,6 +173,39 @@ class TestOptionalIntFields:
         args = _validate_tool_args("list_rows", {"run_id": "r1"})
         assert args["limit"] == 100
         assert args["offset"] == 0
+
+    def test_query_limit_default_applied(self) -> None:
+        args = _validate_tool_args("query", {"sql": "SELECT 1"})
+        assert args["limit"] == MCP_RESULT_LIMIT_MAX
+
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("list_runs", {}),
+            ("list_rows", {"run_id": "r1"}),
+            ("list_tokens", {"run_id": "r1"}),
+            ("list_operations", {"run_id": "r1"}),
+            ("get_errors", {"run_id": "r1"}),
+            ("get_node_states", {"run_id": "r1"}),
+            ("list_collisions", {"run_id": "r1"}),
+            ("query", {"sql": "SELECT 1"}),
+            ("get_failure_context", {"run_id": "r1"}),
+            ("list_contract_violations", {"run_id": "r1"}),
+        ],
+    )
+    def test_limit_above_max_rejected(self, tool_name: str, arguments: dict[str, object]) -> None:
+        with pytest.raises(ValueError, match=f"must be <= {MCP_RESULT_LIMIT_MAX}"):
+            _validate_tool_args(tool_name, {**arguments, "limit": MCP_RESULT_LIMIT_MAX + 1})
+
+    def test_limit_schemas_advertise_maximum(self) -> None:
+        missing = [
+            name
+            for name, defn in _TOOLS.items()
+            if any(field_name == "limit" for field_name, _default in defn.args.optional_int)
+            and defn.schema_properties.get("limit", {}).get("maximum") != MCP_RESULT_LIMIT_MAX
+        ]
+
+        assert missing == []
 
 
 class TestOptionalDictFields:
@@ -223,9 +320,15 @@ class TestToolDefImmutability:
         with pytest.raises(TypeError):
             tool.schema_properties["injected"] = "evil"  # type: ignore[index]
 
+        assert isinstance(tool.schema_properties["run_id"], MappingProxyType)
+        with pytest.raises(TypeError):
+            tool.schema_properties["run_id"]["type"] = "integer"  # type: ignore[index]
+
         # Caller's original dict must be decoupled
         original["injected"] = "evil"  # type: ignore[assignment]
+        original["run_id"]["type"] = "integer"
         assert "injected" not in tool.schema_properties
+        assert tool.schema_properties["run_id"]["type"] == "string"
 
 
 class TestSchemaAndValidatorConsistency:

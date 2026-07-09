@@ -1,3 +1,0 @@
-{
-  "content": "I have a file of recent compliance findings — compliance_findings_h2.csv — and the regional compliance leads each need their own list. Now, I should mention upfront that some findings touch more than one region, and in those cases the entry needs to appear in each affected region's list, not just one — we can't have a finding visible to the eastern lead but invisible to the western lead when both teams own the work. The regional teams will dedupe themselves later if needed, that's not your concern. Could you set this up so that each of the four regions — US-EAST, US-WEST, EMEA, APAC — gets its own list of findings, and a finding that touches two or three regions appears in each of their lists?\n"
-}

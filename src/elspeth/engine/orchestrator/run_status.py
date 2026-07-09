@@ -18,6 +18,7 @@ testable without constructing an Orchestrator instance.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from elspeth.contracts import RunStatus
@@ -25,6 +26,7 @@ from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.events import RunCompletionStatus
 from elspeth.contracts.run_result import derive_terminal_run_status
+from elspeth.engine.orchestrator.counter_classification import TERMINAL_PAIR_COUNTER_EFFECTS, apply_counter_increments
 from elspeth.engine.orchestrator.types import ExecutionCounters
 
 if TYPE_CHECKING:
@@ -55,6 +57,40 @@ def _require_routed_sink_name(outcome_record: TokenOutcome, pair: tuple[Terminal
             f"contract-required for routed outcomes and enforced on read by the TokenOutcome loader)."
         )
     return name
+
+
+def is_counted_coalesced_output(outcome_record: TokenOutcome) -> bool:
+    """Return True when a ``(SUCCESS, COALESCED)`` record is the MERGED output
+    that the counters must tally, False when it is a CONSUMED branch input.
+
+    A coalesce produces TWO kinds of ``(SUCCESS, COALESCED)`` record:
+
+    1. the MERGED/output token, recorded with ``sink_name`` SET when it reaches
+       its terminal sink (live: ``outcomes.py`` accumulate_row_outcomes →
+       ``_route_to_sink``). This is the row that "coalesced", and the LIVE
+       accumulator counts it once.
+    2. each CONSUMED branch input, recorded by :class:`CoalesceExecutor` with
+       ``sink_name`` HARD-CODED to None (``coalesce_executor.py`` ~1016-1022) —
+       these are absorbed INTO the merged token and never routed through
+       ``accumulate_row_outcomes``, so the live path counts only the merged
+       output.
+
+    The derive must mirror that: counting every ``(SUCCESS, COALESCED)`` record
+    double-counts — it reported ``rows_coalesced``/``rows_succeeded`` == 3 for a
+    2-branch coalesce-success where the live RunResult reports 1 (a
+    resume-independent bug that leaked into the audit-derived RunResult of every
+    resumed coalesce-success run). The ``sink_name`` discriminator is an
+    invariant, not a topology coincidence: a consumed input ALWAYS has
+    ``sink_name=None`` and the merged output ALWAYS carries its sink name. This
+    also keeps NESTED coalesces correct — an inner merged token absorbed by an
+    outer coalesce is itself recorded as a consumed input with ``sink_name=None``,
+    so it is not counted at the inner level either.
+
+    This mirrors how ``BATCH_CONSUMED`` delegates its success to the aggregate
+    result and fork children are counted at their own sinks: the consumed inputs
+    DELEGATE their success/coalesce tally to the merged token.
+    """
+    return outcome_record.sink_name is not None
 
 
 def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> tuple[RunStatus, ExecutionCounters]:
@@ -94,7 +130,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     ``rows_processed`` is reconstructed per *source row* (distinct
     ``row_id`` reaching a terminal outcome) rather than per terminal
     token; see the inline comment and
-    ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``.
+    ``AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome``.
 
     Returns:
         ``(terminal_status, counters)``.  ``counters`` feeds the local
@@ -105,7 +141,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
     counters = ExecutionCounters()
     # ``rows_processed`` is per *source row*, not per terminal token — see
-    # ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``.  It
+    # ``AuditRunStatusProjection.count_distinct_source_rows_with_terminal_outcome``.  It
     # MUST NOT be accumulated per-case below: a 1-source-row fork emits two leaf
     # tokens, a 3-source-row aggregation emits one result token, a 1-source-row
     # expand emits N children, yet each contributes exactly its source rows
@@ -114,7 +150,7 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     # unique value that matches an uninterrupted run (F2 reconciliation). All
     # OTHER counters below are genuine per-terminal-token tallies and stay
     # per-case.
-    counters.rows_processed = factory.query.count_distinct_source_rows_with_terminal_outcome(run_id)
+    counters.rows_processed = factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome(run_id)
     # ``rows_coalesce_failed`` has no token_outcomes arm: a failed coalesce
     # records per-branch (FAILURE, UNROUTED) outcomes (so ``rows_failed``
     # reconstructs below) but those carry no node attribution, and a naive
@@ -125,83 +161,32 @@ def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> 
     # value (elspeth-7294de558e) — it is cumulative over run-1 AND resume
     # re-drives (same run_id), replacing the resume-only live-counter graft
     # that forgot run-1 failures.
-    counters.rows_coalesce_failed = factory.query.count_failed_coalesce_barrier_rows(run_id)
+    counters.rows_coalesce_failed = factory.run_status_projection.count_failed_coalesce_barrier_rows(run_id)
     for outcome_record in outcomes:
         if not outcome_record.completed:
             if (outcome_record.outcome, outcome_record.path) == (None, TerminalPath.BUFFERED):
-                counters.rows_buffered += 1
+                apply_counter_increments(counters, TERMINAL_PAIR_COUNTER_EFFECTS[(None, TerminalPath.BUFFERED)])
             continue
         pair = (outcome_record.outcome, outcome_record.path)
-        match pair:
-            case (
-                (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
-                | (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)
-                | (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED)
-            ):
-                counters.rows_succeeded += 1
-            case (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
-                # A coalesce produces TWO kinds of (SUCCESS, COALESCED) record:
-                #   1. the MERGED/output token, recorded with sink_name SET when
-                #      it reaches its terminal sink (live: outcomes.py
-                #      accumulate_row_outcomes → _route_to_sink). This is the row
-                #      that "coalesced", and the LIVE accumulator counts it once.
-                #   2. each CONSUMED branch input, recorded by CoalesceExecutor
-                #      with sink_name HARD-CODED to None (coalesce_executor.py
-                #      ~1016-1022) — these are absorbed INTO the merged token.
-                # The live path never routes the consumed inputs through
-                # accumulate_row_outcomes, so it counts ONLY the merged output.
-                # derive() must mirror that: the consumed inputs DELEGATE their
-                # success/coalesce predicate to the merged token (exactly as
-                # BATCH_CONSUMED delegates to the aggregate result and fork
-                # children are counted at their own sinks). Counting every
-                # COALESCED record here double-counts — derive reported
-                # rows_coalesced/rows_succeeded == 3 for a 2-branch coalesce-success
-                # where the live RunResult reports 1 (resume-independent bug; the
-                # over-count went into the audit-derived RunResult of every resumed
-                # coalesce-success run). The sink_name discriminator is an
-                # invariant, not a topology coincidence: a consumed input ALWAYS
-                # has sink_name=None and the merged output ALWAYS carries its sink
-                # name (this also keeps nested coalesces correct — an inner merged
-                # token absorbed by an outer coalesce is recorded as a consumed
-                # input with sink_name=None and so is not counted at the inner level).
-                if outcome_record.sink_name is not None:
-                    counters.rows_coalesced += 1
-                    counters.rows_succeeded += 1
-            case (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
-                counters.rows_routed_success += 1
-                counters.rows_succeeded += 1
-                counters.routed_destinations[_require_routed_sink_name(outcome_record, pair)] += 1
-            case (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
-                counters.rows_failed += 1
-                counters.rows_routed_failure += 1
-                counters.routed_destinations[_require_routed_sink_name(outcome_record, pair)] += 1
-            case (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
-                counters.rows_failed += 1
-            case (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
-                counters.rows_quarantined += 1
-                counters.rows_failed += 1
-            case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
-                counters.rows_diverted += 1
-                counters.rows_failed += 1
-            case (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
-                counters.rows_diverted += 1
-            case (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT):
-                # Parent tokens delegate predicate counters to their
-                # children, but the structural fork count belongs here.
-                counters.rows_forked += 1
-            case (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT):
-                # Deaggregation parents behave like fork parents for the
-                # success/failure tally, with their own structural count.
-                counters.rows_expanded += 1
-            case (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED):
-                # Batch-consumed tokens do not have a dedicated RunResult
-                # counter; the BUFFERED record captures the structural row.
-                pass
-            case _:
-                raise AssertionError(
-                    f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
-                    "Add a case here; see ADR-019 mapping table and the live accumulator."
-                )
+        effect = TERMINAL_PAIR_COUNTER_EFFECTS.get(pair)
+        if effect is None:
+            raise OrchestrationInvariantError(
+                f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
+                "Add it to TERMINAL_PAIR_COUNTER_EFFECTS; see ADR-019 mapping table."
+            )
+        if pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED) and not is_counted_coalesced_output(outcome_record):
+            # Consumed coalesce branch input — it delegates its success/coalesce
+            # tally to the merged output token (which carries sink_name), exactly
+            # as the live accumulator does. See is_counted_coalesced_output for
+            # the full invariant and the double-count it prevents.
+            continue
+        # Counter movement comes from the shared table (elspeth-feeb4482fc);
+        # the live accumulator and the sink-diversion reconciler consume the
+        # SAME entries, so assert_terminal_counter_parity cannot be broken by
+        # pair-by-pair drift between the two bookkeepers.
+        apply_counter_increments(counters, effect)
+        if effect.counts_routed_destination:
+            counters.routed_destinations[_require_routed_sink_name(outcome_record, pair)] += 1
     terminal_status = derive_terminal_run_status(
         rows_processed=counters.rows_processed,
         rows_succeeded=counters.rows_succeeded,
@@ -220,27 +205,30 @@ derive_resume_terminal_status_from_audit = derive_terminal_status_from_audit
 
 
 # Live-vs-audit counter fields compared strictly by assert_terminal_counter_parity.
+# ExecutionCounters is the authoritative field list. Every field is strict by
+# default; add an entry here only when the exception is documented and handled
+# below.
 # rows_coalesce_failed is EXCLUDED — its two documented divergences (ADR-030 §D,
 # bug elspeth-ff6d48c180) are tolerated and logged instead:
 #   1. arrival-time barrier failures (branch-lost cascades, merge-exception
 #      cleanup) write FAILED node_states the derive counts but the live
 #      accumulator misses (it only counts the timeout/EOF sweeps) — audit MAY
 #      EXCEED live, and the audit value is the owned improvement;
-#   2. a zero-arrival best_effort_timeout_no_arrivals failure consumes no
-#      tokens and writes no node_states — live counts it, the derive cannot,
-#      so live MAY EXCEED audit (accepted, audit-is-truth doctrine).
-_PARITY_STRICT_FIELDS: tuple[str, ...] = (
-    "rows_processed",
-    "rows_succeeded",
-    "rows_failed",
-    "rows_routed_success",
-    "rows_routed_failure",
-    "rows_quarantined",
-    "rows_forked",
-    "rows_coalesced",
-    "rows_expanded",
-    "rows_buffered",
-    "rows_diverted",
+#   2. a zero-arrival best_effort_timeout_no_arrivals or
+#      first_timeout_no_arrivals failure consumes no tokens and writes no
+#      node_states — live counts it, the derive cannot, so live MAY EXCEED
+#      audit (accepted, audit-is-truth doctrine).
+#
+# routed_destinations is compared separately as a plain dict below because
+# RunResult stores a frozen Mapping while ExecutionCounters stores a Counter.
+_PARITY_EXCLUDED_FIELDS: frozenset[str] = frozenset(
+    {
+        "rows_coalesce_failed",
+        "routed_destinations",
+    }
+)
+_PARITY_STRICT_FIELDS: tuple[str, ...] = tuple(
+    field.name for field in fields(ExecutionCounters) if field.name not in _PARITY_EXCLUDED_FIELDS
 )
 
 

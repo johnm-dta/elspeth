@@ -12,7 +12,6 @@ from typing import Any
 from sqlalchemy.engine import Row as SARow
 
 from elspeth.contracts.audit import (
-    _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
     Batch,
     BatchMember,
@@ -33,9 +32,10 @@ from elspeth.contracts.audit import (
     TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
+    validate_node_state_persisted_fields,
+    validate_token_outcome_persisted_fields,
 )
 from elspeth.contracts.enums import (
-    _LEGAL_TERMINAL_PAIRS,
     BatchStatus,
     CallStatus,
     CallType,
@@ -62,6 +62,21 @@ _COMPLETED_AT_REQUIRED_RUN_STATUSES = frozenset(
 )
 
 
+def validate_run_lifecycle_row(run_id: str, status: RunStatus, completed_at: object | None) -> None:
+    """Validate status-dependent run lifecycle invariants for persisted rows."""
+    if status == RunStatus.RUNNING:
+        if completed_at is not None:
+            raise AuditIntegrityError(
+                f"Run {run_id} has status='running' but completed_at is set — "
+                f"audit integrity violation (running runs must not have completed_at)"
+            )
+    elif status in _COMPLETED_AT_REQUIRED_RUN_STATUSES and completed_at is None:
+        raise AuditIntegrityError(
+            f"Run {run_id} has status={status.value!r} but completed_at is NULL — "
+            f"audit integrity violation ({status.value!r} runs must have completed_at)"
+        )
+
+
 class RunLoader:
     """Loader for Run records."""
 
@@ -77,17 +92,7 @@ class RunLoader:
         status = RunStatus(row.status)
 
         # Tier 1: status-dependent lifecycle invariants
-        if status == RunStatus.RUNNING:
-            if row.completed_at is not None:
-                raise AuditIntegrityError(
-                    f"Run {row.run_id} has status='running' but completed_at is set — "
-                    f"audit integrity violation (running runs must not have completed_at)"
-                )
-        elif status in _COMPLETED_AT_REQUIRED_RUN_STATUSES and row.completed_at is None:
-            raise AuditIntegrityError(
-                f"Run {row.run_id} has status={status.value!r} but completed_at is NULL — "
-                f"audit integrity violation ({status.value!r} runs must have completed_at)"
-            )
+        validate_run_lifecycle_row(row.run_id, status, row.completed_at)
         # FAILED and INTERRUPTED: completed_at may or may not be set.
         # complete_run() sets it; update_run_status() (recovery path) does not.
 
@@ -367,24 +372,21 @@ class NodeStateLoader:
                                 (Tier 1 audit integrity violation - crash required)
         """
         status = NodeStateStatus(row.status)
+        try:
+            validate_node_state_persisted_fields(
+                row.state_id,
+                status,
+                output_hash=row.output_hash,
+                completed_at=row.completed_at,
+                duration_ms=row.duration_ms,
+                context_after_json=row.context_after_json,
+                error_json=row.error_json,
+                success_reason_json=row.success_reason_json,
+            )
+        except ValueError as exc:
+            raise AuditIntegrityError(str(exc)) from exc
 
         if status == NodeStateStatus.OPEN:
-            # OPEN states must have NULL completion and result fields.
-            # Operations haven't finished yet, so output_hash, completed_at, duration_ms,
-            # context_after_json, error_json, and success_reason_json must all be NULL.
-            if row.output_hash is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL output_hash - audit integrity violation")
-            if row.completed_at is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL completed_at - audit integrity violation")
-            if row.duration_ms is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL duration_ms - audit integrity violation")
-            if row.context_after_json is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL context_after_json - audit integrity violation")
-            if row.error_json is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL error_json - audit integrity violation")
-            if row.success_reason_json is not None:
-                raise AuditIntegrityError(f"OPEN state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
-
             return NodeStateOpen(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -398,19 +400,6 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.PENDING:
-            # PENDING states must have completed_at, duration_ms (but no output_hash yet).
-            # error_json and success_reason_json must be NULL — results aren't in yet.
-            if row.duration_ms is None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has NULL duration_ms - audit integrity violation")
-            if row.completed_at is None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has NULL completed_at - audit integrity violation")
-            if row.output_hash is not None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has non-NULL output_hash - audit integrity violation")
-            if row.error_json is not None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has non-NULL error_json - audit integrity violation")
-            if row.success_reason_json is not None:
-                raise AuditIntegrityError(f"PENDING state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
-
             return NodeStatePending(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -427,16 +416,6 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.COMPLETED:
-            # COMPLETED states must have output_hash, completed_at, duration_ms.
-            # error_json must be NULL — success and error are mutually exclusive.
-            if row.output_hash is None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has NULL output_hash - audit integrity violation")
-            if row.duration_ms is None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has NULL duration_ms - audit integrity violation")
-            if row.completed_at is None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has NULL completed_at - audit integrity violation")
-            if row.error_json is not None:
-                raise AuditIntegrityError(f"COMPLETED state {row.state_id} has non-NULL error_json - audit integrity violation")
             return NodeStateCompleted(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -455,16 +434,6 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.FAILED:
-            # FAILED states must have completed_at, duration_ms, and error_json.
-            # success_reason_json must be NULL — success and failure are mutually exclusive.
-            if row.duration_ms is None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation")
-            if row.completed_at is None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL completed_at - audit integrity violation")
-            if row.error_json is None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL error_json - audit integrity violation")
-            if row.success_reason_json is not None:
-                raise AuditIntegrityError(f"FAILED state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
             return NodeStateFailed(
                 state_id=row.state_id,
                 token_id=row.token_id,
@@ -589,51 +558,21 @@ class TokenOutcomeLoader:
                 f"TokenOutcome {oid}: invalid path={row.path!r} not in TerminalPath — audit integrity violation"
             ) from exc
 
-        if completed != (outcome is not None):
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid}: completed={completed} but outcome={outcome!r} — "
-                "completed must be true iff outcome is non-NULL (ADR-019 invariant)"
+        try:
+            validate_token_outcome_persisted_fields(
+                oid,
+                outcome,
+                path,
+                completed,
+                sink_name=row.sink_name,
+                batch_id=row.batch_id,
+                fork_group_id=row.fork_group_id,
+                join_group_id=row.join_group_id,
+                expand_group_id=row.expand_group_id,
+                error_hash=row.error_hash,
             )
-
-        if completed:
-            assert outcome is not None
-            if (outcome, path) not in _LEGAL_TERMINAL_PAIRS:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) not in _LEGAL_TERMINAL_PAIRS — audit integrity violation"
-                )
-        elif path != TerminalPath.BUFFERED:
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid}: completed=False requires path=BUFFERED, got {path!r} — audit integrity violation"
-            )
-
-        pair: tuple[TerminalOutcome | None, TerminalPath] = (outcome, path)
-        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
-        field_values = {
-            "sink_name": row.sink_name,
-            "batch_id": row.batch_id,
-            "fork_group_id": row.fork_group_id,
-            "join_group_id": row.join_group_id,
-            "expand_group_id": row.expand_group_id,
-            "error_hash": row.error_hash,
-        }
-        for field_name in constraints.required:
-            if field_values[field_name] is None:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires {field_name} but DB has NULL — audit integrity violation"
-                )
-        for field_name, expected in constraints.exact.items():
-            if field_values[field_name] != expected:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires "
-                    f"{field_name}={expected!r}, got {field_values[field_name]!r} — "
-                    "audit integrity violation"
-                )
-        for field_name in constraints.forbidden:
-            if field_values[field_name] is not None:
-                raise AuditIntegrityError(
-                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) forbids {field_name}, "
-                    f"got {field_values[field_name]!r} — audit integrity violation"
-                )
+        except ValueError as exc:
+            raise AuditIntegrityError(str(exc)) from exc
 
         return TokenOutcome(
             outcome_id=oid,

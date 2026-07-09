@@ -194,3 +194,24 @@ describe("SingleSelectTurn — DOM ID isolation (useId)", () => {
     expect(inputs[1].id).toBeTruthy();
   });
 });
+
+// ── Tutorial passive mode ────────────────────────────────────────────────────
+
+describe("SingleSelectTurn — tutorial passive mode", () => {
+  it("suppresses the 'Choosing an option continues' subtext but keeps the chips", () => {
+    render(
+      <SingleSelectTurn payload={PAYLOAD_NO_CUSTOM} onSubmit={vi.fn()} isTutorial />,
+    );
+    expect(screen.queryByText(/choosing an option continues/i)).toBeNull();
+    // The option chips themselves remain interactive (Send is the guided path,
+    // but a learner who clicks an option still advances).
+    expect(screen.getByRole("button", { name: "CSV File" })).toBeInTheDocument();
+  });
+
+  it("shows the subtext in normal (non-tutorial) mode", () => {
+    render(<SingleSelectTurn payload={PAYLOAD_NO_CUSTOM} onSubmit={vi.fn()} />);
+    expect(
+      screen.getByText(/choosing an option continues/i),
+    ).toBeInTheDocument();
+  });
+});

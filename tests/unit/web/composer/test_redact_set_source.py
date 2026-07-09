@@ -21,6 +21,7 @@ from elspeth.web.composer.redaction import (
     SetSourceArgumentsModel,
     _redact_via_schema,
     _summarize_set_source_options,
+    redact_guided_snapshot_storage_paths,
     redact_source_storage_path,
     redact_tool_call_arguments,
 )
@@ -87,7 +88,8 @@ def test_set_source_argument_model_rejects_extra_fields() -> None:
 def test_redact_substitutes_options_via_summarizer() -> None:
     """Sensitive[options] is replaced by the summarizer string at the top level.
 
-    The summarizer returns canonical JSON of the redacted options dict.
+    The summarizer returns canonical JSON of the options shape with scalar
+    values redacted.
     Because Sensitive() substitutes the ENTIRE marked value, the top-level
     ``options`` slot in the redacted output is a string (the summarizer
     return), not a dict.  This is the load-bearing shape contract: the
@@ -107,21 +109,18 @@ def test_redact_substitutes_options_via_summarizer() -> None:
     assert redacted["on_validation_failure"] == "discard"
     # Sensitive substitution: options is now the summarizer's str output.
     assert isinstance(redacted["options"], str)
-    # blob_ref triggered redact_source_storage_path → path is the sentinel.
-    assert REDACTED_BLOB_SOURCE_PATH in redacted["options"]
+    assert json.loads(redacted["options"]) == {
+        "blob_ref": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
     # The original internal path MUST NOT appear in the summary.
     assert "/internal/blob/path.csv" not in redacted["options"]
     # Telemetry recorded the manifest dispatch with the type-driven shape.
     assert tel.manifest_dispatch_calls == [{"tool_name": "set_source", "shape": "type_driven"}]
 
 
-def test_redact_passes_through_when_no_blob_ref() -> None:
-    """Without blob_ref, redact_source_storage_path is a no-op on options.
-
-    The Sensitive substitution still happens (options becomes the
-    summarizer's str return), but the path inside the JSON-encoded summary
-    is the original path verbatim.
-    """
+def test_redact_source_options_summary_hides_paths_without_blob_ref() -> None:
+    """Source option summaries must not preserve raw paths without blob_ref."""
     tel = NoopRedactionTelemetry()
     args = {
         "plugin": "csv",
@@ -131,8 +130,37 @@ def test_redact_passes_through_when_no_blob_ref() -> None:
     }
     redacted = redact_tool_call_arguments("set_source", args, telemetry=tel)
     assert isinstance(redacted["options"], str)
-    assert "/tmp/data.csv" in redacted["options"]
-    assert REDACTED_BLOB_SOURCE_PATH not in redacted["options"]
+    assert "/tmp/data.csv" not in redacted["options"]
+
+
+def test_redact_source_options_summary_hides_credential_values() -> None:
+    """Credential-bearing source plugin option values must not survive."""
+    tel = NoopRedactionTelemetry()
+    raw_connection_string = "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=KEYVALUE;EndpointSuffix=core.windows.net"
+    raw_sas_token = "sig=abcdefghijklmnopqrstuvwxyz1234567890"
+    raw_client_secret = "client-secret-value"
+    raw_path = "container/private/customer.csv"
+    args = {
+        "plugin": "azure_blob",
+        "options": {
+            "connection_string": raw_connection_string,
+            "sas_token": raw_sas_token,
+            "client_secret": raw_client_secret,
+            "container": "private-container",
+            "blob_path": raw_path,
+        },
+        "on_success": "rows",
+        "on_validation_failure": "discard",
+    }
+
+    redacted = redact_tool_call_arguments("set_source", args, telemetry=tel)
+    serialized = json.dumps(redacted, sort_keys=True)
+
+    assert isinstance(redacted["options"], str)
+    assert raw_connection_string not in serialized
+    assert raw_sas_token not in serialized
+    assert raw_client_secret not in serialized
+    assert raw_path not in serialized
 
 
 def test_redact_source_storage_path_masks_file_shape_when_blob_ref_present() -> None:
@@ -172,6 +200,87 @@ def test_redact_source_storage_path_leaves_manual_file_without_blob_ref() -> Non
     assert REDACTED_BLOB_SOURCE_PATH not in str(redacted)
 
 
+def test_redact_guided_snapshot_masks_both_channels() -> None:
+    """A guided blob source is committed via manual set_source (blob_ref stripped),
+    so the committed source carries the real storage_path with NO blob_ref and the
+    source-keyed redaction misses it. The co-located GuidedSession snapshot retained
+    blob_ref; the helper uses it (no DB lookup) to mask BOTH the committed source
+    path (channel 2) and the snapshot path (channel 3)."""
+    real_path = "/home/u/elspeth/data/blobs/sess/abc_data.csv"
+    sources = {"source": {"plugin": "csv", "options": {"path": real_path, "schema": {"mode": "observed"}}}}
+    composer_meta = {
+        "guided_session": {
+            "step_1_result": {"plugin": "csv", "options": {"path": real_path, "blob_ref": "abc", "schema": {"mode": "observed"}}},
+        }
+    }
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    assert sources_out["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert meta_out["guided_session"]["step_1_result"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    # blob_ref is retained — it is the redaction SIGNAL, not a sensitive value.
+    assert meta_out["guided_session"]["step_1_result"]["options"]["blob_ref"] == "abc"
+    assert real_path not in str(sources_out)
+    assert real_path not in str(meta_out)
+    # inputs are not mutated.
+    assert sources["source"]["options"]["path"] == real_path
+    assert composer_meta["guided_session"]["step_1_result"]["options"]["path"] == real_path
+
+
+def test_redact_guided_snapshot_leaves_operator_typed_source() -> None:
+    """No blob_ref on the snapshot => the path is operator-typed, NOT a blob
+    carrier => nothing is redacted on either channel."""
+    sources = {"source": {"options": {"path": "/tmp/user.csv"}}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": {"path": "/tmp/user.csv", "schema": {"mode": "observed"}}}}}
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    assert sources_out["source"]["options"]["path"] == "/tmp/user.csv"
+    assert meta_out["guided_session"]["step_1_result"]["options"]["path"] == "/tmp/user.csv"
+    assert REDACTED_BLOB_SOURCE_PATH not in str((sources_out, meta_out))
+
+
+def test_redact_guided_snapshot_noop_for_freeform_state() -> None:
+    """Freeform state (composer_meta is None, or has no guided_session snapshot) is
+    returned unchanged — the helper only acts on a guided blob-backed snapshot."""
+    sources = {"source": {"options": {"path": "/some/path.csv", "blob_ref": "x"}}}
+    s1, m1 = redact_guided_snapshot_storage_paths(sources, None)
+    assert s1 == sources
+    assert m1 is None
+    s2, m2 = redact_guided_snapshot_storage_paths(sources, {"repair_turns_used": 0})
+    assert s2["source"]["options"]["path"] == "/some/path.csv"
+    assert m2 == {"repair_turns_used": 0}
+
+
+def test_redact_guided_snapshot_rejects_malformed_present_guided_session() -> None:
+    sources = {"source": {"options": {"path": "/some/path.csv"}}}
+    with pytest.raises(ValueError, match="guided_session must be a dict"):
+        redact_guided_snapshot_storage_paths(sources, {"guided_session": "not-a-session"})
+
+
+def test_redact_guided_snapshot_rejects_malformed_present_snapshot_options() -> None:
+    sources = {"source": {"options": {"path": "/some/path.csv"}}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": "not-options"}}}
+    with pytest.raises(ValueError, match=r"step_1_result\.options must be a dict"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+def test_redact_guided_snapshot_rejects_malformed_source_when_blob_redaction_active() -> None:
+    real_path = "/home/u/elspeth/data/blobs/sess/abc_data.csv"
+    sources = {"source": {"options": "not-options"}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": {"path": real_path, "blob_ref": "abc"}}}}
+    with pytest.raises(ValueError, match=r"source\.options must be a dict"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+def test_redact_guided_snapshot_masks_file_carrier() -> None:
+    """``file`` is an equivalent storage-path carrier to ``path`` (elspeth-a7aa07b7ce);
+    the guided snapshot helper masks it on both channels too."""
+    real = "/internal/blobs/sess/zzz_data.csv"
+    sources = {"source": {"options": {"file": real}}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": {"file": real, "blob_ref": "zzz"}}}}
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    assert sources_out["source"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    assert meta_out["guided_session"]["step_1_result"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    assert real not in str((sources_out, meta_out))
+
+
 def test_summarize_set_source_options_accepts_coerced_datetime() -> None:
     """Pin rev-3 A7: summarizer MUST NOT raise on reachable input values.
 
@@ -198,12 +307,8 @@ def test_serialization_boundary_canary_not_in_json_output() -> None:
     :func:`json.dumps` before writing to ``chat_messages.tool_calls``.  This
     test verifies the canary never survives that serialization — even
     though :func:`json.dumps` would otherwise re-emit the canary if it
-    appeared anywhere in the dict.  Because the summarizer wraps the
-    canary inside ``redact_source_storage_path``, and because the only
-    sensitive options field that gets sentinel-replaced is ``path`` when
-    ``blob_ref`` is also present, the canary is exposed in the absence of
-    ``blob_ref``.  We therefore include ``blob_ref`` so the canary value
-    is genuinely substituted.
+    appeared anywhere in the dict. The source-option summarizer substitutes
+    scalar option values before serialization, independent of blob_ref.
     """
     args = {
         "plugin": "csv",

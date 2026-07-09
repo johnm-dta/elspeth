@@ -15,7 +15,6 @@ EXPECTED_CHECKPOINT_POLICY = {
     "enabled": True,
     "frequency": "every_n",
     "checkpoint_interval": 100,
-    "aggregation_boundaries": True,
 }
 
 

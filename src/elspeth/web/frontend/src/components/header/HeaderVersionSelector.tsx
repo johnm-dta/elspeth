@@ -4,6 +4,7 @@ import {
   useId,
   useRef,
   useState,
+  type FocusEvent,
   type KeyboardEvent,
 } from "react";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -68,6 +69,25 @@ export function HeaderVersionSelector(): JSX.Element | null {
     setIsOpen(false);
     setFocusedIndex(-1);
     triggerRef.current?.focus();
+  }, []);
+
+  // Focus leaving the selector subtree closes the dropdown
+  // (elspeth-83eb51334f): a keyboard user could previously Tab past the
+  // trigger while the listbox stayed visually open. Mirrors UserMenu: only
+  // a real relatedTarget outside the container closes; null relatedTargets
+  // are left to the click-outside handler so in-dropdown clicks are never
+  // swallowed. No focus-return — focus is already moving somewhere else
+  // deliberately.
+  const onContainerBlur = useCallback((e: FocusEvent<HTMLDivElement>) => {
+    const next = e.relatedTarget;
+    if (
+      next instanceof Node &&
+      containerRef.current !== null &&
+      !containerRef.current.contains(next)
+    ) {
+      setIsOpen(false);
+      setFocusedIndex(-1);
+    }
   }, []);
 
   useEffect(() => {
@@ -169,7 +189,11 @@ export function HeaderVersionSelector(): JSX.Element | null {
     !!selectedVersion && selectedVersion.version !== currentVersion;
 
   return (
-    <div ref={containerRef} className="version-selector header-version-selector">
+    <div
+      ref={containerRef}
+      className="version-selector header-version-selector"
+      onBlur={onContainerBlur}
+    >
       <button
         ref={triggerRef}
         aria-haspopup="listbox"

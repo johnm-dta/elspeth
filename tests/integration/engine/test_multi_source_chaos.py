@@ -15,7 +15,7 @@ Chaos instruments:
   LLM API. Determinism note: error-injection percentages are pinned to 100.0
   or 0.0 per call window, so every injection decision is forced — no RNG
   outcome dependence, no real network socket, default-CI safe.
-- Injected MockClock (the test_rc6_lease_recovery_sweep.py pattern) to force
+- Injected MockClock (the test_lease_recovery_sweep.py pattern) to force
   lease expiry mid-transform without wall-clock sleeps.
 - A peer-owner ``recover_expired_leases`` sweep issued from INSIDE a
   transform, simulating a concurrent recovery worker racing the engine.
@@ -63,7 +63,7 @@ from elspeth.core.config import (
     load_settings_from_yaml_string,
 )
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.dag.models import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
@@ -351,7 +351,7 @@ def _fast_retry_settings() -> ElspethSettings:
     """Minimal settings whose ONLY runtime contribution is the retry policy.
 
     ``Orchestrator.run`` builds its RetryManager exclusively from
-    ``settings.retry`` (run_core.build_row_processor); the rest of the run is
+    ``settings.retry`` (processor_factory.build_row_processor); the rest of the run is
     driven by the explicit config/graph arguments. The stub source/sink decls
     exist purely to satisfy settings-model validation and are never
     instantiated. max_delay_seconds caps tenacity's jittered backoff, keeping

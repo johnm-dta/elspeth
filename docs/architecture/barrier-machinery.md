@@ -50,9 +50,9 @@ before you ship. File paths are relative to `src/elspeth/`.
 | End-of-source drain | end-of-source flush via `execute_flush` (orchestrator-driven; post-flush assertion in `finalize_source_iteration`, `engine/orchestrator/source_iteration.py`) | `flush_pending` |
 | Barrier-scalars contract | `contracts/barrier_scalars.py` — `AggregationNodeScalars` (the two trigger latches) | same module — `CoalescePendingScalars` (`lost_branches`); shared top-level `BarrierScalars` |
 | Scalar write (checkpoint) | `AggregationExecutor.get_barrier_scalars` | `CoalesceExecutor.get_barrier_scalars` |
-| Journal restore | `AggregationExecutor.restore_from_journal` (plus `restore_batch`) | `CoalesceExecutor.restore_from_journal` |
+| Journal restore | `AggregationExecutor.restore_from_journal`; validation/hydration in `engine/journal_restore.py` — `AggregationJournalRestorer` | `CoalesceExecutor.restore_from_journal`; validation/hydration in the same module — `CoalesceJournalRestorer` |
 | Journal read on resume | `engine/processor.py` — `_restore_barriers_from_journal` partitions BLOCKED rows on `barrier_key` (aggregation node-id keys) | the same method — coalesce-name keys; one read, both halves restored |
-| Post-completion arrival handling | `_reconcile_journal_batch_members` (audit trail advanced beyond the restored journal rows) | late-arrival rejection in `accept`, backed by `_completed_keys`, `_mark_completed`, `_reconstruct_completed_keys_from_landscape`, `_check_landscape_for_completion` |
+| Post-completion arrival handling | `AggregationJournalRestorer._reconcile_journal_batch_members` (audit trail advanced beyond the restored journal rows) | late-arrival rejection in `accept`, backed by `_completed_keys`, `_mark_completed`, `_check_landscape_for_completion`; restore seeding via `CoalesceJournalRestorer._reconstruct_completed_keys_from_landscape` |
 | Failure arm | flush failure paths inside `execute_flush` | `_fail_pending`, `notify_branch_lost`, `_evaluate_after_loss` |
 | Counter bookkeeping | `rows_buffered` — incremented once per accepted member (audit value N) in `engine/orchestrator/outcomes.py`, re-derived in `engine/orchestrator/run_status.py` | `rows_coalesce_failed` — incremented in `engine/orchestrator/outcomes.py`, re-derived from audit in `run_status.py` (`count_failed_coalesce_barrier_rows`) |
 

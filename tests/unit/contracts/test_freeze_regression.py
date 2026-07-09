@@ -11,6 +11,7 @@ Each test verifies that a specific freeze bypass is closed:
 
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
@@ -25,6 +26,11 @@ from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.freeze import deep_freeze
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class _FakePipelinePlugin:
+    name: str
 
 
 def _make_node(**kwargs: object) -> Node:
@@ -431,14 +437,12 @@ class TestPipelineConfigNestedMutationRejected:
     """PipelineConfig freeze_fields its config — nested dicts must be immutable."""
 
     def test_nested_config_mutation_raises(self) -> None:
-        from unittest.mock import MagicMock
-
         from elspeth.engine.orchestrator.types import PipelineConfig
 
         config = PipelineConfig(
-            sources={"primary": MagicMock()},
+            sources={"primary": _FakePipelinePlugin(name="primary")},
             transforms=[],
-            sinks={"out": MagicMock()},
+            sinks={"out": _FakePipelinePlugin(name="out")},
             config={"nested": {"key": "val"}},
         )
         with pytest.raises(TypeError):

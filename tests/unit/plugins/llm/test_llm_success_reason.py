@@ -8,6 +8,8 @@ payload purge deletes the output row data.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import Mock
@@ -29,14 +31,42 @@ from elspeth.testing import make_pipeline_row
 # ---------------------------------------------------------------------------
 
 
-def _make_ctx() -> Mock:
-    """Minimal mock TransformContext — matches test_transform.py pattern."""
-    ctx = Mock()
-    ctx.state_id = "state-123"
-    ctx.run_id = "run-123"
-    ctx.token = Mock()
-    ctx.token.token_id = "token-1"
-    return ctx
+@dataclass(slots=True)
+class _TokenDouble:
+    token_id: str
+
+
+@dataclass(slots=True)
+class _TransformContextDouble:
+    state_id: str
+    run_id: str
+    token: _TokenDouble
+    shutdown_event: None = None
+
+
+class _TracerDouble:
+    def record_success(self, **_kwargs: Any) -> None:
+        return None
+
+    def record_error(self, **_kwargs: Any) -> None:
+        return None
+
+
+class _PooledExecutorDouble:
+    def __init__(
+        self,
+        execute_batch: Callable[..., list[BufferEntry[TransformResult]]],
+    ) -> None:
+        self.execute_batch = execute_batch
+
+
+def _make_ctx() -> _TransformContextDouble:
+    """Minimal TransformContext double for LLM strategy execution."""
+    return _TransformContextDouble(
+        state_id="state-123",
+        run_id="run-123",
+        token=_TokenDouble(token_id="token-1"),
+    )
 
 
 def _make_mock_provider(responses: list[dict[str, Any]] | None = None) -> Mock:
@@ -85,7 +115,7 @@ def _identity_row(row: PipelineRow) -> PipelineRow:
     return row
 
 
-def _make_multi_query_strategy(*, executor: Mock | None = None) -> MultiQueryStrategy:
+def _make_multi_query_strategy(*, executor: _PooledExecutorDouble | None = None) -> MultiQueryStrategy:
     """Build a MultiQueryStrategy with two simple query specs."""
     specs = [
         QuerySpec(
@@ -139,12 +169,10 @@ def single_query_result() -> TransformResult:
         finish_reason=FinishReason.STOP,
     )
 
-    mock_tracer = Mock()
-
     row = make_pipeline_row({"text": "hello"})
     ctx = _make_ctx()
 
-    return strategy.execute(row, ctx, provider=mock_provider, tracer=mock_tracer)
+    return strategy.execute(row, ctx, provider=mock_provider, tracer=_TracerDouble())
 
 
 # ---------------------------------------------------------------------------
@@ -162,11 +190,10 @@ def multi_query_result() -> TransformResult:
             {"category": "tech", "confidence": 0.9},
         ]
     )
-    tracer = Mock()
     row = make_pipeline_row({"text": "hello"})
     ctx = _make_ctx()
 
-    return strategy.execute(row, ctx, provider=provider, tracer=tracer)
+    return strategy.execute(row, ctx, provider=provider, tracer=_TracerDouble())
 
 
 @pytest.fixture()
@@ -177,8 +204,6 @@ def parallel_multi_query_result() -> TransformResult:
     the real PooledExecutor contract.  This lets _process_fn populate the
     audit_metadata_by_index side-channel that _execute_parallel validates.
     """
-    from collections.abc import Callable
-
     from elspeth.plugins.infrastructure.pooling.executor import RowContext
 
     def _fake_execute_batch(
@@ -202,10 +227,9 @@ def parallel_multi_query_result() -> TransformResult:
             )
         return entries
 
-    mock_executor = Mock()
-    mock_executor.execute_batch.side_effect = _fake_execute_batch
+    executor = _PooledExecutorDouble(_fake_execute_batch)
 
-    strategy = _make_multi_query_strategy(executor=mock_executor)
+    strategy = _make_multi_query_strategy(executor=executor)
     provider = _make_mock_provider(
         [
             {"score": 85, "rationale": "Good"},
@@ -215,7 +239,7 @@ def parallel_multi_query_result() -> TransformResult:
     row = make_pipeline_row({"text": "hello"})
     ctx = _make_ctx()
 
-    return strategy.execute(row, ctx, provider=provider, tracer=Mock())
+    return strategy.execute(row, ctx, provider=provider, tracer=_TracerDouble())
 
 
 # ---------------------------------------------------------------------------

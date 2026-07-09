@@ -37,7 +37,7 @@ from typing import Any, cast
 
 import pytest
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import Checkpoint, RunStatus
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError
 from elspeth.core.checkpoint.recovery import NonResumableRunError, check_run_status_resumable
@@ -86,6 +86,20 @@ class _RecordingCheckpoints:
         self.rebase_calls.append(sequence_number)
 
 
+class _StubCheckpointManager:
+    """Stub CheckpointManager serving a canned latest checkpoint.
+
+    The checkpoint-currency entry guard reads ONLY get_latest_checkpoint —
+    a read-only surface — so a canned return is a faithful double.
+    """
+
+    def __init__(self, latest: Any) -> None:
+        self._latest = latest
+
+    def get_latest_checkpoint(self, run_id: str) -> Any:
+        return self._latest
+
+
 def _coordinator(db: LandscapeDB) -> tuple[ResumeCoordinator, _RecordingCheckpoints]:
     checkpoints = _RecordingCheckpoints()
     coordinator = ResumeCoordinator(
@@ -93,7 +107,8 @@ def _coordinator(db: LandscapeDB) -> tuple[ResumeCoordinator, _RecordingCheckpoi
         events=cast(Any, object()),
         ceremony=cast(Any, object()),
         checkpoints=cast(Any, checkpoints),
-        run_core=cast(Any, object()),
+        context_factory=cast(Any, object()),
+        sink_flush=cast(Any, object()),
         # None is the post-guard tripwire: an ADMITTED resume raises
         # OrchestrationInvariantError("CheckpointManager is required...")
         # inside reconstruct_resume_state, proving it got past the guard.
@@ -106,6 +121,59 @@ def _resume_point_for(run_id: str, *, sequence_number: int = 7) -> Any:
     """Opaque resume-point stub: resume() entry reads only checkpoint.run_id
     and (post-guard) sequence_number."""
     return SimpleNamespace(checkpoint=SimpleNamespace(run_id=run_id), sequence_number=sequence_number)
+
+
+def _full_resume_point(
+    run_id: str,
+    *,
+    checkpoint_id: str = "cp-1",
+    sequence_number: int = 7,
+    topology_hash: str = "hash-1",
+) -> Any:
+    """Resume-point stub with the fields the checkpoint-currency guard reads."""
+    return SimpleNamespace(
+        checkpoint=SimpleNamespace(
+            run_id=run_id,
+            checkpoint_id=checkpoint_id,
+            sequence_number=sequence_number,
+            upstream_topology_hash=topology_hash,
+            full_topology_hash=topology_hash,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        ),
+        sequence_number=sequence_number,
+    )
+
+
+def _latest_checkpoint(
+    run_id: str,
+    *,
+    checkpoint_id: str = "cp-1",
+    sequence_number: int = 7,
+    topology_hash: str = "hash-1",
+) -> Any:
+    """Canned latest-checkpoint stub for _StubCheckpointManager."""
+    return SimpleNamespace(
+        run_id=run_id,
+        checkpoint_id=checkpoint_id,
+        sequence_number=sequence_number,
+        upstream_topology_hash=topology_hash,
+        full_topology_hash=topology_hash,
+        format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+    )
+
+
+def _currency_coordinator(db: LandscapeDB, latest: Any) -> tuple[ResumeCoordinator, _RecordingCheckpoints]:
+    checkpoints = _RecordingCheckpoints()
+    coordinator = ResumeCoordinator(
+        db=db,
+        events=cast(Any, object()),
+        ceremony=cast(Any, object()),
+        checkpoints=cast(Any, checkpoints),
+        context_factory=cast(Any, object()),
+        sink_flush=cast(Any, object()),
+        checkpoint_manager=cast(Any, _StubCheckpointManager(latest)),
+    )
+    return coordinator, checkpoints
 
 
 class TestCheckRunStatusResumable:
@@ -271,10 +339,12 @@ class TestResumeEntryGuard:
 
         The post-guard tripwire (``checkpoint_manager=None``) raises
         ``OrchestrationInvariantError("CheckpointManager is required")``
-        AFTER the guard passes, proving admission without exercising the full
-        resume reconstruction.  ``rebase_sequence`` is called (sequence
-        rebase from the checkpoint coordinator is the first mutation after the
-        takeover CAS) — the guard ADMITTED the run.
+        AFTER the status guard passes, proving admission without exercising
+        the full resume reconstruction. Since elspeth-5129406607 the tripwire
+        fires INSIDE the entry guard itself (the checkpoint-currency check
+        needs the manager, before any mutation), so ``rebase_sequence`` is
+        never reached — admission is proven by the exception TYPE: a refused
+        run raises ``NonResumableRunError`` instead.
         """
         from datetime import timedelta
 
@@ -300,7 +370,7 @@ class TestResumeEntryGuard:
         coordinator, checkpoints = _coordinator(db)
 
         # Slice-4 flip: RUNNING + expired seat is NOW RESUMABLE.  The
-        # post-guard tripwire raises OrchestrationInvariantError to prove the
+        # tripwire raises OrchestrationInvariantError to prove the status
         # guard admitted the run (not NonResumableRunError any more).
         with pytest.raises(OrchestrationInvariantError, match="CheckpointManager is required"):
             coordinator.resume(
@@ -310,9 +380,11 @@ class TestResumeEntryGuard:
                 payload_store=MockPayloadStore(),
             )
 
-        # Admission confirmed: rebase_sequence was called (the guard did not
-        # refuse before the first mutation).
-        assert checkpoints.rebase_calls == [7]
+        # Admission confirmed by exception TYPE (refusals raise
+        # NonResumableRunError). No mutation occurs: the tripwire fires in
+        # the checkpoint-currency entry guard, before rebase_sequence
+        # (elspeth-5129406607).
+        assert checkpoints.rebase_calls == []
 
     def test_refuses_missing_run_before_rebase_sequence(self, db: LandscapeDB) -> None:
         coordinator, checkpoints = _coordinator(db)
@@ -376,4 +448,184 @@ class TestResumeEntryGuard:
                 payload_store=MockPayloadStore(),
             )
 
-        assert checkpoints.rebase_calls == [7]
+        # Admission proven by exception TYPE (refusals raise
+        # NonResumableRunError); the None-manager tripwire fires inside the
+        # checkpoint-currency entry guard before any mutation
+        # (elspeth-5129406607), so rebase_sequence is never reached.
+        assert checkpoints.rebase_calls == []
+
+
+class TestResumeCheckpointCurrencyGuard:
+    """resume() re-verifies checkpoint currency + topology at entry (elspeth-5129406607).
+
+    ``RecoveryManager.get_resume_point()`` is ADVISORY like ``can_resume()``
+    — a caller may hand-build a ``ResumePoint`` — so ``resume()`` re-checks
+    at the enforcing boundary that (a) the supplied checkpoint is the run's
+    LATEST resume baseline and (b) its recorded topology matches the graph
+    the run is about to resume under. Both are READ-ONLY refusals that fire
+    BEFORE the first mutation (``rebase_sequence`` / the seat CAS), mirroring
+    the elspeth-2f23292372 status guard above.
+    """
+
+    def test_missing_latest_checkpoint_refused_before_any_mutation(self, db: LandscapeDB) -> None:
+        """A run with no checkpoint rows cannot validate a supplied resume point."""
+        _insert_run(db, "run-no-cp", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(db, latest=None)
+
+        with pytest.raises(NonResumableRunError, match=r"no checkpoint") as exc_info:
+            coordinator.resume(
+                _full_resume_point("run-no-cp"),
+                cast(Any, None),
+                cast(Any, None),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert exc_info.value.run_id == "run-no-cp"
+        assert checkpoints.rebase_calls == [], "refusal must fire BEFORE rebase_sequence (the first mutation)"
+
+    def test_stale_checkpoint_id_refused_before_any_mutation(self, db: LandscapeDB) -> None:
+        """A resume point naming a superseded checkpoint is refused."""
+        _insert_run(db, "run-stale-id", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(
+            db,
+            latest=_latest_checkpoint("run-stale-id", checkpoint_id="cp-latest", sequence_number=9),
+        )
+
+        with pytest.raises(NonResumableRunError, match=r"not the run's latest resume point") as exc_info:
+            coordinator.resume(
+                _full_resume_point("run-stale-id", checkpoint_id="cp-old", sequence_number=9),
+                cast(Any, None),
+                cast(Any, None),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert "cp-old" in exc_info.value.reason
+        assert "cp-latest" in exc_info.value.reason
+        assert checkpoints.rebase_calls == []
+
+    def test_stale_sequence_number_refused_before_any_mutation(self, db: LandscapeDB) -> None:
+        """A resume point whose sequence lags the latest checkpoint is refused.
+
+        ``resume_point.sequence_number`` is the field ``rebase_sequence``
+        consumes, so a desynced hand-built point must be caught even when the
+        checkpoint_id happens to match.
+        """
+        _insert_run(db, "run-stale-seq", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(
+            db,
+            latest=_latest_checkpoint("run-stale-seq", checkpoint_id="cp-1", sequence_number=9),
+        )
+
+        with pytest.raises(NonResumableRunError, match=r"not the run's latest resume point"):
+            coordinator.resume(
+                _full_resume_point("run-stale-seq", checkpoint_id="cp-1", sequence_number=7),
+                cast(Any, None),
+                cast(Any, None),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert checkpoints.rebase_calls == []
+
+    def test_divergent_topology_refused_before_any_mutation(self, db: LandscapeDB) -> None:
+        """A checkpoint recorded under a different pipeline topology is refused."""
+        from elspeth.engine.orchestrator import PipelineConfig
+        from tests.fixtures.base_classes import as_sink, as_source
+        from tests.fixtures.pipeline import build_production_graph
+        from tests.fixtures.plugins import CollectSink, ListSource
+
+        config = PipelineConfig(
+            sources={"primary": as_source(ListSource([{"value": 1}]))},
+            transforms=[],
+            sinks={"default": as_sink(CollectSink("default"))},
+        )
+        graph = build_production_graph(config)
+
+        _insert_run(db, "run-topo-drift", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(
+            db,
+            latest=_latest_checkpoint("run-topo-drift"),
+        )
+
+        with pytest.raises(NonResumableRunError, match=r"configuration changed") as exc_info:
+            coordinator.resume(
+                _full_resume_point("run-topo-drift", topology_hash="stale-topology-hash"),
+                cast(Any, config),
+                cast(Any, graph),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert exc_info.value.run_id == "run-topo-drift"
+        assert checkpoints.rebase_calls == []
+
+    def test_stored_latest_topology_refused_even_when_hand_built_resume_point_claims_current_hash(self, db: LandscapeDB) -> None:
+        """The enforcing guard validates the stored latest checkpoint, not caller-supplied checkpoint fields."""
+        from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
+        from elspeth.engine.orchestrator import PipelineConfig
+        from tests.fixtures.base_classes import as_sink, as_source
+        from tests.fixtures.pipeline import build_production_graph
+        from tests.fixtures.plugins import CollectSink, ListSource
+
+        config = PipelineConfig(
+            sources={"primary": as_source(ListSource([{"value": 1}]))},
+            transforms=[],
+            sinks={"default": as_sink(CollectSink("default"))},
+        )
+        graph = build_production_graph(config)
+        current_hash = CheckpointCompatibilityValidator().compute_full_topology_hash(graph)
+
+        _insert_run(db, "run-stored-topo-drift", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(
+            db,
+            latest=_latest_checkpoint("run-stored-topo-drift", topology_hash="stale-stored-topology-hash"),
+        )
+
+        with pytest.raises(NonResumableRunError, match=r"configuration changed") as exc_info:
+            coordinator.resume(
+                _full_resume_point("run-stored-topo-drift", topology_hash=current_hash),
+                cast(Any, config),
+                cast(Any, graph),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert exc_info.value.run_id == "run-stored-topo-drift"
+        assert checkpoints.rebase_calls == []
+
+    def test_current_checkpoint_and_matching_topology_admitted(self, db: LandscapeDB) -> None:
+        """Positive control: a current, topology-matching point passes the guard.
+
+        Admission is proven by ``rebase_sequence`` being reached (the first
+        mutation after the guard); the resume then fails downstream inside
+        ``reconstruct_resume_state`` on this fixture's bare runs row, which is
+        expected — the guard must refuse stale points without over-blocking
+        current ones.
+        """
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
+        from elspeth.engine.orchestrator import PipelineConfig
+        from tests.fixtures.base_classes import as_sink, as_source
+        from tests.fixtures.pipeline import build_production_graph
+        from tests.fixtures.plugins import CollectSink, ListSource
+
+        config = PipelineConfig(
+            sources={"primary": as_source(ListSource([{"value": 1}]))},
+            transforms=[],
+            sinks={"default": as_sink(CollectSink("default"))},
+        )
+        graph = build_production_graph(config)
+        current_hash = CheckpointCompatibilityValidator().compute_full_topology_hash(graph)
+
+        _insert_run(db, "run-current-cp", status=RunStatus.FAILED)
+        coordinator, checkpoints = _currency_coordinator(
+            db,
+            latest=_latest_checkpoint("run-current-cp", topology_hash=current_hash),
+        )
+
+        with pytest.raises(AuditIntegrityError, match=r"no runtime VAL manifest stored"):
+            coordinator.resume(
+                _full_resume_point("run-current-cp", topology_hash=current_hash),
+                cast(Any, config),
+                cast(Any, graph),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert checkpoints.rebase_calls == [7], "a current resume point must be admitted past the guard"

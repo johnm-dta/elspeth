@@ -2,16 +2,57 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
+from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import DependencyFailedError
+from elspeth.contracts.run_result import RunResult
 from elspeth.core.dependency_config import DependencyConfig
 from elspeth.engine.dependency_resolver import _hash_settings_file, _load_depends_on, detect_cycles, resolve_dependencies
 from tests.fixtures.audit_hashing import assert_prefixed_canonical_sha256
+
+
+def _run_result(run_id: str, status: RunStatus) -> RunResult:
+    return RunResult(
+        run_id=run_id,
+        status=status,
+        rows_processed=1,
+        rows_succeeded=1 if status is RunStatus.COMPLETED else 0,
+        rows_failed=0 if status is RunStatus.COMPLETED else 1,
+        rows_routed_success=0,
+        rows_routed_failure=0,
+    )
+
+
+class _RunnerDouble:
+    def __init__(
+        self,
+        *,
+        result: RunResult | None = None,
+        error: BaseException | None = None,
+        side_effect: Callable[[Path], RunResult] | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.side_effect = side_effect
+        self.paths: list[Path] = []
+
+    def __call__(self, path: Path) -> RunResult:
+        self.paths.append(path)
+        if self.error is not None:
+            raise self.error
+        if self.side_effect is not None:
+            return self.side_effect(path)
+        if self.result is None:
+            raise AssertionError("RunnerDouble result was not configured")
+        return self.result
 
 
 class TestLoadDependsOnValidation:
@@ -73,13 +114,41 @@ class TestLoadDependsOnValidation:
 
 
 class TestCycleDetection:
+    def test_absolute_dependency_path_rejected(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside.yaml"
+        outside.write_text("source:\n  plugin: null_source\n", encoding="utf-8")
+        main = project / "main.yaml"
+        main.write_text(
+            f"depends_on:\n  - name: outside\n    settings: {outside}\nsource:\n  plugin: null_source\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"Dependency settings path.*must be relative"):
+            detect_cycles(main)
+
+    def test_traversal_dependency_path_rejected(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside.yaml"
+        outside.write_text("source:\n  plugin: null_source\n", encoding="utf-8")
+        main = project / "main.yaml"
+        main.write_text(
+            "depends_on:\n  - name: outside\n    settings: ../outside.yaml\nsource:\n  plugin: null_source\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="escapes allowed root"):
+            detect_cycles(main)
+
     def test_no_cycle_returns_none(self, tmp_path: Path) -> None:
         # A -> B, no cycle
         b = tmp_path / "b.yaml"
         b.write_text("source:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\nlandscape:\n  url: sqlite:///test.db\n")
         a = tmp_path / "a.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\nsource:\n  plugin: null_source\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\nsource:\n  plugin: null_source\n"
             "sinks:\n  out:\n    plugin: json_sink\nlandscape:\n  url: sqlite:///test.db\n"
         )
 
@@ -89,7 +158,7 @@ class TestCycleDetection:
     def test_self_loop_detected(self, tmp_path: Path) -> None:
         a = tmp_path / "a.yaml"
         a.write_text(
-            f"depends_on:\n  - name: self\n    settings: {a}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: self\n    settings: {a.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Cc]ircular|[Cc]ycle"):
@@ -99,10 +168,10 @@ class TestCycleDetection:
         a = tmp_path / "a.yaml"
         b = tmp_path / "b.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         b.write_text(
-            f"depends_on:\n  - name: a\n    settings: {a}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: a\n    settings: {a.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Cc]ircular|[Cc]ycle"):
@@ -113,13 +182,13 @@ class TestCycleDetection:
         b = tmp_path / "b.yaml"
         c = tmp_path / "c.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         b.write_text(
-            f"depends_on:\n  - name: c\n    settings: {c}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: c\n    settings: {c.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         c.write_text(
-            f"depends_on:\n  - name: a\n    settings: {a}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: a\n    settings: {a.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Cc]ircular|[Cc]ycle"):
@@ -133,13 +202,13 @@ class TestCycleDetection:
 
         files["d"].write_text("source:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n")
         files["c"].write_text(
-            f"depends_on:\n  - name: d\n    settings: {files['d']}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: d\n    settings: {files['d'].name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         files["b"].write_text(
-            f"depends_on:\n  - name: c\n    settings: {files['c']}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: c\n    settings: {files['c'].name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
         files["a"].write_text(
-            f"depends_on:\n  - name: b\n    settings: {files['b']}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: b\n    settings: {files['b'].name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         with pytest.raises(ValueError, match=r"[Dd]epth"):
@@ -154,7 +223,7 @@ class TestCycleDetection:
 
         main = tmp_path / "main.yaml"
         main.write_text(
-            f"depends_on:\n  - name: dep\n    settings: {link}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: dep\n    settings: {link.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         # Should not raise — link resolves to real, no cycle
@@ -167,17 +236,17 @@ class TestCycleDetection:
 
         b = tmp_path / "b.yaml"
         b.write_text(
-            f"depends_on:\n  - name: d\n    settings: {d}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: d\n    settings: {d.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         c = tmp_path / "c.yaml"
         c.write_text(
-            f"depends_on:\n  - name: d\n    settings: {d}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
+            f"depends_on:\n  - name: d\n    settings: {d.name}\nsource:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
         a = tmp_path / "a.yaml"
         a.write_text(
-            f"depends_on:\n  - name: b\n    settings: {b}\n  - name: c\n    settings: {c}\n"
+            f"depends_on:\n  - name: b\n    settings: {b.name}\n  - name: c\n    settings: {c.name}\n"
             "source:\n  plugin: null_source\nsinks:\n  out:\n    plugin: json_sink\n"
         )
 
@@ -186,15 +255,42 @@ class TestCycleDetection:
 
 
 class TestResolveDependencies:
+    def test_absolute_dependency_path_rejected_before_runner(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside.yaml"
+        dep = DependencyConfig(name="outside", settings=str(outside))
+        parent_path = tmp_path / "project" / "query.yaml"
+        parent_path.parent.mkdir()
+        mock_runner = _RunnerDouble(result=_run_result("unused", RunStatus.COMPLETED))
+
+        with (
+            patch("elspeth.engine.dependency_resolver._hash_settings_file") as mock_hash,
+            pytest.raises(ValueError, match=r"Dependency settings path.*must be relative"),
+        ):
+            resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
+
+        mock_hash.assert_not_called()
+        assert mock_runner.paths == []
+
+    def test_traversal_dependency_path_rejected_before_runner(self, tmp_path: Path) -> None:
+        dep = DependencyConfig(name="outside", settings="../outside.yaml")
+        parent_path = tmp_path / "project" / "query.yaml"
+        parent_path.parent.mkdir()
+        mock_runner = _RunnerDouble(result=_run_result("unused", RunStatus.COMPLETED))
+
+        with (
+            patch("elspeth.engine.dependency_resolver._hash_settings_file") as mock_hash,
+            pytest.raises(ValueError, match="escapes allowed root"),
+        ):
+            resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
+
+        mock_hash.assert_not_called()
+        assert mock_runner.paths == []
+
     def test_single_dependency_success(self, tmp_path: Path) -> None:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.COMPLETED
-        mock_result.run_id = "dep-run-123"
-
-        mock_runner = MagicMock(return_value=mock_result)
+        mock_runner = _RunnerDouble(result=_run_result("dep-run-123", RunStatus.COMPLETED))
 
         with patch("elspeth.engine.dependency_resolver._hash_settings_file", return_value="sha256:abc"):
             results = resolve_dependencies(
@@ -207,15 +303,41 @@ class TestResolveDependencies:
         assert results[0].name == "index"
         assert results[0].run_id == "dep-run-123"
 
+    def test_dependency_result_hashes_settings_before_runner_side_effects(self, tmp_path: Path) -> None:
+        """Dependency audit hash must describe the config handed to the runner."""
+        dep = DependencyConfig(name="index", settings="./index.yaml")
+        parent_path = tmp_path / "query.yaml"
+        dep_path = tmp_path / "index.yaml"
+        dep_path.write_text("source:\n  plugin: before\n", encoding="utf-8")
+        before_hash = _hash_settings_file(dep_path)
+
+        def mutate_after_execution(settings_path: Path) -> RunResult:
+            assert settings_path == dep_path
+            settings_path.write_text("source:\n  plugin: after\n", encoding="utf-8")
+            return RunResult(
+                run_id="dep-run-123",
+                status=RunStatus.COMPLETED,
+                rows_processed=1,
+                rows_succeeded=1,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+            )
+
+        results = resolve_dependencies(
+            depends_on=[dep],
+            parent_settings_path=parent_path,
+            runner=mutate_after_execution,
+        )
+
+        assert _hash_settings_file(dep_path) != before_hash
+        assert results[0].settings_hash == before_hash
+
     def test_dependency_failure_raises(self, tmp_path: Path) -> None:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_result = MagicMock()
-        mock_result.status = RunStatus.FAILED
-        mock_result.run_id = "dep-run-fail"
-
-        mock_runner = MagicMock(return_value=mock_result)
+        mock_runner = _RunnerDouble(result=_run_result("dep-run-fail", RunStatus.FAILED))
 
         with pytest.raises(DependencyFailedError, match="index"):
             resolve_dependencies(
@@ -228,9 +350,24 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=KeyboardInterrupt())
+        mock_runner = _RunnerDouble(error=KeyboardInterrupt())
 
         with pytest.raises(KeyboardInterrupt):
+            resolve_dependencies(
+                depends_on=[dep],
+                parent_settings_path=parent_path,
+                runner=mock_runner,
+            )
+
+    def test_graceful_shutdown_propagates_unwrapped(self, tmp_path: Path) -> None:
+        from elspeth.contracts.errors import GracefulShutdownError
+
+        dep = DependencyConfig(name="index", settings="./index.yaml")
+        parent_path = tmp_path / "query.yaml"
+        shutdown = GracefulShutdownError(rows_processed=0, run_id="run-1")
+        mock_runner = _RunnerDouble(error=shutdown)
+
+        with pytest.raises(GracefulShutdownError):
             resolve_dependencies(
                 depends_on=[dep],
                 parent_settings_path=parent_path,
@@ -242,7 +379,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=RuntimeError("config loading failed"))
+        mock_runner = _RunnerDouble(error=RuntimeError("config loading failed"))
 
         with pytest.raises(DependencyFailedError, match="RuntimeError") as exc_info:
             resolve_dependencies(
@@ -261,7 +398,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=FrameworkBugError("invariant violated"))
+        mock_runner = _RunnerDouble(error=FrameworkBugError("invariant violated"))
 
         with pytest.raises(FrameworkBugError, match="invariant violated"):
             resolve_dependencies(
@@ -277,7 +414,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=AuditIntegrityError("corrupt audit trail"))
+        mock_runner = _RunnerDouble(error=AuditIntegrityError("corrupt audit trail"))
 
         with pytest.raises(AuditIntegrityError, match="corrupt audit trail"):
             resolve_dependencies(
@@ -291,7 +428,7 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=TypeError("bad argument"))
+        mock_runner = _RunnerDouble(error=TypeError("bad argument"))
 
         with pytest.raises(TypeError, match="bad argument"):
             resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
@@ -301,10 +438,20 @@ class TestResolveDependencies:
         dep = DependencyConfig(name="index", settings="./index.yaml")
         parent_path = tmp_path / "query.yaml"
 
-        mock_runner = MagicMock(side_effect=AttributeError("no such attr"))
+        mock_runner = _RunnerDouble(error=AttributeError("no such attr"))
 
         with pytest.raises(AttributeError, match="no such attr"):
             resolve_dependencies(depends_on=[dep], parent_settings_path=parent_path, runner=mock_runner)
+
+    def test_runner_boundary_catches_exception_not_base_exception(self) -> None:
+        """Crash-through policy lives in the helper; this wrapper only catches Exceptions."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(resolve_dependencies)))
+        caught_names = {
+            handler.type.id for handler in ast.walk(tree) if isinstance(handler, ast.ExceptHandler) and isinstance(handler.type, ast.Name)
+        }
+
+        assert "Exception" in caught_names
+        assert "BaseException" not in caught_names
 
     def test_multiple_dependencies_sequential(self, tmp_path: Path) -> None:
         deps = [
@@ -314,14 +461,11 @@ class TestResolveDependencies:
         parent_path = tmp_path / "main.yaml"
         call_order: list[str] = []
 
-        def track_calls(path: Path) -> MagicMock:
+        def track_calls(path: Path) -> RunResult:
             call_order.append(path.name)
-            result = MagicMock()
-            result.status = RunStatus.COMPLETED
-            result.run_id = f"run-{path.name}"
-            return result
+            return _run_result(f"run-{path.name}", RunStatus.COMPLETED)
 
-        mock_runner = MagicMock(side_effect=track_calls)
+        mock_runner = _RunnerDouble(side_effect=track_calls)
 
         with patch("elspeth.engine.dependency_resolver._hash_settings_file", return_value="sha256:abc"):
             resolve_dependencies(depends_on=deps, parent_settings_path=parent_path, runner=mock_runner)
@@ -330,7 +474,7 @@ class TestResolveDependencies:
 
     def test_empty_depends_on_returns_empty(self, tmp_path: Path) -> None:
         parent_path = tmp_path / "main.yaml"
-        mock_runner = MagicMock()
+        mock_runner = _RunnerDouble(result=_run_result("unused", RunStatus.COMPLETED))
         results = resolve_dependencies(depends_on=[], parent_settings_path=parent_path, runner=mock_runner)
         assert results == []
 

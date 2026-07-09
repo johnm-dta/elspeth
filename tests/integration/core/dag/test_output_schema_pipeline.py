@@ -22,7 +22,8 @@ import pytest
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.config import SourceSettings, TransformSettings
-from elspeth.core.dag import ExecutionGraph, GraphValidationError, WiredTransform
+from elspeth.core.dag import ExecutionGraph, GraphValidationError
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.plugins.transforms.rag.transform import RAGRetrievalTransform
 
 

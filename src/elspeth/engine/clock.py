@@ -1,8 +1,8 @@
-"""Clock abstraction for testable timeout logic.
+"""Clock implementations for testable timeout logic.
 
-This module provides a Clock protocol that abstracts time access,
-enabling deterministic testing of timeout-dependent code paths
-like aggregation triggers and coalesce timeouts.
+The shared clock protocols live in ``elspeth.core.clock``. This engine module
+keeps compatibility re-exports and provides the default production/test
+implementations used by engine scheduling and timeout code.
 
 Production code uses SystemClock (the default).
 Tests inject MockClock to control time advancement.
@@ -13,37 +13,10 @@ from __future__ import annotations
 import math
 import time
 from datetime import UTC, datetime
-from typing import Protocol
 
+from elspeth.core.clock import Clock, MonotonicClock, UtcClock
 
-class Clock(Protocol):
-    """Abstract clock for timeout-based operations.
-
-    Enables testability and control over time in aggregations and coalesce.
-
-    Implementations:
-    - SystemClock: Uses time.monotonic() (production)
-    - MockClock: Returns controllable times (testing)
-    """
-
-    def monotonic(self) -> float:
-        """Return monotonic time in seconds.
-
-        Must be monotonic (never goes backwards), suitable for elapsed
-        time calculations and timeouts. Corresponds to time.monotonic().
-
-        Returns:
-            Current monotonic time in seconds.
-        """
-        ...
-
-    def now_utc(self) -> datetime:
-        """Return the current UTC wall-clock time.
-
-        Scheduler lease and availability timestamps are persisted as UTC
-        datetimes. Tests can inject MockClock so those writes are deterministic.
-        """
-        ...
+__all__ = ["DEFAULT_CLOCK", "Clock", "MockClock", "MonotonicClock", "SystemClock", "UtcClock"]
 
 
 class SystemClock:

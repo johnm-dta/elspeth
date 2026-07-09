@@ -262,11 +262,23 @@ class TestLLMCallResponse:
         with pytest.raises(AttributeError):
             obj.content = "modified"  # type: ignore[misc]
 
+    def test_empty_content_is_allowed(self) -> None:
+        response = LLMCallResponse(
+            content="",
+            model="gpt-4",
+            usage=TokenUsage.unknown(),
+            raw_response={},
+        )
+
+        assert response.content == ""
+
 
 class TestLLMCallResponseConstructionInvariants:
     @pytest.mark.parametrize(
         "overrides",
         [
+            {"content": None},
+            {"content": {"x": 1}},
             {"model": ""},
             {"usage": {"prompt_tokens": 1}},
             {"raw_response": ["not", "a", "mapping"]},
@@ -669,6 +681,14 @@ class TestHTTPCallResponse:
         with pytest.raises(ValueError, match="status_code must be >= 100"):
             HTTPCallResponse(status_code=99, headers={})
 
+    def test_accepts_nonstandard_three_digit_status_code(self) -> None:
+        response = HTTPCallResponse(status_code=999, headers={})
+        assert response.to_dict()["status_code"] == 999
+
+    def test_rejects_status_code_above_three_digits(self) -> None:
+        with pytest.raises(ValueError, match="status_code must be <= 999"):
+            HTTPCallResponse(status_code=1000, headers={})
+
     def test_rejects_negative_body_size(self) -> None:
         with pytest.raises(ValueError, match="body_size must be >= 0"):
             HTTPCallResponse(status_code=200, headers={}, body_size=-1)
@@ -759,7 +779,7 @@ class TestHTTPCallErrorConstructionInvariants:
             {"type": object()},
             {"message": object()},
             {"status_code": 99},
-            {"status_code": 600},
+            {"status_code": 1000},
             {"status_code": 1.5},
             {"status_code": True},
         ],
@@ -774,6 +794,10 @@ class TestHTTPCallErrorConstructionInvariants:
 
         with pytest.raises((TypeError, ValueError)):
             HTTPCallError(**kwargs)  # type: ignore[arg-type]
+
+    def test_accepts_nonstandard_three_digit_status_code(self) -> None:
+        error = HTTPCallError(type="HTTPError", message="HTTP 999", status_code=999)
+        assert error.to_dict()["status_code"] == 999
 
 
 class TestHTTPCallResponseListBodyFreeze:

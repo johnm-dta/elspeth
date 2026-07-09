@@ -133,7 +133,11 @@ function snapshotWithRawValidationResult(version: number, validationResult: Vali
         ? {
             ...r,
             status: validationResult.is_valid ? "ok" : "error",
-            summary: validationResult.is_valid ? "All checks pass" : `${validationResult.errors.length} errors — see details`,
+            summary: validationResult.is_valid
+              ? "All checks pass"
+              : validationResult.errors.length === 1
+                ? "1 problem to fix — see details"
+                : `${validationResult.errors.length} problems to fix — see details`,
             detail: validationResult.errors.map((err) => err.message).join("\n"),
             component_ids: validationResult.errors
               .map((err) => err.component_id)
@@ -203,6 +207,26 @@ describe("AuditReadinessPanel", () => {
     expect(screen.getByText("Plugin trust")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText("Retention")).toBeInTheDocument();
+  });
+
+  it("names the panel 'Audit' with a visible heading in collapsed AND expanded states (elspeth-4f69b267dd)", async () => {
+    // The graduation card directs users to "the Audit panel" — the destination
+    // must exist by that name in every rendered state, not only when expanded.
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    // Collapsed (all-green) state: heading present above the summary button.
+    await screen.findByRole("button", { name: /Audit ready/i });
+    expect(
+      screen.getByRole("heading", { name: "Audit" }),
+    ).toBeInTheDocument();
+    // Expanded state: same visible name.
+    await user.click(screen.getByRole("button", { name: /Audit ready/i }));
+    expect(
+      screen.getByRole("heading", { name: "Audit" }),
+    ).toBeInTheDocument();
   });
 
   it("shows all rows by default when any row has warning or error status", async () => {
@@ -374,9 +398,11 @@ describe("AuditReadinessPanel", () => {
 
     render(<AuditReadinessPanel />);
 
-    expect(
-      await screen.findByLabelText(/audit readiness checked just now.*v1/i),
-    ).toBeInTheDocument();
+    // Freshness is conveyed by the visible paragraph text — the previous
+    // aria-label duplicate on the <p> was never exposed to AT (naming is
+    // prohibited on a paragraph role; elspeth-37293a3b7c).
+    const freshness = await screen.findByText(/checked just now.*v1/i);
+    expect(freshness).toHaveClass("audit-readiness-freshness");
   });
 
   it("force-refreshes the current composition version when Refresh is clicked", async () => {
@@ -547,6 +573,78 @@ describe("AuditReadinessPanel", () => {
     // Each summary string should be present (sanity check on row-rendering loop).
     expect(screen.getByText("Two errors")).toBeInTheDocument();
     expect(screen.getByText(/Missing required secret/)).toBeInTheDocument();
+  });
+
+  // ── Gate legibility (elspeth-088bf83922 T-2, option (a)) ───────────────────
+  //
+  // canExecute (ExecuteButton.tsx) only reads the `validation` row's
+  // is_valid and interpretation-pending state (which the `llm_interpretations`
+  // row mirrors) — plugin_trust/provenance/retention/secrets never gate Run.
+  // These two tests pin that the panel's per-row badges classify honestly
+  // against that real predicate, and that the header carries a one-line
+  // explanation — without touching any gating behaviour.
+
+  it("labels validation and llm_interpretations rows 'Blocks Run' and the other four rows 'Advisory' (elspeth-088bf83922 T-2)", async () => {
+    const everyRowActionable: AuditReadinessSnapshot = {
+      session_id: SESSION_ID,
+      composition_version: 1,
+      checked_at: new Date().toISOString(),
+      rows: [
+        { id: "validation", label: "Validation", status: "error", summary: "Two errors", detail: "Missing source plugin.", component_ids: ["source"] },
+        { id: "plugin_trust", label: "Plugin trust", status: "warning", summary: "One Tier 3 plugin", detail: null, component_ids: ["web_scrape"] },
+        { id: "provenance", label: "Provenance", status: "warning", summary: "Identity passthrough", detail: null, component_ids: ["select_columns"] },
+        { id: "retention", label: "Retention", status: "warning", summary: "Retention shorter than expected", detail: null, component_ids: [] },
+        { id: "llm_interpretations", label: "LLM interpretations", status: "warning", summary: "Untracked LLM output", detail: null, component_ids: ["classify"] },
+        { id: "secrets", label: "Secrets", status: "error", summary: "Missing required secret", detail: "secret 'OPENAI_API_KEY' is not declared.", component_ids: [] },
+      ],
+      validation_result: {
+        is_valid: false,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: BLOCKED_READINESS,
+        semantic_contracts: [],
+      },
+    };
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(everyRowActionable, { signal }),
+    );
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("Validation")).toBeInTheDocument();
+    });
+
+    // Two gating rows.
+    expect(screen.getByText("Validation").closest("li")).toHaveAttribute(
+      "data-gate",
+      "blocks",
+    );
+    expect(
+      screen.getByTestId("audit-readiness-row-llm-interpretations"),
+    ).toHaveAttribute("data-gate", "blocks");
+
+    // Four advisory rows — never appear in ExecuteButton's canExecute.
+    for (const label of ["Plugin trust", "Provenance", "Retention", "Secrets"]) {
+      expect(screen.getByText(label).closest("li")).toHaveAttribute(
+        "data-gate",
+        "advisory",
+      );
+    }
+
+    // Both labels are visible text, present exactly twice each (one per
+    // gating/advisory row count) — not colour-only.
+    expect(screen.getAllByText("Blocks Run")).toHaveLength(2);
+    expect(screen.getAllByText("Advisory")).toHaveLength(4);
+  });
+
+  it("explains the 'Blocks Run' / 'Advisory' classification in the expanded header", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+    render(<AuditReadinessPanel />);
+    expect(
+      await screen.findByText(/Rows marked "Blocks Run" must be clear/i),
+    ).toBeInTheDocument();
   });
 
   it("refetches when compositionState.version advances", async () => {

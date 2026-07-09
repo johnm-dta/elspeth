@@ -36,6 +36,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from elspeth.core.payload_store import FilesystemPayloadStore
+from tests.helpers.checkpoint import checkpoint_draft
 
 
 def _create_test_graph(checkpoint_node: str = "sink-node") -> ExecutionGraph:
@@ -203,9 +204,11 @@ def run_with_checkpoint_and_payloads(
     # Create checkpoint at row 2 (rows 3-4 are unprocessed)
     graph = _create_test_graph()
     checkpoint_manager.create_checkpoint(
-        run_id=run_id,
-        sequence_number=2,
-        graph=graph,
+        draft=checkpoint_draft(
+            run_id=run_id,
+            sequence_number=2,
+            graph=graph,
+        )
     )
 
     return run_id

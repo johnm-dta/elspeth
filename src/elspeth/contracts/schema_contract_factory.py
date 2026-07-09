@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
+from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
 if TYPE_CHECKING:
@@ -41,6 +42,25 @@ def map_schema_mode(
     """
     # Simple uppercase conversion - YAML lowercase to runtime uppercase
     return mode.upper()  # type: ignore[return-value]  # str.upper() returns str, not Literal; callers validate mode beforehand
+
+
+def expected_runtime_output_contract(
+    config: SchemaConfig,
+) -> tuple[Literal["FIXED", "FLEXIBLE", "OBSERVED"], bool]:
+    """ADR-014 expected emitted-contract semantics for a declared output schema.
+
+    The single statement of what a transform's EMITTED ``PipelineRow.contract``
+    must look like for a given ``SchemaConfig`` declaration: the mapped runtime
+    mode, and ``locked=True`` — once a contract is attached to an emitted row
+    it is locked, even for ``flexible``/``observed`` config modes whose
+    pre-emission builders may begin unlocked.
+
+    Both the producer alignment (``BaseTransform._align_output_contract``) and
+    the engine verifier (``verify_schema_config_mode``) derive their
+    expectation from here so mode/lock-policy changes cannot drift apart
+    (filigree elspeth-986cfb43e5).
+    """
+    return map_schema_mode(config.mode), True
 
 
 def create_contract_from_config(
@@ -76,7 +96,7 @@ def create_contract_from_config(
     # field_resolution is original->normalized, we need normalized->original
     normalized_to_original: dict[str, str] = {}
     if field_resolution:
-        normalized_to_original = {v: k for k, v in field_resolution.items()}
+        normalized_to_original = ContractBuilder._normalized_to_original(field_resolution)
 
     # For explicit schemas, create FieldContracts from FieldDefinitions
     fields: tuple[FieldContract, ...] = ()

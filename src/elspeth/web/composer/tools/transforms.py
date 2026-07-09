@@ -25,6 +25,7 @@ from elspeth.web.composer.state import (
     _validate_gate_expression,
     _validate_gate_route_parity,
 )
+from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
     ToolContext,
     ToolResult,
@@ -36,10 +37,12 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _options_with_default_llm_reviews,
     _prevalidate_transform,
+    _runtime_owned_llm_option_error,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
     _validate_plugin_name,
     _validate_transform_provider_config_path,
+    _validate_transform_provider_config_policy,
 )
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
@@ -105,7 +108,7 @@ def _handle_list_transforms(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, context.catalog.list_transforms())
+    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_transforms(), context))
 
 
 _LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
@@ -113,7 +116,7 @@ _LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
     handler=_handle_list_transforms,
     kind=ToolKind.DISCOVERY,
     description="List available transform plugins with name and summary.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -123,7 +126,7 @@ def _handle_list_sinks(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, context.catalog.list_sinks())
+    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_sinks(), context))
 
 
 _LIST_SINKS_DECLARATION = ToolDeclaration(
@@ -131,7 +134,7 @@ _LIST_SINKS_DECLARATION = ToolDeclaration(
     handler=_handle_list_sinks,
     kind=ToolKind.DISCOVERY,
     description="List available sink plugins with name and summary.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -228,6 +231,7 @@ _UPSERT_NODE_DECLARATION_JSON_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["id", "node_type", "input"],
+    "additionalProperties": False,
 }
 
 
@@ -311,6 +315,7 @@ _UPSERT_EDGE_DECLARATION = ToolDeclaration(
             "label": {"type": ["string", "null"], "description": "Display label."},
         },
         "required": ["id", "from_node", "to_node", "edge_type"],
+        "additionalProperties": False,
         "examples": [
             {
                 "id": "e_judge_layers_error",
@@ -343,6 +348,7 @@ _REMOVE_NODE_DECLARATION = ToolDeclaration(
             "id": {"type": "string", "description": "Node ID to remove."},
         },
         "required": ["id"],
+        "additionalProperties": False,
     },
 )
 
@@ -366,6 +372,7 @@ _REMOVE_EDGE_DECLARATION = ToolDeclaration(
             "id": {"type": "string", "description": "Edge ID to remove."},
         },
         "required": ["id"],
+        "additionalProperties": False,
     },
 )
 
@@ -396,6 +403,7 @@ _SET_METADATA_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["patch"],
+        "additionalProperties": False,
     },
 )
 
@@ -411,10 +419,19 @@ def _execute_upsert_node(
     node_type = validated.node_type
     plugin = validated.plugin
     node_options = validated.options
+    runtime_owned_error = _runtime_owned_llm_option_error(
+        plugin,
+        node_options,
+        tool_name="upsert_node",
+    )
+    if runtime_owned_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=node_id,
         component_type="node",
+        plugin_type="transform" if plugin is not None else None,
+        plugin_name=plugin,
         options=node_options,
     )
     if credential_error is not None:
@@ -446,8 +463,12 @@ def _execute_upsert_node(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
+        provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=plugin)
+        if provider_policy_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+
         # S2: confine nested provider_config persist_directory (RAG retrieval).
-        provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir)
+        provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir, session_id=context.session_id)
         if provider_path_error is not None:
             return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 
@@ -622,8 +643,49 @@ def _execute_remove_edge(
     new_state = state.without_edge(edge_id)
     if new_state is None:
         return _failure_result(state, f"Edge '{edge_id}' not found.")
+    new_state = _clear_removed_sink_edge_route(new_state, edge)
 
     return _mutation_result(new_state, affected)
+
+
+def _clear_removed_sink_edge_route(state: CompositionState, edge: EdgeSpec) -> CompositionState:
+    """Clear runtime routing that was written for a removed sink edge."""
+    output_names = {output.name for output in state.outputs}
+    if edge.to_node not in output_names:
+        return state
+
+    if edge.from_node in state.sources:
+        if edge.edge_type != "on_success":
+            return state
+        source = state.sources[edge.from_node]
+        if source.on_success == edge.to_node:
+            return state.with_named_source(edge.from_node, replace(source, on_success="discard"))
+        return state
+
+    node = next((candidate for candidate in state.nodes if candidate.id == edge.from_node), None)
+    if node is None:
+        return state
+    if edge.edge_type == "on_success":
+        if node.on_success == edge.to_node:
+            return state.with_node(replace(node, on_success=None))
+        return state
+    if edge.edge_type == "on_error":
+        if node.on_error == edge.to_node:
+            return state.with_node(replace(node, on_error=None))
+        return state
+    if edge.edge_type in ("route_true", "route_false"):
+        route_key = "true" if edge.edge_type == "route_true" else "false"
+        routes = dict(node.routes or {})
+        if routes.get(route_key) != edge.to_node:
+            return state
+        del routes[route_key]
+        return state.with_node(replace(node, routes=routes or None))
+    if edge.edge_type == "fork":
+        fork_to = tuple(target for target in (node.fork_to or ()) if target != edge.to_node)
+        if fork_to == (node.fork_to or ()):
+            return state
+        return state.with_node(replace(node, fork_to=fork_to or None))
+    return state
 
 
 def _execute_set_metadata(
@@ -712,6 +774,13 @@ def _execute_patch_node_options(
     routing_patch_error = _node_routing_option_patch_error(patch)
     if routing_patch_error is not None:
         return _failure_result(state, routing_patch_error)
+    runtime_owned_error = _runtime_owned_llm_option_error(
+        current.plugin,
+        patch,
+        tool_name="patch_node_options",
+    )
+    if runtime_owned_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
     new_options: Mapping[str, Any] = _apply_merge_patch(current.options, patch)
     new_options = _options_with_default_llm_reviews(
         node_id=node_id,
@@ -722,6 +791,8 @@ def _execute_patch_node_options(
         state,
         component_id=node_id,
         component_type="node",
+        plugin_type="transform" if current.plugin is not None else None,
+        plugin_name=current.plugin,
         options=new_options,
     )
     if credential_error is not None:
@@ -732,9 +803,13 @@ def _execute_patch_node_options(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
+        provider_policy_error = _validate_transform_provider_config_policy(new_options, plugin=current.plugin)
+        if provider_policy_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+
         # S2: confine nested provider_config persist_directory (RAG retrieval).
         # A merge-patch can introduce an escaping path just as upsert_node can.
-        provider_path_error = _validate_transform_provider_config_path(new_options, context.data_dir)
+        provider_path_error = _validate_transform_provider_config_path(new_options, context.data_dir, session_id=context.session_id)
         if provider_path_error is not None:
             return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 
@@ -804,6 +879,7 @@ _PATCH_NODE_OPTIONS_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["node_id", "patch"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )

@@ -150,4 +150,11 @@ def _sqlite_database_file_missing(landscape_url: str) -> bool:
     database = parsed.database
     if database is None or database == ":memory:":
         return False
+    # A SQLite ``file:`` URI (``?uri=true`` connections) carries the real path
+    # in the URI's path component; treating the whole ``file:...`` string as a
+    # literal filename would spuriously report an existing DB as missing.
+    if database.startswith("file:"):
+        from urllib.parse import urlparse
+
+        database = urlparse(database).path
     return not Path(database).exists()

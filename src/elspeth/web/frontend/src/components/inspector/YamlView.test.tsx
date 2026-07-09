@@ -67,6 +67,9 @@ describe("YamlView", () => {
       activeSessionId: null,
       compositionState: null,
       compositionProposals: [],
+      // Reset the export sidecar binding (setState merges); the binding tests
+      // below would otherwise leak their stashed value across cases.
+      exportedYamlBlobBinding: null,
     });
 
     const { fetchYaml } = await import("@/api/client");
@@ -271,5 +274,49 @@ describe("YamlView", () => {
     );
 
     expect(acceptProposal).toHaveBeenCalledWith("proposal-1");
+  });
+
+  // ── source_blob_ids sidecar capture (for the import round-trip) ─────────────
+
+  it("stashes the source_blob_ids sidecar paired to the session + exact YAML on export fetch", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    vi.mocked(fetchYaml).mockResolvedValue({
+      yaml: "source:\n  plugin: text\n",
+      source_blob_ids: { source: "22222222-2222-2222-2222-222222222222" },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+    });
+
+    render(<YamlView />);
+    await screen.findByRole("button", { name: "Copy YAML to clipboard" });
+
+    expect(useSessionStore.getState().exportedYamlBlobBinding).toEqual({
+      sessionId: "session-1",
+      yaml: "source:\n  plugin: text\n",
+      sourceBlobIds: { source: "22222222-2222-2222-2222-222222222222" },
+    });
+  });
+
+  it("clears a stale sidecar binding when the export fetch returns no source_blob_ids", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    vi.mocked(fetchYaml).mockResolvedValue({ yaml: "source:\n  plugin: text\n" });
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+      exportedYamlBlobBinding: {
+        sessionId: "session-1",
+        yaml: "stale",
+        sourceBlobIds: { source: "old" },
+      },
+    } as never);
+
+    render(<YamlView />);
+    await screen.findByRole("button", { name: "Copy YAML to clipboard" });
+
+    expect(useSessionStore.getState().exportedYamlBlobBinding).toBeNull();
   });
 });

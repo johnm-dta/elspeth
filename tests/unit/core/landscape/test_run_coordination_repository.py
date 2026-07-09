@@ -14,8 +14,8 @@ Dedicated tests for the seat lifecycle and the shared leader epoch fence
 - ``fence_refusal`` eventing on a FRESH connection even though the refused
   payload transaction rolled back (and best-effort: never raises);
 - BUSY-vs-CAS-loss discrimination: a held write lock surfaces as the
-  operator-actionable ``WriteLockHeldError`` naming registered pids — never
-  as "leadership held".
+  operator-actionable ``WriteLockHeldError`` carrying structured registered
+  worker forensics — never as "leadership held".
 
 Real file-backed Tier-1 SQLite (two engine handles where a second
 lock-holding connection is needed — the races-test pattern). All clocks are
@@ -29,6 +29,7 @@ import socket
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import create_engine, event, insert, select, update
@@ -62,6 +63,13 @@ NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=UTC)
 WINDOW = 80.0
 # Past the 80s liveness window: the seat registered at NOW is expired here.
 AFTER_EXPIRY = NOW + timedelta(seconds=200)
+
+
+class _PostgresEngineWithoutPragmas:
+    dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+    def connect(self) -> None:
+        raise AssertionError("SQLite PRAGMA probe should not run for PostgreSQL engines")
 
 
 @pytest.fixture
@@ -193,6 +201,22 @@ class TestSeatMint:
         assert [e["event_type"] for e in events] == ["worker_register", "leader_acquire"]
         assert all(e["worker_id"] == wid for e in events)
         assert all(e["leader_epoch"] == 1 for e in events)
+
+    def test_register_on_connection_is_public_composition_surface(self, engine: Tier1Engine, repo: RunCoordinationRepository) -> None:
+        _seed_run(engine, run_id="run-coord-on-conn")
+        wid = mint_worker_id("run-coord-on-conn")
+
+        with begin_write(engine) as conn:
+            token = repo.register_run_leader_on(
+                conn,
+                run_id="run-coord-on-conn",
+                worker_id=wid,
+                now=NOW,
+                window_seconds=WINDOW,
+            )
+
+        assert token == CoordinationToken(run_id="run-coord-on-conn", worker_id=wid, leader_epoch=1)
+        assert _seat_row(engine, "run-coord-on-conn")["leader_worker_id"] == wid
 
 
 class TestAcquireRunLeadershipCAS:
@@ -470,7 +494,7 @@ class TestFencedLeaderTransaction:
 class TestWriteLockHeld:
     """§B.4 BUSY discrimination: a held write lock is NOT 'leadership held'."""
 
-    def test_acquire_raises_write_lock_held_with_registered_pids(
+    def test_acquire_raises_write_lock_held_with_structured_worker_forensics(
         self, engines: tuple[Tier1Engine, Tier1Engine], repo: RunCoordinationRepository
     ) -> None:
         engine, holder_engine = engines
@@ -501,7 +525,8 @@ class TestWriteLockHeld:
         assert leader_a in roster
         assert roster[leader_a].pid == os.getpid()
         assert roster[leader_a].role == "leader"
-        assert str(os.getpid()) in str(err)
+        assert str(os.getpid()) not in str(err)
+        assert leader_a not in str(err)
         # Distinct failure mode: NOT NonResumableRunError, and zero mutation.
         assert _seat_row(engine)["leader_epoch"] == 1
 
@@ -666,6 +691,13 @@ class TestPragmaProbe:
         with pytest.raises(AuditIntegrityError, match="not opened through LandscapeDB"):
             RunCoordinationRepository(Tier1Engine(bare))
         bare.dispose()
+
+    def test_postgresql_engine_does_not_run_sqlite_pragma_probe(self) -> None:
+        engine = Tier1Engine(cast(Engine, _PostgresEngineWithoutPragmas()))
+
+        repo = RunCoordinationRepository(engine)
+
+        assert isinstance(repo, RunCoordinationRepository)
 
 
 class TestEventLedgerDiscipline:

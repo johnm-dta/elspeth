@@ -23,6 +23,7 @@ from elspeth.web.interpretation_state import (
     pipeline_decision_artifact_hash,
     prompt_shield_recommendation_warning_pairs,
     prompt_structure_hash_from_options,
+    raw_html_cleanup_review_contract_error,
     strip_authoring_options,
     vague_term_wiring_count,
 )
@@ -467,10 +468,44 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
 
 
+def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() -> None:
+    state = _state_with_web_scrape_cleanup_node(
+        {
+            "mapping": {
+                "url": "url",
+                "primary_colours": "primary_colours",
+            },
+            "select_only": True,
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "unrelated-pipeline-decision",
+                    "kind": "pipeline_decision",
+                    "user_term": "some_other_pipeline_choice",
+                    "status": "pending",
+                    "draft": "Approve a different row-shaping decision.",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        }
+    )
+
+    contract_error = raw_html_cleanup_review_contract_error(state)
+    sites = interpretation_sites(state)
+
+    assert contract_error is not None
+    assert "drop_raw_html_fields" in contract_error
+    assert ("drop_raw_html", "drop_raw_html_fields", InterpretationKind.PIPELINE_DECISION) in (
+        (site.component_id, site.user_term, site.kind) for site in sites
+    )
+
+
 def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
     # The gate topology routes web_scrape output into the LLM via gate routes,
     # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
-    # prompt-shield recommendation is advisory, not blocking (elspeth-abb2cb0931):
+    # Prompt-shield recommendation is advisory, not blocking:
     # an unshielded LLM-over-scrape surfaces a warning and still composes.
     state = _state_with_web_scrape_gate_to_llm()
 
@@ -492,6 +527,61 @@ def test_gate_routed_web_scrape_through_prompt_shield_emits_no_warning() -> None
     warning_pairs = prompt_shield_recommendation_warning_pairs(state)
 
     assert warning_pairs == ()
+
+
+def _state_with_plain_llm_only() -> CompositionState:
+    """One llm node with NO upstream producer at all (no web_scrape, no shield)."""
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="rate_node",
+                node_type="transform",
+                plugin="llm",
+                input="rows",
+                on_success="out",
+                on_error="stop",
+                options={
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "prompt_template": "Rate {{ row.text }} and return JSON.",
+                    "temperature": 0,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def test_plain_unshielded_llm_warns_always_on() -> None:
+    # Always-on: an llm node with no upstream producer and no shield still
+    # surfaces the advisory (State C default). The pre-change code returned () here.
+    state = _state_with_plain_llm_only()
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+    assert warning_pairs
+    assert any(component == "node:rate_node" for component, _message in warning_pairs)
+
+
+def test_prompt_shield_warning_uses_available_draft_in_state_b() -> None:
+    from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT
+
+    state = _state_with_plain_llm_only()
+    pairs_b = prompt_shield_recommendation_warning_pairs(state, shield_available=True)
+    assert pairs_b
+    assert any(PROMPT_SHIELD_AVAILABLE_DRAFT in message for _component, message in pairs_b)
+
+    pairs_c = prompt_shield_recommendation_warning_pairs(state, shield_available=False)
+    assert pairs_c
+    assert any("continuing without it is allowed" in message for _component, message in pairs_c)
 
 
 def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_cleanup_review_site() -> None:
@@ -564,6 +654,40 @@ def test_resolved_raw_html_cleanup_decision_rejects_mapping_that_preserves_raw_f
     state = _state_with_cleanup_node(patched_options)
 
     with pytest.raises(ValueError, match="preserves raw HTML/fingerprint field"):
+        materialize_state_for_execution(state)
+
+
+def test_resolved_raw_html_cleanup_decision_rejects_custom_raw_field_preservation() -> None:
+    options = _pipeline_decision_options(status="resolved")
+    options["mapping"] = {
+        "url": "url",
+        "page_body": "page_body",
+        "page_hash": "page_hash",
+        "primary_colours": "primary_colours",
+    }
+    base = _state_with_web_scrape_cleanup_node(options)
+    scrape = replace(
+        base.nodes[0],
+        options={
+            "url_field": "url",
+            "content_field": "page_body",
+            "fingerprint_field": "page_hash",
+        },
+    )
+    mapper = replace(base.nodes[1], id="select_fields")
+    state_without_hash = replace(base, nodes=(scrape, mapper))
+    artifact_hash = pipeline_decision_artifact_hash(
+        state_without_hash.nodes[1],
+        state_without_hash.nodes,
+        user_term=RAW_HTML_CLEANUP_USER_TERM,
+    )
+    requirement = dict(options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
+    requirement["accepted_artifact_hash"] = artifact_hash
+    patched_options = dict(options)
+    patched_options[INTERPRETATION_REQUIREMENTS_KEY] = [requirement]
+    state = replace(state_without_hash, nodes=(scrape, replace(mapper, options=patched_options)))
+
+    with pytest.raises(ValueError, match="page_body"):
         materialize_state_for_execution(state)
 
 
@@ -1286,3 +1410,52 @@ def test_wiring_count_wrong_term_is_unresolvable() -> None:
         "prompt_template": "Rate how {{interpretation:important}} this row is.",
     }
     assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+# ---------------------------------------------------------------------------
+# prompt_shield_state_for_node — A/B/C state helper
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_shield_state_for_node_returns_A_when_shielded() -> None:
+    from elspeth.web.interpretation_state import prompt_shield_state_for_node
+
+    state = _state_with_web_scrape_gate_shield_to_llm()
+    llm = next(n for n in state.nodes if n.plugin == "llm")
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=True) == "A"
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=False) == "A"
+
+
+def test_prompt_shield_state_for_node_B_vs_C() -> None:
+    from elspeth.web.interpretation_state import prompt_shield_state_for_node
+
+    state = _state_with_plain_llm_only()
+    llm = next(n for n in state.nodes if n.plugin == "llm")
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=True) == "B"
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=False) == "C"
+
+
+# refine_prompt_shield_warnings_for_availability — B-vs-C post-processor
+# ---------------------------------------------------------------------------
+
+
+def test_refine_prompt_shield_warnings_rewrites_c_to_b_when_available() -> None:
+    from elspeth.web.interpretation_state import (
+        PROMPT_SHIELD_AVAILABLE_DRAFT,
+        PROMPT_SHIELD_WARNING_DRAFT,
+        refine_prompt_shield_warnings_for_availability,
+    )
+
+    c_warnings = [
+        {"component": "node:rate_node", "message": f"lead {PROMPT_SHIELD_WARNING_DRAFT}", "severity": "medium"},
+        {"component": "node:other", "message": "unrelated warning", "severity": "medium"},
+    ]
+    refined = refine_prompt_shield_warnings_for_availability(c_warnings, shield_available=True)
+    shield = [w for w in refined if w["component"] == "node:rate_node"]
+    assert shield
+    assert PROMPT_SHIELD_AVAILABLE_DRAFT in shield[0]["message"]
+    assert PROMPT_SHIELD_WARNING_DRAFT not in shield[0]["message"]
+    other = [w for w in refined if w["component"] == "node:other"]
+    assert other[0]["message"] == "unrelated warning"
+    unchanged = refine_prompt_shield_warnings_for_availability(c_warnings, shield_available=False)
+    assert any(PROMPT_SHIELD_WARNING_DRAFT in w["message"] for w in unchanged)

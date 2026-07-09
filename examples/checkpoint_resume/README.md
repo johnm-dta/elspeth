@@ -72,7 +72,6 @@ checkpoint:
   enabled: true
   frequency: every_n          # Checkpoint every N rows
   checkpoint_interval: 5      # N = 5 rows
-  aggregation_boundaries: true  # Also checkpoint at aggregation flushes
 ```
 
 ### Frequency Options

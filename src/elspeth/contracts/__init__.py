@@ -6,7 +6,7 @@ config/cicd/contracts-whitelist.yaml.
 
 This package is Layer 0 (L0) in the 4-layer dependency hierarchy and has
 NO runtime imports from core, engine, or plugins. This is enforced by CI
-(``enforce_tier_model.py`` with rule L1). TYPE_CHECKING imports from core
+(``trust_tier.tier_model`` rule L1). TYPE_CHECKING imports from core
 exist for type annotations only and do not create runtime coupling.
 
 To maintain this property, Settings classes (RetrySettings, ElspethSettings, etc.)
@@ -21,6 +21,7 @@ Import patterns:
 """
 
 from elspeth.contracts.audit import (
+    OPERATION_TYPE_VALUES,
     Artifact,
     Batch,
     BatchMember,
@@ -38,6 +39,7 @@ from elspeth.contracts.audit import (
     NodeStatePending,
     NonCanonicalMetadata,
     Operation,
+    OperationType,
     RoutingEvent,
     Row,
     RowLineage,
@@ -67,7 +69,7 @@ from elspeth.contracts.call_data import (
     LLMCallResponse,
     RawCallPayload,
 )
-from elspeth.contracts.checkpoint import ResumeCheck, ResumedRow, ResumePoint
+from elspeth.contracts.checkpoint import CheckpointDraft, ResumeCheck, ResumedRow, ResumePoint
 from elspeth.contracts.cli import ExecutionResult, ProgressEvent
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
@@ -215,6 +217,7 @@ from elspeth.contracts.header_modes import (
     parse_header_mode,
     resolve_headers,
 )
+from elspeth.contracts.identifiers import validate_field_name, validate_field_names
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.node_state_context import (
     AggregationFlushContext,
@@ -238,6 +241,7 @@ from elspeth.contracts.plugin_protocols import (
     SourceProtocol,
     TransformProtocol,
 )
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.contracts.probes import CollectionProbe, CollectionReadinessResult
 from elspeth.contracts.results import (
     ArtifactDescriptor,
@@ -285,6 +289,7 @@ from elspeth.contracts.type_normalization import (
     require_supported_contract_type,
 )
 from elspeth.contracts.types import (
+    NODE_ID_MAX_LENGTH,
     AggregationName,
     BranchName,
     CoalesceName,
@@ -308,6 +313,8 @@ __all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
     "Operation",
+    "OperationType",
+    "OPERATION_TYPE_VALUES",
     # errors
     "CommencementGateFailedError",
     "DependencyFailedError",
@@ -412,6 +419,9 @@ __all__ = [  # Grouped by category for readability
     "error_edge_label",
     # identity
     "TokenInfo",
+    # identifiers
+    "validate_field_name",
+    "validate_field_names",
     # scheduler
     "SchedulerEvent",
     "SchedulerEventType",
@@ -422,6 +432,7 @@ __all__ = [  # Grouped by category for readability
     "BarrierScalars",
     "CoalescePendingScalars",
     # checkpoint
+    "CheckpointDraft",
     "ResumeCheck",
     "ResumePoint",
     "ResumedRow",
@@ -444,6 +455,7 @@ __all__ = [  # Grouped by category for readability
     "BranchName",
     "CoalesceName",
     "GateName",
+    "NODE_ID_MAX_LENGTH",
     "NodeID",
     "SinkName",
     "StepResolver",
@@ -542,6 +554,10 @@ __all__ = [  # Grouped by category for readability
     "UNSUPPORTED_CONTRACT_TYPE",
     "PipelineRow",
     "PipelineRunner",
+    # preflight
+    "CommencementGateResult",
+    "DependencyRunResult",
+    "PreflightResult",
     "SchemaContract",
     # Schema contracts — audit trail records
     "ContractAuditRecord",

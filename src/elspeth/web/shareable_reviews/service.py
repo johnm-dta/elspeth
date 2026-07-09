@@ -66,7 +66,7 @@ from elspeth.web.composer.telemetry_phase8 import (
     SessionsTelemetry,
     record_session_completed,
 )
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.models import composer_completion_events_table
@@ -141,7 +141,13 @@ class _SessionServiceLike(Protocol):
 
 class _ExecutionServiceLike(Protocol):
     async def validate(self, session_id: UUID, *, user_id: str | None = None) -> Any: ...
-    async def validate_state(self, state: Any, *, user_id: str | None = None) -> Any: ...
+    async def validate_state(
+        self,
+        state: Any,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> Any: ...
 
 
 class _ReadinessServiceLike(Protocol):
@@ -223,7 +229,7 @@ def _build_snapshot(
     contractual wire shape for the share artifact.
     """
     composition_state = state_from_record(state_record)
-    yaml_text = generate_yaml(composition_state)
+    yaml_text = generate_public_yaml(composition_state)
     composition_dict = composition_state.to_dict()
     # ``metadata`` is normalised to ``{"name", "description"}`` by
     # CompositionState.to_dict — that IS the pipeline_metadata wire shape.
@@ -343,7 +349,10 @@ class ShareableReviewService:
                 detail="No composition state exists for this session",
             )
         composition_state = state_from_record(state_record)
-        validation = await self._execution_service.validate_state(composition_state, user_id=user_id)
+        # session_id scopes the sink path allowlist (blobs/<session_id>/) and
+        # inline-blob metadata lookups; omitting it fails closed to outputs-only
+        # and rejects states that /validate and /execute accept.
+        validation = await self._execution_service.validate_state(composition_state, user_id=user_id, session_id=session_id)
         if not validation.is_valid:
             raise CompositionNotRunnableError(
                 reason="validation_failed",

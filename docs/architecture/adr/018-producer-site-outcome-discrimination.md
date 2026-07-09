@@ -162,5 +162,6 @@ L0, L3, and frontend predicate-role fields identical is the mechanical guard.
 ## Related Decisions
 
 - ADR-004: Explicit Sink Routing
-- `docs/superpowers/plans/2026-05-02-rows-routed-counter-split.md`
+- Historical implementation plan: `2026-05-02-rows-routed-counter-split.md`
+  (retained in git history, not active docs)
 - Filigree issue `elspeth-5069612f3c`

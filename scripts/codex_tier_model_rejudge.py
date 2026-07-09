@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 from codex_audit_common import (  # type: ignore[import-not-found]
@@ -66,6 +67,9 @@ ALLOWLIST_DIR = "config/cicd/enforce_tier_model"
 # Decorator-covered findings: green, never re-judged (see release-train playbook).
 IGNORE_RULES = {"R_TB_SUPPRESSED"}
 SHAPE_ONLY_ENV = {"ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE": "shape-only-when-key-missing"}
+_JsonObject = dict[str, Any]
+_JsonList = list[_JsonObject]
+_ScopeSpan = tuple[int, int, list[str]]
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +82,7 @@ def _lints_env(repo_root: Path) -> dict[str, str]:
     return env
 
 
-def _run_diagnose(repo_root: Path, root: Path, allowlist: Path) -> dict:
+def _run_diagnose(repo_root: Path, root: Path, allowlist: Path) -> _JsonObject:
     out = subprocess.run(
         [
             str(repo_root / ".venv/bin/diagnose-judge-signatures"),
@@ -95,7 +99,7 @@ def _run_diagnose(repo_root: Path, root: Path, allowlist: Path) -> dict:
         text=True,
     )
     # diagnose exits non-zero when entries require action; stdout still holds the JSON.
-    return json.loads(out.stdout)
+    return cast(_JsonObject, json.loads(out.stdout))
 
 
 def _strip_allowlist(src: Path, dst: Path, strip_keys: set[str]) -> int:
@@ -125,11 +129,32 @@ def _strip_allowlist(src: Path, dst: Path, strip_keys: set[str]) -> int:
             else:
                 out.append(lines[i])
                 i += 1
-        path.write_text("\n".join(out))
+        stripped_lines = "\n".join(out).splitlines()
+        allowlist_headers = [
+            line_index for line_index, line in enumerate(stripped_lines) if line.strip() in {"allow_hits:", "allow_hits: []"}
+        ]
+        if len(allowlist_headers) > 1:
+            normalised_lines: list[str] = []
+            for line_index, line in enumerate(stripped_lines):
+                if line_index == allowlist_headers[0] and line.strip() == "allow_hits: []":
+                    continue
+                if line_index > 0 and line.strip() == "" and line_index - 1 == allowlist_headers[0]:
+                    continue
+                normalised_lines.append(line)
+            stripped_lines = normalised_lines
+        for line_index, line in enumerate(stripped_lines):
+            if line.strip() != "allow_hits:":
+                continue
+            next_index = line_index + 1
+            while next_index < len(stripped_lines) and stripped_lines[next_index].strip() == "":
+                next_index += 1
+            if next_index == len(stripped_lines) or not stripped_lines[next_index].startswith("- "):
+                stripped_lines[line_index] = "allow_hits: []"
+        path.write_text("\n".join(stripped_lines) + "\n")
     return removed
 
 
-def _run_stripped_gate(repo_root: Path, root: Path, stripped_allowlist: Path) -> list[dict]:
+def _run_stripped_gate(repo_root: Path, root: Path, stripped_allowlist: Path) -> _JsonList:
     out = subprocess.run(
         [
             str(repo_root / ".venv/bin/python"),
@@ -150,17 +175,17 @@ def _run_stripped_gate(repo_root: Path, root: Path, stripped_allowlist: Path) ->
         capture_output=True,
         text=True,
     )
-    return json.loads(out.stdout)
+    return cast(_JsonList, json.loads(out.stdout))
 
 
 class _ScopeIndex:
     def __init__(self, root: Path):
         self.root = root
-        self._cache: dict[str, list | None] = {}
+        self._cache: dict[str, list[_ScopeSpan] | None] = {}
 
     def symbol(self, relpath: str, line: int) -> str:
         if relpath not in self._cache:
-            spans: list[tuple[int, int, list[str]]] = []
+            spans: list[_ScopeSpan] = []
             try:
                 tree = ast.parse((self.root / relpath).read_text())
             except (OSError, SyntaxError):
@@ -177,17 +202,17 @@ class _ScopeIndex:
 
                 walk(tree, [])
                 self._cache[relpath] = spans
-        spans = self._cache[relpath]
-        if spans is None:
+        cached_spans = self._cache[relpath]
+        if cached_spans is None:
             return "_module_"
         best: list[str] | None = None
-        for start, end, chain in spans:
+        for start, end, chain in cached_spans:
             if start <= line <= end and (best is None or len(chain) > len(best)):
                 best = chain
         return ":".join(best) if best else "_module_"
 
 
-def build_worklist(repo_root: Path, out_dir: Path) -> dict:
+def build_worklist(repo_root: Path, out_dir: Path) -> _JsonObject:
     root = repo_root / "src/elspeth"
     allowlist = repo_root / ALLOWLIST_DIR
     diag = _run_diagnose(repo_root, root, allowlist)
@@ -211,7 +236,7 @@ def build_worklist(repo_root: Path, out_dir: Path) -> dict:
     violations = _run_stripped_gate(repo_root, root, stripped_dir)
 
     scope = _ScopeIndex(root)
-    targets: list[dict] = []
+    targets: _JsonList = []
     auto_drift = pfr = ignored = 0
     for v in violations:
         f = v["file_path"]
@@ -253,12 +278,12 @@ def build_worklist(repo_root: Path, out_dir: Path) -> dict:
 # --------------------------------------------------------------------------- #
 # codex rejudge
 # --------------------------------------------------------------------------- #
-def _safe_name(target: dict) -> str:
+def _safe_name(target: _JsonObject) -> str:
     raw = f"{target['file_path']}__{target['rule']}__{target['symbol']}__{target['fingerprint']}"
     return re.sub(r"[^\w.\-]", "_", raw)[:180]
 
 
-def _build_rejudge_prompt(target: dict, context: str) -> str:
+def _build_rejudge_prompt(target: _JsonObject, context: str) -> str:
     return (
         "You are the cicd-judge adjudicating whether a single tier-model finding may be\n"
         "suppressed in the signed allowlist. Decide ACCEPT (legitimate Tier-3 boundary or\n"
@@ -291,7 +316,7 @@ def _build_rejudge_prompt(target: dict, context: str) -> str:
 
 async def _rejudge_batches(
     *,
-    targets: list[dict],
+    targets: _JsonList,
     reports_dir: Path,
     model: str | None,
     repo_root: Path,
@@ -351,10 +376,10 @@ async def _rejudge_batches(
 # --------------------------------------------------------------------------- #
 # manifest assembly
 # --------------------------------------------------------------------------- #
-def build_manifest(out_dir: Path) -> dict:
-    targets = json.loads((out_dir / "worklist.json").read_text())
+def build_manifest(out_dir: Path) -> dict[str, int]:
+    targets = cast(_JsonList, json.loads((out_dir / "worklist.json").read_text()))
     reports_dir = out_dir / "reports"
-    accepted: list[dict] = []
+    accepted: _JsonList = []
     counts = {"ACCEPT": 0, "BLOCK": 0, "MISSING": 0, "UNPARSED": 0}
     blocked: list[str] = []
     for t in targets:

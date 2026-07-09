@@ -161,6 +161,27 @@ class TestSharedBatchAdapter:
         assert got_result.row.to_dict() == {"fast": True}
         assert elapsed < 0.1  # Should be nearly instant
 
+    def test_duplicate_register_fails_fast_and_preserves_existing_waiter(self) -> None:
+        """Duplicate register() for the same key must not orphan the first waiter."""
+        adapter = SharedBatchAdapter()
+        key = ("token-dup-register", "state-dup-register")
+
+        adapter.register(*key)
+        original_entry = adapter._entries[key]
+
+        with pytest.raises(OrchestrationInvariantError, match=r"token-dup-register.*state-dup-register"):
+            adapter.register(*key)
+
+        assert adapter._entries[key] is original_entry
+
+    def test_row_waiter_does_not_hold_adapter_registry_or_lock(self) -> None:
+        """RowWaiter should delegate lifecycle operations instead of owning adapter internals."""
+        adapter = SharedBatchAdapter()
+        waiter = adapter.register("token-boundary", "state-boundary")
+
+        assert not hasattr(waiter, "_entries")
+        assert not hasattr(waiter, "_lock")
+
     def test_timeout(self) -> None:
         """Test that wait() times out if result never arrives."""
         adapter = SharedBatchAdapter()
@@ -189,19 +210,48 @@ class TestSharedBatchAdapter:
         # After timeout, entry must be cleaned up
         assert ("token-timeout", "state-timeout") not in adapter._entries
 
-    def test_shutdown_event_returns_shutdown_result(self) -> None:
-        """Run cancellation must wake batch waiters instead of waiting for the provider timeout."""
+    def test_shutdown_event_raises_interrupted_error(self) -> None:
+        """Run cancellation wakes batch waiters with InterruptedError, not a domain result.
+
+        The waiter is a delivery primitive: it signals cancellation with the
+        same typed exception the sync path uses (retry.py), and the PROCESSOR
+        translates that into the shutdown_requested error result
+        (_convert_retryable_to_error_result) — shutdown policy lives in one
+        layer (filigree elspeth-14571961a6). Entry cleanup still happens so a
+        late emit() cannot leak a result nobody will retrieve.
+        """
         adapter = SharedBatchAdapter()
         waiter = adapter.register("token-cancel", "state-cancel")
         shutdown_event = threading.Event()
         shutdown_event.set()
 
-        result = waiter.wait(timeout=60.0, shutdown_event=shutdown_event)
+        with pytest.raises(InterruptedError, match="Shutdown requested while waiting for token token-cancel"):
+            waiter.wait(timeout=60.0, shutdown_event=shutdown_event)
 
-        assert result.status == "error"
-        assert result.reason is not None
-        assert result.reason["reason"] == "shutdown_requested"
         assert ("token-cancel", "state-cancel") not in adapter._entries
+
+    def test_late_result_after_shutdown_not_stored(self) -> None:
+        """A result emitted after a shutdown-cancelled wait is discarded, not stored.
+
+        Mirrors the timeout leak test: the shutdown arm removed the entry, so
+        the (token_id, state_id) retry-safety keying must drop the late result.
+        """
+        adapter = SharedBatchAdapter()
+        waiter = adapter.register("token-cancel-late", "state-cancel-late")
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+
+        with pytest.raises(InterruptedError):
+            waiter.wait(timeout=60.0, shutdown_event=shutdown_event)
+
+        adapter.emit(
+            _make_token("token-cancel-late", "row-1"),
+            TransformResult.success(make_pipeline_row({"late": "result"}), success_reason={"action": "test"}),
+            "state-cancel-late",
+        )
+
+        assert ("token-cancel-late", "state-cancel-late") not in adapter._entries
+        assert len(adapter._entries) == 0
 
     def test_late_result_after_timeout_not_stored(self) -> None:
         """Test that late results after timeout are discarded, not stored.

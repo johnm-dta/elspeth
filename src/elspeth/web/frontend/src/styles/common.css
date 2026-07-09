@@ -18,7 +18,7 @@
 
 .yaml-view-toolbar {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--color-border);
   background-color: var(--color-surface);
@@ -79,8 +79,8 @@
 .markdown-body h2,
 .markdown-body h3,
 .markdown-body h4 {
-  margin: 12px 0 6px;
-  font-weight: 600;
+  margin: var(--space-md) 0 var(--space-1-5);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text);
 }
 
@@ -90,17 +90,17 @@
 .markdown-body h4 { font-size: var(--font-size-sm); }
 
 .markdown-body p {
-  margin: 4px 0;
+  margin: var(--space-xs) 0;
 }
 
 .markdown-body ul,
 .markdown-body ol {
-  margin: 4px 0;
+  margin: var(--space-xs) 0;
   padding-left: 20px;
 }
 
 .markdown-body li {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
 }
 
 /* Loose-list mitigation: CommonMark wraps list-item text in <p> when the
@@ -116,7 +116,7 @@
 
 .markdown-body table {
   border-collapse: collapse;
-  margin: 8px 0;
+  margin: var(--space-sm) 0;
   font-size: var(--font-size-sm);
   width: 100%;
 }
@@ -124,18 +124,18 @@
 .markdown-body th,
 .markdown-body td {
   border: 1px solid var(--color-border-strong);
-  padding: 4px 8px;
+  padding: var(--space-xs) var(--space-sm);
   text-align: left;
 }
 
 .markdown-body th {
   background-color: var(--color-surface-elevated);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .markdown-body .inline-code {
   background-color: var(--color-surface-elevated);
-  padding: 1px 4px;
+  padding: var(--space-2xs) var(--space-xs);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -145,8 +145,8 @@
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
-  margin: 8px 0;
+  padding: var(--space-2-5) var(--space-md);
+  margin: var(--space-sm) 0;
   overflow-x: auto;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -183,8 +183,8 @@
 }
 
 .markdown-body .mermaid-container {
-  margin: 8px 0;
-  padding: 12px;
+  margin: var(--space-sm) 0;
+  padding: var(--space-md);
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -206,8 +206,8 @@
 }
 
 .markdown-body blockquote {
-  margin: 8px 0;
-  padding: 4px 12px;
+  margin: var(--space-sm) 0;
+  padding: var(--space-xs) var(--space-md);
   border-left: 3px solid var(--color-border-strong);
   color: var(--color-text-secondary);
 }
@@ -257,8 +257,14 @@
   font-size: var(--font-size-base);
 }
 
-.command-palette-input:focus {
-  outline: none;
+/* Standard app focus ring (base.css :focus-visible idiom). This input
+   previously set outline:none and relied on border-color alone, which fails
+   WCAG 2.4.7's visible-focus expectation (elspeth-4a9a0b18ca). Text inputs
+   match :focus-visible whenever focused, so the ring shows for the palette's
+   keyboard-driven flow. */
+.command-palette-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
   border-color: var(--color-focus-ring);
 }
 
@@ -286,7 +292,7 @@
 .command-palette-group-header {
   padding: var(--space-xs) var(--space-md);
   font-size: var(--font-size-xs);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--color-text-muted);
@@ -316,7 +322,7 @@
 }
 
 .command-palette-kbd {
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
@@ -336,7 +342,7 @@
 
 
 .command-palette-footer kbd {
-  padding: 1px var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
@@ -370,7 +376,7 @@
 .error-boundary-title {
   margin: 0;
   font-size: var(--font-size-base);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text);
 }
 
@@ -398,7 +404,7 @@
 }
 
 .yaml-toolbar-btn {
-  padding: var(--space-xs) 10px;
+  padding: var(--space-xs) var(--space-2-5);
   font-size: var(--font-size-xs);
 }
 
@@ -424,7 +430,7 @@
   background-color: var(--color-surface-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 
@@ -470,10 +476,13 @@
   z-index: var(--z-dialog);
   display: flex;
   flex-direction: column;
-  background-color: var(--color-surface-paper);
+  /* Dialog surface, matching .save-for-review-dialog — the warm
+     --color-surface-paper family belongs to document-flavoured inspector
+     panes and clashed with the app's cool whites here (elspeth-bff8043d33). */
+  background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 

@@ -2,16 +2,63 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import inspect
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from sqlalchemy.engine import Connection, Engine
 
+import elspeth.core.landscape.factory as factory_module
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.factory import RecorderFactory, _PluginAuditWriterAdapter
+from elspeth.core.landscape.factory import (
+    DataFlowReadRepository,
+    ExecutionReadRepository,
+    RecorderFactory,
+    RunLifecycleReadRepository,
+)
+from elspeth.core.landscape.plugin_audit_writer import PluginAuditWriterAdapter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from tests.fixtures.stores import MockPayloadStore
+
+
+class _PostgresEngineWithoutPragmas:
+    dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+    def connect(self) -> None:
+        raise AssertionError("SQLite PRAGMA probe should not run for PostgreSQL engines")
+
+
+def _unexpected_connection(message: str) -> Connection:
+    raise AssertionError(message)
+
+
+class _PostgresLandscapeDB:
+    is_read_only = False
+
+    def __init__(self) -> None:
+        self._engine = Tier1Engine(cast(Engine, _PostgresEngineWithoutPragmas()))
+
+    @property
+    def engine(self) -> Tier1Engine:
+        return self._engine
+
+    @contextmanager
+    def read_only_connection(self) -> Iterator[Connection]:
+        yield _unexpected_connection("RecorderFactory construction should not open a read-only connection")
+
+    @contextmanager
+    def connection(self) -> Iterator[Connection]:
+        yield _unexpected_connection("RecorderFactory construction should not open a connection")
+
+    @contextmanager
+    def write_connection(self) -> Iterator[Connection]:
+        yield _unexpected_connection("RecorderFactory construction should not open a write connection")
 
 
 @pytest.fixture()
@@ -25,9 +72,13 @@ def factory(db: LandscapeDB) -> RecorderFactory:
 
 
 class TestRepositoryConstruction:
-    """Verify the factory creates all four repositories with correct types."""
+    """Verify the factory creates the expected repository graph."""
 
-    def test_creates_all_four_repositories(self, factory: RecorderFactory) -> None:
+    def test_factory_docstring_describes_repository_graph_without_fixed_count(self) -> None:
+        assert RecorderFactory.__doc__ is not None
+        assert "all 4 repositories" not in RecorderFactory.__doc__
+
+    def test_creates_core_repository_surfaces(self, factory: RecorderFactory) -> None:
         assert isinstance(factory.run_lifecycle, RunLifecycleRepository)
         assert isinstance(factory.execution, ExecutionRepository)
         assert isinstance(factory.data_flow, DataFlowRepository)
@@ -38,10 +89,20 @@ class TestRepositoryConstruction:
         run = factory.run_lifecycle.begin_run(
             config={"sources": {"primary": {"plugin": "csv"}}},
             canonical_version="v1",
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
         retrieved = factory.run_lifecycle.get_run(run.run_id)
         assert retrieved is not None
         assert retrieved.run_id == run.run_id
+
+    def test_postgresql_factory_construction_does_not_run_sqlite_pragmas(self) -> None:
+        """Auth-audit access must not be blocked by eager SQLite-only probes."""
+        db = cast(LandscapeDB, _PostgresLandscapeDB())
+
+        factory = RecorderFactory(db)
+
+        assert factory.auth_audit is not None
 
 
 class TestPayloadStore:
@@ -49,9 +110,9 @@ class TestPayloadStore:
 
     def test_payload_store_propagated(self) -> None:
         db = LandscapeDB.in_memory()
-        mock_store = MagicMock()
-        factory = RecorderFactory(db, payload_store=mock_store)
-        assert factory.payload_store is mock_store
+        payload_store = MockPayloadStore()
+        factory = RecorderFactory(db, payload_store=payload_store)
+        assert factory.payload_store is payload_store
 
     def test_payload_store_defaults_to_none(self, factory: RecorderFactory) -> None:
         assert factory.payload_store is None
@@ -62,4 +123,86 @@ class TestPluginAuditWriter:
 
     def test_plugin_audit_writer_is_adapter(self, factory: RecorderFactory) -> None:
         writer = factory.plugin_audit_writer()
-        assert isinstance(writer, _PluginAuditWriterAdapter)
+        assert isinstance(writer, PluginAuditWriterAdapter)
+
+    def test_factory_does_not_define_plugin_audit_writer_adapter(self) -> None:
+        assert "_PluginAuditWriterAdapter" not in vars(factory_module)
+        assert "PluginAuditWriterAdapter" not in vars(factory_module)
+
+
+class _RecordingRepo:
+    """Duck-typed repository stub: records every call, returns a per-method sentinel."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        def _method(*args: object, **kwargs: object) -> tuple[str, str]:
+            self.calls.append((name, args, dict(kwargs)))
+            return ("delegated", name)
+
+        return _method
+
+
+class TestReadPortDelegation:
+    """Pin the facade -> repository wiring of the read-only capability ports.
+
+    The read ports are pure pass-through views introduced by the repository
+    splits; the regression class they guard is a facade method wired to the
+    wrong repository method, or dropping/reordering arguments, after a
+    refactor. Every public method must forward to the same-named repository
+    method with its arguments unchanged and return that method's result.
+    """
+
+    @pytest.mark.parametrize(
+        "facade_cls",
+        [RunLifecycleReadRepository, DataFlowReadRepository, ExecutionReadRepository],
+    )
+    def test_every_public_method_delegates_to_same_named_repo_method(self, facade_cls: type) -> None:
+        stub = _RecordingRepo()
+        facade = facade_cls(cast(Any, stub))
+        methods = [(name, func) for name, func in inspect.getmembers(facade_cls, inspect.isfunction) if not name.startswith("_")]
+        assert methods, f"{facade_cls.__name__} exposes no public methods"
+        for name, func in methods:
+            args: list[object] = []
+            kwargs: dict[str, object] = {}
+            parameters = list(inspect.signature(func).parameters.values())[1:]  # drop self
+            for param in parameters:
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                    args.append(f"arg-{param.name}")
+                elif param.kind is inspect.Parameter.KEYWORD_ONLY:
+                    kwargs[param.name] = f"kw-{param.name}"
+                elif param.kind is inspect.Parameter.VAR_POSITIONAL:
+                    args.extend((f"var-{param.name}-0", f"var-{param.name}-1"))
+                else:  # VAR_KEYWORD
+                    kwargs[f"extra_{param.name}"] = f"kw-{param.name}"
+            result = getattr(facade, name)(*args, **kwargs)
+            assert result == ("delegated", name), f"{facade_cls.__name__}.{name} did not return the repository result"
+            recorded_name, recorded_args, recorded_kwargs = stub.calls[-1]
+            assert recorded_name == name, f"{facade_cls.__name__}.{name} delegated to {recorded_name!r}"
+            assert recorded_args == tuple(args), f"{facade_cls.__name__}.{name} altered positional arguments"
+            assert recorded_kwargs == kwargs, f"{facade_cls.__name__}.{name} altered keyword arguments"
+
+
+class TestReadOnlyHandle:
+    """A read-only LandscapeDB handle must refuse the write-only repositories."""
+
+    def test_scheduler_and_run_coordination_raise_on_read_only_handle(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "landscape.db"
+        LandscapeDB.from_url(f"sqlite:///{db_path}")
+        read_only = LandscapeDB.from_url(f"sqlite:///{db_path}", read_only=True, create_tables=False)
+        read_only_factory = RecorderFactory(read_only)
+        with pytest.raises(RuntimeError, match="scheduler repository is not available"):
+            _ = read_only_factory.scheduler
+        with pytest.raises(RuntimeError, match="run coordination repository is not available"):
+            _ = read_only_factory.run_coordination
+        with pytest.raises(RuntimeError, match="writable repositories are not available"):
+            _ = read_only_factory.write_repositories()
+
+
+class TestWriteRepositoriesAuditWriter:
+    """LandscapeWriteRepositories composes the plugin audit writer adapter."""
+
+    def test_write_repositories_plugin_audit_writer_is_adapter(self, factory: RecorderFactory) -> None:
+        writer = factory.write_repositories().plugin_audit_writer()
+        assert isinstance(writer, PluginAuditWriterAdapter)

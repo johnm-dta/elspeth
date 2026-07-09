@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { ComposingIndicator } from "./ComposingIndicator";
+import { act, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ComposingIndicator, formatElapsed } from "./ComposingIndicator";
 import type { ComposerProgressSnapshot, CompositionState } from "@/types/api";
 
 function makeState(overrides: Partial<CompositionState> = {}): CompositionState {
@@ -44,6 +44,10 @@ describe("ComposingIndicator", () => {
     expect(screen.getByText("Likely next")).toBeInTheDocument();
     expect(screen.getByText("ELSPETH will use the schemas to choose a pipeline shape.")).toBeInTheDocument();
     expect(screen.queryByText("Working on: convert HTML into JSON")).not.toBeInTheDocument();
+    // Backend-evidenced views must NOT carry the estimated marker
+    // (elspeth-b189b5b3b8 part c).
+    expect(screen.queryByText("(estimated)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Best guess from your request")).not.toBeInTheDocument();
   });
 
   it("shows a broad-strokes read of an HTML to JSON request", () => {
@@ -61,6 +65,26 @@ describe("ComposingIndicator", () => {
     expect(
       screen.getByText("Likely next move: choose an input, extract the useful fields, then save structured JSON."),
     ).toBeInTheDocument();
+  });
+
+  it("marks keyword-guessed working views as estimated, distinct from backend evidence", () => {
+    // elspeth-b189b5b3b8 part c: with no backend progress snapshot the view is
+    // keyword-guessed from the user's message and must not read as if ELSPETH
+    // reported it — visible "(estimated)" marker + the estimated section label
+    // + an italicising modifier class the CSS hangs off.
+    const { container } = render(
+      <ComposingIndicator
+        latestRequest="Exploit this HTML into JSON"
+        compositionState={makeState()}
+      />,
+    );
+
+    expect(screen.getByText("(estimated)")).toBeInTheDocument();
+    expect(screen.getByText("Best guess from your request")).toBeInTheDocument();
+    expect(screen.queryByText("What ELSPETH can see")).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".composing-working-view--estimated"),
+    ).not.toBeNull();
   });
 
   it("summarizes existing pipeline shape without plugin jargon", () => {
@@ -118,12 +142,70 @@ describe("ComposingIndicator", () => {
   });
 });
 
+describe("ComposingIndicator elapsed-time readout", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("counts up in mm:ss while composing and is hidden from assistive tech", () => {
+    // elspeth-b189b5b3b8 part a: slow must not read identically to stalled.
+    const { container } = render(<ComposingIndicator latestRequest="hello" />);
+
+    const readout = container.querySelector(".composing-elapsed");
+    expect(readout).not.toBeNull();
+    expect(readout?.textContent).toBe("00:00");
+    // The once-per-second tick must not spam the role="status" live region.
+    expect(readout?.getAttribute("aria-hidden")).toBe("true");
+
+    act(() => {
+      vi.advanceTimersByTime(65_000);
+    });
+    expect(container.querySelector(".composing-elapsed")?.textContent).toBe("01:05");
+  });
+
+  it("drops the readout once a terminal phase lands", () => {
+    const progress: ComposerProgressSnapshot = {
+      session_id: "session-1",
+      request_id: "message-1",
+      phase: "complete",
+      headline: "Pipeline saved.",
+      evidence: ["Saved version 3."],
+      likely_next: null,
+      reason: null,
+      updated_at: "2026-04-26T10:00:00Z",
+    };
+
+    const { container } = render(<ComposingIndicator composerProgress={progress} />);
+    expect(container.querySelector(".composing-elapsed")).toBeNull();
+  });
+});
+
+describe("formatElapsed", () => {
+  it("formats seconds as zero-padded mm:ss", () => {
+    expect(formatElapsed(0)).toBe("00:00");
+    expect(formatElapsed(9)).toBe("00:09");
+    expect(formatElapsed(65)).toBe("01:05");
+    expect(formatElapsed(600)).toBe("10:00");
+  });
+
+  it("clamps negative input to zero rather than rendering nonsense", () => {
+    expect(formatElapsed(-5)).toBe("00:00");
+  });
+});
+
 describe("ComposingIndicator live region scope", () => {
-  it("does not declare its own aria-live (avoids nesting inside chat-panel-messages)", () => {
+  it("carries its own role=status but no explicit aria-live", () => {
+    // The indicator is mounted OUTSIDE ChatPanel's role="log" container
+    // (elspeth-76a0cc485e) so its implicit role="status" politeness is the
+    // single live region announcing compose progress. ChatPanel.test.tsx pins
+    // the outside-the-log placement; this pins the region's own attributes.
     const { container } = render(<ComposingIndicator />);
     const root = container.firstChild as HTMLElement;
     expect(root.getAttribute("aria-live")).toBeNull();
-    // role="status" remains for semantic clarity
     expect(root.getAttribute("role")).toBe("status");
   });
 });

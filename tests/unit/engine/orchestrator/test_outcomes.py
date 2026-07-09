@@ -10,8 +10,8 @@ _execute_run() and _process_resumed_rows(). These tests verify that:
 
 from __future__ import annotations
 
-from dataclasses import replace
-from unittest.mock import Mock
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 import pytest
 
@@ -33,25 +33,120 @@ from elspeth.testing import make_row, make_token_info
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class _FakeRowResult:
+    outcome: TerminalOutcome | None
+    path: TerminalPath
+    token: TokenInfo
+    sink_name: str | None = None
+    error: Any | None = None
+    scheduler_pending_sink: bool = False
+    authoritative_error_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class _FakeCoalesceOutcome:
+    merged_token: TokenInfo | None
+    failure_reason: str | None
+    coalesce_name: str | None = None
+    consumed_tokens: tuple[TokenInfo, ...] = ()
+
+
+@dataclass
+class _FakeContext:
+    run_id: str = "run-1"
+    emitted_events: list[Any] = field(default_factory=list)
+
+    def telemetry_emit(self, event: Any) -> None:
+        self.emitted_events.append(event)
+
+
+@dataclass
+class _FakeCoalesceExecutor:
+    registered_names: list[str] = field(default_factory=lambda: ["merge_1"])
+    timed_out_outcomes: list[_FakeCoalesceOutcome] = field(default_factory=list)
+    flush_outcomes: list[_FakeCoalesceOutcome] = field(default_factory=list)
+    get_registered_names_call_count: int = 0
+    check_timeouts_calls: list[str] = field(default_factory=list)
+    flush_pending_call_count: int = 0
+
+    def get_registered_names(self) -> list[str]:
+        self.get_registered_names_call_count += 1
+        return list(self.registered_names)
+
+    def check_timeouts(self, *, coalesce_name: str) -> list[_FakeCoalesceOutcome]:
+        self.check_timeouts_calls.append(coalesce_name)
+        return list(self.timed_out_outcomes)
+
+    def flush_pending(self) -> list[_FakeCoalesceOutcome]:
+        self.flush_pending_call_count += 1
+        return list(self.flush_outcomes)
+
+
+@dataclass
+class _FakeProcessor:
+    process_token_results: list[_FakeRowResult] = field(default_factory=list)
+    complete_coalesce_merge_results: list[_FakeRowResult] = field(default_factory=list)
+    complete_coalesce_merge_side_effect: BaseException | None = None
+    mark_blocked_barrier_terminal_result: int = 1
+    process_token_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = field(default_factory=list)
+    complete_coalesce_merge_calls: list[dict[str, Any]] = field(default_factory=list)
+    mark_blocked_barrier_terminal_calls: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+
+    def process_token(self, *args: Any, **kwargs: Any) -> list[_FakeRowResult]:
+        self.process_token_calls.append((args, kwargs))
+        return list(self.process_token_results)
+
+    def complete_coalesce_merge(
+        self,
+        *,
+        coalesce_name: CoalesceName,
+        consumed_tokens: tuple[TokenInfo, ...],
+        merged_token: TokenInfo,
+        coalesce_node_id: NodeID,
+        ctx: _FakeContext,
+    ) -> list[_FakeRowResult]:
+        self.complete_coalesce_merge_calls.append(
+            {
+                "coalesce_name": coalesce_name,
+                "consumed_tokens": consumed_tokens,
+                "merged_token": merged_token,
+                "coalesce_node_id": coalesce_node_id,
+                "ctx": ctx,
+            }
+        )
+        if self.complete_coalesce_merge_side_effect is not None:
+            raise self.complete_coalesce_merge_side_effect
+        return list(self.complete_coalesce_merge_results)
+
+    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
+        self.mark_blocked_barrier_terminal_calls.append((barrier_key, token_ids))
+        return self.mark_blocked_barrier_terminal_result
+
+
+def _assert_no_processor_work(processor: _FakeProcessor) -> None:
+    assert processor.process_token_calls == []
+    assert processor.complete_coalesce_merge_calls == []
+    assert processor.mark_blocked_barrier_terminal_calls == []
+
+
 def _make_result(
     outcome: TerminalOutcome | None,
     path: TerminalPath,
     *,
     token: TokenInfo | None = None,
     sink_name: str | None = None,
-) -> Mock:
-    """Create a mock RowResult with the two-axis terminal pair."""
+) -> _FakeRowResult:
+    """Create a RowResult-shaped test value with the two-axis terminal pair."""
     result_token = token or make_token_info()
     if path == TerminalPath.COALESCED and result_token.join_group_id is None:
         result_token = replace(result_token, join_group_id="join-1")
-    result = Mock()
-    result.outcome = outcome
-    result.path = path
-    result.token = result_token
-    result.sink_name = sink_name
-    result.error = None
-    result.scheduler_pending_sink = False
-    return result
+    return _FakeRowResult(
+        outcome=outcome,
+        path=path,
+        token=result_token,
+        sink_name=sink_name,
+    )
 
 
 def _make_counters() -> ExecutionCounters:
@@ -67,14 +162,28 @@ def _make_merged_coalesce_outcome(
     *,
     coalesce_name: str | None = None,
     consumed_tokens: tuple[TokenInfo, ...] | None = None,
-) -> Mock:
-    """Create a successful CoalesceOutcome-shaped mock."""
-    outcome = Mock(spec=None)
-    outcome.merged_token = merged_token
-    outcome.failure_reason = None
-    outcome.coalesce_name = coalesce_name
-    outcome.consumed_tokens = consumed_tokens if consumed_tokens is not None else (make_token_info(token_id="consumed-token-1"),)
-    return outcome
+) -> _FakeCoalesceOutcome:
+    """Create a successful CoalesceOutcome-shaped test value."""
+    return _FakeCoalesceOutcome(
+        merged_token=merged_token,
+        failure_reason=None,
+        coalesce_name=coalesce_name,
+        consumed_tokens=consumed_tokens if consumed_tokens is not None else (make_token_info(token_id="consumed-token-1"),),
+    )
+
+
+def _make_failed_coalesce_outcome(
+    *,
+    failure_reason: str | None,
+    consumed_tokens: tuple[TokenInfo, ...] = (),
+    coalesce_name: str | None = None,
+) -> _FakeCoalesceOutcome:
+    return _FakeCoalesceOutcome(
+        merged_token=None,
+        failure_reason=failure_reason,
+        coalesce_name=coalesce_name,
+        consumed_tokens=consumed_tokens,
+    )
 
 
 # =============================================================================
@@ -187,21 +296,20 @@ class TestAccumulateTerminalPairsRoutedOnError:
         *,
         sink_name: str = "error_sink",
         token: TokenInfo | None = None,
-    ) -> Mock:
+    ) -> _FakeRowResult:
         """ROUTED_ON_ERROR requires a real FailureInfo on .error."""
         from elspeth.contracts.results import FailureInfo
 
-        result = Mock()
-        result.outcome = TerminalOutcome.FAILURE
-        result.path = TerminalPath.ON_ERROR_ROUTED
-        result.token = token or make_token_info()
-        result.sink_name = sink_name
-        result.error = FailureInfo(
-            exception_type="ValueError",
-            message="upstream transform raised",
+        return _FakeRowResult(
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
+            token=token or make_token_info(),
+            sink_name=sink_name,
+            error=FailureInfo(
+                exception_type="ValueError",
+                message="upstream transform raised",
+            ),
         )
-        result.scheduler_pending_sink = False
-        return result
 
     def test_routed_on_error_increments_routed_failure_counter(self) -> None:
         """ROUTED_ON_ERROR increments rows_routed_failure (NOT rows_routed_success)."""
@@ -232,6 +340,60 @@ class TestAccumulateTerminalPairsRoutedOnError:
         assert counters.rows_routed_success == 1
         assert counters.rows_succeeded == 1
         assert counters.rows_routed_failure == 0
+
+
+class TestAccumulateAuthoritativeErrorHash:
+    """Replayed pending sinks carry the PERSISTED error hash (elspeth-d74d19f901).
+
+    Crash recovery rebuilds ON_ERROR_ROUTED results with a synthetic
+    ``FailureInfo('ResumedPendingSink', <message>)``; recomputing the hash from
+    that synthetic evidence diverges from the originally-audited hash whenever
+    the original message was EMPTY (compute_error_hash falls back to the
+    exception TYPE exactly then). The replay path therefore threads the stored
+    ``pending_error_hash`` through ``RowResult.authoritative_error_hash`` and
+    the accumulator must prefer it over recomputation.
+    """
+
+    def _routed_on_error_result(self, *, authoritative_error_hash: str | None, message: str, exception_type: str) -> Any:
+        from types import SimpleNamespace
+
+        from elspeth.contracts.results import FailureInfo
+
+        return SimpleNamespace(
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
+            token=make_token_info(),
+            sink_name="error_sink",
+            error=FailureInfo(exception_type=exception_type, message=message),
+            scheduler_pending_sink=True,
+            authoritative_error_hash=authoritative_error_hash,
+        )
+
+    def test_replayed_pending_sink_prefers_persisted_hash(self) -> None:
+        counters = _make_counters()
+        pending = _make_pending()
+        # Synthetic replay evidence with an EMPTY message — the exact class
+        # where a recomputed hash diverges from the original.
+        result = self._routed_on_error_result(authoritative_error_hash="deadbeefdeadbeef", message="", exception_type="ResumedPendingSink")
+
+        accumulate_row_outcomes([result], counters, pending)
+
+        pending_outcome = pending["error_sink"][0][1]
+        assert pending_outcome is not None
+        assert pending_outcome.error_hash == "deadbeefdeadbeef"
+
+    def test_live_result_recomputes_hash_when_no_authoritative_hash(self) -> None:
+        from elspeth.engine._error_hash import compute_error_hash
+
+        counters = _make_counters()
+        pending = _make_pending()
+        result = self._routed_on_error_result(authoritative_error_hash=None, message="boom", exception_type="ValueError")
+
+        accumulate_row_outcomes([result], counters, pending)
+
+        pending_outcome = pending["error_sink"][0][1]
+        assert pending_outcome is not None
+        assert pending_outcome.error_hash == compute_error_hash("boom", exception_type="ValueError")
 
 
 class TestAccumulateTerminalPairsTerminal:
@@ -521,14 +683,12 @@ class TestCoalesceCountingOwnership:
         merged_token = make_token_info()
         outcome = _make_merged_coalesce_outcome(merged_token)
 
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = [outcome]
-
-        processor = Mock()
-        processor.complete_coalesce_merge.return_value = [
-            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
-        ]
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=[outcome])
+        processor = _FakeProcessor(
+            complete_coalesce_merge_results=[
+                _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
+            ]
+        )
 
         counters = _make_counters()
         pending = _make_pending()
@@ -538,7 +698,7 @@ class TestCoalesceCountingOwnership:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
@@ -551,14 +711,12 @@ class TestCoalesceCountingOwnership:
         merged_token = make_token_info()
         outcome = _make_merged_coalesce_outcome(merged_token, coalesce_name="merge_1")
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-
-        processor = Mock()
-        processor.complete_coalesce_merge.return_value = [
-            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
-        ]
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[outcome])
+        processor = _FakeProcessor(
+            complete_coalesce_merge_results=[
+                _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
+            ]
+        )
 
         counters = _make_counters()
         pending = _make_pending()
@@ -568,7 +726,7 @@ class TestCoalesceCountingOwnership:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
@@ -581,14 +739,12 @@ class TestCoalesceCountingOwnership:
         merged_token = make_token_info()
         outcome = _make_merged_coalesce_outcome(merged_token)
 
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = [outcome]
-
-        processor = Mock()
-        processor.complete_coalesce_merge.return_value = [
-            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
-        ]
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=[outcome])
+        processor = _FakeProcessor(
+            complete_coalesce_merge_results=[
+                _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
+            ]
+        )
 
         counters = _make_counters()
         pending = _make_pending()
@@ -598,7 +754,7 @@ class TestCoalesceCountingOwnership:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
@@ -622,14 +778,12 @@ class TestCoalesceCountingOwnership:
         )
         outcome = _make_merged_coalesce_outcome(merged_token, consumed_tokens=consumed_tokens)
 
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = [outcome]
-
-        processor = Mock()
-        processor.complete_coalesce_merge.side_effect = AuditIntegrityError(
-            "Scheduler barrier terminalization mismatch for run_id='test-run' barrier_key='merge_1': "
-            "live consumed 3 token(s), but durable BLOCKED rows contained 2 matching token(s)."
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=[outcome])
+        processor = _FakeProcessor(
+            complete_coalesce_merge_side_effect=AuditIntegrityError(
+                "Scheduler barrier terminalization mismatch for run_id='test-run' barrier_key='merge_1': "
+                "live consumed 3 token(s), but durable BLOCKED rows contained 2 matching token(s)."
+            )
         )
 
         counters = _make_counters()
@@ -641,7 +795,7 @@ class TestCoalesceCountingOwnership:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map=node_map,
                 processor=processor,
-                ctx=Mock(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
@@ -665,16 +819,12 @@ class TestCoalesceCountingOwnership:
         )
         outcome = _make_merged_coalesce_outcome(merged_token, consumed_tokens=consumed_tokens)
 
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = [outcome]
-
-        processor = Mock()
-        processor.complete_coalesce_merge.side_effect = RuntimeError("downstream transform failed")
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=[outcome])
+        processor = _FakeProcessor(complete_coalesce_merge_side_effect=RuntimeError("downstream transform failed"))
 
         counters = _make_counters()
         pending = _make_pending()
-        ctx = Mock()
+        ctx = _FakeContext()
         node_map = {CoalesceName("merge_1"): NodeID("coalesce::merge_1")}
 
         with pytest.raises(RuntimeError, match="downstream transform failed"):
@@ -687,15 +837,17 @@ class TestCoalesceCountingOwnership:
                 pending_tokens=pending,
             )
 
-        processor.complete_coalesce_merge.assert_called_once_with(
-            coalesce_name=CoalesceName("merge_1"),
-            consumed_tokens=consumed_tokens,
-            merged_token=merged_token,
-            coalesce_node_id=NodeID("coalesce::merge_1"),
-            ctx=ctx,
-        )
-        processor.process_token.assert_not_called()
-        processor.mark_blocked_barrier_terminal.assert_not_called()
+        assert processor.complete_coalesce_merge_calls == [
+            {
+                "coalesce_name": CoalesceName("merge_1"),
+                "consumed_tokens": consumed_tokens,
+                "merged_token": merged_token,
+                "coalesce_node_id": NodeID("coalesce::merge_1"),
+                "ctx": ctx,
+            }
+        ]
+        assert processor.process_token_calls == []
+        assert processor.mark_blocked_barrier_terminal_calls == []
         assert counters.rows_coalesced == 0
         assert counters.rows_succeeded == 0
 
@@ -785,19 +937,19 @@ class TestHandleCoalesceTimeouts:
     def _setup(
         self,
         *,
-        timed_out_outcomes: list[Mock] | None = None,
+        timed_out_outcomes: list[_FakeCoalesceOutcome] | None = None,
         total_transforms: int = 2,
         coalesce_step: int = 1,
-    ) -> tuple[Mock, Mock, ExecutionCounters, dict[str, list[tuple[TokenInfo, PendingOutcome | None]]], dict[CoalesceName, NodeID]]:
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = timed_out_outcomes or []
-
-        processor = Mock()
-        processor.process_token.return_value = []
-        processor.complete_coalesce_merge.return_value = []
-        processor.resolve_node_step.return_value = coalesce_step
-        processor.mark_blocked_barrier_terminal.return_value = 1
+    ) -> tuple[
+        _FakeCoalesceExecutor,
+        _FakeProcessor,
+        ExecutionCounters,
+        dict[str, list[tuple[TokenInfo, PendingOutcome | None]]],
+        dict[CoalesceName, NodeID],
+    ]:
+        _ = (total_transforms, coalesce_step)
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=timed_out_outcomes or [])
+        processor = _FakeProcessor()
 
         counters = _make_counters()
         pending = _make_pending()
@@ -813,13 +965,13 @@ class TestHandleCoalesceTimeouts:
             coalesce_executor=executor,
             coalesce_node_map=node_map,
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
 
         assert counters.rows_coalesced == 0
-        processor.process_token.assert_not_called()
+        assert processor.process_token_calls == []
 
     def test_non_terminal_coalesce_counts_succeeded_not_coalesced(self) -> None:
         """Non-terminal coalesce: merged token continues through downstream transforms.
@@ -838,11 +990,11 @@ class TestHandleCoalesceTimeouts:
             coalesce_step=1,
         )
         # Non-terminal: downstream transforms produce COMPLETED
-        processor.complete_coalesce_merge.return_value = [
+        processor.complete_coalesce_merge_results = [
             _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
 
-        ctx = Mock()
+        ctx = _FakeContext()
         handle_coalesce_timeouts(
             coalesce_executor=executor,
             coalesce_node_map=node_map,
@@ -854,13 +1006,15 @@ class TestHandleCoalesceTimeouts:
 
         assert counters.rows_coalesced == 0, "Non-terminal coalesce should not count as COALESCED"
         assert counters.rows_succeeded == 1
-        processor.complete_coalesce_merge.assert_called_once_with(
-            coalesce_name=CoalesceName("merge_1"),
-            consumed_tokens=tuple(outcome.consumed_tokens),
-            merged_token=merged_token,
-            coalesce_node_id=NodeID("coalesce::merge_1"),
-            ctx=ctx,
-        )
+        assert processor.complete_coalesce_merge_calls == [
+            {
+                "coalesce_name": CoalesceName("merge_1"),
+                "consumed_tokens": tuple(outcome.consumed_tokens),
+                "merged_token": merged_token,
+                "coalesce_node_id": NodeID("coalesce::merge_1"),
+                "ctx": ctx,
+            }
+        ]
 
     def test_merged_timeout_missing_node_map_entry_crashes_before_continuation(self) -> None:
         """Merged timeout with graph-map drift raises a typed invariant error."""
@@ -874,13 +1028,13 @@ class TestHandleCoalesceTimeouts:
                 coalesce_executor=executor,
                 coalesce_node_map={},
                 processor=processor,
-                ctx=Mock(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
 
-        processor.complete_coalesce_merge.assert_not_called()
-        processor.process_token.assert_not_called()
+        assert processor.complete_coalesce_merge_calls == []
+        assert processor.process_token_calls == []
         assert counters.rows_succeeded == 0
         assert counters.rows_coalesced == 0
         assert pending == _make_pending()
@@ -896,11 +1050,11 @@ class TestHandleCoalesceTimeouts:
             coalesce_step=1,
         )
         # Terminal: processor returns COALESCED (no downstream transforms)
-        processor.complete_coalesce_merge.return_value = [
+        processor.complete_coalesce_merge_results = [
             _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
-        ctx = Mock()
+        ctx = _FakeContext()
         handle_coalesce_timeouts(
             coalesce_executor=executor,
             coalesce_node_map=node_map,
@@ -913,38 +1067,40 @@ class TestHandleCoalesceTimeouts:
         assert counters.rows_coalesced == 1
         assert counters.rows_succeeded == 1
         assert len(pending["output"]) == 1
-        processor.complete_coalesce_merge.assert_called_once_with(
-            coalesce_name=CoalesceName("merge_1"),
-            consumed_tokens=tuple(outcome.consumed_tokens),
-            merged_token=merged_token,
-            coalesce_node_id=NodeID("coalesce::merge_1"),
-            ctx=ctx,
-        )
+        assert processor.complete_coalesce_merge_calls == [
+            {
+                "coalesce_name": CoalesceName("merge_1"),
+                "consumed_tokens": tuple(outcome.consumed_tokens),
+                "merged_token": merged_token,
+                "coalesce_node_id": NodeID("coalesce::merge_1"),
+                "ctx": ctx,
+            }
+        ]
 
     def test_failure_increments_coalesce_failed(self) -> None:
         """Failed coalesce (missing branches) increments coalesce_failed and rows_failed.
 
         Regression: elspeth-045f60670c — rows_failed must reflect consumed tokens.
         """
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = "quorum_not_met"
-        outcome.consumed_tokens = (
-            make_token_info(token_id="token-a"),
-            make_token_info(token_id="token-b"),
-            make_token_info(token_id="token-c"),
+        outcome = _make_failed_coalesce_outcome(
+            failure_reason="quorum_not_met",
+            consumed_tokens=(
+                make_token_info(token_id="token-a"),
+                make_token_info(token_id="token-b"),
+                make_token_info(token_id="token-c"),
+            ),
         )
 
         executor, processor, counters, pending, node_map = self._setup(
             timed_out_outcomes=[outcome],
         )
-        processor.mark_blocked_barrier_terminal.return_value = 3
+        processor.mark_blocked_barrier_terminal_result = 3
 
         handle_coalesce_timeouts(
             coalesce_executor=executor,
             coalesce_node_map=node_map,
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
@@ -952,39 +1108,59 @@ class TestHandleCoalesceTimeouts:
         assert counters.rows_coalesce_failed == 1
         assert counters.rows_failed == 3  # one per consumed token
         assert counters.rows_coalesced == 0
-        processor.mark_blocked_barrier_terminal.assert_called_once_with(
-            "merge_1",
-            ("token-a", "token-b", "token-c"),
+        assert processor.mark_blocked_barrier_terminal_calls == [("merge_1", ("token-a", "token-b", "token-c"))]
+
+    def test_failed_timeout_with_no_arrivals_does_not_terminalize_empty_barrier(self) -> None:
+        """A zero-arrival timeout has no blocked scheduler rows to terminalize."""
+        outcome = _make_failed_coalesce_outcome(failure_reason="best_effort_timeout_no_arrivals")
+
+        executor, processor, counters, pending, node_map = self._setup(
+            timed_out_outcomes=[outcome],
         )
+
+        handle_coalesce_timeouts(
+            coalesce_executor=executor,
+            coalesce_node_map=node_map,
+            processor=processor,
+            ctx=_FakeContext(),
+            counters=counters,
+            pending_tokens=pending,
+        )
+
+        assert counters.rows_coalesce_failed == 1
+        assert counters.rows_failed == 0
+        assert counters.rows_coalesced == 0
+        assert processor.mark_blocked_barrier_terminal_calls == []
+        assert processor.process_token_calls == []
 
     def test_failed_timeout_raises_when_scheduler_terminal_count_does_not_match_live_tokens(self) -> None:
         """Failed timeout coalesces must reconcile durable scheduler rows before accepting counters."""
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = "quorum_not_met"
-        outcome.consumed_tokens = (
-            make_token_info(token_id="token-a"),
-            make_token_info(token_id="token-b"),
+        outcome = _make_failed_coalesce_outcome(
+            failure_reason="quorum_not_met",
+            consumed_tokens=(
+                make_token_info(token_id="token-a"),
+                make_token_info(token_id="token-b"),
+            ),
         )
 
         executor, processor, counters, pending, node_map = self._setup(
             timed_out_outcomes=[outcome],
         )
-        processor.mark_blocked_barrier_terminal.return_value = 1
+        processor.mark_blocked_barrier_terminal_result = 1
 
         with pytest.raises(AuditIntegrityError, match=r"live consumed 2 token.*durable scheduler terminalized 1"):
             handle_coalesce_timeouts(
                 coalesce_executor=executor,
                 coalesce_node_map=node_map,
                 processor=processor,
-                ctx=Mock(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
 
         assert counters.rows_coalesce_failed == 0
         assert counters.rows_failed == 0
-        processor.process_token.assert_not_called()
+        assert processor.process_token_calls == []
 
     def test_failure_emits_token_completed_telemetry_for_each_consumed_token(self) -> None:
         """Timeout-driven coalesce failures must surface in telemetry once per token."""
@@ -992,19 +1168,14 @@ class TestHandleCoalesceTimeouts:
             make_token_info(row_id="row-1", token_id="token-1"),
             make_token_info(row_id="row-2", token_id="token-2"),
         )
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = "quorum_not_met"
-        outcome.consumed_tokens = tokens
+        outcome = _make_failed_coalesce_outcome(failure_reason="quorum_not_met", consumed_tokens=tokens)
 
         executor, processor, counters, pending, node_map = self._setup(
             timed_out_outcomes=[outcome],
         )
-        processor.mark_blocked_barrier_terminal.return_value = 2
+        processor.mark_blocked_barrier_terminal_result = 2
 
-        ctx = Mock()
-        ctx.run_id = "run-1"
-        ctx.telemetry_emit = Mock()
+        ctx = _FakeContext(run_id="run-1")
 
         handle_coalesce_timeouts(
             coalesce_executor=executor,
@@ -1015,8 +1186,8 @@ class TestHandleCoalesceTimeouts:
             pending_tokens=pending,
         )
 
-        assert ctx.telemetry_emit.call_count == 2
-        emitted = [call.args[0] for call in ctx.telemetry_emit.call_args_list]
+        assert len(ctx.emitted_events) == 2
+        emitted = ctx.emitted_events
         assert [event.token_id for event in emitted] == ["token-1", "token-2"]
         assert all(event.run_id == "run-1" for event in emitted)
         assert all(event.outcome == TerminalOutcome.FAILURE for event in emitted)
@@ -1036,21 +1207,18 @@ class TestFlushCoalescePending:
         merged_token = make_token_info()
         outcome = _make_merged_coalesce_outcome(merged_token, coalesce_name="merge_1")
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-
-        processor = Mock()
-        processor.complete_coalesce_merge.return_value = [
-            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
-        ]
-        processor.resolve_node_step.return_value = 0
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[outcome])
+        processor = _FakeProcessor(
+            complete_coalesce_merge_results=[
+                _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
+            ]
+        )
 
         counters = _make_counters()
         pending = _make_pending()
         node_map = {CoalesceName("merge_1"): NodeID("coalesce::merge_1")}
 
-        ctx = Mock()
+        ctx = _FakeContext()
         flush_coalesce_pending(
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
@@ -1062,33 +1230,32 @@ class TestFlushCoalescePending:
 
         assert counters.rows_coalesced == 0, "Non-terminal flush should not count as COALESCED"
         assert counters.rows_succeeded == 1
-        processor.complete_coalesce_merge.assert_called_once_with(
-            coalesce_name=CoalesceName("merge_1"),
-            consumed_tokens=tuple(outcome.consumed_tokens),
-            merged_token=merged_token,
-            coalesce_node_id=NodeID("coalesce::merge_1"),
-            ctx=ctx,
-        )
+        assert processor.complete_coalesce_merge_calls == [
+            {
+                "coalesce_name": CoalesceName("merge_1"),
+                "consumed_tokens": tuple(outcome.consumed_tokens),
+                "merged_token": merged_token,
+                "coalesce_node_id": NodeID("coalesce::merge_1"),
+                "ctx": ctx,
+            }
+        ]
 
     def test_terminal_flush_counts_coalesced_and_succeeded(self) -> None:
         """Terminal flush: no downstream transforms, processor returns COALESCED."""
         merged_token = make_token_info()
         outcome = _make_merged_coalesce_outcome(merged_token, coalesce_name="merge_1")
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-
-        processor = Mock()
-        processor.resolve_node_step.return_value = 1
-        processor.complete_coalesce_merge.return_value = [
-            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
-        ]
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[outcome])
+        processor = _FakeProcessor(
+            complete_coalesce_merge_results=[
+                _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
+            ]
+        )
         counters = _make_counters()
         pending = _make_pending()
         node_map = {CoalesceName("merge_1"): NodeID("coalesce::merge_1")}
 
-        ctx = Mock()
+        ctx = _FakeContext()
         flush_coalesce_pending(
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
@@ -1101,27 +1268,27 @@ class TestFlushCoalescePending:
         assert counters.rows_coalesced == 1
         assert counters.rows_succeeded == 1
         assert len(pending["output"]) == 1
-        processor.complete_coalesce_merge.assert_called_once_with(
-            coalesce_name=CoalesceName("merge_1"),
-            consumed_tokens=tuple(outcome.consumed_tokens),
-            merged_token=merged_token,
-            coalesce_node_id=NodeID("coalesce::merge_1"),
-            ctx=ctx,
-        )
+        assert processor.complete_coalesce_merge_calls == [
+            {
+                "coalesce_name": CoalesceName("merge_1"),
+                "consumed_tokens": tuple(outcome.consumed_tokens),
+                "merged_token": merged_token,
+                "coalesce_node_id": NodeID("coalesce::merge_1"),
+                "ctx": ctx,
+            }
+        ]
 
     def test_merged_flush_missing_node_map_entry_crashes_before_continuation(self) -> None:
         """Merged flush with graph-map drift raises a typed invariant error."""
         merged_token = make_token_info()
         outcome = _make_merged_coalesce_outcome(merged_token, coalesce_name="merge_1")
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-
-        processor = Mock()
-        processor.process_token.return_value = [
-            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
-        ]
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[outcome])
+        processor = _FakeProcessor(
+            process_token_results=[
+                _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
+            ]
+        )
         counters = _make_counters()
         pending = _make_pending()
 
@@ -1130,13 +1297,13 @@ class TestFlushCoalescePending:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={},
                 processor=processor,
-                ctx=Mock(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
 
-        processor.complete_coalesce_merge.assert_not_called()
-        processor.process_token.assert_not_called()
+        assert processor.complete_coalesce_merge_calls == []
+        assert processor.process_token_calls == []
         assert counters.rows_succeeded == 0
         assert counters.rows_coalesced == 0
         assert pending == _make_pending()
@@ -1146,36 +1313,33 @@ class TestFlushCoalescePending:
 
         Regression: elspeth-045f60670c — rows_failed must reflect consumed tokens.
         """
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = "incomplete_branches"
-        outcome.coalesce_name = "merge_1"
-        outcome.consumed_tokens = (
-            make_token_info(token_id="token-a"),
-            make_token_info(token_id="token-b"),
+        outcome = _make_failed_coalesce_outcome(
+            failure_reason="incomplete_branches",
+            coalesce_name="merge_1",
+            consumed_tokens=(
+                make_token_info(token_id="token-a"),
+                make_token_info(token_id="token-b"),
+            ),
         )
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = []
+        coalesce_executor = _FakeCoalesceExecutor(registered_names=[], flush_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
-        processor = Mock()
-        processor.mark_blocked_barrier_terminal.return_value = 2
+        processor = _FakeProcessor(mark_blocked_barrier_terminal_result=2)
 
         flush_coalesce_pending(
             coalesce_executor=coalesce_executor,
             coalesce_node_map={},
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
 
         assert counters.rows_coalesce_failed == 1
         assert counters.rows_failed == 2
-        processor.mark_blocked_barrier_terminal.assert_called_once_with("merge_1", ("token-a", "token-b"))
+        assert processor.mark_blocked_barrier_terminal_calls == [("merge_1", ("token-a", "token-b"))]
 
     def test_failure_emits_token_completed_telemetry_for_each_consumed_token(self) -> None:
         """Flush-driven coalesce failures must surface in telemetry once per token."""
@@ -1183,23 +1347,14 @@ class TestFlushCoalescePending:
             make_token_info(row_id="row-1", token_id="token-1"),
             make_token_info(row_id="row-2", token_id="token-2"),
         )
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = "incomplete_branches"
-        outcome.coalesce_name = "merge_1"
-        outcome.consumed_tokens = tokens
+        outcome = _make_failed_coalesce_outcome(failure_reason="incomplete_branches", coalesce_name="merge_1", consumed_tokens=tokens)
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = []
+        coalesce_executor = _FakeCoalesceExecutor(registered_names=[], flush_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
-        ctx = Mock()
-        ctx.run_id = "run-1"
-        ctx.telemetry_emit = Mock()
-        processor = Mock()
-        processor.mark_blocked_barrier_terminal.return_value = 2
+        ctx = _FakeContext(run_id="run-1")
+        processor = _FakeProcessor(mark_blocked_barrier_terminal_result=2)
 
         flush_coalesce_pending(
             coalesce_executor=coalesce_executor,
@@ -1210,88 +1365,80 @@ class TestFlushCoalescePending:
             pending_tokens=pending,
         )
 
-        assert ctx.telemetry_emit.call_count == 2
-        emitted = [call.args[0] for call in ctx.telemetry_emit.call_args_list]
+        assert len(ctx.emitted_events) == 2
+        emitted = ctx.emitted_events
         assert [event.token_id for event in emitted] == ["token-1", "token-2"]
         assert all(event.run_id == "run-1" for event in emitted)
         assert all(event.outcome == TerminalOutcome.FAILURE for event in emitted)
         assert all(event.path == TerminalPath.UNROUTED for event in emitted)
-        processor.mark_blocked_barrier_terminal.assert_called_once_with("merge_1", ("token-1", "token-2"))
+        assert processor.mark_blocked_barrier_terminal_calls == [("merge_1", ("token-1", "token-2"))]
 
     def test_failed_flush_with_consumed_tokens_requires_coalesce_name(self) -> None:
         """Failed flush outcomes need an explicit barrier key before counters move."""
         tokens = (make_token_info(token_id="token-1"),)
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = "incomplete_branches"
-        outcome.coalesce_name = None
-        outcome.consumed_tokens = tokens
+        outcome = _make_failed_coalesce_outcome(failure_reason="incomplete_branches", consumed_tokens=tokens)
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
-        processor = Mock()
+        processor = _FakeProcessor()
 
         with pytest.raises(AuditIntegrityError, match="consumed tokens but no coalesce_name"):
             flush_coalesce_pending(
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={},
                 processor=processor,
-                ctx=Mock(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
 
-        processor.mark_blocked_barrier_terminal.assert_not_called()
+        assert processor.mark_blocked_barrier_terminal_calls == []
         assert counters.rows_coalesce_failed == 0
         assert counters.rows_failed == 0
 
     def test_empty_flush_is_noop(self) -> None:
         """No pending coalesces means nothing happens."""
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = []
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[])
 
         counters = _make_counters()
         pending = _make_pending()
-        processor = Mock()
+        processor = _FakeProcessor()
 
         flush_coalesce_pending(
             coalesce_executor=coalesce_executor,
             coalesce_node_map={},
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
 
         assert counters.rows_coalesced == 0
         assert counters.rows_coalesce_failed == 0
-        processor.mark_blocked_barrier_terminal.assert_not_called()
-        coalesce_executor.get_registered_names.assert_not_called()
+        assert processor.mark_blocked_barrier_terminal_calls == []
+        assert coalesce_executor.get_registered_names_call_count == 0
 
     def test_registered_barrier_without_live_outcome_does_not_terminalize_scheduler_work(self) -> None:
         """End-of-source sweep cannot turn durable BLOCKED rows terminal without live token evidence."""
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = []
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[])
 
         counters = _make_counters()
         pending = _make_pending()
-        processor = Mock()
+        processor = _FakeProcessor()
 
         flush_coalesce_pending(
             coalesce_executor=coalesce_executor,
             coalesce_node_map={CoalesceName("merge_1"): NodeID("coalesce::merge_1")},
             processor=processor,
-            ctx=Mock(),
+            ctx=_FakeContext(),
             counters=counters,
             pending_tokens=pending,
         )
 
-        processor.mark_blocked_barrier_terminal.assert_not_called()
-        coalesce_executor.get_registered_names.assert_not_called()
+        assert processor.mark_blocked_barrier_terminal_calls == []
+        assert coalesce_executor.get_registered_names_call_count == 0
 
 
 # =============================================================================
@@ -1314,13 +1461,9 @@ class TestCoalesceOutcomeValidation:
         """Outcome with both merged_token=None and failure_reason=None crashes."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = None
+        outcome = _FakeCoalesceOutcome(merged_token=None, failure_reason=None)
 
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = [outcome]
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
@@ -1330,8 +1473,8 @@ class TestCoalesceOutcomeValidation:
             handle_coalesce_timeouts(
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map=node_map,
-                processor=Mock(),
-                ctx=Mock(),
+                processor=_FakeProcessor(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
@@ -1340,13 +1483,9 @@ class TestCoalesceOutcomeValidation:
         """Outcome with both merged_token and failure_reason set crashes."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        outcome = Mock()
-        outcome.merged_token = make_token_info()
-        outcome.failure_reason = "some_failure"
+        outcome = _FakeCoalesceOutcome(merged_token=make_token_info(), failure_reason="some_failure")
 
-        coalesce_executor = Mock()
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
-        coalesce_executor.check_timeouts.return_value = [outcome]
+        coalesce_executor = _FakeCoalesceExecutor(timed_out_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
@@ -1356,8 +1495,8 @@ class TestCoalesceOutcomeValidation:
             handle_coalesce_timeouts(
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map=node_map,
-                processor=Mock(),
-                ctx=Mock(),
+                processor=_FakeProcessor(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
@@ -1366,13 +1505,9 @@ class TestCoalesceOutcomeValidation:
         """flush_coalesce_pending crashes on outcome with both fields None."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        outcome = Mock()
-        outcome.merged_token = None
-        outcome.failure_reason = None
+        outcome = _FakeCoalesceOutcome(merged_token=None, failure_reason=None)
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = []
+        coalesce_executor = _FakeCoalesceExecutor(registered_names=[], flush_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
@@ -1381,8 +1516,8 @@ class TestCoalesceOutcomeValidation:
             flush_coalesce_pending(
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={},
-                processor=Mock(),
-                ctx=Mock(),
+                processor=_FakeProcessor(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
@@ -1391,14 +1526,9 @@ class TestCoalesceOutcomeValidation:
         """flush_coalesce_pending crashes on outcome with both fields set."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        outcome = Mock()
-        outcome.merged_token = make_token_info()
-        outcome.failure_reason = "contradictory"
-        outcome.coalesce_name = "merge_1"
+        outcome = _FakeCoalesceOutcome(merged_token=make_token_info(), failure_reason="contradictory", coalesce_name="merge_1")
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = ["merge_1"]
+        coalesce_executor = _FakeCoalesceExecutor(flush_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
@@ -1407,8 +1537,8 @@ class TestCoalesceOutcomeValidation:
             flush_coalesce_pending(
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={CoalesceName("merge_1"): NodeID("coalesce::merge_1")},
-                processor=Mock(),
-                ctx=Mock(),
+                processor=_FakeProcessor(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )
@@ -1417,14 +1547,9 @@ class TestCoalesceOutcomeValidation:
         """flush_coalesce_pending crashes if merged_token present but coalesce_name is None."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        outcome = Mock()
-        outcome.merged_token = make_token_info()
-        outcome.failure_reason = None
-        outcome.coalesce_name = None
+        outcome = _FakeCoalesceOutcome(merged_token=make_token_info(), failure_reason=None, coalesce_name=None)
 
-        coalesce_executor = Mock()
-        coalesce_executor.flush_pending.return_value = [outcome]
-        coalesce_executor.get_registered_names.return_value = []
+        coalesce_executor = _FakeCoalesceExecutor(registered_names=[], flush_outcomes=[outcome])
 
         counters = _make_counters()
         pending = _make_pending()
@@ -1433,8 +1558,8 @@ class TestCoalesceOutcomeValidation:
             flush_coalesce_pending(
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={},
-                processor=Mock(),
-                ctx=Mock(),
+                processor=_FakeProcessor(),
+                ctx=_FakeContext(),
                 counters=counters,
                 pending_tokens=pending,
             )

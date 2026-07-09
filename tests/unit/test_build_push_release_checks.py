@@ -10,6 +10,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_PUSH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-push.yaml"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 
 def _workflow() -> dict[str, Any]:
@@ -135,6 +136,14 @@ def test_release_dockerfile_builds_frontend_dist_before_python_install() -> None
     assert "npm run build" in dockerfile
     assert "COPY --from=frontend-builder /frontend/dist /tmp/frontend-dist/" in dockerfile
     assert dockerfile.index("npm run build") < dockerfile.index("uv sync --frozen --extra all --no-editable --active")
+
+
+def test_release_build_context_excludes_host_node_modules() -> None:
+    """Host-installed frontend dependencies must not enter the Docker context."""
+    raw_lines = DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+    dockerignore_patterns = {line.strip() for line in raw_lines if line.strip() and not line.lstrip().startswith("#")}
+
+    assert "**/node_modules/" in dockerignore_patterns
 
 
 def test_release_dockerfile_copies_local_uv_sources_before_dependency_sync() -> None:

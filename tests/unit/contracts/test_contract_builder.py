@@ -557,3 +557,45 @@ class TestContractBuilderEdgeCases:
 
         with pytest.raises(KeyError, match="orphan"):
             builder.process_first_row(first_row, field_resolution)
+
+    def test_process_first_row_enforces_inferred_field_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Over-wide first rows must raise the typed cap exception, not lock."""
+        import elspeth.contracts.contract_builder as contract_builder
+        from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
+
+        monkeypatch.setattr(contract_builder, "_MAX_INFERRED_CONTRACT_FIELDS", 2, raising=False)
+
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        builder = ContractBuilder(contract)
+
+        first_row = {"a": 1, "b": 2, "c": 3}
+        field_resolution = {name: name for name in first_row}
+
+        with pytest.raises(ContractFieldLimitExceeded, match="field 'c'"):
+            builder.process_first_row(first_row, field_resolution)
+
+        assert builder.contract is contract
+
+    def test_sparse_cap_reports_existing_over_limit_contract_without_missing_names(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Already over-limit contracts must not index into an empty missing set."""
+        import elspeth.contracts.contract_builder as contract_builder
+        from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
+
+        monkeypatch.setattr(contract_builder, "_MAX_INFERRED_CONTRACT_FIELDS", 2, raising=False)
+
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("a", int, original_name="a", source="inferred"),
+                make_field("b", int, original_name="b", source="inferred"),
+                make_field("c", int, original_name="c", source="inferred"),
+            ),
+            locked=True,
+        )
+        builder = ContractBuilder(contract)
+
+        with pytest.raises(ContractFieldLimitExceeded, match="already exceeds maximum inferred schema fields"):
+            builder.process_sparse_fields({"a": 1, "b": 2, "c": 3}, {"a": "a", "b": "b", "c": "c"})

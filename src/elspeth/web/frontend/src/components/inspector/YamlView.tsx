@@ -55,6 +55,9 @@ function describeYamlFetchError(error: unknown): YamlFetchError {
 export function YamlView() {
   const compositionState = useSessionStore((s) => s.compositionState);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const setExportedYamlBlobBinding = useSessionStore(
+    (s) => s.setExportedYamlBlobBinding,
+  );
   const compositionProposals = useSessionStore((s) => s.compositionProposals);
   const proposalActionPendingIds = useSessionStore(
     (s) => s.proposalActionPendingIds,
@@ -94,11 +97,24 @@ export function YamlView() {
 
     api
       .fetchYaml(activeSessionId)
-      .then(({ yaml: text }) => {
+      .then(({ yaml: text, source_blob_ids }) => {
         if (!cancelled) {
           setYaml(text);
           setYamlError(null);
           setIsLoading(false);
+          // Preserve the export's blob-source sidecar so a same-session
+          // verbatim re-import can rebind it (ImportYamlModal). Reset to null
+          // when this export has no blob-backed source, so a prior binding
+          // can't linger and be replayed against a different pipeline.
+          setExportedYamlBlobBinding(
+            source_blob_ids && Object.keys(source_blob_ids).length > 0
+              ? {
+                  sessionId: activeSessionId,
+                  yaml: text,
+                  sourceBlobIds: source_blob_ids,
+                }
+              : null,
+          );
         }
       })
       .catch((error: unknown) => {
@@ -112,7 +128,7 @@ export function YamlView() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, version, hasPipelineContent]);
+  }, [activeSessionId, version, hasPipelineContent, setExportedYamlBlobBinding]);
 
   const pendingYamlProposal = pendingYamlProposals[0] ?? null;
   const pendingYamlProposalIsBusy =

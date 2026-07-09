@@ -1,8 +1,11 @@
-# enforce_telemetry_backfill_trailer — allowlist
+# enforce_telemetry_backfill_trailer — CI-only SHA allowlist
 
-Per-cohort allowlist for the telemetry-backfill commit-msg hook
-(`.githooks/commit-msg-telemetry-backfill`) and its CI backstop
+Per-cohort SHA allowlist for the telemetry-backfill CI backstop
 (`.github/workflows/enforce-telemetry-backfill-trailer.yaml`).
+The local commit-msg hook (`.githooks/commit-msg-telemetry-backfill`)
+cannot consume this SHA allowlist because the commit SHA does not exist
+while `commit-msg` is running; it enforces trailers directly against the
+staged diff and commit message.
 
 ## Why this directory exists
 
@@ -43,11 +46,19 @@ entries:
     expires: <YYYY-MM-DD>   # required — every exemption has a TTL
 ```
 
-The hook and the CI backstop both read every `*.yaml` in this directory
-and skip cohort enforcement for SHAs present in `entries[].commit_sha`.
-SHAs past `expires` are treated as if the entry is absent (so a stale
-exemption transitions back to enforced automatically rather than
-quietly persisting).
+The CI backstop reads every `*.yaml` in this directory and skips cohort
+enforcement for SHAs present in `entries[].commit_sha`. SHAs past
+`expires` are treated as if the entry is absent (so a stale exemption
+transitions back to enforced automatically rather than quietly
+persisting).
+
+The local commit-msg hook cannot consume this SHA allowlist. It has only
+the commit-message file and the staged index, so cohort-touching local
+commits still need the relevant `telemetry-backfill: <cohort-token>`
+trailer before they can be created. If a local commit is a legitimate
+exception, either add the trailer with the rationale in the commit body or
+let the CI-only SHA allowlist document the exception after the commit
+exists.
 
 ## Removing an entry
 
@@ -57,7 +68,7 @@ Re-enforcement happens automatically.
 ## Removing the hook entirely
 
 Later removal is a governance decision. Any PR removing the hook MUST cite
-[20-phase-8-polish-and-telemetry.md](../../../docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md)
-§"Cohort attribution via commit trailers (A4 — load-bearing)" in the
-removal commit's body and explain how cross-phase attribution will be
-preserved by the replacement mechanism.
+the cohort-attribution rationale in this README and the commit history for the
+hook's introduction in the removal commit's body, then explain how cross-phase
+attribution will be preserved by the replacement mechanism. Do not rely on a
+maintainer-local `docs-archive/` path as public evidence.

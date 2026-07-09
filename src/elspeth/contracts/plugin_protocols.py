@@ -88,6 +88,7 @@ class _PluginReferenceContent(Protocol):
     example_use: str | None
     capability_tags: tuple[str, ...]
     audit_characteristics: DeclaredAuditCharacteristics
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]]
 
 
 class _PluginAssistanceHooks(Protocol):
@@ -170,9 +171,11 @@ class SourceProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     # All sources must set this - config-based sources get it from SourceDataConfig
     _on_validation_failure: str
 
-    # Success routing: sink name for rows that pass source validation
-    # All sources must set this - config-based sources get it from SourceDataConfig
-    on_success: str
+    # Success routing: sink name for rows that pass source validation.
+    # Injected by runtime_factory.py bridge from SourceSettings.on_success.
+    # Always non-None at runtime (SourceSettings requires on_success).
+    # Protocol retains str | None because injection happens post-construction.
+    on_success: str | None
 
     # Producer-guarantee declaration surface (ADR-016).
     # Set from the source's effective SchemaConfig guarantees at construction.

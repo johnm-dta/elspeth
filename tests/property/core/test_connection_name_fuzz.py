@@ -359,11 +359,11 @@ class TestConnectionNameRoundtrip:
         assert graph.node_count == 3
         assert graph.edge_count == 2
 
-        # All node IDs should be within column length
-        from elspeth.core.landscape.schema import NODE_ID_COLUMN_LENGTH
+        # All node IDs should be within the shared node-id contract length.
+        from elspeth.contracts.types import NODE_ID_MAX_LENGTH
 
         for node_info in graph.get_nodes():
-            assert len(node_info.node_id) <= NODE_ID_COLUMN_LENGTH
+            assert len(node_info.node_id) <= NODE_ID_MAX_LENGTH
 
     @given(name=valid_connection_names)
     @settings(max_examples=50, deadline=5000)

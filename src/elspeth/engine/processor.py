@@ -13,41 +13,80 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
-from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars, CoalescePendingScalars
+from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
 from elspeth.contracts.coordination import DEFAULT_ITEM_STALL_BUDGET_SECONDS
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine._error_hash import compute_error_hash
-from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
+from elspeth.engine.barrier_coordination import (
+    BarrierIntakeCoordinator,
+    BarrierJournalRestoreContext,
+    BarrierRecoveryCoordinator,
+    _LiveBarrierHold,
+)
+from elspeth.engine.dag_navigator import DAGNavigator
+from elspeth.engine.scheduler_drain import (
+    MAX_WORK_QUEUE_ITERATIONS as MAX_WORK_QUEUE_ITERATIONS,  # re-export: tests import from here
+)
+from elspeth.engine.scheduler_drain import (
+    SCHEDULER_MAINTENANCE_INTERVAL as SCHEDULER_MAINTENANCE_INTERVAL,  # re-export: tests import from here
+)
+from elspeth.engine.scheduler_drain import (
+    ProcessorMode,
+    SchedulerDrainCoordinator,
+    is_scheduler_sink_bound_result,
+    require_scheduler_outcome,
+    require_scheduler_sink_name,
+    scheduler_error_hash,
+    scheduler_error_message,
+    with_scheduler_pending_sink_handoffs,
+)
+from elspeth.engine.scheduler_work_codec import SchedulerWorkCodec
+from elspeth.engine.token_traversal import TokenTraversalEngine
+from elspeth.engine.token_traversal import (
+    _GateContinue as _GateContinue,  # re-export: callers import the union types from here
+)
+from elspeth.engine.token_traversal import (
+    _GateOutcome as _GateOutcome,  # re-export
+)
+from elspeth.engine.token_traversal import (
+    _GateTerminal as _GateTerminal,  # re-export
+)
+from elspeth.engine.token_traversal import (
+    _TransformContinue as _TransformContinue,  # re-export: tests import from here
+)
+from elspeth.engine.token_traversal import (
+    _TransformOutcome as _TransformOutcome,  # re-export
+)
+from elspeth.engine.token_traversal import (
+    _TransformTerminal as _TransformTerminal,  # re-export
+)
+from elspeth.engine.work_items import WorkItem, WorkItemFactory
 
 if TYPE_CHECKING:
-    # TypeIs (PEP 742) lives in typing on 3.13 but only typing_extensions on
-    # 3.12; it is used solely in an annotation (lazy under `from __future__
-    # import annotations`), so a type-checking-only import works on both.
-    from typing import TypeIs
-
     from sqlalchemy.engine import Connection
 
-    from elspeth.contracts import Batch
     from elspeth.contracts.audit import Row as AuditRow
     from elspeth.contracts.audit import Token as AuditToken
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.engine.clock import Clock
-    from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.executors import GateOutcome
-    from elspeth.engine.orchestrator.types import RowPlugin, TelemetryManagerProtocol
+    from elspeth.engine.orchestrator.plugin_types import RowPlugin
+    from elspeth.engine.orchestrator.ports import TelemetryManagerProtocol
 
 from elspeth.contracts import BatchTransformProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.declaration_contracts import (
@@ -59,7 +98,6 @@ from elspeth.contracts.declaration_contracts import (
     DeclarationContractViolation,
 )
 from elspeth.contracts.enums import (
-    BatchStatus,
     NodeStateStatus,
     OutputMode,
     RoutingKind,
@@ -73,12 +111,10 @@ from elspeth.contracts.errors import (
     CapacityError,
     ExecutionError,
     FrameworkBugError,
-    MaxRetriesExceeded,
     OrchestrationInvariantError,
     PassThroughContractViolation,
     PluginContractViolation,
     PluginRetryableError,
-    SchedulerLeaseLostError,
     TransformErrorCategory,
     TransformErrorReason,
 )
@@ -86,22 +122,20 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
 from elspeth.contracts.scheduler import (
     BarrierEmission,
-    BatchMembershipSpec,
     BranchLossSpec,
-    BufferedOutcomeSpec,
     TokenWorkItem,
     TokenWorkStatus,
 )
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
-from elspeth.core.landscape._helpers import generate_id
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.scheduler_repository import (
     TokenSchedulerRepository,
-    token_from_journal_item,
 )
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors import (
@@ -109,18 +143,13 @@ from elspeth.engine.executors import (
     GateExecutor,
     TransformExecutor,
 )
-from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
 from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
+from elspeth.engine.executors.state_guard import stamped_node_state_id
+from elspeth.engine.executors.transform import record_transform_error_with_routing
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
 
-# Iteration guard to prevent infinite loops from bugs.
-# This counts dequeued work items, so it must exceed the largest supported
-# single-row fan-out; otherwise legal expansion trips the safety valve before
-# the final child runs.
-MAX_WORK_QUEUE_ITERATIONS = 100_000
-SCHEDULER_MAINTENANCE_INTERVAL = 64
 logger = logging.getLogger(__name__)
 
 type _SourceBoundaryFailure = (
@@ -146,6 +175,11 @@ class DAGTraversalContext:
     node_to_next: Mapping[NodeID, NodeID | None]
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     branch_first_node: Mapping[str, NodeID] = MappingProxyType({})
+    # Explicit allowlist of non-plugin traversal nodes (sources, queues,
+    # coalesce points). Nodes in node_to_next that are neither plugin-bearing
+    # nor in this set fail closed at resolution instead of being skipped.
+    # Coalesce nodes are structural by definition and always unioned in.
+    structural_node_ids: frozenset[NodeID] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "node_step_map", deep_freeze(self.node_step_map))
@@ -153,78 +187,11 @@ class DAGTraversalContext:
         object.__setattr__(self, "node_to_next", deep_freeze(self.node_to_next))
         object.__setattr__(self, "coalesce_node_map", deep_freeze(self.coalesce_node_map))
         object.__setattr__(self, "branch_first_node", deep_freeze(self.branch_first_node))
-
-
-@dataclass(frozen=True, slots=True)
-class _AggregationRestorePlan:
-    """Derived restore inputs for one aggregation node (journal restore).
-
-    Built during the derivation phase of ``_restore_barriers_from_journal``
-    so every audit read completes (and can raise) before any executor
-    mutation runs.
-    """
-
-    node_id: NodeID
-    items: Sequence[TokenWorkItem]
-    member_order: Sequence[str]
-    batch_id: str | None
-    accepted_count_total: int
-    completed_flush_count: int
-    scalars: AggregationNodeScalars
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "items", deep_freeze(self.items))
-        object.__setattr__(self, "member_order", deep_freeze(self.member_order))
-
-
-@dataclass(frozen=True, slots=True)
-class _LiveBarrierHold:
-    """In-memory companion of one durable BLOCKED barrier hold (ADR-030 §E.2).
-
-    Stashed by the processor at the moment a claimed token is about to block
-    at a barrier (aggregation buffering / coalesce hold) and consumed by the
-    next drain iteration's journal-first intake: the LIVE token preserves the
-    exact post-transform payload and resume provenance the old in-claim accept
-    used (N=1 parity). Inherited rows with no stash entry (leader takeover)
-    fall back to journal rehydration with audit-derived attempt offsets —
-    the same semantics as the restore path.
-    """
-
-    token: TokenInfo
-    barrier_key: str
-
-
-@dataclass(frozen=True, slots=True)
-class BarrierJournalRestoreContext:
-    """Resume inputs for the journal-based barrier restore (F1 design D3).
-
-    Built by the resume path (``ResumeCoordinator``) and handed to
-    ``RowProcessor.__init__``; its presence IS the resume signal — a normal
-    run passes ``None`` and no restore sweep runs.
-
-    Attributes:
-        resume_checkpoint_id: Checkpoint id stamped on every journal-restored
-            token (resume provenance).
-        barrier_scalars: Underivable scalar barrier metadata from the
-            checkpoint row (trigger latches / lost_branches). ``None`` means
-            the checkpoint carried no scalars — every node restores with
-            unlatched / no-losses defaults. The scalars snapshot is
-            NON-transactional vs the journal (D3 staleness model): an absent
-            entry always means not-fired / re-derivable, never corruption.
-        batch_id_remap: old->retry batch_id mapping returned by
-            ``handle_incomplete_batches`` — BUFFERED token_outcomes still
-            reference the dead original batch ids, so the restored in-progress
-            batch id must be read through this remap.
-    """
-
-    resume_checkpoint_id: str
-    barrier_scalars: BarrierScalars | None
-    batch_id_remap: Mapping[str, str]
-
-    def __post_init__(self) -> None:
-        if not self.resume_checkpoint_id:
-            raise ValueError("BarrierJournalRestoreContext.resume_checkpoint_id must not be empty")
-        object.__setattr__(self, "batch_id_remap", deep_freeze(self.batch_id_remap))
+        object.__setattr__(
+            self,
+            "structural_node_ids",
+            frozenset(self.structural_node_ids) | frozenset(self.coalesce_node_map.values()),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,46 +275,6 @@ def _validated_quarantined_indices(result: TransformResult, *, buffered_token_co
     return quarantined_index_set
 
 
-# --- Discriminated union types for _process_single_token extraction ---
-
-
-@dataclass(frozen=True, slots=True)
-class _TransformContinue:
-    """Token should advance to the next node in the DAG."""
-
-    updated_token: TokenInfo
-    updated_sink: str
-
-
-@dataclass(frozen=True, slots=True)
-class _TransformTerminal:
-    """Token has reached a terminal state (completed, failed, quarantined, etc.)."""
-
-    result: RowResult | tuple[RowResult, ...]
-
-
-type _TransformOutcome = _TransformContinue | _TransformTerminal
-
-
-@dataclass(frozen=True, slots=True)
-class _GateContinue:
-    """Gate says advance to next node (or jump to a specific node)."""
-
-    updated_token: TokenInfo
-    updated_sink: str
-    next_node_id: NodeID | None = None  # None = next structural node
-
-
-@dataclass(frozen=True, slots=True)
-class _GateTerminal:
-    """Gate has routed, forked, or diverted the token to a terminal state."""
-
-    result: RowResult | tuple[RowResult, ...]
-
-
-type _GateOutcome = _GateContinue | _GateTerminal
-
-
 def make_step_resolver(
     node_step_map: Mapping[NodeID, int],
     source_node_id: NodeID,
@@ -375,18 +302,6 @@ def make_step_resolver(
         raise OrchestrationInvariantError(f"Node ID '{node_id}' missing from traversal step map")
 
     return resolve
-
-
-def _is_result_tuple(result: RowResult | tuple[RowResult, ...]) -> TypeIs[tuple[RowResult, ...]]:
-    """Narrow a scheduler result to the buffered-tuple shape.
-
-    A ``TypeIs`` guard (PEP 742) so mypy narrows BOTH branches: callers that
-    fall through (or take the ``else`` of a ternary) get ``RowResult``, not the
-    union. ``type(result) is tuple`` rather than ``isinstance`` because the
-    discrimination is between a frozen ``RowResult`` dataclass and a concrete
-    aggregation-buffer ``tuple`` — an exact-type test, not a subtype check.
-    """
-    return type(result) is tuple
 
 
 class RowProcessor:
@@ -439,6 +354,7 @@ class RowProcessor:
         sink_names: frozenset[str] | None = None,
         coalesce_on_success_map: dict[CoalesceName, str] | None = None,
         barrier_restore: BarrierJournalRestoreContext | None = None,
+        barrier_restore_reads: BarrierRestoreReadModel | None = None,
         payload_store: PayloadStore | None = None,
         clock: Clock | None = None,
         max_workers: int | None = None,
@@ -450,6 +366,7 @@ class RowProcessor:
         coordination_token: CoordinationToken | None = None,
         run_coordination: RunCoordinationRepository | None = None,
         follower_barrier_node_ids: frozenset[NodeID] | None = None,
+        mode: ProcessorMode = ProcessorMode.LEADER,
     ) -> None:
         """Initialize processor.
 
@@ -478,6 +395,9 @@ class RowProcessor:
                 restore (F1). Non-None means this processor is being built on
                 the resume path: barrier buffers are rebuilt from journal
                 BLOCKED rows + audit tables before the first row is processed.
+            barrier_restore_reads: Restore-owned token-outcome read model for
+                ADR-030 duplicate-acceptance and crash-window reconciliation.
+                Required when ``barrier_restore`` is supplied.
             payload_store: Optional PayloadStore for persisting source row payloads
             clock: Optional clock for time access. Defaults to system clock.
                    Inject MockClock for deterministic testing.
@@ -507,6 +427,15 @@ class RowProcessor:
                 journal-intake adopts the arrival and runs trigger evaluation
                 (§B.2: trigger evaluation is leader-only).  Non-follower
                 processors leave this None (no-op path).
+            mode: Explicit processor role (elspeth-577179bba1). LEADER (the
+                default) covers the fenced leader, the N=1 arm, and direct
+                repository-level construction — within it, behavior still
+                keys on genuine coordination_token/run_coordination presence.
+                FOLLOWER is validated fail-closed below: it requires
+                ``coordination_token=None``, ``run_coordination=None``, and
+                an explicit ``scheduler_lease_owner``; it gates the public
+                :meth:`drain_follower_ready_work` surface and the follower
+                skip of scheduler maintenance (ADR-030 §C.3).
         """
         if scheduler is None:
             raise TypeError("scheduler repository is required; RowProcessor no longer supports the legacy in-memory drain")
@@ -531,7 +460,10 @@ class RowProcessor:
         self._coalesce_name_by_node_id: dict[NodeID, CoalesceName] = {
             node_id: coalesce_name for coalesce_name, node_id in self._coalesce_node_ids.items()
         }
-        self._structural_node_ids: frozenset[NodeID] = frozenset(nid for nid in self._node_to_next if nid not in self._node_to_plugin)
+        # Explicit allowlist from the traversal context (elspeth-c522931bd1):
+        # never derived as the complement of node_to_plugin, which silently
+        # skipped plugin nodes missing from the mapping (fail-open).
+        self._structural_node_ids: frozenset[NodeID] = traversal.structural_node_ids
         self._branch_to_coalesce: dict[BranchName, CoalesceName] = branch_to_coalesce or {}
         self._branch_to_sink: dict[BranchName, SinkName] = branch_to_sink or {}
         overlap = set(self._branch_to_coalesce.keys()) & set(self._branch_to_sink.keys())
@@ -550,16 +482,12 @@ class RowProcessor:
         self._clock = clock if clock is not None else DEFAULT_CLOCK
 
         # DAG navigator: pure topology queries extracted from RowProcessor
-        self._nav = DAGNavigator(
-            node_to_plugin=self._node_to_plugin,
-            node_to_next=self._node_to_next,
-            coalesce_node_ids=self._coalesce_node_ids,
-            structural_node_ids=self._structural_node_ids,
-            coalesce_name_by_node_id=self._coalesce_name_by_node_id,
+        self._nav = DAGNavigator.from_traversal_context(
+            traversal,
             coalesce_on_success_map=self._coalesce_on_success_map,
             sink_names=self._sink_names,
-            branch_first_node=dict(traversal.branch_first_node),
         )
+        self._work_items = WorkItemFactory(self._nav)
 
         # Build error edge map: transform node_id -> DIVERT edge_id.
         # Scans edge_map for __error_{name}__ labels (created by dag.py for transforms
@@ -594,16 +522,63 @@ class RowProcessor:
         )
         self._telemetry_manager = telemetry_manager
         self._scheduler = scheduler
+        # One codec for the WorkItem <-> durable scheduler payload mapping
+        # (elspeth-6291c51766): ingest, enqueue, READY barrier emission, and
+        # rehydrate must derive byte-identical field bundles (deterministic
+        # work_item_id + strict field-equality reconciliation), so the
+        # derivation lives in one place instead of four hand-synced encoders.
+        self._work_codec = SchedulerWorkCodec(
+            serialize_row_payload=scheduler.serialize_row_payload,
+            deserialize_row_payload=scheduler.deserialize_row_payload,
+            resolve_node_cursor=self._scheduler_node_id,
+            resolve_step_index=self._scheduler_step_index,
+            resolve_ingest_sequence=data_flow.resolve_row_ingest_sequence,
+            queue_key_for_item=self._queue_key_for_blocked_item,
+            barrier_key_for_item=self._barrier_key_for_blocked_item,
+            create_work_item=self._work_items.create,
+        )
         self._coordination_token = coordination_token
         self._run_coordination = run_coordination
-        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when the
-        # caller explicitly passed a scheduler_lease_owner that is registered in the
-        # run_workers table (production multi-worker paths: run_core.py for leaders,
-        # follower.py for followers).  False = legacy / test / single-worker path
-        # where the auto-generated "row-processor:{run_id}:{uuid}" identity has no
-        # run_workers row; the membership fence is inactive in that case.
-        self._scheduler_lease_owner_registered: bool = scheduler_lease_owner is not None
-        self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
+        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when
+        # the lease owner is a run_workers identity. Production paths pass the
+        # owner explicitly; direct tests often pass only the coordination token,
+        # whose worker_id is the same registered leader identity.
+        resolved_scheduler_lease_owner = scheduler_lease_owner
+        if resolved_scheduler_lease_owner is None and coordination_token is not None:
+            resolved_scheduler_lease_owner = coordination_token.worker_id
+        self._scheduler_lease_owner_registered: bool = resolved_scheduler_lease_owner is not None
+        self._scheduler_lease_owner = resolved_scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
+        # Explicit processor role (elspeth-577179bba1): follower-ness is a
+        # STORED construction-time decision, never re-derived from the
+        # coordination_token/run_coordination None-sentinels. On the follower
+        # path those sentinels remain correct ABSENCES (no epoch fence, no
+        # §C.2 housekeeping) — the mode flag, not their None-ness, drives
+        # branch selection. FOLLOWER wiring is validated fail-closed HERE so
+        # a wrong-mode construction crashes instead of silently taking a
+        # leader-only arm. (The follower barrier-intake no-op needs no mode
+        # gate: it is already structural — empty aggregation_settings plus
+        # coalesce_executor=None make the intake pass a no-op.)
+        self._mode = mode
+        if mode is ProcessorMode.FOLLOWER:
+            if coordination_token is not None:
+                raise OrchestrationInvariantError(
+                    "ProcessorMode.FOLLOWER forbids a coordination_token: a follower must never "
+                    "present an epoch fence (ADR-030 §B.1 — the fenced verbs are leader-only). "
+                    "A follower carrying a leader fence is the wrong-mode bug this flag exists to catch."
+                )
+            if run_coordination is not None:
+                raise OrchestrationInvariantError(
+                    "ProcessorMode.FOLLOWER forbids run_coordination: a follower must never run "
+                    "the §C.2 housekeeping/eviction sweep (leader-only). A follower holding the "
+                    "coordination repository is the wrong-mode bug this flag exists to catch."
+                )
+            if not self._scheduler_lease_owner_registered:
+                raise OrchestrationInvariantError(
+                    "ProcessorMode.FOLLOWER requires an explicit scheduler_lease_owner: the "
+                    "follower's registered run_workers identity IS its lease owner and "
+                    "membership-fence key (ADR-030 §A.1/§G); an anonymous minted owner cannot "
+                    "pass the claim fence."
+                )
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
             raise OrchestrationInvariantError(f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}")
@@ -613,18 +588,6 @@ class RowProcessor:
                 f"scheduler_lease_seconds ({scheduler_lease_seconds}); otherwise the heartbeat "
                 "cannot refresh the lease before it expires under any slow-work scenario."
             )
-        self._scheduler_heartbeat_seconds = scheduler_heartbeat_seconds
-        # Active scheduler claim state for in-loop heartbeat refresh
-        # (ADR-026 RC6 multi-worker, filigree elspeth-ddde8144b6). These fields
-        # are non-None only inside ``_drain_scheduler_claims`` between
-        # ``claim_ready``/``claim_pending_sink`` and the terminal ``mark_*``.
-        # ``_process_single_token`` calls ``_heartbeat_active_claim`` on each
-        # node-iteration boundary so an alive-but-slow worker's lease does not
-        # expire under a peer reaper. RowProcessor is single-threaded per row,
-        # so this instance state has no concurrent access.
-        self._active_claim_work_item_id: str | None = None
-        self._last_heartbeat_at: datetime | None = None
-        self._scheduler_drains_since_maintenance = 0
 
         # ADR-030 §E.2 (slice 3, journal-first barrier acceptance): live-token
         # stash keyed by token_id. `_process_batch_aggregation_node` and
@@ -654,8 +617,83 @@ class RowProcessor:
         # crashed sink attempt) must stamp resume_attempt_offset/-checkpoint_id
         # so the re-driven sink node_state does not collide at attempt 0.
         self._resume_checkpoint_id: str | None = barrier_restore.resume_checkpoint_id if barrier_restore is not None else None
+        restore_reads = barrier_restore_reads if barrier_restore_reads is not None else execution
+        # Barrier subsystem (elspeth-e76a186916): the intake and recovery
+        # coordinators own the crash-window adoption/restore ordering (open
+        # batch -> fenced adopt -> feed memory -> evaluate trigger) behind one
+        # boundary; the processor keeps thin delegates plus the continuation
+        # seams (flush execution, coalesce fire completion, telemetry).
+        self._barrier_intake = BarrierIntakeCoordinator(
+            run_id=run_id,
+            scheduler=scheduler,
+            data_flow=data_flow,
+            execution=execution,
+            barrier_restore_reads=restore_reads,
+            aggregation_executor=self._aggregation_executor,
+            coalesce_executor=self._coalesce_executor,
+            nav=self._nav,
+            work_items=self._work_items,
+            clock=self._clock,
+            aggregation_settings=self._aggregation_settings,
+            coalesce_node_ids=self._coalesce_node_ids,
+            coordination_token=coordination_token,
+            scheduler_lease_owner=self._scheduler_lease_owner,
+            live_barrier_holds=self._live_barrier_holds,
+            resume_checkpoint_id=self._resume_checkpoint_id,
+            flush_batch=self.handle_timeout_flush,
+            complete_coalesce_fire=self._complete_coalesce_fire,
+            terminal_coalesce_row_result=self._terminal_coalesce_row_result,
+            emit_token_completed=self._emit_token_completed,
+            mark_coalesce_consumed_terminal=self._mark_coalesce_consumed_scheduler_work_terminal,
+        )
+        # Scheduler-drain subsystem (elspeth-c49f33d6e4 component 3): the
+        # coordinator owns the durable claim/drain loop, dispositions,
+        # pending-sink recovery, the active-claim heartbeat, and the
+        # maintenance cadence. It shares the live-holds dict and the
+        # branch-loss stage BY REFERENCE with the barrier subsystem and the
+        # processor-side producers, and drives token processing through this
+        # processor at call time (the traversal engine is component 4 of the
+        # same split).
+        self._scheduler_drain = SchedulerDrainCoordinator(
+            processor=self,
+            mode=mode,
+            run_id=run_id,
+            scheduler=scheduler,
+            work_codec=self._work_codec,
+            execution=execution,
+            barrier_restore_reads=restore_reads,
+            clock=self._clock,
+            run_coordination=run_coordination,
+            coordination_token=coordination_token,
+            scheduler_lease_owner=self._scheduler_lease_owner,
+            scheduler_lease_seconds=scheduler_lease_seconds,
+            scheduler_heartbeat_seconds=scheduler_heartbeat_seconds,
+            scheduler_lease_owner_registered=self._scheduler_lease_owner_registered,
+            resume_checkpoint_id=self._resume_checkpoint_id,
+            live_barrier_holds=self._live_barrier_holds,
+            pending_branch_losses=self._pending_branch_losses,
+        )
+        # Component 4 (c49): the DAG token-traversal state machine. Holds only a
+        # back-reference and resolves processor seams at call time, so tests that
+        # patch _process_single_token / _handle_transform_node on the processor
+        # still intercept traversal.
+        self._token_traversal = TokenTraversalEngine(self)
         if barrier_restore is not None:
-            self._restore_barriers_from_journal(barrier_restore)
+            if barrier_restore_reads is None:
+                raise OrchestrationInvariantError("barrier_restore_reads is required when barrier_restore is supplied")
+            BarrierRecoveryCoordinator(
+                run_id=run_id,
+                scheduler=scheduler,
+                barrier_restore_reads=barrier_restore_reads,
+                execution=execution,
+                aggregation_executor=self._aggregation_executor,
+                coalesce_executor=self._coalesce_executor,
+                clock=self._clock,
+                aggregation_settings=self._aggregation_settings,
+                coalesce_node_ids=self._coalesce_node_ids,
+                coordination_token=coordination_token,
+                scheduler_lease_owner=self._scheduler_lease_owner,
+            ).restore_from_journal(barrier_restore)
 
     @property
     def token_manager(self) -> TokenManager:
@@ -671,491 +709,6 @@ class RowProcessor:
         repository-level construction (the unfenced legacy arm).
         """
         return self._coordination_token
-
-    def _restore_barriers_from_journal(self, restore: BarrierJournalRestoreContext) -> None:
-        """Rebuild aggregation buffers and coalesce pendings from journal BLOCKED rows.
-
-        F1 resume path. The journal (token_work_items BLOCKED rows with a
-        non-NULL barrier_key) is authoritative for buffered/held token
-        payloads; counters, batch membership, hold state ids and attempt
-        offsets derive from audit tables; the checkpoint contributes only
-        the underivable scalars (``restore.barrier_scalars``).
-
-        Discipline: ALL derivations complete (and raise, if they must) before
-        any executor restore call mutates state. The coalesce restore is a
-        single all-or-nothing call (its contract — a second call would discard
-        the first); aggregation restores run per node afterwards, each
-        internally validate-before-mutate.
-
-        BLOCKED rows manufactured by the pre-epoch-20 blob-materialization
-        restore path lacked ``barrier_blocked_at``; that writer is deleted and
-        the epoch-20 delete-the-DB policy retired its rows, so the executors'
-        NULL-means-corruption assert is honest — no live DB carries them.
-
-        Raises:
-            AuditIntegrityError: On any journal/audit disagreement (orphan
-                barrier_key, missing/foreign batch ids, membership mismatch,
-                NULL barrier_blocked_at, missing hold state ...).
-        """
-        now = self._clock.now_utc()
-        # ADR-030 §E.4 belt: one run-wide duplicate-acceptance sweep at restore
-        # entry. token_outcomes has NO non-terminal uniqueness — the adoption
-        # CAS is the structural guard; >1 live BUFFERED rows for a token means
-        # a deposed leader's unfenced intake wrote a second acceptance.
-        duplicate_acceptances = self._data_flow.find_duplicate_live_buffered_outcomes(self._run_id)
-        if duplicate_acceptances:
-            details = ", ".join(f"{token_id} ({count} live BUFFERED)" for token_id, count in duplicate_acceptances)
-            raise AuditIntegrityError(
-                f"Barrier journal restore for run {self._run_id!r} (resume checkpoint "
-                f"{restore.resume_checkpoint_id!r}) found duplicate live BUFFERED acceptances: {details}. "
-                "A deposed leader's unfenced intake wrote a second acceptance — refusing silent latest-wins."
-            )
-        items = self._scheduler.list_blocked_barrier_items(run_id=self._run_id)
-        scalars = restore.barrier_scalars if restore.barrier_scalars is not None else BarrierScalars(aggregation={}, coalesce={})
-
-        # ---- Partition (design D1) ----------------------------------------
-        # A BLOCKED row's barrier KIND is decided by its barrier_key ONLY:
-        # barrier_key == coalesce_name        -> coalesce barrier
-        # barrier_key == str(aggregation node_id) -> aggregation barrier
-        # NEVER partition on node_id (a BLOCKED row's node_id is the
-        # enqueue-time cursor, not the barrier owner) and NEVER on
-        # coalesce_name (aggregation rows may carry non-NULL coalesce_name
-        # LINEAGE for tokens that will coalesce after the flush).
-        coalesce_keys: set[str] = {str(name) for name in self._coalesce_node_ids}
-        aggregation_keys: set[str] = {str(node_id) for node_id in self._aggregation_settings}
-        ambiguous = coalesce_keys & aggregation_keys
-        if ambiguous:
-            raise OrchestrationInvariantError(
-                f"Barrier-key namespace collision between coalesce names and aggregation node ids: {sorted(ambiguous)}. "
-                "The journal restore partition cannot disambiguate BLOCKED rows for these keys."
-            )
-
-        agg_items_by_node: dict[NodeID, list[TokenWorkItem]] = {}
-        coalesce_items: list[TokenWorkItem] = []
-        intake_pending_count = 0
-        for item in items:
-            if item.barrier_key is None:  # pragma: no cover - excluded by the query contract
-                raise AuditIntegrityError(
-                    f"list_blocked_barrier_items returned a row without barrier_key "
-                    f"(work_item_id={item.work_item_id!r}, run {self._run_id!r})."
-                )
-            if item.barrier_key not in coalesce_keys and item.barrier_key not in aggregation_keys:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {restore.resume_checkpoint_id!r}) carries orphan barrier_key "
-                    f"{item.barrier_key!r}: not a configured coalesce ({sorted(coalesce_keys)}) "
-                    f"or aggregation node ({sorted(aggregation_keys)}). The journal references a "
-                    "barrier this pipeline no longer has — refusing to resume."
-                )
-            if item.barrier_adopted_epoch is None:
-                # ADR-030 §E.2/§E.4: an intake-pending row was deposited but
-                # never adopted (crash between mark_blocked and adoption, or a
-                # mid-adoption rollback). It has NO batch_members/BUFFERED
-                # rows and NO executor memory to restore — the legitimate
-                # disposition is the next drain iteration's journal-first
-                # intake, which adopts it under THIS leader's epoch.
-                intake_pending_count += 1
-                continue
-            if item.barrier_key in coalesce_keys:
-                coalesce_items.append(item)
-            else:
-                agg_items_by_node.setdefault(NodeID(item.barrier_key), []).append(item)
-        if intake_pending_count:
-            logger.info(
-                "barrier journal restore: %d intake-pending BLOCKED row(s) left for the journal-first intake (run %s)",
-                intake_pending_count,
-                self._run_id,
-            )
-        # Adopted rows only from here down: derivations (attempt offsets,
-        # batch ids, hold state ids) cover restored memory, not intake-pending
-        # rows.
-        items = [*coalesce_items, *(item for node_items in agg_items_by_node.values() for item in node_items)]
-        if coalesce_items and self._coalesce_executor is None:
-            raise OrchestrationInvariantError(
-                f"Journal has {len(coalesce_items)} BLOCKED coalesce rows but no CoalesceExecutor is configured."
-            )
-
-        # ---- Audit derivations (no mutation yet) ---------------------------
-        # Attempt offsets: max node_states attempt per journal token, + 1.
-        # Derived here with ONE focused query rather than plumbed from
-        # recovery's incomplete_by_row map: that map's exclusion set reads
-        # journal BLOCKED rows (so the resume loop does not re-drive blocked
-        # tokens), which excludes exactly the tokens this restore needs
-        # offsets for.
-        token_ids = [item.token_id for item in items]
-        max_attempts = self._execution.get_max_node_state_attempts(self._run_id, token_ids) if token_ids else {}
-        attempt_offsets: dict[str, int] = {
-            token_id: (max_attempts[token_id] if token_id in max_attempts else -1) + 1 for token_id in token_ids
-        }
-
-        # Per-node batch metadata for every configured aggregation node.
-        agg_plans: list[_AggregationRestorePlan] = []
-        if self._aggregation_settings:
-            members_by_batch: dict[str, list[str]] = {}
-            for member in self._execution.get_all_batch_members_for_run(self._run_id):
-                members_by_batch.setdefault(member.batch_id, []).append(member.token_id)
-            batches_by_node: dict[str, list[Batch]] = {}
-            for batch in self._execution.get_batches(self._run_id):
-                batches_by_node.setdefault(str(batch.aggregation_node_id), []).append(batch)
-
-            for node_id in sorted(self._aggregation_settings, key=str):
-                node_items = agg_items_by_node[node_id] if node_id in agg_items_by_node else []
-                # Reconciliation join (configured nodes against audit batches): a
-                # configured node with no batches yet (batches are created
-                # lazily on first row arrival) legitimately has zero rows, so
-                # absence is an empty bucket, not Tier-1 corruption.
-                node_batches = batches_by_node[str(node_id)] if str(node_id) in batches_by_node else []
-                # COUNT(DISTINCT token_id), not raw COUNT: retry_batch COPIES
-                # members into the retry batch, and handle_incomplete_batches
-                # runs BEFORE this derivation on resume — a raw count would
-                # double-count every member of a retried batch.
-                accepted_count_total = len(
-                    {
-                        member_token
-                        for node_batch in node_batches
-                        for member_token in (members_by_batch[node_batch.batch_id] if node_batch.batch_id in members_by_batch else ())
-                    }
-                )
-                completed_flush_count = sum(1 for node_batch in node_batches if node_batch.status is BatchStatus.COMPLETED)
-                node_scalars = (
-                    scalars.aggregation[str(node_id)] if str(node_id) in scalars.aggregation else AggregationNodeScalars(None, None)
-                )
-                # ---- ADR-030 §E.3a aggregation reconcile (elspeth-55546a6fd6) ---
-                # A FAILED out-of-claim flush records terminal FAILURE/UNROUTED
-                # token_outcomes for every buffered token (_handle_flush_error)
-                # and THEN releases their BLOCKED scheduler rows in a SEPARATE
-                # transaction (_mark_buffered_scheduler_work_terminal). A crash
-                # between the two strands durable BLOCKED rows whose tokens are
-                # already terminally failed: they carry NO live BUFFERED outcome,
-                # so _derive_restored_batch_id below would refuse loudly and
-                # brick EVERY resume attempt. Mirror the coalesce §E.3a holdless
-                # path: the tokens are done — journal-release their orphaned
-                # BLOCKED rows here (under this leader's coordination token) and
-                # drop them from the restore set so the deriver sees only live
-                # tokens. A fully-reconciled node then falls through to the
-                # counter-only branch below ("flushes all FAILED" — exactly the
-                # state that branch already anticipates).
-                #
-                # Scoped to (FAILURE, UNROUTED): the success-path BATCH_CONSUMED
-                # crash residual (elspeth-3977d8ab60) still owes a sink output
-                # and is NOT swept here — it keeps hitting the loud refusal.
-                if node_items:
-                    failed_terminal_ids = self._data_flow.get_failed_unrouted_terminal_token_ids(
-                        self._run_id, [item.token_id for item in node_items]
-                    )
-                    if failed_terminal_ids:
-                        reconciled = [item for item in node_items if item.token_id in failed_terminal_ids]
-                        released = self._scheduler.mark_blocked_barrier_terminal(
-                            run_id=self._run_id,
-                            barrier_key=str(node_id),
-                            token_ids=tuple(item.token_id for item in reconciled),
-                            now=now,
-                            coordination_token=self._coordination_token,
-                            release_context={
-                                "reason": "failed_flush_crash_reconcile",
-                                "released_by": self._scheduler_lease_owner,
-                                "restore_reconcile": True,
-                            },
-                        )
-                        if released != len(reconciled):
-                            raise AuditIntegrityError(
-                                f"Restore §E.3a aggregation reconcile: FAILED-flush release at aggregation node "
-                                f"{node_id!r} (run {self._run_id!r}, resume checkpoint {restore.resume_checkpoint_id!r}) "
-                                f"terminalized {released} rows; expected exactly {len(reconciled)} orphaned "
-                                "terminally-failed BLOCKED row(s)."
-                            )
-                        logger.info(
-                            "barrier journal restore: §E.3a aggregation reconcile released %d orphaned BLOCKED row(s) "
-                            "with terminal FAILURE/UNROUTED outcomes at node %s (run %s)",
-                            len(reconciled),
-                            node_id,
-                            self._run_id,
-                        )
-                        node_items = [item for item in node_items if item.token_id not in failed_terminal_ids]
-                if node_items:
-                    batch_id = self._derive_restored_batch_id(node_id, node_items, restore)
-                    agg_plans.append(
-                        _AggregationRestorePlan(
-                            node_id=node_id,
-                            items=node_items,
-                            member_order=(members_by_batch[batch_id] if batch_id in members_by_batch else []),
-                            batch_id=batch_id,
-                            accepted_count_total=accepted_count_total,
-                            completed_flush_count=completed_flush_count,
-                            scalars=node_scalars,
-                        )
-                    )
-                elif completed_flush_count > 0 or accepted_count_total > 0 or str(node_id) in scalars.aggregation:
-                    # Counter-only node: nothing buffered, but the audit trail
-                    # shows prior activity — completed flushes, accepted rows
-                    # (a node whose flushes all FAILED has accepted > 0 with
-                    # zero COMPLETED batches and an empty buffer), or a stale
-                    # scalars entry. Restore the derived counters so post-flush
-                    # pagination metadata survives the resume.
-                    agg_plans.append(
-                        _AggregationRestorePlan(
-                            node_id=node_id,
-                            items=[],
-                            member_order=[],
-                            batch_id=None,
-                            accepted_count_total=accepted_count_total,
-                            completed_flush_count=completed_flush_count,
-                            scalars=node_scalars,
-                        )
-                    )
-
-        # Coalesce hold state ids: the OPEN node_state written at accept()
-        # time at the coalesce node (the executor calls it the PENDING hold).
-        coalesce_state_ids: Mapping[str, str] = {}
-        if coalesce_items:
-            coalesce_state_ids = self._execution.get_open_node_state_ids(
-                self._run_id,
-                node_ids=[str(node_id) for node_id in self._coalesce_node_ids.values()],
-                token_ids=[item.token_id for item in coalesce_items],
-            )
-
-        # ---- ADR-030 §E.3a/§E.4 crash-window reconcile (findings 1 & 3) -----
-        # Adopted coalesce rows with no OPEN state_id are in a crash window:
-        # the adoption CAS committed (barrier_adopted_epoch non-NULL) but
-        # accept() never wrote the PENDING hold node_state (the leader died
-        # between steps 1 and 2 of _intake_adopt_coalesce_row).
-        #
-        # Two sub-cases, identified by whether the row's (coalesce_name, row_id)
-        # key is Landscape-completed:
-        #
-        # a. Key completed (late-arrival crash §E.3a): the group already
-        #    resolved; journal-release the row here at restore exactly like the
-        #    live §E.3a path (mark_blocked_barrier_terminal with late_arrival
-        #    context), using the new leader's coordination token.
-        #
-        # b. Key NOT completed (normal adoption crash §E.3): accept() never ran
-        #    — re-run it after restore_from_journal populates executor state,
-        #    writing the missing hold node_state under a fresh attempt offset.
-        #    The row was already adopted, so the intake IS-NULL filter won't
-        #    pick it up; this post-restore accept is the only recovery path.
-        #
-        # This replaces the old hard-refusal in restore_from_journal's
-        # state_ids check, which fired on both reachable crash states.
-        coalesce_holdless_items: list[TokenWorkItem] = []
-        if coalesce_items:
-            holdless = [item for item in coalesce_items if item.token_id not in coalesce_state_ids]
-            if holdless:
-                # Resolve the Landscape completed set once for all holdless rows.
-                node_id_to_coalesce_name: dict[str, str] = {str(nid): str(name) for name, nid in self._coalesce_node_ids.items()}
-                completed_pairs = self._execution.get_completed_row_ids_for_nodes(
-                    self._run_id,
-                    frozenset(node_id_to_coalesce_name.keys()),
-                )
-                completed_keys_set: frozenset[tuple[str, str]] = frozenset(
-                    (node_id_to_coalesce_name[node_id_str], row_id)
-                    for node_id_str, row_id in completed_pairs
-                    if node_id_str in node_id_to_coalesce_name
-                )
-                for item in holdless:
-                    coalesce_name_str = item.coalesce_name or item.barrier_key
-                    key = (str(coalesce_name_str), item.row_id)
-                    if key in completed_keys_set:
-                        # §E.3a at restore: adopted-but-unreleased late row
-                        # against a completed key — journal-release it now.
-                        released = self._scheduler.mark_blocked_barrier_terminal(
-                            run_id=self._run_id,
-                            barrier_key=str(coalesce_name_str),
-                            token_ids=(item.token_id,),
-                            now=now,
-                            coordination_token=self._coordination_token,
-                            release_context={
-                                "late_arrival": True,
-                                "reason": "late_arrival_after_merge",
-                                "released_by": self._scheduler_lease_owner,
-                                "scope_row_id": item.row_id,
-                                "restore_reconcile": True,
-                            },
-                        )
-                        if released != 1:
-                            raise AuditIntegrityError(
-                                f"Restore §E.3a reconcile: late-arrival release for token {item.token_id!r} "
-                                f"at coalesce {coalesce_name_str!r} (run {self._run_id!r}) terminalized "
-                                f"{released} rows; expected exactly one."
-                            )
-                        logger.info(
-                            "barrier journal restore: §E.3a reconcile released adopted-holdless late-arrival "
-                            "token %s at coalesce %s/%s (run %s)",
-                            item.token_id,
-                            coalesce_name_str,
-                            item.row_id,
-                            self._run_id,
-                        )
-                    else:
-                        # Normal adoption crash: accept() never ran — collect for
-                        # post-restore accept (after restore_from_journal populates
-                        # completed_keys so the executor can do late-arrival detection).
-                        coalesce_holdless_items.append(item)
-                # Remove ALL holdless items from the restore list; reconciled ones
-                # are journal-released above, deferred ones handled post-restore.
-                coalesce_items = [item for item in coalesce_items if item.token_id in coalesce_state_ids]
-
-        # §E.5/§E.4: the durable coalesce_branch_losses ledger is the restore
-        # source of truth for lost_branches across takeover; the D3 checkpoint
-        # scalar is retained as a cross-check only (union, table wins on a
-        # reason disagreement — the first durable record may already have
-        # fired a must-fail policy).
-        effective_coalesce_scalars: dict[tuple[str, str], CoalescePendingScalars] = dict(scalars.coalesce)
-        if self._coalesce_executor is not None:
-            for loss in self._scheduler.list_coalesce_branch_losses(run_id=self._run_id):
-                key = (loss.coalesce_name, loss.row_id)
-                existing = effective_coalesce_scalars[key] if key in effective_coalesce_scalars else None
-                lost_branches = dict(existing.lost_branches) if existing is not None else {}
-                checkpoint_reason = lost_branches[loss.branch_name] if loss.branch_name in lost_branches else None
-                if checkpoint_reason is not None and checkpoint_reason != loss.reason:
-                    logger.warning(
-                        "coalesce restore: checkpoint lost-branch reason %r for %s/%s/%s disagrees with the durable "
-                        "loss ledger %r; the ledger wins",
-                        checkpoint_reason,
-                        loss.coalesce_name,
-                        loss.row_id,
-                        loss.branch_name,
-                        loss.reason,
-                    )
-                lost_branches[loss.branch_name] = loss.reason
-                effective_coalesce_scalars[key] = CoalescePendingScalars(lost_branches=lost_branches)
-
-        # ---- Mutate ---------------------------------------------------------
-        # Coalesce first: ONE call for the whole executor (a second call would
-        # discard this one — see CoalesceExecutor.restore_from_journal's caller
-        # obligations). Called whenever a coalesce executor exists so completed
-        # keys are reconstructed from the Landscape even with nothing pending,
-        # and stale lost-branch scalars are dropped-with-log.
-        if self._coalesce_executor is not None:
-            # ---- §E.3 crash-window recovery: reset holdless non-completed rows ---
-            # Adopted BLOCKED coalesce rows with no OPEN state_id whose key is NOT
-            # completed are in the crash window between adopt_blocked_barrier_item
-            # commit and CoalesceExecutor.accept() — accept() never wrote the hold.
-            # Resetting barrier_adopted_epoch to NULL re-classifies them as
-            # intake-pending: the first drain iteration's journal-first intake adopts
-            # them afresh and runs the full accept + trigger path (merge, failure,
-            # late-arrival), which the restore phase cannot safely produce (accept()
-            # may fire a merge whose RowResult the __init__ path cannot commit to the
-            # journal).  This reset is safe because the takeover CAS has already
-            # committed — the old leader cannot concurrently re-adopt these rows.
-            if coalesce_holdless_items:
-                reset_count = self._scheduler.reset_adoption_marker_to_pending(
-                    work_item_ids=[item.work_item_id for item in coalesce_holdless_items],
-                    run_id=self._run_id,
-                )
-                if reset_count != len(coalesce_holdless_items):
-                    logger.warning(
-                        "barrier journal restore: §E.3 crash-window reset expected %d rows but "
-                        "reset %d (run %s); the intake will re-classify any missed rows",
-                        len(coalesce_holdless_items),
-                        reset_count,
-                        self._run_id,
-                    )
-                else:
-                    logger.info(
-                        "barrier journal restore: §E.3 crash-window reset %d holdless-non-completed "
-                        "BLOCKED coalesce row(s) to intake-pending (run %s)",
-                        reset_count,
-                        self._run_id,
-                    )
-            self._coalesce_executor.restore_from_journal(
-                items=coalesce_items,
-                scalars=effective_coalesce_scalars,
-                state_ids=coalesce_state_ids,
-                attempt_offsets=attempt_offsets,
-                resume_checkpoint_id=restore.resume_checkpoint_id,
-                now=now,
-            )
-
-        for plan in agg_plans:
-            self._aggregation_executor.restore_from_journal(
-                node_id=plan.node_id,
-                items=plan.items,
-                member_order=plan.member_order,
-                batch_id=plan.batch_id,
-                accepted_count_total=plan.accepted_count_total,
-                completed_flush_count=plan.completed_flush_count,
-                scalars=plan.scalars,
-                attempt_offsets=attempt_offsets,
-                resume_checkpoint_id=restore.resume_checkpoint_id,
-                now=now,
-            )
-
-    def _derive_restored_batch_id(
-        self,
-        node_id: NodeID,
-        node_items: Sequence[TokenWorkItem],
-        restore: BarrierJournalRestoreContext,
-    ) -> str:
-        """Resolve the in-progress batch id for one aggregation node's BLOCKED rows.
-
-        Source of truth: each buffered token's BUFFERED token_outcome carries
-        the batch_id it was accepted into (written by the fenced adoption
-        verb since ADR-030 §E.2), read through the
-        ``handle_incomplete_batches`` old->retry remap because the audit
-        outcomes still reference the dead original batch when a crash
-        interrupted a flush.
-
-        Raises:
-            AuditIntegrityError: If any token lacks a BUFFERED outcome with a
-                batch_id, the group's tokens disagree on the (remapped)
-                batch_id, the batch row is missing, or the batch belongs to a
-                different aggregation node.
-        """
-        batch_id: str | None = None
-        first_token_id: str | None = None
-        for item in node_items:
-            live_buffered = self._data_flow.get_live_buffered_outcomes(TokenRef(token_id=item.token_id, run_id=self._run_id))
-            if len(live_buffered) > 1:
-                # ADR-030 §C.4 row 6a / §E.4: token_outcomes has no non-terminal
-                # uniqueness; >1 live BUFFERED rows means a deposed leader's
-                # unfenced intake wrote a second acceptance. Refuse loudly —
-                # never the historical silent latest-wins.
-                duplicates = "; ".join(
-                    f"outcome_id={o.outcome_id!r} batch_id={o.batch_id!r} "
-                    f"recorded_at={o.recorded_at.isoformat()} context={o.context_json!r}"
-                    for o in live_buffered
-                )
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at aggregation node {node_id!r} "
-                    f"(run {self._run_id!r}, resume checkpoint {restore.resume_checkpoint_id!r}) has "
-                    f"{len(live_buffered)} live BUFFERED token_outcomes — duplicate acceptances; a deposed "
-                    "leader's unfenced intake wrote a second acceptance; refusing silent latest-wins. "
-                    f"{duplicates}"
-                )
-            outcome = live_buffered[0] if live_buffered else None
-            if outcome is None or outcome.batch_id is None:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at aggregation node {node_id!r} "
-                    f"(run {self._run_id!r}, resume checkpoint {restore.resume_checkpoint_id!r}) has no "
-                    f"matching BUFFERED token_outcome with a batch_id (got {outcome!r}) — the journal "
-                    "and the audit trail disagree about this token being buffered."
-                )
-            resolved = restore.batch_id_remap.get(outcome.batch_id, outcome.batch_id)
-            if batch_id is None:
-                batch_id = resolved
-                first_token_id = item.token_id
-            elif resolved != batch_id:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal rows at aggregation node {node_id!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {restore.resume_checkpoint_id!r}) split across batches: token "
-                    f"{first_token_id!r} resolves batch_id={batch_id!r} but token {item.token_id!r} "
-                    f"resolves batch_id={resolved!r}. One node has exactly one in-progress batch."
-                )
-        if batch_id is None:  # pragma: no cover - callers pass non-empty node_items
-            raise AuditIntegrityError(f"_derive_restored_batch_id called with no journal rows for node {node_id!r}.")
-        batch = self._execution.get_batch(batch_id)
-        if batch is None:
-            raise AuditIntegrityError(
-                f"Restored batch_id {batch_id!r} for aggregation node {node_id!r} (run {self._run_id!r}) "
-                "has no batches row — audit data corruption."
-            )
-        if str(batch.aggregation_node_id) != str(node_id):
-            raise AuditIntegrityError(
-                f"Restored batch_id {batch_id!r} belongs to aggregation node "
-                f"{batch.aggregation_node_id!r}, but the journal BLOCKED rows carry barrier_key "
-                f"{str(node_id)!r} (run {self._run_id!r}) — journal/audit disagreement."
-            )
-        return batch_id
 
     @property
     def run_id(self) -> str:
@@ -1529,17 +1082,6 @@ class RowProcessor:
         transform_node_id_str = str(fctx.node_id)
 
         try:
-            verify_zero_emission_declaration_path(
-                plugin=fctx.transform,
-                plugin_name=fctx.transform.name,
-                node_id=transform_node_id_str,
-                run_id=self._run_id,
-                row_id=identity_token.row_id,
-                token_id=identity_token.token_id,
-                emitted_count=len(emitted),
-                used_success_empty=used_success_empty,
-            )
-
             # _FlushContext.__post_init__ guarantees buffered_tokens is non-empty;
             # no defensive emptiness guard (CLAUDE.md: defensive programming
             # forbidden for internal paths).
@@ -1582,7 +1124,10 @@ class RowProcessor:
                                 static_contract=static_contract,
                                 effective_input_fields=token_fields,
                             ),
-                            outputs=BatchFlushOutputs(emitted_rows=(emitted_row,)),
+                            outputs=BatchFlushOutputs(
+                                emitted_rows=(emitted_row,),
+                                used_success_empty=used_success_empty,
+                            ),
                         )
                 elif len(emitted) == 0:
                     # Zero-emission success has no 1:1 pairing witness, but the
@@ -1602,7 +1147,10 @@ class RowProcessor:
                             static_contract=static_contract,
                             effective_input_fields=input_fields,
                         ),
-                        outputs=BatchFlushOutputs(emitted_rows=()),
+                        outputs=BatchFlushOutputs(
+                            emitted_rows=(),
+                            used_success_empty=used_success_empty,
+                        ),
                     )
                 else:
                     # Count mismatch is ``_route_passthrough_results``'s
@@ -1628,7 +1176,10 @@ class RowProcessor:
                         static_contract=static_contract,
                         effective_input_fields=input_fields,
                     ),
-                    outputs=BatchFlushOutputs(emitted_rows=tuple(emitted)),
+                    outputs=BatchFlushOutputs(
+                        emitted_rows=tuple(emitted),
+                        used_success_empty=used_success_empty,
+                    ),
                 )
         except PluginContractViolation as violation:
             self._record_flush_violation(fctx, violation)
@@ -1842,7 +1393,7 @@ class RowProcessor:
             for token, enriched_data in zip(fctx.buffered_tokens, pipeline_rows, strict=True):
                 updated_token = token.with_updated_data(enriched_data)
                 child_items.append(
-                    self._nav.create_continuation_work_item(
+                    self._work_items.create_continuation(
                         token=updated_token,
                         current_node_id=fctx.node_id,
                         coalesce_name=work_item_coalesce_name,
@@ -2018,7 +1569,7 @@ class RowProcessor:
                 work_item_coalesce_name = fctx.coalesce_name if needs_coalesce else None
                 for token in expanded_tokens:
                     child_items.append(
-                        self._nav.create_continuation_work_item(
+                        self._work_items.create_continuation(
                             token=token,
                             current_node_id=fctx.node_id,
                             coalesce_name=work_item_coalesce_name,
@@ -2206,6 +1757,7 @@ class RowProcessor:
         ctx: Any,
         reason: TransformErrorCategory,
         *,
+        state_id: str | None,
         retryable: bool = True,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Convert a retryable exception to a TransformResult.error when no retry manager is configured.
@@ -2214,6 +1766,13 @@ class RowProcessor:
         (ConnectionError, TimeoutError, OSError, CapacityError). Records the
         error in the audit trail and emits a DIVERT routing event if on_error
         routes to a sink.
+
+        ``state_id`` is the failed attempt's node-state id, carried out of the
+        executor on the exception via NodeStateGuard's stamp (ctx.state_id is
+        scope-restored during unwind and must not be read here). None is only
+        possible when no attempt ever opened a node state (e.g. shutdown
+        before the first retry attempt); record_transform_error_with_routing
+        rejects None for named sinks.
         """
         on_error = transform.on_error
         # on_error is always set (required by TransformSettings) — Tier 1 invariant
@@ -2222,34 +1781,23 @@ class RowProcessor:
                 f"Transform '{transform.name}' has on_error=None — this should be impossible since TransformSettings requires on_error"
             )
 
-        error_details: TransformErrorReason = {"reason": reason, "error": str(exc)}
-        ctx.record_transform_error(
-            token_id=token.token_id,
-            transform_id=transform.node_id,
+        error_details: TransformErrorReason = {"reason": reason, "error": scrub_text_for_audit(str(exc))}
+        # Shared error-audit routine (elspeth-aeb0a8f756): identical
+        # transform_error + DIVERT routing_event recording as the executor's
+        # error-result branch. Here the guard already auto-failed the state on
+        # exception exit, so recording happens after completion by design —
+        # the helper is sequencing-agnostic.
+        record_transform_error_with_routing(
+            ctx=ctx,
+            execution=self._execution,
+            error_edge_ids=self._error_edge_ids,
+            state_id=state_id,
+            token=token,
+            transform=transform,
             row=token.row_data,
             error_details=error_details,
-            destination=on_error,
+            on_error=on_error,
         )
-
-        # Record DIVERT routing_event using ctx.state_id (set by
-        # TransformExecutor.execute_transform before the exception propagated).
-        if on_error != "discard":
-            try:
-                error_edge_id = self._error_edge_ids[NodeID(transform.node_id)]
-            except KeyError as key_err:
-                raise OrchestrationInvariantError(
-                    f"Transform '{transform.node_id}' has on_error={on_error!r} but no DIVERT edge registered."
-                ) from key_err
-            if ctx.state_id is None:
-                raise OrchestrationInvariantError(
-                    f"ctx.state_id must be set by TransformExecutor before exception propagated (transform={transform.node_id})"
-                )
-            self._execution.record_routing_event(
-                state_id=ctx.state_id,
-                edge_id=error_edge_id,
-                mode=RoutingMode.DIVERT,
-                reason=error_details,
-            )
 
         return (
             TransformResult.error(error_details, retryable=retryable),
@@ -2307,6 +1855,7 @@ class RowProcessor:
                     token,
                     ctx,
                     reason="shutdown_requested",
+                    state_id=stamped_node_state_id(e),
                     retryable=False,
                 )
             except PluginRetryableError as e:
@@ -2316,6 +1865,7 @@ class RowProcessor:
                     token,
                     ctx,
                     reason="transient_error_no_retry" if e.retryable else "permanent_error",
+                    state_id=stamped_node_state_id(e),
                 )
             except (ConnectionError, TimeoutError, OSError, CapacityError) as e:
                 return self._convert_retryable_to_error_result(
@@ -2324,20 +1874,32 @@ class RowProcessor:
                     token,
                     ctx,
                     reason="transient_error_no_retry",
+                    state_id=stamped_node_state_id(e),
                 )
 
-        # Track attempt number for audit
+        # Track attempt number for audit; track the last failed attempt's
+        # node-state id so a shutdown InterruptedError raised INSIDE the
+        # RetryManager (pre-attempt check or backoff wait — never crosses a
+        # NodeStateGuard, so it carries no stamp) can still attribute its
+        # DIVERT routing_event to the state that actually failed.
         attempt_tracker = {"current": attempt_offset}
+        state_tracker: dict[str, str | None] = {"last_failed_state_id": None}
 
         def execute_attempt() -> tuple[TransformResult, TokenInfo, str | None]:
             attempt = attempt_tracker["current"]
             attempt_tracker["current"] += 1
-            return self._transform_executor.execute_transform(
-                transform=transform,
-                token=token,
-                ctx=ctx,
-                attempt=attempt,
-            )
+            try:
+                return self._transform_executor.execute_transform(
+                    transform=transform,
+                    token=token,
+                    ctx=ctx,
+                    attempt=attempt,
+                )
+            except BaseException as e:
+                stamped = stamped_node_state_id(e)
+                if stamped is not None:
+                    state_tracker["last_failed_state_id"] = stamped
+                raise
 
         def is_retryable(e: BaseException) -> bool:
             if isinstance(e, InterruptedError):
@@ -2359,6 +1921,10 @@ class RowProcessor:
                 token,
                 ctx,
                 reason="shutdown_requested",
+                # Stamped when the shutdown fired inside execute_transform
+                # (batch waiter); otherwise the RetryManager raised it and the
+                # last failed attempt's state is the divert attribution point.
+                state_id=stamped_node_state_id(e) or state_tracker["last_failed_state_id"],
                 retryable=False,
             )
 
@@ -2574,7 +2140,7 @@ class RowProcessor:
         initial_node_id = self._node_to_next[source_node_id]
         if transforms and initial_node_id == source_node_id:
             raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
-        return self._nav.create_work_item(
+        return self._work_items.create(
             token=token,
             current_node_id=initial_node_id,
             coalesce_node_id=coalesce_node_id,
@@ -2596,9 +2162,11 @@ class RowProcessor:
 
         Composes the rows+tokens inserts (via the data-flow repository's
         connection-accepting closure) with the initial enqueue-and-claim in
-        ONE epoch-fenced IMMEDIATE transaction. Field derivation mirrors
-        ``_enqueue_scheduler_work_item`` exactly (deterministic
-        work_item_id + strict field equality reconciliation downstream).
+        ONE epoch-fenced IMMEDIATE transaction. Scheduler fields come from
+        the shared work codec (deterministic work_item_id + strict field
+        equality reconciliation downstream); ``ingest_sequence`` is passed
+        explicitly because the row is inserted in this same transaction and
+        is not yet resolvable.
         """
         coordination_token = self._coordination_token
         if coordination_token is None:
@@ -2607,6 +2175,7 @@ class RowProcessor:
             )
         token = item.token
         now = self._clock.now_utc()
+        fields = self._work_codec.ready_fields(item, ingest_sequence=ingest_sequence)
 
         def insert_row_and_token(conn: Connection) -> tuple[AuditRow, AuditToken]:
             return self._data_flow.insert_row_with_token_on(
@@ -2625,23 +2194,23 @@ class RowProcessor:
             coordination_token=coordination_token,
             now=now,
             insert_row_and_token=insert_row_and_token,
-            token_id=token.token_id,
-            row_id=token.row_id,
-            node_id=self._scheduler_node_id(item.current_node_id),
-            step_index=self._scheduler_step_index(item.current_node_id),
-            ingest_sequence=ingest_sequence,
-            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
+            token_id=fields.token_id,
+            row_id=fields.row_id,
+            node_id=fields.node_id,
+            step_index=fields.step_index,
+            ingest_sequence=fields.ingest_sequence,
+            row_payload_json=fields.row_payload_json,
             lease_owner=self._scheduler_lease_owner,
             lease_seconds=self._scheduler_lease_seconds,
-            queue_key=self._queue_key_for_blocked_item(item),
-            barrier_key=self._barrier_key_for_blocked_item(item),
-            on_success_sink=item.on_success_sink,
-            branch_name=token.branch_name,
-            fork_group_id=token.fork_group_id,
-            join_group_id=token.join_group_id,
-            expand_group_id=token.expand_group_id,
-            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
-            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
+            queue_key=fields.queue_key,
+            barrier_key=fields.barrier_key,
+            on_success_sink=fields.on_success_sink,
+            branch_name=fields.branch_name,
+            fork_group_id=fields.fork_group_id,
+            join_group_id=fields.join_group_id,
+            expand_group_id=fields.expand_group_id,
+            coalesce_node_id=fields.coalesce_node_id,
+            coalesce_name=fields.coalesce_name,
         )
         return scheduled
 
@@ -2901,7 +2470,7 @@ class RowProcessor:
         coalesce merges that must continue processing, and for resume of fork→sink tokens.
         """
         return self._drain_work_queue(
-            self._nav.create_work_item(
+            self._work_items.create(
                 token=token,
                 current_node_id=current_node_id,
                 coalesce_node_id=coalesce_node_id,
@@ -2953,14 +2522,14 @@ class RowProcessor:
         the bumped attempt and stamped with provenance (ADDENDUM 4 — carried on the token,
         NOT passed as params to process_token).
 
-        Dispatch cases (branch_name checked first to avoid confusing a fork→coalesce
-        before-barrier token with a post-coalesce merged token that also has join_group_id):
+        Dispatch cases (expand_group_id checked first because expanded children inherit
+        their parent's branch_name; their persisted step still identifies the expand node):
 
-        1. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
+        1. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
+        2. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
            (process_token's None-path routes via branch_to_sink to the terminal sink).
-        2. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
+        3. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
            re-run the branch from its first processing node with coalesce context.
-        3. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
         4. post-coalesce merged token, crashed after barrier (B1 review finding): join_group_id
            set AND fork_group_id None AND branch_name None →
            - Non-terminal coalesce (next node exists): process_token from node after coalesce.
@@ -2986,6 +2555,15 @@ class RowProcessor:
         )
         branch = spec.branch_name
 
+        if spec.expand_group_id is not None:
+            # expand child: re-drive from the node AFTER the expand node.
+            # Expanded children inherit branch_name from fork branches, including
+            # coalesce-bound branches, so this must run before branch dispatch.
+            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
+            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
+            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
+            return self.process_token(token, ctx, current_node_id=after)
+
         if branch is not None and BranchName(branch) in self._branch_to_sink:
             # fork → sink terminal branch: straight to the sink via None-path routing.
             return self.process_token(token, ctx, current_node_id=None)
@@ -3001,13 +2579,6 @@ class RowProcessor:
                 current_node_id=first_node,
                 coalesce_name=coalesce_name,
             )
-
-        if spec.expand_group_id is not None:
-            # expand child: re-drive from the node AFTER the expand node.
-            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
-            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
-            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
-            return self.process_token(token, ctx, current_node_id=after)
 
         if spec.join_group_id is not None and spec.fork_group_id is None and branch is None:
             # post-coalesce merged token, crashed AFTER the barrier (B1 review finding):
@@ -3188,7 +2759,7 @@ class RowProcessor:
             # Non-terminal — consume held siblings and emit the merged child's
             # READY continuation in ONE atomic journal transition (F1/D6),
             # then resume the merged token at the coalesce step.
-            merged_item = self._nav.create_work_item(
+            merged_item = self._work_items.create(
                 token=outcome.merged_token,
                 current_node_id=coalesce_node_id,
             )
@@ -3333,7 +2904,7 @@ class RowProcessor:
         to READY within the liveness window instead of waiting out the full item
         lease TTL.  Returns the number of leases recovered this pass.
         """
-        return self._run_scheduler_maintenance(self._clock.now_utc())
+        return self._scheduler_drain.run_maintenance(self._clock.now_utc())
 
     def active_scheduled_row_ids(self) -> frozenset[str]:
         """Return row IDs currently represented by active scheduler work."""
@@ -3438,11 +3009,11 @@ class RowProcessor:
         return BarrierEmission(
             token_id=token.token_id,
             row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
-            sink_name=self._require_scheduler_sink_name(result),
-            outcome=self._require_scheduler_outcome(result).value,
+            sink_name=require_scheduler_sink_name(result),
+            outcome=require_scheduler_outcome(result).value,
             path=result.path.value,
-            error_hash=self._scheduler_error_hash(result),
-            error_message=self._scheduler_error_message(result),
+            error_hash=scheduler_error_hash(result),
+            error_message=scheduler_error_message(result),
             row_id=token.row_id,
             node_id=None,
             step_index=self._scheduler_step_index(None),
@@ -3499,7 +3070,7 @@ class RowProcessor:
         emitted_token_ids: set[str] = set()
         for result in results:
             token_id = result.token.token_id
-            if not self._is_scheduler_sink_bound_result(result):
+            if not is_scheduler_sink_bound_result(result):
                 continue
             if token_id in emitted_token_ids:
                 raise AuditIntegrityError(
@@ -3532,37 +3103,9 @@ class RowProcessor:
         pending_sink_token_ids = frozenset(emitted_token_ids)
         tagged_results = cast(
             tuple[RowResult, ...],
-            self._with_scheduler_pending_sink_handoffs(results, pending_sink_token_ids),
+            with_scheduler_pending_sink_handoffs(results, pending_sink_token_ids),
         )
         return tagged_results, pending_sink_token_ids
-
-    def _ready_emission_from_work_item(self, item: WorkItem) -> BarrierEmission:
-        """Build the READY continuation emission for a merged-coalesce work item.
-
-        Field derivation MUST mirror ``_enqueue_scheduler_work_item`` exactly:
-        the drain loop (or ``_drain_work_queue``'s initial claim) later runs
-        the idempotent enqueue for the same WorkItem, which reconciles against
-        the row inserted here by deterministic ``work_item_id`` and strict
-        field equality.
-        """
-        token = item.token
-        return BarrierEmission(
-            token_id=token.token_id,
-            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
-            row_id=token.row_id,
-            node_id=self._scheduler_node_id(item.current_node_id),
-            step_index=self._scheduler_step_index(item.current_node_id),
-            ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token.row_id),
-            queue_key=self._queue_key_for_blocked_item(item),
-            barrier_key=self._barrier_key_for_blocked_item(item),
-            on_success_sink=item.on_success_sink,
-            branch_name=token.branch_name,
-            fork_group_id=token.fork_group_id,
-            join_group_id=token.join_group_id,
-            expand_group_id=token.expand_group_id,
-            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
-            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
-        )
 
     def _complete_coalesce_fire(
         self,
@@ -3606,7 +3149,12 @@ class RowProcessor:
             barrier_key=str(coalesce_name),
             consumed_token_ids=consumed_token_ids,
             emitted_pending_sink=() if merged_sink_result is None else (self._sink_emission_from_result(merged_sink_result),),
-            emitted_ready=() if merged_item is None else (self._ready_emission_from_work_item(merged_item),),
+            # READY continuation fields come from the shared work codec: the
+            # drain loop (or ``_drain_work_queue``'s initial claim) later runs
+            # the idempotent enqueue for the same WorkItem, which reconciles
+            # against the row inserted here by deterministic ``work_item_id``
+            # and strict field equality.
+            emitted_ready=() if merged_item is None else (self._work_codec.ready_emission(merged_item),),
             now=self._clock.now_utc(),
             # §E.3 per-firing-group snapshot: the fired group's adopted branches.
             intake_snapshot_token_ids=frozenset(consumed_token_ids),
@@ -3635,7 +3183,7 @@ class RowProcessor:
         reconciles idempotently against the READY row inserted here (same
         deterministic work_item_id and field derivation).
         """
-        merged_item = self._nav.create_work_item(
+        merged_item = self._work_items.create(
             token=merged_token,
             current_node_id=coalesce_node_id,
             coalesce_node_id=coalesce_node_id,
@@ -3687,86 +3235,6 @@ class RowProcessor:
 
         return results
 
-    def _run_scheduler_maintenance(self, now: datetime) -> int:
-        """Evict dead members then recover expired peer leases (§C.2 path 1).
-
-        Ordering: evict-before-reap (§C.2 :232) ensures that when we rotate
-        an expired item lease the owner's registry row already carries
-        status='evicted' (arm b of owner_registry_dead), so the reap is
-        silent (no worker_stalled emitted for already-evicted workers).
-
-        The stall-arm reap (item_stall_budget) is the documented exception:
-        it may rotate BEFORE eviction for a live-heartbeat-but-wedged-drain
-        worker, and emits worker_stalled in the same transaction (§A.5 :145).
-
-        Leader-only: the evict sweep is gated on ``_coordination_token`` being
-        set (followers never evict; unfenced/test arm skips silently).
-
-        ADR-030 §C.2/§C.3 (slice 5): followers must NOT run
-        ``recover_expired_leases``.  A follower passes
-        ``coordination_token=None``, which takes the UNFENCED/LEGACY arm of
-        ``recover_expired_leases`` — that arm unconditionally reaps ALL
-        expired non-caller leases, defeating the liveness-aware gate that
-        protects the leader's and peers' in-flight item leases from spurious
-        rotation (§A.5/§C.1).  Followers are drain-only workers; lease
-        recovery and eviction are the leader's responsibility (§C.2 path 1,
-        §C.3: "followers drain what is claimable, then idle/exit").
-        The follower path is identified by both ``_coordination_token is None``
-        AND ``_scheduler_lease_owner_registered`` (registered worker identity
-        from run_workers) AND ``_run_coordination is None``.  All three must
-        be true simultaneously for the follower build path (follower.py); in
-        all other None-token cases (N=1 test arm, direct repo construction)
-        the legacy reap is correct and must be preserved.
-        """
-        # §C.2 path 1: leader evicts dead non-leader members before reaping.
-        # Individual, not bulk — one evict_worker call per dead member (§B.4,
-        # §C.2 :233). evict_worker is idempotent (benign skip on CAS miss).
-        if self._coordination_token is not None and self._run_coordination is not None:
-            from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
-
-            grace = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
-            dead_members = self._run_coordination.dead_non_leader_workers(
-                run_id=self._run_id,
-                leader_worker_id=self._coordination_token.worker_id,
-                now=now,
-                grace_seconds=grace,
-            )
-            for target_worker_id in dead_members:
-                self._run_coordination.evict_worker(
-                    token=self._coordination_token,
-                    target_worker_id=target_worker_id,
-                    now=now,
-                    grace_seconds=grace,
-                    window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
-                )
-
-        # ADR-030 §C.3: followers must not run recover_expired_leases.
-        # The follower build path (follower.py:build_follower_processor) has
-        # coordination_token=None AND run_coordination=None AND a registered
-        # lease owner (scheduler_lease_owner_registered=True).  In that case
-        # skipping the reap is CORRECT; the leader owns the reap sweep.
-        # All other None-token paths (N=1, test arm) still run the legacy reap.
-        is_follower_path = self._coordination_token is None and self._run_coordination is None and self._scheduler_lease_owner_registered
-        if is_follower_path:
-            self._scheduler_drains_since_maintenance = 0
-            return 0
-
-        recovered = self._scheduler.recover_expired_leases(
-            run_id=self._run_id,
-            now=now,
-            caller_owner=self._scheduler_lease_owner,
-            coordination_token=self._coordination_token,
-        )
-        self._scheduler_drains_since_maintenance = 0
-        return recovered
-
-    def _scheduler_maintenance_due(self, *, recover_pending_sinks: bool) -> bool:
-        """Return whether this drain should run scheduler maintenance up front."""
-        if recover_pending_sinks:
-            return True
-        self._scheduler_drains_since_maintenance += 1
-        return self._scheduler_drains_since_maintenance >= SCHEDULER_MAINTENANCE_INTERVAL
-
     # ─────────────────────────────────────────────────────────────────────────
     # Journal-first barrier intake (ADR-030 §E.2/§E.3/§E.3a/§E.5, slice 3)
     # ─────────────────────────────────────────────────────────────────────────
@@ -3782,390 +3250,16 @@ class RowProcessor:
             )
         return self._coordination_token
 
-    def _backdated_accept_monotonic(self, row: TokenWorkItem) -> float:
-        """Convert a row's durable ``barrier_blocked_at`` onto the monotonic scale.
-
-        §E.2 backdated accept timing — the EXACT clamped wall->monotonic
-        transform the journal restore uses (coalesce restore_from_journal /
-        aggregation elapsed_age derivation): trigger latches and coalesce
-        arrival anchors are pure functions of durable state + config, hence
-        invariant under leader takeover (§H 476).
-        """
-        if row.barrier_blocked_at is None:
-            raise AuditIntegrityError(
-                f"BLOCKED journal row for token {row.token_id!r} (run {self._run_id!r}) has NULL "
-                "barrier_blocked_at — the backdated accept instant cannot be derived; journal "
-                "corruption (mark_blocked stamps every hold)."
-            )
-        now_wall = self._clock.now_utc()
-        return self._clock.monotonic() - max(0.0, (now_wall - row.barrier_blocked_at).total_seconds())
-
-    def _token_for_intake(self, row: TokenWorkItem) -> TokenInfo:
-        """Resolve the TokenInfo to feed executor memory for one adopted row.
-
-        Live stash first (N=1 parity: the exact post-transform token the old
-        in-claim accept used, with its original resume provenance); journal
-        rehydration with audit-derived attempt offsets as the inherited-row
-        fallback (leader takeover) — the same semantics as the restore path,
-        stamped with this processor's resume checkpoint provenance.
-        """
-        hold = self._live_barrier_holds.pop(row.token_id, None)
-        if hold is not None:
-            return hold.token
-        if self._resume_checkpoint_id is None:
-            raise AuditIntegrityError(
-                f"Barrier intake for run {self._run_id!r} found an intake-pending BLOCKED row for token "
-                f"{row.token_id!r} with no live stash entry and no resume checkpoint provenance: a fresh "
-                "(non-resume) leader adopted a row it never blocked. At N=1 every intake-pending row is "
-                "either this leader's own hold (stashed) or takeover inheritance (resume provenance set)."
-            )
-        max_attempts = self._execution.get_max_node_state_attempts(self._run_id, [row.token_id])
-        return token_from_journal_item(
-            row,
-            attempt_offset=max_attempts.get(row.token_id, -1) + 1,
-            resume_checkpoint_id=self._resume_checkpoint_id,
-        )
-
     def _run_barrier_intake_pass(self, ctx: PluginContext) -> tuple[list[RowResult], list[WorkItem]]:
-        """One §E.2 intake pass: adopt arrivals, replay losses, fire triggers.
+        """One §E.2 intake pass, delegated to the barrier subsystem.
 
-        Runs at the top of every drain iteration (and from the orchestrator's
-        EOF loop via ``run_barrier_intake``). Steps, in design order:
-
-        1. arrival intake — every intake-pending BLOCKED barrier row
-           (``barrier_adopted_epoch IS NULL``) is adopted via the fenced
-           backdated adoption verb and fed into executor memory; coalesce
-           adoption runs the executor accept, surfacing merge fires, group
-           failures and late-arrival releases (§E.3a) here;
-        2. per-adoption aggregation trigger evaluation — count/condition
-           triggers fire from the SAME intake step as the triggering
-           arrival's adoption (the §E.2 replacement for the deleted in-claim
-           flush arm; batch composition is preserved because the check runs
-           after EACH adoption, exactly like the old accept-then-check);
-        3. branch-loss replay (§E.5) — unadopted durable losses are marked
-           (journal-first) and replayed through ``notify_branch_lost``
-           before the next trigger evaluation; at N=1 this is a structural
-           no-op (record-then-notify already ran in-claim).
-
-        Returns (results, child_items): results append to the drain's result
-        set; child_items are continuations whose READY rows were inserted
-        atomically by ``complete_barrier`` — the caller enqueues them
-        (idempotent reconcile) into its own loop.
+        The BarrierIntakeCoordinator owns the adoption/replay/trigger
+        ordering (elspeth-e76a186916) and returns typed dispositions;
+        flattening them preserves the historical (results, child_items)
+        contract for the drain loop and the orchestrator's EOF loop.
         """
-        results: list[RowResult] = []
-        child_items: list[WorkItem] = []
-        if not self._aggregation_settings and self._coalesce_executor is None:
-            return results, child_items
-
-        # ADR-030 §E.2 intake scan shape: only intake-pending rows
-        # (barrier_adopted_epoch IS NULL).  The SQL predicate avoids
-        # materializing adopted rows on every drain iteration — without it a
-        # filling count-N batch costs O(N²/2) full-row hydrations (finding 2).
-        pending_rows = self._scheduler.list_pending_blocked_barrier_items(run_id=self._run_id)
-        if pending_rows:
-            coalesce_keys = {str(name) for name in self._coalesce_node_ids}
-            aggregation_keys = {str(node_id) for node_id in self._aggregation_settings}
-            for row in pending_rows:
-                if row.barrier_key in aggregation_keys:
-                    self._intake_adopt_aggregation_row(row, ctx, results, child_items)
-                elif row.barrier_key in coalesce_keys:
-                    self._intake_adopt_coalesce_row(row, results, child_items)
-                else:
-                    raise AuditIntegrityError(
-                        f"Intake-pending BLOCKED row for token {row.token_id!r} (run {self._run_id!r}) carries "
-                        f"orphan barrier_key {row.barrier_key!r}: not a configured coalesce "
-                        f"({sorted(coalesce_keys)}) or aggregation node ({sorted(aggregation_keys)})."
-                    )
-
-        self._intake_replay_branch_losses(results, child_items)
-        return results, child_items
-
-    def _intake_adopt_aggregation_row(
-        self,
-        row: TokenWorkItem,
-        ctx: PluginContext,
-        results: list[RowResult],
-        child_items: list[WorkItem],
-    ) -> None:
-        """Adopt one aggregation barrier row, then evaluate the node's trigger."""
-        if row.barrier_key is None:  # pragma: no cover - excluded by the query contract
-            raise AuditIntegrityError(f"Intake aggregation row {row.work_item_id!r} has no barrier_key.")
-        node_id = NodeID(row.barrier_key)
-        coordination_token = self._require_coordination_token()
-        # Resolve the token BEFORE the fenced verb: a row this leader cannot
-        # attribute (no live stash, no resume provenance — e.g. a stray
-        # deposit) must be refused with ZERO durable mutation.
-        token = self._token_for_intake(row)
-        batch_id, ordinal = self._aggregation_executor.open_batch_membership(node_id)
-        adoption = self._scheduler.adopt_blocked_barrier_item(
-            run_id=self._run_id,
-            work_item_id=row.work_item_id,
-            token_id=row.token_id,
-            barrier_key=row.barrier_key,
-            membership=BatchMembershipSpec(batch_id=batch_id, ordinal=ordinal),
-            buffered_outcome=BufferedOutcomeSpec(batch_id=batch_id),
-            now=self._clock.now_utc(),
-            coordination_token=coordination_token,
-        )
-        if not adoption.adopted:
-            # Idempotent success-SKIP: already adopted (a racing duplicate of
-            # this leader's own pass). MUST NOT re-feed memory (§C.4 row 6a).
-            return
-        self._aggregation_executor.accept_adopted_row(node_id, token, accept_time=self._backdated_accept_monotonic(row))
-
-        # Step 2: per-adoption trigger evaluation — the §E.2 home of the old
-        # in-claim count/condition flush decision (accept-then-check), so
-        # batch composition is byte-identical to the in-claim era.
-        should_flush, trigger_type = self._aggregation_executor.check_flush_status(node_id)
-        if not should_flush:
-            return
-        transform = self._nav.resolve_plugin_for_node(node_id)
-        if not isinstance(transform, TransformProtocol) or not transform.is_batch_aware:
-            raise OrchestrationInvariantError(
-                f"Aggregation node {node_id!r} fired a {trigger_type} trigger at intake but resolves to "
-                f"{type(transform).__name__!r}, not a batch-aware transform. DAG/config inconsistency."
-            )
-        flush_results, flush_child_items = self.handle_timeout_flush(
-            node_id=node_id,
-            transform=transform,
-            ctx=ctx,
-            trigger_type=trigger_type if trigger_type is not None else TriggerType.COUNT,
-        )
-        results.extend(flush_results)
-        child_items.extend(flush_child_items)
-
-    def _intake_adopt_coalesce_row(
-        self,
-        row: TokenWorkItem,
-        results: list[RowResult],
-        child_items: list[WorkItem],
-    ) -> None:
-        """Adopt one coalesce barrier row and run the intake-time accept."""
-        if row.barrier_key is None:  # pragma: no cover - excluded by the query contract
-            raise AuditIntegrityError(f"Intake coalesce row {row.work_item_id!r} has no barrier_key.")
-        if self._coalesce_executor is None:  # pragma: no cover - partition guarantees a coalesce key
-            raise OrchestrationInvariantError(f"Intake coalesce row for {row.barrier_key!r} but no CoalesceExecutor is configured.")
-        coalesce_name = CoalesceName(row.barrier_key)
-        coordination_token = self._require_coordination_token()
-        # Resolve the token BEFORE the fenced verb (refusal-before-mutation
-        # for unattributable rows — see the aggregation arm).
-        token = self._token_for_intake(row)
-        adoption = self._scheduler.adopt_blocked_barrier_item(
-            run_id=self._run_id,
-            work_item_id=row.work_item_id,
-            token_id=row.token_id,
-            barrier_key=row.barrier_key,
-            membership=None,
-            buffered_outcome=None,
-            now=self._clock.now_utc(),
-            coordination_token=coordination_token,
-        )
-        if not adoption.adopted:
-            return
-        outcome = self._coalesce_executor.accept(
-            token=token,
-            coalesce_name=str(coalesce_name),
-            arrival_time=self._backdated_accept_monotonic(row),
-        )
-
-        if outcome.held:
-            return
-
-        if outcome.late_arrival:
-            # §E.3a: the group already completed — release THIS row alone in
-            # the same drain iteration, with forensic late-arrival context.
-            # The executor already recorded the FAILED node_state + FAILURE
-            # outcome (outcomes_recorded=True on the late arm).
-            released = self._scheduler.mark_blocked_barrier_terminal(
-                run_id=self._run_id,
-                barrier_key=str(coalesce_name),
-                token_ids=(token.token_id,),
-                now=self._clock.now_utc(),
-                coordination_token=self._coordination_token,
-                release_context={
-                    "late_arrival": True,
-                    "reason": outcome.failure_reason,
-                    "released_by": self._scheduler_lease_owner,
-                    "scope_row_id": row.row_id,
-                },
-            )
-            if released != 1:
-                raise AuditIntegrityError(
-                    f"Late-arrival release for token {token.token_id!r} at coalesce {coalesce_name!r} "
-                    f"(run {self._run_id!r}) terminalized {released} rows; expected exactly one."
-                )
-            self._emit_token_completed(token, outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED)
-            results.append(
-                RowResult(
-                    token=token,
-                    final_data=token.row_data,
-                    outcome=TerminalOutcome.FAILURE,
-                    path=TerminalPath.UNROUTED,
-                    error=FailureInfo(exception_type="CoalesceFailure", message=outcome.failure_reason or "late_arrival_after_merge"),
-                )
-            )
-            return
-
-        if outcome.merged_token is not None:
-            self._fire_intake_coalesce_merge(coalesce_name, outcome, scope_row_id=row.row_id, results=results, child_items=child_items)
-            return
-
-        if outcome.failure_reason:
-            # Group failure completed by this arrival: every consumed branch
-            # (this one included) holds a BLOCKED row — release them all.
-            self._mark_coalesce_consumed_scheduler_work_terminal(
-                coalesce_name=coalesce_name,
-                consumed_tokens=tuple(outcome.consumed_tokens),
-            )
-            error_msg = outcome.failure_reason
-            # Bug 9z8 fix: only record if CoalesceExecutor didn't already record.
-            if not outcome.outcomes_recorded:
-                self._data_flow.record_token_outcome(
-                    ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                    outcome=TerminalOutcome.FAILURE,
-                    path=TerminalPath.UNROUTED,
-                    error_hash=compute_error_hash(error_msg),
-                )
-            # Emit TokenCompleted telemetry AFTER Landscape recording. Only
-            # the arriving token surfaces a RowResult (the held siblings'
-            # outcomes were recorded by the executor) — the pre-§E.2 shape.
-            self._emit_token_completed(token, outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED)
-            results.append(
-                RowResult(
-                    token=token,
-                    final_data=token.row_data,
-                    outcome=TerminalOutcome.FAILURE,
-                    path=TerminalPath.UNROUTED,
-                    error=FailureInfo(exception_type="CoalesceFailure", message=error_msg),
-                )
-            )
-            return
-
-        raise OrchestrationInvariantError(
-            f"CoalesceOutcome for token {token.token_id} in coalesce '{coalesce_name}' is in invalid state: "
-            f"held={outcome.held}, merged_token={outcome.merged_token is not None}, "
-            f"failure_reason={outcome.failure_reason!r}"
-        )
-
-    def _fire_intake_coalesce_merge(
-        self,
-        coalesce_name: CoalesceName,
-        outcome: CoalesceOutcome,
-        *,
-        scope_row_id: str,
-        results: list[RowResult],
-        child_items: list[WorkItem],
-    ) -> None:
-        """Complete an intake-time coalesce merge fire (terminal or not).
-
-        Non-terminal: mirrors ``complete_coalesce_merge``'s shape — the merged
-        child's READY continuation is inserted atomically with the consumption
-        (F1/D6) and the same WorkItem is handed back for the caller's
-        idempotent enqueue.
-
-        Terminal: the COALESCED sink-bound result is emitted as a fresh
-        PENDING_SINK row in the SAME atomic completion — the merged output is
-        journal-durable the moment its inputs are consumed (the pre-§E.2
-        in-claim ride to ``mark_pending_sink`` left it memory-only between the
-        consumption and the claim disposition).
-        """
-        if outcome.merged_token is None:  # pragma: no cover - caller checks
-            raise OrchestrationInvariantError("merged_token is None in _fire_intake_coalesce_merge")
-        coalesce_node_id = self._coalesce_node_ids[coalesce_name]
-        if self._nav.resolve_next_node(coalesce_node_id) is None:
-            terminal_result = self._terminal_coalesce_row_result(
-                outcome.merged_token,
-                coalesce_name,
-                context=f"intake coalesce fire for token '{outcome.merged_token.token_id}'",
-            )
-            self._complete_coalesce_fire(
-                coalesce_name=coalesce_name,
-                consumed_tokens=tuple(outcome.consumed_tokens),
-                scope_row_id=scope_row_id,
-                merged_sink_result=terminal_result,
-            )
-            results.append(replace(terminal_result, scheduler_pending_sink=True))
-            return
-        merged_item = self._nav.create_work_item(
-            token=outcome.merged_token,
-            current_node_id=coalesce_node_id,
-            coalesce_node_id=coalesce_node_id,
-            coalesce_name=coalesce_name,
-        )
-        self._complete_coalesce_fire(
-            coalesce_name=coalesce_name,
-            consumed_tokens=tuple(outcome.consumed_tokens),
-            scope_row_id=scope_row_id,
-            merged_item=merged_item,
-        )
-        child_items.append(merged_item)
-
-    def _intake_replay_branch_losses(
-        self,
-        results: list[RowResult],
-        child_items: list[WorkItem],
-    ) -> None:
-        """§E.5 loss intake: mark unadopted durable losses, replay into memory.
-
-        Journal-first: the fenced cursor mark commits BEFORE the in-memory
-        replay — a crash between mark and replay loses nothing because the
-        takeover restore derives lost_branches from the FULL loss table. At
-        N=1 the replay arm is structurally idle: the producer already
-        notified in-claim (record-then-notify), so ``has_recorded_branch_loss``
-        (or the executor's completed-keys check) dedups every row.
-        """
-        if self._coalesce_executor is None:
-            return
-        losses = self._scheduler.list_unadopted_coalesce_branch_losses(run_id=self._run_id)
-        if not losses:
-            return
-        coordination_token = self._require_coordination_token()
-        self._scheduler.adopt_coalesce_branch_losses(
-            run_id=self._run_id,
-            loss_ids=[loss.loss_id for loss in losses],
-            now=self._clock.now_utc(),
-            coordination_token=coordination_token,
-        )
-        for loss in losses:
-            if self._coalesce_executor.has_recorded_branch_loss(loss.coalesce_name, loss.row_id, loss.branch_name):
-                continue
-            outcome = self._coalesce_executor.notify_branch_lost(
-                coalesce_name=loss.coalesce_name,
-                row_id=loss.row_id,
-                lost_branch=loss.branch_name,
-                reason=loss.reason,
-            )
-            if outcome is None:
-                continue
-            coalesce_name = CoalesceName(loss.coalesce_name)
-            if outcome.merged_token is not None:
-                self._fire_intake_coalesce_merge(coalesce_name, outcome, scope_row_id=loss.row_id, results=results, child_items=child_items)
-                continue
-            if outcome.failure_reason:
-                self._mark_coalesce_consumed_scheduler_work_terminal(
-                    coalesce_name=coalesce_name,
-                    consumed_tokens=tuple(outcome.consumed_tokens),
-                )
-                # Replayed must-fail (§E.5: a must-fail group fails within one
-                # drain iteration of the loss becoming visible): mirror the
-                # branch-loss notification failure arm — RowResults for the
-                # held siblings the failure consumed.
-                for consumed_token in outcome.consumed_tokens:
-                    self._emit_token_completed(consumed_token, outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED)
-                    results.append(
-                        RowResult(
-                            token=consumed_token,
-                            final_data=consumed_token.row_data,
-                            outcome=TerminalOutcome.FAILURE,
-                            path=TerminalPath.UNROUTED,
-                            error=FailureInfo(exception_type="CoalesceFailure", message=outcome.failure_reason),
-                        )
-                    )
-                continue
-            raise OrchestrationInvariantError(
-                f"Replayed branch loss {loss.loss_id!r} ({loss.coalesce_name!r}/{loss.row_id!r}/{loss.branch_name!r}) "
-                f"produced an invalid CoalesceOutcome: held={outcome.held}, merged=None, failure_reason=None."
-            )
+        outcome = self._barrier_intake.run_intake_pass(ctx)
+        return outcome.results, outcome.child_items
 
     def run_barrier_intake(self, ctx: PluginContext) -> list[RowResult]:
         """Public §E.2 intake entry for the orchestrator's EOF loop (§D step 3).
@@ -4192,6 +3286,38 @@ class RowProcessor:
         """Grouped §D step-2 unquiesced work for invariant diagnostics."""
         return self._scheduler.summarize_unquiesced_work(run_id=self._run_id)
 
+    def drain_follower_ready_work(
+        self,
+        ctx: PluginContext,
+        *,
+        before_claim: Callable[[], None] | None = None,
+    ) -> list[RowResult]:
+        """Follower drain surface: claim and advance READY work only (ADR-030 §B.1/§C.3).
+
+        The explicit follower entry point driven by orchestrator/follower.py's
+        drain loop. The follower-mode contract is owned HERE, not by caller
+        flag wiring: ``claim_ready`` only — never ``claim_pending_sink`` or
+        pending-sink recovery (sink work is leader-only) — and no pre-claimed
+        items. ``before_claim`` is the follower's leader-liveness probe,
+        invoked before every claim attempt.
+
+        Fails closed on mode: driving a LEADER-mode processor through the
+        follower surface is exactly the wrong-mode bug this named contract
+        exists to catch (elspeth-577179bba1).
+        """
+        if self._mode is not ProcessorMode.FOLLOWER:
+            raise OrchestrationInvariantError(
+                f"drain_follower_ready_work called on a {self._mode.value!r}-mode RowProcessor: "
+                "the follower drain surface requires ProcessorMode.FOLLOWER. Leader/N=1 paths "
+                "drain via process_row / drain_scheduled_work."
+            )
+        return self._scheduler_drain.drain_claims(
+            ctx=ctx,
+            pending_items={},
+            recover_pending_sinks=False,
+            before_claim=before_claim,
+        )
+
     def _drain_scheduler_claims(
         self,
         *,
@@ -4203,340 +3329,21 @@ class RowProcessor:
     ) -> list[RowResult]:
         """Claim and advance scheduler work until no READY work remains.
 
-        When ``recover_pending_sinks=True`` (the resume entry point), any
-        PENDING_SINK rows left durable by a prior crashed worker are drained
-        up front via ``claim_pending_sink`` BEFORE the main claim_ready loop
-        runs. This is the only path that re-claims PENDING_SINK rows inside
-        a drain.
-
-        PENDING_SINK rows produced by the main loop itself (via
-        ``mark_pending_sink`` after a transform success at sink handoff) are
-        NOT re-claimed by this drain — their RowResult is already in
-        ``results`` from the ``claim_ready`` path that produced them, and
-        their durable scheduler row is terminalized later by
-        ``mark_sink_bound_scheduler_terminal`` via the sink-write callback
-        (``_make_checkpoint_after_sink_factory`` in orchestrator/core.py).
-        Re-claiming them here would emit a duplicate
-        ``_row_result_from_pending_sink`` for the same token_id. See
-        filigree elspeth-5c5e88b071 (G3).
-
-        Note: if a prior worker's lease on a sink-bound row is still active
-        (not yet expired), ``claim_pending_sink`` won't find it (status is
-        LEASED, not PENDING_SINK) and ``recover_expired_leases`` won't touch
-        it (lease not yet expired). It will be stranded until the lease
-        ages out, at which point a subsequent ``drain_scheduled_work`` call
-        from a later resume attempt recovers it. That is correct behavior:
-        the prior worker may still be alive and finishing the sink write.
-        Forcing recovery here would race against an in-flight sink writer
-        and risk duplicate sink emission.
+        Thin delegate to the scheduler-drain subsystem (elspeth-c49f33d6e4):
+        ``SchedulerDrainCoordinator.drain_claims`` owns the claim loop, the
+        per-iteration journal-first barrier intake ordering, the disposition
+        arms, and pending-sink recovery. The keyword-only signature here is
+        load-bearing — the ADR-030 invariant-guard tests call this private
+        name. (orchestrator/follower.py now enters via the public
+        :meth:`drain_follower_ready_work` surface instead.)
         """
-        results: list[RowResult] = []
-
-        if recover_pending_sinks:
-            self._drain_preexisting_pending_sinks(results)
-
-        iterations = 0
-        maintenance_iteration = 0
-        preclaimed_queue = list(preclaimed_items or ())
-
-        if self._scheduler_maintenance_due(recover_pending_sinks=recover_pending_sinks):
-            self._run_scheduler_maintenance(self._clock.now_utc())
-
-        while True:
-            iterations += 1
-            if iterations > MAX_WORK_QUEUE_ITERATIONS:
-                raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
-            if before_claim is not None:
-                before_claim()
-
-            # ADR-030 §E.2 (slice 3): per-iteration journal-first intake —
-            # adopt intake-pending BLOCKED barrier rows into executor memory,
-            # replay durable branch losses (§E.5), release late arrivals
-            # (§E.3a) and evaluate count/condition triggers over post-intake
-            # memory, ALL before this iteration's claim. Flush/merge outputs
-            # append to the drain's results; continuation items enqueue into
-            # the current loop (their READY rows were inserted atomically by
-            # complete_barrier; the enqueue reconciles idempotently).
-            intake_results, intake_child_items = self._run_barrier_intake_pass(ctx)
-            results.extend(intake_results)
-            for intake_child in intake_child_items:
-                self._enqueue_scheduler_work_item(intake_child, pending_items)
-
-            # The claim timestamp is read AFTER intake: rows the intake just
-            # emitted carry available_at stamps later than an iteration-top
-            # reading, and claim_ready's available_at <= now predicate must
-            # see them.
-            now = self._clock.now_utc()
-            if iterations - maintenance_iteration >= SCHEDULER_MAINTENANCE_INTERVAL:
-                self._run_scheduler_maintenance(now)
-                maintenance_iteration = iterations
-
-            claimed: TokenWorkItem | None
-            if preclaimed_queue:
-                claimed = preclaimed_queue.pop(0)
-            else:
-                claimed = self._scheduler.claim_ready(
-                    run_id=self._run_id,
-                    lease_owner=self._scheduler_lease_owner,
-                    lease_seconds=self._scheduler_lease_seconds,
-                    now=now,
-                )
-            if claimed is None:
-                if recover_pending_sinks:
-                    recovered = self._run_scheduler_maintenance(self._clock.now_utc())
-                    if recovered:
-                        continue
-                if pending_items:
-                    # ADR-030 multi-worker: peer followers may have claimed some of
-                    # the READY children enqueued by this leader (e.g. json_explode
-                    # or per-LLM-call continuations).  Once a peer claims a child, the
-                    # leader's in-memory pending entry can no longer be claimed READY:
-                    # the peer drives it LEASED → PENDING_SINK (lease_owner kept) →
-                    # TERMINAL/FAILED.  The leader may relinquish such peer-owned
-                    # continuations, but ONLY under a discriminator that keeps the
-                    # single-worker invariant and the audit backstops intact:
-                    #
-                    #   (1) NONE of the pending items are still READY
-                    #       (count_ready_in_set == 0) — a still-READY item is a
-                    #       genuine stranded continuation and must raise; and
-                    #   (2) NONE of the pending items are FAILED
-                    #       (count_failed_in_set == 0) — FAILED is the ONLY status
-                    #       absent from BOTH backstops (count_active_work AND
-                    #       complete_run's quiescence CAS cover READY/LEASED/BLOCKED/
-                    #       PENDING_SINK but NOT FAILED), so a self-FAILED stray would
-                    #       be silently lost; refusing on any FAILED pending row keeps
-                    #       it loud (this is the M1 residual fix, and it lands at N=1
-                    #       where the leader's OWN item is FAILED with no peer); and
-                    #   (3) a peer is/was carrying work — has_peer_owned_work: some
-                    #       OTHER lease_owner holds a LEASED or PENDING_SINK row on
-                    #       this run.  PENDING_SINK is included because
-                    #       mark_pending_sink KEEPS the claimant's lease_owner, so a
-                    #       follower that has already parked all its claims as
-                    #       PENDING_SINK and let its active LEASES lapse is STILL
-                    #       detectable (the in-claim drain races AGAINST this: by the
-                    #       time the leader's claim_ready returns None, the follower
-                    #       may hold zero active leases yet own many PENDING_SINK
-                    #       rows).  An N=1 leader's own rows carry the leader's owner
-                    #       (BLOCKED rows carry none), so has_peer_owned_work is False
-                    #       for a solo leader → it never relinquishes → its
-                    #       self-stranded LEASED/BLOCKED/PENDING_SINK rows still hit
-                    #       the raise here or the run-level backstop — never silent.
-                    #
-                    # The surviving relinquish set is therefore exactly "non-READY,
-                    # non-FAILED continuations a peer is carrying" — every one of
-                    # which is covered by the run-level and quiescence backstops if
-                    # the peer somehow fails to finish it.
-                    if self._scheduler_lease_owner_registered:
-                        pending_ids = list(pending_items.keys())
-                        ready_count = self._scheduler.count_ready_in_set(run_id=self._run_id, work_item_ids=pending_ids)
-                        failed_count = self._scheduler.count_failed_in_set(run_id=self._run_id, work_item_ids=pending_ids)
-                        if (
-                            ready_count == 0
-                            and failed_count == 0
-                            and self._scheduler.has_peer_owned_work(run_id=self._run_id, caller_owner=self._scheduler_lease_owner)
-                        ):
-                            relinquished = {
-                                work_item_id: f"{item.token.token_id}@{item.current_node_id}"
-                                for work_item_id, item in pending_items.items()
-                            }
-                            logger.info(
-                                "Relinquishing %d non-READY/non-FAILED pending continuation(s) to a peer worker "
-                                "(run_id=%r, work_item_ids=%r, observed_statuses=%r)",
-                                len(pending_items),
-                                self._run_id,
-                                list(relinquished.keys()),
-                                self._scheduler.summarize_active_work(run_id=self._run_id),
-                            )
-                            pending_items.clear()
-                            break
-                    stranded = ", ".join(f"{item.token.token_id}@{item.current_node_id}" for item in pending_items.values())
-                    active = "; ".join(self._scheduler.summarize_active_work(run_id=self._run_id)) or "<none>"
-                    raise OrchestrationInvariantError(
-                        f"Scheduler has {len(pending_items)} in-memory continuations for run {self._run_id!r} "
-                        f"but no READY work item could be claimed. Stranded: {stranded}. Active journal work: {active}."
-                    )
-                break
-
-            if claimed.work_item_id in pending_items:
-                item = pending_items.pop(claimed.work_item_id)
-            else:
-                item = self._work_item_from_scheduler(claimed)
-            claimed_lease_owner = self._claimed_scheduler_lease_owner(claimed)
-            # Mark this claim active so ``_process_single_token``'s per-node
-            # heartbeat refreshes the right lease (filigree elspeth-ddde8144b6).
-            # Initial last_heartbeat_at is now: claim_ready just set
-            # lease_expires_at = now + lease_seconds, so the first heartbeat
-            # only needs to fire once heartbeat_seconds has elapsed.
-            self._active_claim_work_item_id = claimed.work_item_id
-            self._last_heartbeat_at = self._clock.now_utc()
-            try:
-                try:
-                    result, child_items = self._process_single_token(
-                        token=item.token,
-                        ctx=ctx,
-                        current_node_id=item.current_node_id,
-                        coalesce_node_id=item.coalesce_node_id,
-                        coalesce_name=item.coalesce_name,
-                        on_success_sink=item.on_success_sink,
-                        attempt_offset=max(claimed.attempt - 1, 0),
-                    )
-                except SchedulerLeaseLostError as exc:
-                    # The lease was reaped by a peer mid-processing. The
-                    # original ``work_item_id`` no longer exists (peer rewrote
-                    # it under a bumped attempt) or no longer carries this
-                    # worker's ``lease_owner``. Issuing ``mark_failed`` would
-                    # CAS-fail and cascade into Tier-1 AuditIntegrityError —
-                    # the exact failure mode this primitive exists to
-                    # eliminate. Abandon the in-flight work, do NOT emit the
-                    # (lost) result, and return the results that were already
-                    # proven before this lease was lost. The caller's
-                    # post-sink scheduler invariant check will refuse run
-                    # completion if active work remains. Staged §E.5 loss
-                    # records are discarded with the abandoned claim (the
-                    # peer's re-drive re-stages them with its own disposition).
-                    self._pending_branch_losses.clear()
-                    exc.add_note("scheduler lease lost during row processing; in-flight token result was abandoned")
-                    return results
-                except Exception as processing_exc:
-                    try:
-                        self._scheduler.mark_failed(
-                            work_item_id=claimed.work_item_id,
-                            now=self._clock.now_utc(),
-                            expected_lease_owner=claimed_lease_owner,
-                            branch_loss=self._take_claim_branch_loss(claimed.token_id),
-                        )
-                    except Exception as scheduler_exc:
-                        raise AuditIntegrityError(
-                            f"Scheduler failed to mark work_item_id={claimed.work_item_id!r} failed after original "
-                            f"processing exception {type(processing_exc).__name__}: {processing_exc}. "
-                            f"The scheduler failure write raised {type(scheduler_exc).__name__}: {scheduler_exc}."
-                        ) from scheduler_exc
-                    raise
-            finally:
-                self._active_claim_work_item_id = None
-                self._last_heartbeat_at = None
-
-            for child_item in child_items:
-                self._enqueue_scheduler_work_item(child_item, pending_items)
-
-            if result is not None and self._is_buffered_scheduler_result(result):
-                self._mark_claimed_scheduler_work_blocked(
-                    claimed,
-                    item,
-                    now=self._clock.now_utc(),
-                    queue_key=None,
-                    barrier_key=self._barrier_key_for_live_hold(claimed.token_id),
-                )
-                if isinstance(result, tuple):
-                    results.extend(result)
-                else:
-                    results.append(result)
-                # §E.2: ALWAYS take another iteration — the next iteration's
-                # journal-first intake adopts the row just marked BLOCKED (and
-                # fires any count/condition trigger it satisfies) before the
-                # drain may exit.
-                continue
-
-            if result is None and not child_items:
-                self._mark_claimed_scheduler_work_blocked(claimed, item, now=self._clock.now_utc())
-                # §E.2: ALWAYS take another iteration (see the buffered arm).
-                continue
-
-            if (sink_bound_result := self._scheduler_sink_bound_result_for_claimed_token(result, claimed.token_id)) is not None:
-                self._scheduler.mark_pending_sink(
-                    work_item_id=claimed.work_item_id,
-                    row_payload_json=self._scheduler.serialize_row_payload(sink_bound_result.token.row_data),
-                    sink_name=self._require_scheduler_sink_name(sink_bound_result),
-                    outcome=self._require_scheduler_outcome(sink_bound_result).value,
-                    path=sink_bound_result.path.value,
-                    error_hash=self._scheduler_error_hash(sink_bound_result),
-                    error_message=self._scheduler_error_message(sink_bound_result),
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self._take_claim_branch_loss(claimed.token_id),
-                )
-                result = self._with_scheduler_pending_sink_handoff(result, claimed.token_id)
-            elif self._scheduler_result_failed_claimed_token(result, claimed.token_id):
-                self._scheduler.mark_failed(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self._take_claim_branch_loss(claimed.token_id),
-                )
-            else:
-                self._scheduler.mark_terminal(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self._take_claim_branch_loss(claimed.token_id),
-                )
-
-            if result is not None:
-                if isinstance(result, tuple):
-                    results.extend(result)
-                else:
-                    results.append(result)
-
-            if not recover_pending_sinks and not pending_items:
-                break
-
-        return results
-
-    def _drain_preexisting_pending_sinks(self, results: list[RowResult]) -> None:
-        """Re-emit PENDING_SINK rows left durable by a prior crashed worker.
-
-        Called once at the top of a recovery drain (``recover_pending_sinks=True``).
-        Each claim transitions a PENDING_SINK row to LEASED under this worker's
-        lease_owner and appends a reconstructed RowResult to ``results``;
-        terminalization happens later via the sink-write callback
-        (``mark_sink_bound_scheduler_terminal``).
-
-        ``recover_expired_leases`` is run on every iteration so that a prior
-        worker's expired sink-bound lease (recovered as PENDING_SINK by
-        scheduler_repository.recover_expired_leases) is picked up in the same
-        drain pass. Iteration is bounded by ``MAX_WORK_QUEUE_ITERATIONS``
-        because real fault-injected runs can produce hundreds of stranded
-        pending-sinks; the cap prevents an unbounded loop if some other code
-        path keeps recreating PENDING_SINK rows behind us.
-
-        Only the resume entry point (``drain_scheduled_work``) calls into this
-        path. Inside the main claim_ready loop, PENDING_SINK rows produced by
-        ``mark_pending_sink`` MUST NOT be re-claimed here — see
-        ``_drain_scheduler_claims`` docstring.
-        """
-        iterations = 0
-        while True:
-            iterations += 1
-            if iterations > MAX_WORK_QUEUE_ITERATIONS:
-                raise RuntimeError(
-                    f"Pending-sink recovery exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. "
-                    "Possible infinite loop in PENDING_SINK recovery."
-                )
-
-            now = self._clock.now_utc()
-            self._scheduler.recover_expired_leases(
-                run_id=self._run_id,
-                now=now,
-                caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._coordination_token,
-            )
-            repaired = self._scheduler.terminalize_pending_sinks_with_terminal_outcomes(
-                run_id=self._run_id,
-                now=now,
-                caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._require_coordination_token(),
-            )
-            if repaired:
-                continue
-            pending_sink = self._scheduler.claim_pending_sink(
-                run_id=self._run_id,
-                lease_owner=self._scheduler_lease_owner,
-                lease_seconds=self._scheduler_lease_seconds,
-                now=now,
-            )
-            if pending_sink is None:
-                return
-            results.append(self._row_result_from_pending_sink(pending_sink))
+        return self._scheduler_drain.drain_claims(
+            ctx=ctx,
+            pending_items=pending_items,
+            recover_pending_sinks=recover_pending_sinks,
+            preclaimed_items=preclaimed_items,
+            before_claim=before_claim,
+        )
 
     def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
         """Terminalize scheduler work after sink outcome durability."""
@@ -4569,85 +3376,8 @@ class RowProcessor:
             )
 
     def _row_result_from_pending_sink(self, scheduled: TokenWorkItem) -> RowResult:
-        """Rebuild a sink-bound row result without re-running its producer node."""
-        if scheduled.pending_sink_name is None or scheduled.pending_outcome is None or scheduled.pending_path is None:
-            raise AuditIntegrityError(f"Scheduler pending sink work_item_id={scheduled.work_item_id!r} is missing sink outcome metadata.")
-        # Attempt-offset derivation: if the original run already opened a SINK
-        # node_state for this token (the sink write itself crashed after
-        # opening attempt 0), the re-driven sink write must run at the bumped
-        # attempt or its node_state insert collides with audited history.
-        # Scoped to the sink step — the only step a pending-sink re-drive
-        # writes; producer-node attempts must not inflate the offset.
-        max_attempts = self._execution.get_max_node_state_attempts(
-            self._run_id,
-            [scheduled.token_id],
-            step_index=self.resolve_sink_step(),
-        )
-        attempt_offset = max_attempts.get(scheduled.token_id, -1) + 1
-        if attempt_offset > 0 and self._resume_checkpoint_id is None:
-            raise AuditIntegrityError(
-                f"Scheduler pending sink token {scheduled.token_id!r} (run {self._run_id!r}) already has "
-                f"node_states up to attempt {attempt_offset - 1} but this processor has no resume checkpoint "
-                "provenance; re-driving without a resume_checkpoint_id would write an unattributed retry attempt."
-            )
-        token = TokenInfo(
-            row_id=scheduled.row_id,
-            token_id=scheduled.token_id,
-            row_data=self._scheduler.deserialize_row_payload(scheduled.row_payload_json),
-            branch_name=scheduled.branch_name,
-            fork_group_id=scheduled.fork_group_id,
-            join_group_id=scheduled.join_group_id,
-            expand_group_id=scheduled.expand_group_id,
-            resume_attempt_offset=attempt_offset,
-            resume_checkpoint_id=self._resume_checkpoint_id if attempt_offset > 0 else None,
-        )
-        return RowResult(
-            token=token,
-            final_data=token.row_data,
-            outcome=TerminalOutcome(scheduled.pending_outcome),
-            path=TerminalPath(scheduled.pending_path),
-            sink_name=scheduled.pending_sink_name,
-            error=FailureInfo(exception_type="ResumedPendingSink", message=scheduled.pending_error_message or "")
-            if scheduled.pending_path == TerminalPath.ON_ERROR_ROUTED.value
-            else None,
-            scheduler_pending_sink=True,
-        )
-
-    def _mark_claimed_scheduler_work_blocked(
-        self,
-        claimed: TokenWorkItem,
-        item: WorkItem,
-        *,
-        now: datetime,
-        queue_key: str | None = None,
-        barrier_key: str | None = None,
-    ) -> None:
-        """Persist BLOCKED state only when resume has a durable release key."""
-        queue_key = self._queue_key_for_blocked_item(item) if queue_key is None and barrier_key is None else queue_key
-        barrier_key = self._barrier_key_for_blocked_item(item) if queue_key is None and barrier_key is None else barrier_key
-        if queue_key is None and barrier_key is None:
-            raise OrchestrationInvariantError(
-                f"Work item {claimed.work_item_id!r} (token={item.token.token_id!r}, node={item.current_node_id!r}) "
-                "produced no result and no children, but has no queue or barrier key; cannot be unblocked. "
-                "This is a processor bug."
-            )
-        self._scheduler.mark_blocked(
-            work_item_id=claimed.work_item_id,
-            queue_key=queue_key,
-            barrier_key=barrier_key,
-            now=now,
-            expected_lease_owner=self._claimed_scheduler_lease_owner(claimed),
-        )
-
-    @staticmethod
-    def _claimed_scheduler_lease_owner(claimed: TokenWorkItem) -> str:
-        """Return the proven lease owner for a claimed scheduler item."""
-        if claimed.lease_owner is None:
-            raise AuditIntegrityError(
-                f"Scheduler claimed work_item_id={claimed.work_item_id!r} without a lease_owner; "
-                "cannot perform an owner-fenced state transition."
-            )
-        return claimed.lease_owner
+        """Rebuild a sink-bound row result without re-running its producer node (delegate)."""
+        return self._scheduler_drain.row_result_from_pending_sink(scheduled)
 
     def _take_pending_branch_losses(self) -> tuple[BranchLossSpec, ...]:
         """Take-and-clear every staged §E.5 branch-loss record.
@@ -4662,203 +3392,23 @@ class RowProcessor:
         return losses
 
     def _take_claim_branch_loss(self, claimed_token_id: str) -> BranchLossSpec | None:
-        """Take the staged §E.5 loss record for the claim being disposed.
-
-        A single claim loses at most ONE branch (the claimed token reaches
-        exactly one lossy terminal arm); the record rides the claim's own
-        ``mark_failed`` / ``mark_pending_sink`` / ``mark_terminal``
-        transaction. More than one staged record, or a record for a different
-        token, is a processor bug.
-        """
-        if not self._pending_branch_losses:
-            return None
-        if len(self._pending_branch_losses) > 1:
-            staged = [(spec.token_id, spec.branch_name) for spec in self._pending_branch_losses]
-            raise OrchestrationInvariantError(
-                f"Claim disposition for token {claimed_token_id!r} found {len(self._pending_branch_losses)} staged "
-                f"branch-loss records ({staged!r}); one claim loses at most one branch. Processor bug."
-            )
-        spec = self._pending_branch_losses.pop()
-        if spec.token_id != claimed_token_id:
-            raise OrchestrationInvariantError(
-                f"Claim disposition for token {claimed_token_id!r} found a staged branch-loss record for "
-                f"token {spec.token_id!r} (branch {spec.branch_name!r}); the loss must ride its own token's "
-                "disposition. Processor bug."
-            )
-        return spec
+        """Take the staged §E.5 loss record for the claim being disposed (delegate)."""
+        return self._scheduler_drain.take_claim_branch_loss(claimed_token_id)
 
     def _heartbeat_active_claim(self) -> None:
-        """Refresh the active scheduler lease if heartbeat interval has elapsed.
+        """Refresh the active scheduler lease if the heartbeat interval elapsed.
 
-        Called from ``_process_single_token`` on every node-iteration boundary
-        (ADR-026 RC6 multi-worker, filigree elspeth-ddde8144b6). The actual
-        DB write fires at most once per ``scheduler_heartbeat_seconds`` so
-        fast plugin chains do not incur a write per node.
-
-        No-op when no claim is active or the interval has not yet elapsed.
-
-        Raises:
-            SchedulerLeaseLostError: the lease was reaped or reassigned by a
-                peer between the claim and this heartbeat. The caller (the
-                drain loop) catches this specifically and skips both the
-                in-flight result emission and the terminal ``mark_*`` write —
-                issuing either would CAS-fail and cascade into a Tier-1
-                AuditIntegrityError, which is the exact failure mode this
-                primitive exists to eliminate.
-
-        **Single-plugin-call limitation.** This heartbeat fires *between*
-        plugin calls, not *during* a single plugin call. If one plugin call
-        exceeds ``scheduler_lease_seconds`` on its own, the lease still
-        expires while that call is in-flight. The operator must size
-        ``scheduler_lease_seconds`` to bracket the longest expected
-        single-plugin call. Sub-call-level protection (option b watchdog or
-        thread-based heartbeat) is a separate concern and not in scope for
-        the ticket's option (a).
+        Delegate: ``SchedulerDrainCoordinator.heartbeat_active_claim`` owns the
+        active-claim state and the at-most-once-per-interval write.
+        ``_process_single_token`` calls this on every node-iteration boundary
+        (ADR-026 RC6, filigree elspeth-ddde8144b6); it raises
+        ``SchedulerLeaseLostError`` when the lease was reaped by a peer.
         """
-        if self._active_claim_work_item_id is None:
-            return
-        now = self._clock.now_utc()
-        if self._last_heartbeat_at is not None and (now - self._last_heartbeat_at).total_seconds() < self._scheduler_heartbeat_seconds:
-            return
-        self._scheduler.heartbeat_lease(
-            run_id=self._run_id,
-            work_item_id=self._active_claim_work_item_id,
-            lease_owner=self._scheduler_lease_owner,
-            lease_seconds=self._scheduler_lease_seconds,
-            now=now,
-        )
-        self._last_heartbeat_at = now
+        self._scheduler_drain.heartbeat_active_claim()
 
     def _barrier_key_for_live_hold(self, token_id: str) -> str:
-        """Resolve the barrier that owns a token about to be marked BLOCKED.
-
-        §E.2: the historical derivation read the in-claim BUFFERED outcome's
-        batch_id, which no longer exists at block time — the producer
-        (``_process_batch_aggregation_node`` / ``_maybe_coalesce_token``)
-        stashed the barrier_key alongside the live token instead.
-        """
-        try:
-            hold = self._live_barrier_holds[token_id]
-        except KeyError:
-            raise AuditIntegrityError(
-                f"Buffered scheduler result for token {token_id!r} has no live barrier hold stash; "
-                "cannot persist a durable release barrier. Processor bug."
-            ) from None
-        return hold.barrier_key
-
-    @staticmethod
-    def _is_buffered_scheduler_result(result: RowResult | tuple[RowResult, ...] | None) -> bool:
-        """Return whether a scheduler result is an active aggregation buffer."""
-        if result is None:
-            return False
-        if _is_result_tuple(result):
-            return bool(result) and all(item.outcome is None and item.path is TerminalPath.BUFFERED for item in result)
-        return result.outcome is None and result.path is TerminalPath.BUFFERED
-
-    @staticmethod
-    def _scheduler_result_failed_claimed_token(result: RowResult | tuple[RowResult, ...] | None, claimed_token_id: str) -> bool:
-        """Return whether the claimed scheduler token itself reached FAILURE."""
-        if result is None:
-            return False
-        result_items = result if _is_result_tuple(result) else (result,)
-        return any(item.token.token_id == claimed_token_id and item.outcome is TerminalOutcome.FAILURE for item in result_items)
-
-    @staticmethod
-    def _is_scheduler_sink_bound_result(result: RowResult) -> bool:
-        return result.sink_name is not None and result.path in {
-            TerminalPath.DEFAULT_FLOW,
-            TerminalPath.GATE_ROUTED,
-            TerminalPath.ON_ERROR_ROUTED,
-            TerminalPath.COALESCED,
-        }
-
-    @classmethod
-    def _scheduler_sink_bound_result_for_claimed_token(
-        cls,
-        result: RowResult | tuple[RowResult, ...] | None,
-        claimed_token_id: str,
-    ) -> RowResult | None:
-        """Return the claimed token's sink-bound result, if any."""
-        if result is None:
-            return None
-        result_items = result if _is_result_tuple(result) else (result,)
-        for item in result_items:
-            if item.token.token_id != claimed_token_id:
-                continue
-            if cls._is_scheduler_sink_bound_result(item):
-                return item
-        return None
-
-    @staticmethod
-    def _with_scheduler_pending_sink_handoffs(
-        result: RowResult | tuple[RowResult, ...] | None,
-        token_ids: frozenset[str],
-    ) -> RowResult | tuple[RowResult, ...]:
-        """Mark every requested token result as scheduler pending-sink backed."""
-        if result is None:
-            raise OrchestrationInvariantError(
-                f"Cannot mark scheduler pending-sink handoffs for token_ids={sorted(token_ids)!r}: result is None."
-            )
-        if not token_ids:
-            return result
-        if isinstance(result, tuple):
-            tagged: list[RowResult] = []
-            matched_token_ids: set[str] = set()
-            for item in result:
-                if item.token.token_id in token_ids:
-                    tagged.append(replace(item, scheduler_pending_sink=True))
-                    matched_token_ids.add(item.token.token_id)
-                else:
-                    tagged.append(item)
-            missing_token_ids = token_ids - matched_token_ids
-            if missing_token_ids:
-                raise OrchestrationInvariantError(
-                    "Cannot mark scheduler pending-sink handoffs: "
-                    f"token_ids={sorted(missing_token_ids)!r} were not present in tuple result."
-                )
-            return tuple(tagged)
-        if result.token.token_id not in token_ids:
-            raise OrchestrationInvariantError(
-                "Cannot mark scheduler pending-sink handoff: "
-                f"token_ids={sorted(token_ids)!r} do not include result token {result.token.token_id!r}."
-            )
-        return replace(result, scheduler_pending_sink=True)
-
-    @staticmethod
-    def _with_scheduler_pending_sink_handoff(
-        result: RowResult | tuple[RowResult, ...] | None,
-        claimed_token_id: str,
-    ) -> RowResult | tuple[RowResult, ...]:
-        """Mark only the claimed token result as scheduler pending-sink backed."""
-        return RowProcessor._with_scheduler_pending_sink_handoffs(result, frozenset((claimed_token_id,)))
-
-    @staticmethod
-    def _require_scheduler_sink_name(result: RowResult) -> str:
-        if result.sink_name is None:
-            raise OrchestrationInvariantError(f"Scheduler sink-bound result missing sink_name for token {result.token.token_id!r}")
-        return result.sink_name
-
-    @staticmethod
-    def _require_scheduler_outcome(result: RowResult) -> TerminalOutcome:
-        if result.outcome is None:
-            raise OrchestrationInvariantError(f"Scheduler sink-bound result missing terminal outcome for token {result.token.token_id!r}")
-        return result.outcome
-
-    @staticmethod
-    def _scheduler_error_hash(result: RowResult) -> str | None:
-        if result.path is not TerminalPath.ON_ERROR_ROUTED:
-            return None
-        if result.error is None:
-            raise OrchestrationInvariantError(f"Scheduler ON_ERROR_ROUTED result missing error for token {result.token.token_id!r}")
-        return compute_error_hash(result.error.message, exception_type=result.error.exception_type)
-
-    @staticmethod
-    def _scheduler_error_message(result: RowResult) -> str | None:
-        if result.path is not TerminalPath.ON_ERROR_ROUTED:
-            return None
-        if result.error is None:
-            raise OrchestrationInvariantError(f"Scheduler ON_ERROR_ROUTED result missing error for token {result.token.token_id!r}")
-        return result.error.message
+        """Resolve the barrier owning a token about to be marked BLOCKED (delegate)."""
+        return self._scheduler_drain.barrier_key_for_live_hold(token_id)
 
     def _enqueue_scheduler_work_item(
         self,
@@ -4867,93 +3417,8 @@ class RowProcessor:
         *,
         claim_immediately: bool = False,
     ) -> TokenWorkItem:
-        """Persist a READY scheduler item and retain the live token payload."""
-        available_at = self._clock.now_utc()
-        node_id = self._scheduler_node_id(item.current_node_id)
-        step_index = self._scheduler_step_index(item.current_node_id)
-        ingest_sequence = self._data_flow.resolve_row_ingest_sequence(item.token.row_id)
-        row_payload_json = self._scheduler.serialize_row_payload(item.token.row_data)
-        queue_key = self._queue_key_for_blocked_item(item)
-        barrier_key = self._barrier_key_for_blocked_item(item)
-        coalesce_node_id = str(item.coalesce_node_id) if item.coalesce_node_id is not None else None
-        coalesce_name = str(item.coalesce_name) if item.coalesce_name is not None else None
-        if claim_immediately:
-            scheduled = self._scheduler.enqueue_ready_claimed(
-                run_id=self._run_id,
-                token_id=item.token.token_id,
-                row_id=item.token.row_id,
-                node_id=node_id,
-                step_index=step_index,
-                ingest_sequence=ingest_sequence,
-                row_payload_json=row_payload_json,
-                available_at=available_at,
-                queue_key=queue_key,
-                barrier_key=barrier_key,
-                on_success_sink=item.on_success_sink,
-                branch_name=item.token.branch_name,
-                fork_group_id=item.token.fork_group_id,
-                join_group_id=item.token.join_group_id,
-                expand_group_id=item.token.expand_group_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
-                lease_owner=self._scheduler_lease_owner,
-                lease_seconds=self._scheduler_lease_seconds,
-                now=available_at,
-            )
-        else:
-            scheduled = self._scheduler.enqueue_ready(
-                run_id=self._run_id,
-                token_id=item.token.token_id,
-                row_id=item.token.row_id,
-                node_id=node_id,
-                step_index=step_index,
-                ingest_sequence=ingest_sequence,
-                row_payload_json=row_payload_json,
-                available_at=available_at,
-                queue_key=queue_key,
-                barrier_key=barrier_key,
-                on_success_sink=item.on_success_sink,
-                branch_name=item.token.branch_name,
-                fork_group_id=item.token.fork_group_id,
-                join_group_id=item.token.join_group_id,
-                expand_group_id=item.token.expand_group_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
-                # Membership fence (ADR-030 §G, slice 5): thread the registered
-                # worker identity so an evicted RowProcessor cannot enqueue READY
-                # items that no active worker will claim. The fence is active only
-                # when scheduler_lease_owner was explicitly registered in run_workers
-                # (production multi-worker path: leaders via run_core.py, followers
-                # via follower.py). Legacy / single-worker / test-fixture builds
-                # pass scheduler_lease_owner=None → auto-generate an unregistered
-                # identity → _scheduler_lease_owner_registered=False → fence skipped.
-                worker_id=self._scheduler_lease_owner if self._scheduler_lease_owner_registered else None,
-            )
-        if scheduled.status is TokenWorkStatus.READY or (
-            scheduled.status is TokenWorkStatus.LEASED and scheduled.lease_owner == self._scheduler_lease_owner
-        ):
-            pending_items[scheduled.work_item_id] = item
-        return scheduled
-
-    def _work_item_from_scheduler(self, scheduled: TokenWorkItem) -> WorkItem:
-        """Rehydrate a scheduler work item from its durable payload snapshot."""
-        current_node_id = None if scheduled.node_id is None or scheduled.node_id == "__terminal__" else NodeID(scheduled.node_id)
-        token = TokenInfo(
-            row_id=scheduled.row_id,
-            token_id=scheduled.token_id,
-            row_data=self._scheduler.deserialize_row_payload(scheduled.row_payload_json),
-            branch_name=scheduled.branch_name,
-            fork_group_id=scheduled.fork_group_id,
-            join_group_id=scheduled.join_group_id,
-            expand_group_id=scheduled.expand_group_id,
-        )
-        return self._nav.create_work_item(
-            token=token,
-            current_node_id=current_node_id,
-            coalesce_node_id=NodeID(scheduled.coalesce_node_id) if scheduled.coalesce_node_id is not None else None,
-            coalesce_name=CoalesceName(scheduled.coalesce_name) if scheduled.coalesce_name is not None else None,
-            on_success_sink=scheduled.on_success_sink,
-        )
+        """Persist a READY scheduler item and retain the live token payload (delegate)."""
+        return self._scheduler_drain.enqueue_work_item(item, pending_items, claim_immediately=claim_immediately)
 
     def _scheduler_node_id(self, node_id: NodeID | None) -> str | None:
         """Return the persisted node cursor for a work item."""
@@ -4997,6 +3462,34 @@ class RowProcessor:
             return str(item.coalesce_name)
         return None
 
+    # --- TokenTraversalEngine delegates (c49 component 4) ---
+    # The traversal state machine lives in engine/token_traversal.py. These three
+    # names are the cluster's external surface and stay on RowProcessor: the
+    # SchedulerDrainHost seam calls self._processor._process_single_token at call
+    # time (10+ tests patch it), and test_processor.py drives _handle_transform_node
+    # / _handle_transform_error_status directly. Every other handler in the family
+    # is engine-internal.
+
+    def _process_single_token(
+        self,
+        token: TokenInfo,
+        ctx: PluginContext,
+        current_node_id: NodeID | None,
+        coalesce_node_id: NodeID | None = None,
+        coalesce_name: CoalesceName | None = None,
+        on_success_sink: str | None = None,
+        attempt_offset: int = 0,
+    ) -> tuple[RowResult | tuple[RowResult, ...] | None, list[WorkItem]]:
+        return self._token_traversal.process_single_token(
+            token,
+            ctx,
+            current_node_id,
+            coalesce_node_id,
+            coalesce_name,
+            on_success_sink,
+            attempt_offset,
+        )
+
     def _handle_transform_node(
         self,
         transform: TransformProtocol,
@@ -5009,172 +3502,17 @@ class RowProcessor:
         current_on_success_sink: str,
         attempt_offset: int = 0,
     ) -> _TransformOutcome:
-        """Handle a single transform node: execute with retry, route errors, handle multi-row.
-
-        Args:
-            transform: The transform plugin to execute.
-            current_token: Token being processed through the DAG.
-            ctx: Plugin context for the current run.
-            node_id: Current DAG node ID (needed for deaggregation expand_token() and
-                child work item creation via create_continuation_work_item()).
-            child_items: Mutable list — deaggregation appends child work items here.
-            coalesce_node_id: Coalesce barrier node for fork branches (or None).
-            coalesce_name: Coalesce point name for fork branches (or None).
-            current_on_success_sink: Current sink name, may be updated by transform.on_success.
-
-        Resume state (attempt offset and checkpoint provenance) is carried on
-        current_token.resume_attempt_offset and current_token.resume_checkpoint_id
-        and flow through to execute_transform without explicit threading.
-
-        Returns:
-            _TransformContinue: Token should advance to next node (updated token + updated sink).
-            _TransformTerminal: Token reached terminal state (FAILED, QUARANTINED, ROUTED, or EXPANDED).
-        """
-        # 1. Execute transform with retry
-        try:
-            transform_result, current_token, error_sink = self._execute_transform_with_retry(
-                transform=transform,
-                token=current_token,
-                ctx=ctx,
-                attempt_offset=attempt_offset,
-            )
-            # Emit TransformCompleted telemetry AFTER Landscape recording succeeds
-            # (Landscape recording happens inside _execute_transform_with_retry)
-            self._emit_transform_completed(
-                token=current_token,
-                transform=transform,
-                transform_result=transform_result,
-            )
-        except MaxRetriesExceeded as e:
-            # All retries exhausted - return FAILED outcome
-            error_hash = compute_error_hash(str(e), exception_type=type(e).__name__)
-            self._data_flow.record_token_outcome(
-                ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.UNROUTED,
-                error_hash=error_hash,
-            )
-            # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(
-                current_token,
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.UNROUTED,
-            )
-            # Notify coalesce if this is a forked branch
-            sibling_results = self._notify_coalesce_of_lost_branch(
-                current_token,
-                f"max_retries_exceeded:{e}",
-                child_items,
-            )
-            current_result = RowResult(
-                token=current_token,
-                final_data=current_token.row_data,
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.UNROUTED,
-                error=FailureInfo.from_max_retries_exceeded(e),
-            )
-            if sibling_results:
-                return _TransformTerminal(result=(current_result, *sibling_results))
-            return _TransformTerminal(result=current_result)
-
-        # 2. Handle error status
-        if transform_result.status == "error":
-            return self._handle_transform_error_status(
-                transform_result,
-                current_token,
-                error_sink,
-                child_items,
-            )
-
-        # 3. Track on_success for sink routing at end of chain
-        updated_sink = current_on_success_sink
-        if transform.on_success is not None:
-            updated_sink = transform.on_success
-
-        # 4. Handle multi-row output (deaggregation)
-        # NOTE: This is ONLY for non-aggregation transforms. Aggregation
-        # transforms route through _process_batch_aggregation_node() above.
-        if transform_result.is_multi_row:
-            if transform_result.rows is None:
-                raise OrchestrationInvariantError("is_multi_row guarantees rows is not None")
-            if len(transform_result.rows) == 0:
-                self._record_dropped_by_filter_outcome(
-                    token=current_token,
-                    transform_name=transform.name,
-                    node_id=node_id,
-                    path_label="after success_empty()",
-                )
-                self._emit_token_completed(
-                    current_token,
-                    outcome=TerminalOutcome.SUCCESS,
-                    path=TerminalPath.FILTER_DROPPED,
-                )
-                sibling_results = self._notify_coalesce_of_lost_branch(
-                    current_token,
-                    "dropped_by_filter",
-                    child_items,
-                )
-                current_result = RowResult(
-                    token=current_token,
-                    final_data=current_token.row_data,
-                    outcome=TerminalOutcome.SUCCESS,
-                    path=TerminalPath.FILTER_DROPPED,
-                )
-                if sibling_results:
-                    return _TransformTerminal(result=(current_result, *sibling_results))
-                return _TransformTerminal(result=current_result)
-
-            # Validate transform is allowed to create tokens
-            if not transform.creates_tokens:
-                raise RuntimeError(
-                    f"Transform '{transform.name}' returned multi-row result "
-                    f"but has creates_tokens=False. Either set creates_tokens=True "
-                    f"or return single row via TransformResult.success(row). "
-                    f"(Multi-row is allowed in aggregation passthrough mode.)"
-                )
-
-            # Deaggregation: create child tokens for each output row
-            # NOTE: Parent EXPANDED outcome is recorded atomically in expand_token()
-            # Contract consistency is enforced by TransformResult.success_multi()
-            output_contract = transform_result.rows[0].contract
-            child_tokens, _expand_group_id = self._token_manager.expand_token(
-                parent_token=current_token,
-                expanded_rows=[r.to_dict() for r in transform_result.rows],
-                output_contract=output_contract,
-                node_id=node_id,
-                run_id=self._run_id,
-            )
-
-            # Queue each child for continued processing.
-            # Pass updated_sink so terminal children inherit the
-            # expanding transform's sink instead of defaulting to source_on_success.
-            # Children born during a re-drive get fresh token_ids with no prior node_states,
-            # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
-            for child_token in child_tokens:
-                child_coalesce_name = coalesce_name if coalesce_name is not None and child_token.branch_name is not None else None
-                child_items.append(
-                    self._nav.create_continuation_work_item(
-                        token=child_token,
-                        current_node_id=node_id,
-                        coalesce_name=child_coalesce_name,
-                        on_success_sink=updated_sink,
-                    )
-                )
-
-            # NOTE: Parent EXPANDED outcome is recorded atomically in expand_token()
-            # to eliminate crash window between child creation and outcome recording.
-            return _TransformTerminal(
-                result=RowResult(
-                    token=current_token,
-                    final_data=current_token.row_data,
-                    outcome=TerminalOutcome.TRANSIENT,
-                    path=TerminalPath.EXPAND_PARENT,
-                )
-            )
-
-        # 5. Single row success — continue to next node
-        # (current_token already updated by _execute_transform_with_retry)
-        return _TransformContinue(updated_token=current_token, updated_sink=updated_sink)
+        return self._token_traversal.handle_transform_node(
+            transform,
+            current_token,
+            ctx,
+            node_id,
+            child_items,
+            coalesce_node_id,
+            coalesce_name,
+            current_on_success_sink,
+            attempt_offset,
+        )
 
     def _handle_transform_error_status(
         self,
@@ -5183,552 +3521,9 @@ class RowProcessor:
         error_sink: str | None,
         child_items: list[WorkItem],
     ) -> _TransformTerminal:
-        """Handle transform error status: quarantine (discard) or route to error sink.
-
-        Args:
-            transform_result: The failed transform result.
-            current_token: Token that failed processing.
-            error_sink: "discard" for quarantine, or a sink name for error routing.
-            child_items: Mutable list — coalesce notifications may append child work items.
-
-        Returns:
-            _TransformTerminal with QUARANTINED or ROUTED_ON_ERROR outcome.
-        """
-        if error_sink == "discard":
-            # Intentionally discarded - QUARANTINED
-            # The QUARANTINED path tolerates an "unknown_error" fallback for
-            # historical reasons; do NOT extend that fallback to ROUTED_ON_ERROR
-            # below — see the offensive guard in the routed branch.
-            error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
-            quarantine_error_hash = compute_error_hash(error_detail)
-            self._data_flow.record_token_outcome(
-                ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.QUARANTINED_AT_SOURCE,
-                error_hash=quarantine_error_hash,
-            )
-            # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(
-                current_token,
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.QUARANTINED_AT_SOURCE,
-            )
-            # Notify coalesce if this is a forked branch
-            sibling_results = self._notify_coalesce_of_lost_branch(
-                current_token,
-                f"quarantined:{error_detail}",
-                child_items,
-            )
-            current_result = RowResult(
-                token=current_token,
-                final_data=current_token.row_data,
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.QUARANTINED_AT_SOURCE,
-            )
-            if sibling_results:
-                return _TransformTerminal(result=(current_result, *sibling_results))
-            return _TransformTerminal(result=current_result)
-
-        # Routed to error sink — emit ROUTED_ON_ERROR (DIVERT semantics).
-        # NOTE: Do NOT record the outcome here - the token hasn't been written yet.
-        # SinkExecutor.write() records the outcome AFTER sink durability is achieved.
-        #
-        # Offensive: refuse to fabricate Tier-1 audit data. If the upstream
-        # transform did not provide a reason, that is a producer bug; crashing
-        # here is correct because emitting `FailureInfo.message="unknown_error"`
-        # would create a deterministic error_hash collision across unrelated
-        # falsy-error failures and falsify the audit trail.
-        if not transform_result.reason:
-            raise OrchestrationInvariantError(
-                "ROUTED_ON_ERROR requires transform_result.reason; refusing to "
-                "fabricate FailureInfo.message='unknown_error' for audit hashing"
-            )
-        error_detail = str(transform_result.reason)
-
-        sibling_results = self._notify_coalesce_of_lost_branch(
+        return self._token_traversal.handle_transform_error_status(
+            transform_result,
             current_token,
-            f"error_routed:{error_detail}",
+            error_sink,
             child_items,
         )
-        # Capture the originating transform error so the audit trail records both
-        # sink_name and error_hash on the ROUTED_ON_ERROR outcome (mirror of DIVERTED's
-        # contract). The accumulator converts FailureInfo.message -> error_hash before
-        # the pending-sink record is handed to SinkExecutor for durable recording.
-        failure = FailureInfo(exception_type="TransformError", message=error_detail)
-        current_result = RowResult(
-            token=current_token,
-            final_data=current_token.row_data,
-            outcome=TerminalOutcome.FAILURE,
-            path=TerminalPath.ON_ERROR_ROUTED,
-            sink_name=error_sink,
-            error=failure,
-        )
-        if sibling_results:
-            return _TransformTerminal(result=(current_result, *sibling_results))
-        return _TransformTerminal(result=current_result)
-
-    def _handle_gate_node(
-        self,
-        gate: GateSettings,
-        current_token: TokenInfo,
-        ctx: PluginContext,
-        node_id: NodeID,
-        child_items: list[WorkItem],
-        coalesce_node_id: NodeID | None,
-        coalesce_name: CoalesceName | None,
-        current_on_success_sink: str,
-    ) -> _GateOutcome:
-        """Handle a gate node: evaluate, then fork/route/divert/continue.
-
-        Args:
-            gate: Gate configuration to evaluate.
-            current_token: Token being processed through the DAG.
-            ctx: Plugin context for the current run.
-            node_id: Current DAG node ID (passed to gate executor and used for
-                fork child work item creation).
-            child_items: Mutable list — fork paths append child work items here.
-            coalesce_node_id: Coalesce barrier node for fork branches (or None).
-            coalesce_name: Coalesce point name for fork branches (or None).
-            current_on_success_sink: Current sink name, carried forward or overridden by jumps.
-
-        Returns:
-            _GateTerminal: Gate routed to sink, forked to paths, or diverted (contains result + child_items populated).
-            _GateContinue: Gate says continue — updated_token, updated_sink, and optional next_node_id for jumps.
-        """
-        # 1. Execute gate
-        outcome = self._gate_executor.execute_config_gate(
-            gate_config=gate,
-            node_id=node_id,
-            token=current_token,
-            ctx=ctx,
-            token_manager=self._token_manager,
-        )
-        current_token = outcome.updated_token
-
-        # 2. Emit GateEvaluated telemetry AFTER Landscape recording succeeds
-        # (Landscape recording happens inside execute_config_gate)
-        self._emit_gate_evaluated(
-            token=current_token,
-            gate_name=gate.name,
-            gate_node_id=node_id,
-            routing_mode=outcome.result.action.mode,
-            destinations=self._get_gate_destinations(outcome),
-        )
-
-        # 3. Check if gate routed to a sink
-        if outcome.sink_name is not None:
-            # NOTE: Do NOT record ROUTED outcome here - the token hasn't been written yet.
-            # SinkExecutor.write() records the outcome AFTER sink durability is achieved.
-            # Notify coalesce if this is a forked branch
-            sibling_results = self._notify_coalesce_of_lost_branch(
-                current_token,
-                f"gate_routed_to_sink:{outcome.sink_name}",
-                child_items,
-            )
-            current_result = RowResult(
-                token=current_token,
-                final_data=current_token.row_data,
-                outcome=TerminalOutcome.SUCCESS,
-                path=TerminalPath.GATE_ROUTED,
-                sink_name=outcome.sink_name,
-            )
-            if sibling_results:
-                return _GateTerminal(result=(current_result, *sibling_results))
-            return _GateTerminal(result=current_result)
-
-        if outcome.discarded:
-            self._record_gate_discarded_outcome(
-                token=current_token,
-                gate_name=gate.name,
-                node_id=node_id,
-            )
-            with best_effort(
-                "TokenCompleted telemetry after gate discard audit",
-                run_id=self._run_id,
-                token_id=current_token.token_id,
-                gate_node_id=node_id,
-                gate_name=gate.name,
-            ):
-                self._emit_token_completed(
-                    current_token,
-                    outcome=TerminalOutcome.SUCCESS,
-                    path=TerminalPath.GATE_DISCARDED,
-                )
-            sibling_results = self._notify_coalesce_of_lost_branch(
-                current_token,
-                "gate_discarded",
-                child_items,
-            )
-            current_result = RowResult(
-                token=current_token,
-                final_data=current_token.row_data,
-                outcome=TerminalOutcome.SUCCESS,
-                path=TerminalPath.GATE_DISCARDED,
-            )
-            if sibling_results:
-                return _GateTerminal(result=(current_result, *sibling_results))
-            return _GateTerminal(result=current_result)
-
-        # 4. Fork to paths
-        if outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
-            return self._handle_gate_fork(outcome, current_token, node_id, child_items)
-
-        # 5. Jump to specific node
-        if outcome.next_node_id is not None:
-            # Validate jump target exists in the DAG (our data — crash on invariant violation).
-            # Without this check, a nonexistent target silently passes the coalesce ordering
-            # check below (both .get() calls return None → condition is False) and only fails
-            # one iteration later with a less informative error from resolve_plugin_for_node().
-            if outcome.next_node_id not in self._node_step_map:
-                raise OrchestrationInvariantError(
-                    f"Gate at node '{node_id}' jumped token '{current_token.token_id}' to "
-                    f"node '{outcome.next_node_id}' which is not in the DAG step map. "
-                    f"Known nodes: {sorted(self._node_step_map.keys())}"
-                )
-
-            updated_sink = current_on_success_sink
-            resolved_sink = self._nav.resolve_jump_target_sink(outcome.next_node_id)
-            if resolved_sink is not None:
-                updated_sink = resolved_sink
-
-            # Re-validate coalesce ordering invariant after gate jump.
-            # The initial check at entry only validates the starting node.
-            # A gate jump can move the token past its coalesce node,
-            # which would silently bypass join handling.
-            #
-            # IMPORTANT: Use outcome.next_node_id (not the caller's node_id param)
-            # because we're validating the JUMP TARGET, not the current position.
-            if coalesce_node_id is not None:
-                jump_target_step = self._node_step_map[outcome.next_node_id]
-                coalesce_barrier_step = self._node_step_map[coalesce_node_id]
-                if jump_target_step > coalesce_barrier_step:
-                    raise OrchestrationInvariantError(
-                        f"Gate jump moved token '{current_token.token_id}' to node '{outcome.next_node_id}' "
-                        f"(step {jump_target_step}) which is past its coalesce node '{coalesce_node_id}' "
-                        f"(step {coalesce_barrier_step}). This would bypass join handling."
-                    )
-
-            return _GateContinue(
-                updated_token=current_token,
-                updated_sink=updated_sink,
-                next_node_id=outcome.next_node_id,
-            )
-
-        # 6. CONTINUE: config gate says "proceed to next structural node."
-        if outcome.result.action.kind != RoutingKind.CONTINUE:
-            raise OrchestrationInvariantError(
-                f"Unhandled config gate routing kind {outcome.result.action.kind!r} "
-                f"for token {current_token.token_id} at node '{node_id}'. "
-                f"Expected CONTINUE when no sink_name, fork, or next_node_id is set."
-            )
-        return _GateContinue(updated_token=current_token, updated_sink=current_on_success_sink)
-
-    def _handle_gate_fork(
-        self,
-        outcome: GateOutcome,
-        current_token: TokenInfo,
-        node_id: NodeID,
-        child_items: list[WorkItem],
-    ) -> _GateTerminal:
-        """Handle fork-to-paths routing: build child work items for each fork branch.
-
-        Iterates child tokens from the gate outcome, resolves coalesce info for each
-        branch, and appends continuation or terminal work items to child_items.
-
-        Args:
-            outcome: Config gate outcome containing child tokens and routing info.
-            current_token: Parent token being forked.
-            node_id: Current gate node ID for continuation work items.
-            child_items: Mutable list — fork paths append child work items here.
-
-        Returns:
-            _GateTerminal with FORKED outcome for the parent token.
-        """
-        for child_token in outcome.child_tokens:
-            # Look up coalesce info for this branch
-            cfg_branch_name = child_token.branch_name
-            cfg_coalesce_name: CoalesceName | None = None
-
-            if cfg_branch_name and BranchName(cfg_branch_name) in self._branch_to_coalesce:
-                cfg_coalesce_name = self._branch_to_coalesce[BranchName(cfg_branch_name)]
-
-            # See config gate fork handler above for routing logic.
-            # Children born during a re-drive get fresh token_ids with no prior node_states,
-            # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
-            if cfg_coalesce_name is None and cfg_branch_name and BranchName(cfg_branch_name) in self._branch_to_sink:
-                child_items.append(
-                    self._nav.create_work_item(
-                        token=child_token,
-                        current_node_id=None,
-                    )
-                )
-            else:
-                child_items.append(
-                    self._nav.create_continuation_work_item(
-                        token=child_token,
-                        current_node_id=node_id,
-                        coalesce_name=cfg_coalesce_name,
-                    )
-                )
-
-        # NOTE: Parent FORKED outcome is now recorded atomically in fork_token()
-        # to eliminate crash window between child creation and outcome recording.
-        return _GateTerminal(
-            result=RowResult(
-                token=current_token,
-                final_data=current_token.row_data,
-                outcome=TerminalOutcome.TRANSIENT,
-                path=TerminalPath.FORK_PARENT,
-            )
-        )
-
-    def _validate_coalesce_ordering(
-        self,
-        token: TokenInfo,
-        current_node_id: NodeID | None,
-        coalesce_node_id: NodeID | None,
-        coalesce_name: CoalesceName | None,
-    ) -> None:
-        """Validate that tokens with coalesce metadata don't start downstream of their coalesce point.
-
-        A malformed work item starting past the coalesce node would silently skip coalesce handling
-        because _maybe_coalesce_token only triggers on exact node equality.
-
-        Raises:
-            OrchestrationInvariantError: If the token's starting node is downstream of its coalesce barrier.
-        """
-        if (
-            coalesce_node_id is not None
-            and current_node_id is not None
-            and coalesce_name is not None
-            and current_node_id != coalesce_node_id
-            and current_node_id in self._node_step_map
-            and coalesce_node_id in self._node_step_map
-        ):
-            current_step = self._node_step_map[current_node_id]
-            coalesce_step = self._node_step_map[coalesce_node_id]
-            if current_step > coalesce_step:
-                raise OrchestrationInvariantError(
-                    f"Token {token.token_id} started at node '{current_node_id}' (step {current_step}), "
-                    f"which is downstream of coalesce '{coalesce_name}' (step {coalesce_step}). "
-                    f"Work items with coalesce metadata must start at or before the coalesce point."
-                )
-
-    def _handle_terminal_token(
-        self,
-        current_token: TokenInfo,
-        current_on_success_sink: str,
-    ) -> RowResult:
-        """Handle a token that has traversed all nodes: resolve final sink, return result.
-
-        Determines the effective sink from:
-        1. branch_to_sink mapping (for fork branches routing directly to sinks)
-        2. last_on_success_sink (inherited from transforms or source)
-
-        If the token has a branch_name that maps to a direct sink via _branch_to_sink,
-        that takes precedence. Otherwise, the accumulated on_success sink is used.
-
-        Raises:
-            OrchestrationInvariantError: If no effective sink can be determined (indicates
-                a DAG construction or on_success configuration bug).
-
-        Returns:
-            RowResult with COMPLETED outcome and resolved sink_name.
-        """
-        # Determine sink name from explicit routing maps. Fork children
-        # targeting direct sinks are resolved via _branch_to_sink (built from
-        # DAG COPY edges at construction time). Non-fork tokens use the last
-        # transform's on_success or the source's on_success.
-        effective_sink = current_on_success_sink
-        if current_token.branch_name is not None:
-            branch = BranchName(current_token.branch_name)
-            if branch in self._branch_to_sink:
-                effective_sink = self._branch_to_sink[branch]
-
-        if not effective_sink or not effective_sink.strip():
-            raise OrchestrationInvariantError(
-                f"No effective sink for token {current_token.token_id}: "
-                f"last_on_success_sink={current_on_success_sink!r}, "
-                f"branch_name={current_token.branch_name!r}. "
-                f"This indicates a DAG construction or on_success configuration bug."
-            )
-
-        return RowResult(
-            token=current_token,
-            final_data=current_token.row_data,
-            outcome=TerminalOutcome.SUCCESS,
-            path=TerminalPath.DEFAULT_FLOW,
-            sink_name=effective_sink,
-        )
-
-    def _process_single_token(
-        self,
-        token: TokenInfo,
-        ctx: PluginContext,
-        current_node_id: NodeID | None,
-        coalesce_node_id: NodeID | None = None,
-        coalesce_name: CoalesceName | None = None,
-        on_success_sink: str | None = None,
-        attempt_offset: int = 0,
-    ) -> tuple[RowResult | tuple[RowResult, ...] | None, list[WorkItem]]:
-        """Process a single token through processing nodes starting at node_id.
-
-        Args:
-            token: Token to process; token.resume_attempt_offset and
-                token.resume_checkpoint_id carry the resume state for this token
-                and propagate automatically through all node_state writes.
-            ctx: Plugin context
-            current_node_id: Node ID to start processing from. None is valid only
-                for terminal work items that already have explicit sink context
-                (inherited on_success_sink or branch_to_sink mapping).
-            coalesce_node_id: Node ID at which fork children should coalesce
-            coalesce_name: Name of the coalesce point for merging
-            on_success_sink: Inherited sink from parent (e.g. terminal deagg parent's on_success)
-            attempt_offset: Starting audit attempt offset for lease-recovered work
-
-        Returns:
-            Tuple of (RowResult or list of RowResults or None if held for coalesce,
-                      list of child WorkItems to queue)
-            - Single RowResult for most operations
-            - List of RowResults for passthrough aggregation mode
-            - None for held coalesce tokens
-        """
-        current_token = token
-        # MUTATION CONTRACT: child_items is passed by reference to _handle_transform_node(),
-        # _handle_gate_node(), _notify_coalesce_of_lost_branch(), and _maybe_coalesce_token().
-        # These methods append child WorkItems (fork paths, deaggregation, coalesce merges)
-        # directly into this list. The caller returns child_items alongside the RowResult.
-        # Do NOT replace with return-value-based patterns without updating all call sites.
-        child_items: list[WorkItem] = []
-
-        # current_node_id=None skips traversal loop entirely, so only allow it
-        # when sink routing is explicit (inherited sink or branch->sink map).
-        if current_node_id is None:
-            has_branch_sink = current_token.branch_name is not None and BranchName(current_token.branch_name) in self._branch_to_sink
-            if on_success_sink is None and not has_branch_sink:
-                raise OrchestrationInvariantError(
-                    f"Token {token.token_id} has current_node_id=None without explicit terminal sink context. "
-                    "Expected inherited on_success_sink or branch_to_sink mapping."
-                )
-
-        last_on_success_sink: str = on_success_sink if on_success_sink is not None else self._source_on_success
-        if coalesce_name is not None and current_node_id is not None:
-            coalesce_node_id_for_name = self._coalesce_node_ids[coalesce_name]
-            if coalesce_node_id_for_name == current_node_id and self._nav.resolve_next_node(current_node_id) is None:
-                last_on_success_sink = self._nav.resolve_coalesce_sink(
-                    coalesce_name,
-                    context=f"start of token processing for token '{token.token_id}'",
-                )
-
-        self._validate_coalesce_ordering(token, current_node_id, coalesce_node_id, coalesce_name)
-
-        node_id: NodeID | None = current_node_id
-        max_inner_iterations = len(self._node_to_next) + 1
-        inner_iterations = 0
-        while node_id is not None:
-            inner_iterations += 1
-            if inner_iterations > max_inner_iterations:
-                raise OrchestrationInvariantError(
-                    f"Inner traversal exceeded {max_inner_iterations} iterations for token "
-                    f"{token.token_id}. Possible cycle in node_to_next map."
-                )
-            # Refresh active scheduler lease (filigree elspeth-ddde8144b6).
-            # No-op when no claim is active. Raises SchedulerLeaseLostError
-            # when the lease was reaped by a peer — propagates up to
-            # ``_drain_scheduler_claims`` which catches it specifically and
-            # abandons this iteration cleanly.
-            self._heartbeat_active_claim()
-            handled, result = self._maybe_coalesce_token(
-                current_token,
-                current_node_id=node_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
-                child_items=child_items,
-            )
-            if handled:
-                return (result, child_items)
-
-            next_node_id = self._nav.resolve_next_node(node_id)
-            plugin = self._nav.resolve_plugin_for_node(node_id)
-            if plugin is None:
-                # Non-processing structural nodes (e.g. coalesce) are traversed but not executed.
-                node_id = next_node_id
-                continue
-
-            # Type-safe plugin detection using protocols
-            if isinstance(plugin, TransformProtocol):
-                row_transform = plugin
-                # Check if this is a batch-aware transform at an aggregation node
-                transform_node_id = row_transform.node_id
-                if row_transform.is_batch_aware and transform_node_id is not None and transform_node_id in self._aggregation_settings:
-                    # Use engine buffering for aggregation
-                    return self._process_batch_aggregation_node(
-                        transform=row_transform,
-                        current_token=current_token,
-                        ctx=ctx,
-                        child_items=child_items,
-                        coalesce_node_id=coalesce_node_id,
-                        coalesce_name=coalesce_name,
-                    )
-
-                # ADR-030 §B (slice 5, follower aggregation barrier hand-off):
-                # a follower has no AggregationSettings (trigger evaluation is
-                # leader-only per §B.2).  If this batch-aware transform sits at
-                # a known aggregation node, the follower must NOT execute it
-                # row-wise — doing so produces wrong aggregate output and
-                # bypasses the leader's barrier.  Return (None, []) so that
-                # _drain_scheduler_claims hits the ``result is None and not
-                # child_items`` arm (line 4241) and calls mark_blocked with the
-                # aggregation barrier key.  The leader's next journal-intake
-                # adopts the arrival and runs trigger evaluation.
-                if row_transform.is_batch_aware and transform_node_id is not None and transform_node_id in self._follower_barrier_node_ids:
-                    logger.debug(
-                        "follower: aggregation barrier hold for token %r at node %r — marking blocked; leader adopts via journal-intake",
-                        current_token.token_id,
-                        transform_node_id,
-                    )
-                    return None, child_items
-
-                # NOTE: child_items is mutated inside (deagg appends, coalesce notifications).
-                transform_outcome = self._handle_transform_node(
-                    row_transform,
-                    current_token,
-                    ctx,
-                    node_id,
-                    child_items,
-                    coalesce_node_id,
-                    coalesce_name,
-                    last_on_success_sink,
-                    attempt_offset,
-                )
-                if isinstance(transform_outcome, _TransformTerminal):
-                    return transform_outcome.result, child_items
-                current_token = transform_outcome.updated_token
-                last_on_success_sink = transform_outcome.updated_sink
-            elif isinstance(plugin, GateSettings):
-                # NOTE: child_items is mutated inside (fork paths, coalesce notifications).
-                gate_outcome = self._handle_gate_node(
-                    plugin,
-                    current_token,
-                    ctx,
-                    node_id,
-                    child_items,
-                    coalesce_node_id,
-                    coalesce_name,
-                    last_on_success_sink,
-                )
-                if isinstance(gate_outcome, _GateTerminal):
-                    return gate_outcome.result, child_items
-                current_token = gate_outcome.updated_token
-                last_on_success_sink = gate_outcome.updated_sink
-                if gate_outcome.next_node_id is not None:
-                    node_id = gate_outcome.next_node_id
-                    continue
-
-            else:
-                raise TypeError(f"Unknown transform type: {type(plugin).__name__}. Expected TransformProtocol or GateSettings.")
-
-            node_id = next_node_id
-
-        result = self._handle_terminal_token(current_token, last_on_success_sink)
-        return result, child_items

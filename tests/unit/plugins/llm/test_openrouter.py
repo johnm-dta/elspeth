@@ -4,8 +4,8 @@
 import json
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any, cast
-from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -16,6 +16,7 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.engine.batch_adapter import ExceptionResult
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
+from elspeth.plugins.infrastructure.clients.llm import ContentPolicyError, LLMClientError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig, OpenRouterLLMProvider
 from elspeth.plugins.transforms.llm.transform import LLMTransform
@@ -29,6 +30,141 @@ from .conftest import chaosllm_openrouter_http_responses, chaosllm_openrouter_ht
 DYNAMIC_SCHEMA = {"mode": "observed"}
 _OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
 _OPENROUTER_INVALID_MODEL = "anthropic/this-model-does-not-exist"
+_OPENROUTER_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+@dataclass(frozen=True)
+class RecordedAuditCall:
+    """Captured audit call from the in-memory test recorder."""
+
+    state_id: str | None
+    operation_id: str | None
+    call_index: int
+    call_type: Any
+    status: Any
+    request_data: Any
+    response_data: Any | None = None
+    error: Any | None = None
+    latency_ms: float | None = None
+    request_ref: str | None = None
+    response_ref: str | None = None
+    resolved_prompt_template_hash: str | None = None
+
+
+@dataclass
+class InMemoryAuditWriter:
+    """Minimal PluginAuditWriter fake for LLM/OpenRouter tests."""
+
+    calls: list[RecordedAuditCall] = field(default_factory=list)
+    operation_calls: list[RecordedAuditCall] = field(default_factory=list)
+    _state_call_indexes: dict[str, int] = field(default_factory=dict)
+    _operation_call_indexes: dict[str, int] = field(default_factory=dict)
+
+    def allocate_call_index(self, state_id: str) -> int:
+        return self._allocate(self._state_call_indexes, state_id)
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return self._allocate(self._operation_call_indexes, operation_id)
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: Any,
+        status: Any,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> RecordedAuditCall:
+        call = RecordedAuditCall(
+            state_id=state_id,
+            operation_id=None,
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_data=request_data,
+            response_data=response_data,
+            error=error,
+            latency_ms=latency_ms,
+            request_ref=request_ref,
+            response_ref=response_ref,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
+        )
+        self.calls.append(call)
+        return call
+
+    def record_operation_call(
+        self,
+        operation_id: str,
+        call_type: Any,
+        status: Any,
+        request_data: Any,
+        response_data: Any | None = None,
+        error: Any | None = None,
+        latency_ms: float | None = None,
+        *,
+        call_index: int | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> RecordedAuditCall:
+        if call_index is None:
+            call_index = self.allocate_operation_call_index(operation_id)
+        call = RecordedAuditCall(
+            state_id=None,
+            operation_id=operation_id,
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_data=request_data,
+            response_data=response_data,
+            error=error,
+            latency_ms=latency_ms,
+            request_ref=request_ref,
+            response_ref=response_ref,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
+        )
+        self.operation_calls.append(call)
+        return call
+
+    def get_node_state(self, _state_id: str) -> None:
+        return None
+
+    @staticmethod
+    def _allocate(indexes: dict[str, int], parent_id: str) -> int:
+        call_index = indexes.get(parent_id, 0)
+        indexes[parent_id] = call_index + 1
+        return call_index
+
+
+@pytest.fixture
+def audit_writer() -> InMemoryAuditWriter:
+    """Create an in-memory audit writer for recorder-dependent tests."""
+    return InMemoryAuditWriter()
+
+
+def _ignore_telemetry(_event: Any) -> None:
+    return None
+
+
+def _http_request() -> httpx.Request:
+    return httpx.Request("POST", _OPENROUTER_COMPLETIONS_URL)
+
+
+def _http_response(status_code: int, text: str = "", request: httpx.Request | None = None) -> httpx.Response:
+    request = request or _http_request()
+    return httpx.Response(status_code=status_code, text=text, request=request)
+
+
+def _http_status_error(message: str, status_code: int, text: str = "") -> httpx.HTTPStatusError:
+    request = _http_request()
+    response = _http_response(status_code, text=text, request=request)
+    return httpx.HTTPStatusError(message, request=request, response=response)
 
 
 def _create_mock_response(
@@ -57,8 +193,11 @@ def _create_mock_response(
         usage_override=usage,
     )
     if raise_for_status_error is not None:
-        # Override raise_for_status to raise the specified error
-        response.raise_for_status = Mock(side_effect=raise_for_status_error)  # type: ignore[method-assign]
+
+        def raise_for_status() -> None:
+            raise raise_for_status_error
+
+        response.raise_for_status = raise_for_status  # type: ignore[method-assign]
     return response
 
 
@@ -67,7 +206,7 @@ def mock_httpx_client(
     chaosllm_server,
     response: httpx.Response | list[httpx.Response] | None = None,
     side_effect: Exception | None = None,
-) -> Iterator[Mock]:
+) -> Iterator[Any]:
     """Context manager to mock httpx.Client using ChaosLLM responses."""
     if response is None and side_effect is None:
         response = _create_mock_response(chaosllm_server)
@@ -246,8 +385,10 @@ class TestOpenRouterConfig:
         assert config.base_url == "https://custom.proxy.com/api/v1"
 
     @pytest.mark.parametrize("base_url", ["http://127.0.0.1:8199/v1", "http://localhost:8199/v1", "http://[::1]:8199/v1"])
-    def test_config_accepts_loopback_http_base_url_for_local_compatible_servers(self, base_url: str) -> None:
-        """Local OpenAI-compatible test servers may use HTTP loopback."""
+    def test_config_accepts_loopback_http_base_url(self, base_url: str) -> None:
+        """Loopback HTTP is allowed for local OpenAI-compatible dev servers — the
+        shipped ChaosLLM examples target http://127.0.0.1:8199/v1, and the bearer
+        token never leaves the machine. Remote HTTP stays rejected (next test)."""
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
@@ -390,33 +531,26 @@ class TestLLMTransformOpenRouterPipelining:
     """
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create a mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
-
-    @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
     @pytest.fixture
-    def ctx(self, mock_factory: Mock) -> PluginContext:
+    def ctx(self, audit_writer: InMemoryAuditWriter) -> PluginContext:
         """Create plugin context with landscape, state_id, and token."""
         token = make_token("row-1")
         return make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
     @pytest.fixture
-    def transform(self, collector: CollectorOutputPort, mock_factory: Mock) -> Generator[LLMTransform, None, None]:
+    def transform(self, collector: CollectorOutputPort, audit_writer: InMemoryAuditWriter) -> Generator[LLMTransform, None, None]:
         """Create and initialize LLMTransform (OpenRouter) with pipelining."""
         t = LLMTransform(_openrouter_config())
-        # Initialize with factory reference
-        init_ctx = make_context(landscape=mock_factory)
+        # Initialize with recorder reference
+        init_ctx = make_context(landscape=audit_writer)
         t.on_start(init_ctx)
         # Connect output port
         t.connect_output(collector, max_pending=10)
@@ -490,14 +624,9 @@ class TestLLMTransformOpenRouterPipelining:
         In the unified LLMTransform, the provider classifies HTTP errors and
         the strategy catches non-retryable LLMClientError as 'llm_call_failed'.
         """
-        mock_response = Mock(status_code=400, text="Bad Request")
         with mock_httpx_client(
             chaosllm_server,
-            side_effect=httpx.HTTPStatusError(
-                "Bad Request",
-                request=Mock(),
-                response=mock_response,
-            ),
+            side_effect=_http_status_error("Bad Request", 400, "Bad Request"),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
             transform.flush_batch_processing(timeout=10.0)
@@ -522,11 +651,7 @@ class TestLLMTransformOpenRouterPipelining:
 
         with mock_httpx_client(
             chaosllm_server,
-            side_effect=httpx.HTTPStatusError(
-                "Server error",
-                request=Mock(),
-                response=Mock(status_code=500, text=""),
-            ),
+            side_effect=_http_status_error("Server error", 500),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
             transform.flush_batch_processing(timeout=10.0)
@@ -552,11 +677,7 @@ class TestLLMTransformOpenRouterPipelining:
 
         with mock_httpx_client(
             chaosllm_server,
-            side_effect=httpx.HTTPStatusError(
-                "429 Too Many Requests",
-                request=Mock(),
-                response=Mock(status_code=429, text=""),
-            ),
+            side_effect=_http_status_error("429 Too Many Requests", 429),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
             transform.flush_batch_processing(timeout=10.0)
@@ -582,11 +703,7 @@ class TestLLMTransformOpenRouterPipelining:
 
         with mock_httpx_client(
             chaosllm_server,
-            side_effect=httpx.HTTPStatusError(
-                "503 Service Unavailable",
-                request=Mock(),
-                response=Mock(status_code=503, text=""),
-            ),
+            side_effect=_http_status_error("503 Service Unavailable", 503),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
             transform.flush_batch_processing(timeout=10.0)
@@ -612,11 +729,7 @@ class TestLLMTransformOpenRouterPipelining:
 
         with mock_httpx_client(
             chaosllm_server,
-            side_effect=httpx.HTTPStatusError(
-                "529 Site is overloaded",
-                request=Mock(),
-                response=Mock(status_code=529, text=""),
-            ),
+            side_effect=_http_status_error("529 Site is overloaded", 529),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
             transform.flush_batch_processing(timeout=10.0)
@@ -652,7 +765,7 @@ class TestLLMTransformOpenRouterPipelining:
         assert result.exception.retryable is True
 
     def test_missing_state_id_propagates_exception(
-        self, mock_factory: Mock, transform: LLMTransform, collector: CollectorOutputPort
+        self, audit_writer: InMemoryAuditWriter, transform: LLMTransform, collector: CollectorOutputPort
     ) -> None:
         """Missing state_id causes exception propagation, not error result.
 
@@ -669,7 +782,7 @@ class TestLLMTransformOpenRouterPipelining:
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_factory,
+            landscape=audit_writer,
             state_id=None,  # Missing state_id - calling code bug
             token=token,
         )
@@ -685,7 +798,9 @@ class TestLLMTransformOpenRouterPipelining:
         assert isinstance(result.exception, RuntimeError)
         assert "state_id" in str(result.exception)
 
-    def test_system_prompt_included_in_request(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_system_prompt_included_in_request(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """System prompt is included when configured."""
         transform = LLMTransform(
             _openrouter_config(
@@ -693,7 +808,7 @@ class TestLLMTransformOpenRouterPipelining:
                 system_prompt="You are a helpful assistant.",
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -701,7 +816,7 @@ class TestLLMTransformOpenRouterPipelining:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -743,7 +858,7 @@ class TestLLMTransformOpenRouterPipelining:
             assert len(messages) == 1
             assert messages[0]["role"] == "user"
 
-    def test_custom_response_field(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_custom_response_field(self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Custom response_field name is used."""
         transform = LLMTransform(
             _openrouter_config(
@@ -752,7 +867,7 @@ class TestLLMTransformOpenRouterPipelining:
                 response_field="analysis",
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -760,7 +875,7 @@ class TestLLMTransformOpenRouterPipelining:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -812,11 +927,7 @@ class TestLLMTransformOpenRouterPipelining:
         """raise_for_status is called on response to check errors."""
         mock_response = _create_mock_response(
             chaosllm_server,
-            raise_for_status_error=httpx.HTTPStatusError(
-                "400 Bad Request",
-                request=Mock(),
-                response=Mock(status_code=400, text="Bad Request"),
-            ),
+            raise_for_status_error=_http_status_error("400 Bad Request", 400, "Bad Request"),
         )
         with mock_httpx_client(chaosllm_server, response=mock_response):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
@@ -841,10 +952,10 @@ class TestLLMTransformOpenRouterPipelining:
         with pytest.raises(RuntimeError, match="connect_output"):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
 
-    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_factory: Mock) -> None:
+    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, audit_writer: InMemoryAuditWriter) -> None:
         """connect_output() raises if called more than once."""
         transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -864,18 +975,13 @@ class TestLLMTransformOpenRouterIntegration:
     """Integration-style tests for edge cases with OpenRouter provider."""
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create a mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
-
-    @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_complex_template_with_multiple_variables(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_complex_template_with_multiple_variables(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Complex template with multiple variables works correctly."""
         transform = LLMTransform(
             _openrouter_config(
@@ -890,7 +996,7 @@ class TestLLMTransformOpenRouterIntegration:
                 """,
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -898,7 +1004,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -924,10 +1030,12 @@ class TestLLMTransformOpenRouterIntegration:
         finally:
             transform.close()
 
-    def test_empty_usage_handled_gracefully(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_empty_usage_handled_gracefully(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Empty usage dict from API is handled."""
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -935,7 +1043,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         response = _create_mock_response(
@@ -963,7 +1071,9 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.row is not None
         assert result.row["llm_response_usage"] == {}
 
-    def test_connection_error_raises_network_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_connection_error_raises_network_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Network connection error raises NetworkError for engine RetryManager.
 
         Regression test for P2-2026-01-31-openrouter-retry-semantics.
@@ -971,7 +1081,7 @@ class TestLLMTransformOpenRouterIntegration:
         from elspeth.plugins.infrastructure.clients.llm import NetworkError
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -979,7 +1089,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -995,7 +1105,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert isinstance(result.exception, NetworkError)
         assert result.exception.retryable is True
 
-    def test_timeout_stored_in_config(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_timeout_stored_in_config(self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Custom timeout_seconds is stored in _config for provider creation."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1009,7 +1119,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert isinstance(transform._config, OpenRouterConfig)
         assert transform._config.timeout_seconds == 120.0
 
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1017,7 +1127,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1033,14 +1143,14 @@ class TestLLMTransformOpenRouterIntegration:
         assert isinstance(result, TransformResult)
         assert result.status == "success"
 
-    def test_empty_choices_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_empty_choices_emits_error(self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Empty choices array emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         empty choices, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1048,7 +1158,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         response = _create_mock_response(
@@ -1078,7 +1188,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason["reason"] == "llm_call_failed"
 
     def test_null_content_from_content_filtering_emits_error(
-        self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
     ) -> None:
         """Null content (content filtering) returns error.
 
@@ -1087,7 +1197,7 @@ class TestLLMTransformOpenRouterIntegration:
         as a non-retryable 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1095,7 +1205,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         response = _create_mock_response(
@@ -1124,14 +1234,16 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
 
-    def test_missing_choices_key_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_missing_choices_key_emits_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Missing 'choices' key in response emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         missing choices, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1139,7 +1251,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         response = _create_mock_response(
@@ -1167,14 +1279,16 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
 
-    def test_malformed_choice_structure_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_malformed_choice_structure_emits_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Malformed choice structure emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         malformed response structure, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1182,7 +1296,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         response = _create_mock_response(
@@ -1211,14 +1325,16 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
 
-    def test_invalid_json_response_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_invalid_json_response_emits_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Non-JSON response body emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         invalid JSON, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1226,7 +1342,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         response = _create_mock_response(
@@ -1254,18 +1370,13 @@ class TestOpenRouterTemplateFeatures:
     """Tests for template files and lookup features via LLMTransform (OpenRouter)."""
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create a mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
-
-    @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_lookup_data_accessible_in_template(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_lookup_data_accessible_in_template(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Lookup data is accessible via lookup.* namespace in templates."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1274,7 +1385,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup={"categories": ["positive", "negative"]},
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1282,7 +1393,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1304,7 +1415,9 @@ class TestOpenRouterTemplateFeatures:
         finally:
             transform.close()
 
-    def test_two_dimensional_lookup_row_plus_lookup(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_two_dimensional_lookup_row_plus_lookup(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Two-dimensional lookup: lookup.X[row.Y] works correctly."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1313,7 +1426,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup={"tones": {"formal": "professional", "casual": "friendly"}},
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1321,7 +1434,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1341,7 +1454,9 @@ class TestOpenRouterTemplateFeatures:
         finally:
             transform.close()
 
-    def test_lookup_hash_included_in_output(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_lookup_hash_included_in_output(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Output includes lookup_hash when lookup data is configured."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1350,7 +1465,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup={"cats": ["A", "B", "C"]},
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1358,7 +1473,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1382,7 +1497,9 @@ class TestOpenRouterTemplateFeatures:
         # lookup_source is None when lookup is inline (not from file)
         assert "llm_response_lookup_source" in metadata
 
-    def test_template_source_included_in_output(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_template_source_included_in_output(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Output includes template_source when provided."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1391,7 +1508,7 @@ class TestOpenRouterTemplateFeatures:
                 prompt_template_source="prompts/analysis.j2",
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1399,7 +1516,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1418,7 +1535,9 @@ class TestOpenRouterTemplateFeatures:
         assert result.success_reason is not None
         assert result.success_reason["metadata"]["llm_response_template_source"] == "prompts/analysis.j2"
 
-    def test_all_audit_fields_present_with_lookup(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_all_audit_fields_present_with_lookup(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """All audit metadata fields are present when using template with lookup."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1429,7 +1548,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup_source="prompts/lookups.yaml",
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1437,7 +1556,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1469,7 +1588,9 @@ class TestOpenRouterTemplateFeatures:
         assert metadata["llm_response_lookup_source"] == "prompts/lookups.yaml"
         assert metadata["llm_response_lookup_hash"] is not None
 
-    def test_no_lookup_has_none_hash_in_output(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_no_lookup_has_none_hash_in_output(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Output has None for lookup fields when no lookup configured."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1478,7 +1599,7 @@ class TestOpenRouterTemplateFeatures:
                 # No lookup configured
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1486,7 +1607,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1510,7 +1631,7 @@ class TestOpenRouterTemplateFeatures:
         assert "llm_response_lookup_source" in metadata
         assert metadata["llm_response_lookup_source"] is None
 
-    def test_lookup_iteration_in_template(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_lookup_iteration_in_template(self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Lookup data can be iterated in templates."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1528,7 +1649,7 @@ Text: {{ row.text }}""",
                 },
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1536,7 +1657,7 @@ Text: {{ row.text }}""",
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1557,7 +1678,9 @@ Text: {{ row.text }}""",
         finally:
             transform.close()
 
-    def test_template_error_includes_source_in_error_details(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
+    def test_template_error_includes_source_in_error_details(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort
+    ) -> None:
         """Template rendering error includes template_source for debugging."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1566,7 +1689,7 @@ Text: {{ row.text }}""",
                 prompt_template_source="prompts/requires_field.j2",
             )
         )
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1574,7 +1697,7 @@ Text: {{ row.text }}""",
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1597,21 +1720,16 @@ class TestOpenRouterConcurrency:
     """Tests for concurrent row processing via BatchTransformMixin (OpenRouter)."""
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create a mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
-
-    @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_multiple_rows_processed_in_fifo_order(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_multiple_rows_processed_in_fifo_order(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Multiple rows are emitted in submission order (FIFO)."""
         transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1629,7 +1747,7 @@ class TestOpenRouterConcurrency:
                     ctx = make_context(
                         state_id=f"state-{i}",
                         token=token,
-                        landscape=mock_factory,
+                        landscape=audit_writer,
                     )
                     transform.accept(make_pipeline_row(row), ctx)
 
@@ -1645,8 +1763,8 @@ class TestOpenRouterConcurrency:
             assert result.row is not None
             assert result.row["text"] == rows[i]["text"]
 
-    def test_on_start_captures_recorder(self, mock_factory: Mock) -> None:
-        """on_start() captures factory reference for provider creation."""
+    def test_on_start_captures_recorder(self, audit_writer: InMemoryAuditWriter) -> None:
+        """on_start() captures recorder reference for provider creation."""
         transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
 
         # Verify _recorder starts as None
@@ -1654,17 +1772,17 @@ class TestOpenRouterConcurrency:
 
         ctx = make_context(
             state_id="test-state-id",
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
         transform.on_start(ctx)
 
-        # Verify factory was captured
-        assert transform._recorder is mock_factory
+        # Verify recorder was captured
+        assert transform._recorder is audit_writer
 
-    def test_close_clears_recorder(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
+    def test_close_clears_recorder(self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort) -> None:
         """close() clears factory reference."""
         transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1688,22 +1806,18 @@ class TestOpenRouterNanRejection:
     """
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
-
-    @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         return CollectorOutputPort()
 
-    def test_nan_in_response_body_returns_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_nan_in_response_body_returns_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """NaN token in API response body is rejected at parse boundary."""
         nan_body = '{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": NaN}, "model": "test"}'
         response = _create_mock_response(chaosllm_server, raw_body=nan_body, status_code=200, headers={"content-type": "application/json"})
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1712,7 +1826,7 @@ class TestOpenRouterNanRejection:
             run_id="test",
             state_id="test-state",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1729,13 +1843,15 @@ class TestOpenRouterNanRejection:
         finally:
             transform.close()
 
-    def test_non_finite_usage_value_returns_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_non_finite_usage_value_returns_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Usage field with overflow float (inf from 1e309) is rejected."""
         inf_body = '{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1e309}, "model": "test"}'
         response = _create_mock_response(chaosllm_server, raw_body=inf_body, status_code=200, headers={"content-type": "application/json"})
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1744,7 +1860,7 @@ class TestOpenRouterNanRejection:
             run_id="test",
             state_id="test-state",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1762,7 +1878,7 @@ class TestOpenRouterNanRejection:
             transform.close()
 
     def test_response_missing_model_routes_error_not_fabricated(
-        self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
     ) -> None:
         """A response that omits 'model' must NOT be back-filled with the requested model.
 
@@ -1782,12 +1898,12 @@ class TestOpenRouterNanRejection:
         )
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(run_id="test", state_id="test-state", token=token, landscape=mock_factory)
+        ctx = make_context(run_id="test", state_id="test-state", token=token, landscape=audit_writer)
 
         try:
             with mock_httpx_client(chaosllm_server, response=response):
@@ -1820,16 +1936,12 @@ class TestOpenRouterMalformedUtf8:
     """
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
-
-    @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         return CollectorOutputPort()
 
-    def test_invalid_utf8_response_returns_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_invalid_utf8_response_returns_error(
+        self, audit_writer: InMemoryAuditWriter, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
         """Response with invalid UTF-8 bytes must be rejected, not silently decoded."""
         # Valid JSON prefix with invalid UTF-8 continuation byte embedded
         invalid_utf8 = b'{"choices": [{"message": {"content": "hello \x80\x81 world"}}]}'
@@ -1841,7 +1953,7 @@ class TestOpenRouterMalformedUtf8:
         )
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_factory)
+        init_ctx = make_context(landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1850,7 +1962,7 @@ class TestOpenRouterMalformedUtf8:
             run_id="test",
             state_id="test-state",
             token=token,
-            landscape=mock_factory,
+            landscape=audit_writer,
         )
 
         try:
@@ -1872,12 +1984,12 @@ class TestOpenRouterRefcount:
     """Tests for HTTP client reference counting correctness."""
 
     def _make_provider(self) -> OpenRouterLLMProvider:
-        """Create provider with mock dependencies for refcount testing."""
+        """Create provider with in-memory dependencies for refcount testing."""
         return OpenRouterLLMProvider(
             api_key="sk-test",
-            recorder=Mock(),
+            recorder=InMemoryAuditWriter(),
             run_id="test-run",
-            telemetry_emit=Mock(),
+            telemetry_emit=_ignore_telemetry,
         )
 
     def test_release_unknown_state_id_raises(self) -> None:
@@ -1886,3 +1998,69 @@ class TestOpenRouterRefcount:
 
         with pytest.raises(RuntimeError, match="unknown state_id"):
             provider._release_http_client("never-acquired")
+
+
+class TestOpenRouterRuntimePreflightValidation:
+    """Runtime preflight must validate successful OpenRouter payloads."""
+
+    def _make_provider(self) -> OpenRouterLLMProvider:
+        return OpenRouterLLMProvider(
+            api_key="sk-test",
+            recorder=InMemoryAuditWriter(),
+            run_id="test-run",
+            telemetry_emit=_ignore_telemetry,
+        )
+
+    def _response_for_payload(self, chaosllm_server, payload: dict[str, Any] | str) -> httpx.Response:
+        raw_body = payload if isinstance(payload, str) else json.dumps(payload)
+        return _create_mock_response(
+            chaosllm_server,
+            raw_body=raw_body,
+            status_code=200,
+            headers={"content-type": "application/json"},
+        )
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_error", "match"),
+        (
+            ("{not-json", LLMClientError, "not valid JSON"),
+            ({"model": _OPENROUTER_MODEL}, LLMClientError, "Empty or missing choices"),
+            ({"model": _OPENROUTER_MODEL, "choices": []}, LLMClientError, "Empty or missing choices"),
+            ({"model": _OPENROUTER_MODEL, "choices": [{"message": {}}]}, LLMClientError, "Malformed response structure"),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": None}}]},
+                ContentPolicyError,
+                "null content",
+            ),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": 123}}]},
+                LLMClientError,
+                "Expected string content",
+            ),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]},
+                ContentPolicyError,
+                "empty content",
+            ),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": ""}, "finish_reason": "tool_calls"}]},
+                LLMClientError,
+                "tool_calls",
+            ),
+        ),
+    )
+    def test_runtime_preflight_rejects_malformed_200_payloads(
+        self,
+        chaosllm_server,
+        payload: dict[str, Any] | str,
+        expected_error: type[Exception],
+        match: str,
+    ) -> None:
+        provider = self._make_provider()
+        response = self._response_for_payload(chaosllm_server, payload)
+
+        with mock_httpx_client(chaosllm_server, response=response), pytest.raises(expected_error, match=match):
+            provider.runtime_preflight(
+                operation_id="op-preflight",
+                model=_OPENROUTER_MODEL,
+            )

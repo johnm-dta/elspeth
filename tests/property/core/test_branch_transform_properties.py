@@ -22,7 +22,7 @@ from elspeth.contracts import SinkProtocol, SourceProtocol
 from elspeth.contracts.types import CoalesceName
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.dag.models import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.testing import make_pipeline_row, make_token_info
 from tests.fixtures.factories import wire_transforms
 from tests.fixtures.plugins import CollectSink, ListSource, PassTransform

@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 
-def test_cli_accepts_empty_rule_set(tmp_path: Path, capsys: object) -> None:
+
+def test_cli_accepts_empty_rule_set(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The package CLI can run with no rules as the initial skeleton state."""
     from elspeth_lints.core.cli import main
 
@@ -18,7 +23,102 @@ def test_cli_accepts_empty_rule_set(tmp_path: Path, capsys: object) -> None:
     assert captured.err == ""
 
 
-def test_cli_dump_edges_contract_is_available(tmp_path: Path, capsys: object) -> None:
+def test_cli_honors_empty_rule_set_without_optional_rule_dependencies(tmp_path: Path) -> None:
+    """A standalone install can run an empty check without optional rule imports."""
+    env = _standalone_lints_env_without_runtime_packages(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "elspeth_lints.core.cli",
+            "check",
+            "--rules",
+            "nothing",
+            "--root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == []
+
+
+def test_options_metadata_rule_reports_missing_runtime_in_standalone_install(tmp_path: Path) -> None:
+    """Selecting the runtime-backed plugin rule fails as a finding, not a traceback."""
+    env = _standalone_lints_env_without_runtime_packages(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "elspeth_lints.core.cli",
+            "check",
+            "--rules",
+            "plugin_contract.options_metadata",
+            "--root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stderr == ""
+    findings = json.loads(result.stdout)
+    assert len(findings) == 1
+    assert findings[0]["rule_id"] == "plugin_contract.options_metadata"
+    assert "requires the elspeth package" in findings[0]["message"]
+
+
+def _standalone_lints_env_without_runtime_packages(tmp_path: Path) -> dict[str, str]:
+    project_root = Path(__file__).resolve().parents[3]
+    blocker_dir = tmp_path / "import_blocker"
+    blocker_dir.mkdir()
+    (blocker_dir / "sitecustomize.py").write_text(
+        """
+import builtins
+
+_real_import = builtins.__import__
+
+
+def _block_optional_rule_dependencies(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "pydantic" or name.startswith("pydantic."):
+        raise ModuleNotFoundError("No module named 'pydantic'")
+    if name == "elspeth" or name.startswith("elspeth."):
+        raise ModuleNotFoundError("No module named 'elspeth'")
+    return _real_import(name, globals, locals, fromlist, level)
+
+
+builtins.__import__ = _block_optional_rule_dependencies
+""",
+        encoding="utf-8",
+    )
+    return {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [
+                str(blocker_dir),
+                str(project_root / "elspeth-lints" / "src"),
+            ]
+        ),
+    }
+
+
+def test_cli_dump_edges_contract_is_available(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The foundation CLI exposes the import-edge command reserved by ADR-023."""
     from elspeth_lints.core.cli import main
 
@@ -34,7 +134,7 @@ def test_cli_dump_edges_contract_is_available(tmp_path: Path, capsys: object) ->
     assert payload["edges"] == []
 
 
-def test_cli_refuses_explicit_files_outside_rule_path_filter(tmp_path: Path, capsys: object) -> None:
+def test_cli_refuses_explicit_files_outside_rule_path_filter(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Explicit --files input must respect each rule's metadata path filter."""
     import argparse
     from collections.abc import Iterable
@@ -96,7 +196,7 @@ def test_cli_refuses_explicit_files_outside_rule_path_filter(tmp_path: Path, cap
     assert "demo.scoped" in captured.err
 
 
-def test_cli_surfaces_parse_and_read_errors_for_whole_repo_rules(tmp_path: Path, capsys: object) -> None:
+def test_cli_surfaces_parse_and_read_errors_for_whole_repo_rules(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Whole-repo rules must not make unparseable files invisible."""
     import argparse
     from collections.abc import Iterable
@@ -150,7 +250,7 @@ def test_cli_surfaces_parse_and_read_errors_for_whole_repo_rules(tmp_path: Path,
     assert {"parse-error", "read-error"} <= rule_ids
 
 
-def test_cli_whole_repo_parse_diagnostics_respect_rule_path_filter(tmp_path: Path, capsys: object) -> None:
+def test_cli_whole_repo_parse_diagnostics_respect_rule_path_filter(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A scoped whole-repo rule must not fail on malformed files outside its path_filter."""
     import argparse
     from collections.abc import Iterable
@@ -303,7 +403,7 @@ def test_allowlist_accepts_protocol_schema_fields(tmp_path: Path) -> None:
     pins the post-C8-3 shape: binding fields ride with the judge
     quartet, not as a standalone schema extension.
     """
-    from elspeth_lints.core.allowlist import FindingKey, load_allowlist
+    from elspeth_lints.core.allowlist import AllowlistEntry, FindingKey, load_allowlist
     from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 
     allowlist_file = tmp_path / "allowlist.yaml"
@@ -339,5 +439,6 @@ allow_hits:
     match = allowlist.match(finding)
 
     assert match is not None
+    assert isinstance(match, AllowlistEntry)
     assert match.file_fingerprint == "sha256:source"
     assert match.ast_path == "Module.body[0].body[0]"

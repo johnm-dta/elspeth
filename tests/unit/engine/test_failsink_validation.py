@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT, FAILSINK_ELIGIBLE_SINK_PLUGINS
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.engine.orchestrator.validation import validate_sink_failsink_destinations
 
@@ -45,6 +46,18 @@ class TestValidateSinkFailsinkDestinations:
             sink_plugins={"output": "database", "json_failsink": "json"},
         )  # No error raised
 
+    @pytest.mark.parametrize("plugin_name", sorted(FAILSINK_ELIGIBLE_SINK_PLUGINS))
+    def test_shared_failsink_capability_plugins_are_valid(self, plugin_name: str) -> None:
+        failsink_name = f"{plugin_name}_failsink"
+        validate_sink_failsink_destinations(
+            sink_configs={
+                "output": _stub(failsink_name),
+                failsink_name: _stub("discard"),
+            },
+            available_sinks={"output", failsink_name},
+            sink_plugins={"output": "database", failsink_name: plugin_name},
+        )  # No error raised
+
     def test_unknown_failsink_raises(self) -> None:
         with pytest.raises(RouteValidationError, match="nonexistent"):
             validate_sink_failsink_destinations(
@@ -54,8 +67,8 @@ class TestValidateSinkFailsinkDestinations:
             )
 
     def test_non_file_failsink_raises(self) -> None:
-        """Failsink must be csv or json."""
-        with pytest.raises(RouteValidationError, match="csv or json"):
+        """Failsink must use a shared failsink-capable plugin."""
+        with pytest.raises(RouteValidationError, match=FAILSINK_ELIGIBLE_PLUGIN_TEXT):
             validate_sink_failsink_destinations(
                 sink_configs={
                     "output": _stub("db_sink"),
@@ -67,7 +80,7 @@ class TestValidateSinkFailsinkDestinations:
 
     def test_chroma_as_failsink_raises(self) -> None:
         """ChromaSink is not a valid failsink plugin type."""
-        with pytest.raises(RouteValidationError, match="csv or json"):
+        with pytest.raises(RouteValidationError, match=FAILSINK_ELIGIBLE_PLUGIN_TEXT):
             validate_sink_failsink_destinations(
                 sink_configs={
                     "output": _stub("chroma_backup"),

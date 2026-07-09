@@ -7,48 +7,138 @@ Verifies that:
    CallType.HTTP_REDIRECT with correct lineage data.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
 
 from elspeth.contracts import CallStatus, CallType
 from elspeth.core.security.web import SSRFSafeRequest
+from elspeth.plugins.infrastructure.clients import http as http_client_module
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
 
+@dataclass(frozen=True)
+class RecordedGetCall:
+    url: str
+    kwargs: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ValidationCall:
+    url: str
+    allowed_ranges: tuple[Any, ...]
+
+
+@dataclass
+class FakeHTTPXClient:
+    get_results: list[httpx.Response | BaseException] = field(default_factory=list)
+    get_calls: list[RecordedGetCall] = field(default_factory=list)
+
+    def queue_get(self, *results: httpx.Response | BaseException) -> None:
+        self.get_results.extend(results)
+
+    def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        self.get_calls.append(RecordedGetCall(url=url, kwargs=kwargs))
+        if not self.get_results:
+            raise AssertionError(f"No queued fake HTTP GET result for {url}")
+
+        result = self.get_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def __enter__(self) -> "FakeHTTPXClient":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+
+@dataclass
+class FakeHTTPXClientFactory:
+    shared_client: FakeHTTPXClient
+    ephemeral_client: FakeHTTPXClient
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(self, **kwargs: Any) -> FakeHTTPXClient:
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return self.shared_client
+        return self.ephemeral_client
+
+
+@dataclass
+class FakeSSRFValidator:
+    results: list[SSRFSafeRequest | BaseException] = field(default_factory=list)
+    calls: list[ValidationCall] = field(default_factory=list)
+
+    def queue(self, *results: SSRFSafeRequest | BaseException) -> None:
+        self.results.extend(results)
+
+    def __call__(self, url: str, *, allowed_ranges: Sequence[Any] = ()) -> SSRFSafeRequest:
+        self.calls.append(ValidationCall(url=url, allowed_ranges=tuple(allowed_ranges)))
+        if not self.results:
+            raise AssertionError(f"No queued fake SSRF validation result for {url}")
+
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+@dataclass
+class FakeCallRecorder:
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    next_call_index: int = 0
+
+    def allocate_call_index(self, state_id: str) -> int:
+        assert state_id == "test-state-001"
+        self.next_call_index += 1
+        return self.next_call_index
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        raise AssertionError(f"Unexpected operation call index allocation for {operation_id}")
+
+    def record_call(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        return SimpleNamespace(**kwargs)
+
+
+def _ignore_telemetry(_event: object) -> None:
+    return None
+
+
 @pytest.fixture
-def http_client():
-    """Create AuditedHTTPClient with mocked dependencies.
+def ssrf_validator(monkeypatch):
+    validator = FakeSSRFValidator()
+    monkeypatch.setattr(http_client_module, "validate_url_for_ssrf", validator)
+    return validator
 
-    Patches httpx.Client so that:
-    - The shared self._client (created in __init__) is a mock
-    - Ephemeral clients created via `with httpx.Client(...) as c:` return
-      a controllable mock — accessible as http_client._ephemeral_mock
-    """
-    ephemeral_mock = MagicMock()
-    # Context manager protocol: __enter__ returns the mock itself
-    ephemeral_mock.__enter__ = Mock(return_value=ephemeral_mock)
-    ephemeral_mock.__exit__ = Mock(return_value=False)
 
-    with patch("elspeth.plugins.infrastructure.clients.http.httpx.Client") as MockClient:
-        # First call: shared client in __init__
-        # Subsequent calls: ephemeral clients in get_ssrf_safe / _follow_redirects_safe
-        shared_mock = MagicMock()
-        MockClient.side_effect = [shared_mock, ephemeral_mock, ephemeral_mock, ephemeral_mock, ephemeral_mock, ephemeral_mock]
+@pytest.fixture
+def http_client(monkeypatch):
+    """Create AuditedHTTPClient with fake HTTP and audit dependencies."""
+    shared_client = FakeHTTPXClient()
+    ephemeral_client = FakeHTTPXClient()
+    client_factory = FakeHTTPXClientFactory(shared_client=shared_client, ephemeral_client=ephemeral_client)
+    monkeypatch.setattr(http_client_module.httpx, "Client", client_factory)
 
-        execution = Mock()
-        execution.record_call = Mock()
-        client = AuditedHTTPClient(
-            execution=execution,
-            state_id="test-state-001",
-            run_id="test-run-001",
-            telemetry_emit=Mock(),
-            timeout=30.0,
-        )
-        # Expose the ephemeral mock for tests to set up return values
-        client._ephemeral_mock = ephemeral_mock
-        yield client
+    client = AuditedHTTPClient(
+        execution=FakeCallRecorder(),
+        state_id="test-state-001",
+        run_id="test-run-001",
+        telemetry_emit=_ignore_telemetry,
+        timeout=30.0,
+    )
+    client._test_ephemeral_client = ephemeral_client
+    return client
 
 
 def _make_redirect_response(location: str, status_code: int = 301, url: str = "https://93.184.216.34:443/old-path") -> httpx.Response:
@@ -86,14 +176,13 @@ def _make_ssrf_request(url: str, ip: str = "93.184.216.34") -> SSRFSafeRequest:
 class TestRelativeRedirectResolution:
     """Relative redirects must resolve against hostname, not IP."""
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_relative_redirect_resolves_against_hostname(self, mock_validate, http_client):
+    def test_relative_redirect_resolves_against_hostname(self, ssrf_validator, http_client):
         """Location: /new-path should produce https://example.com/new-path, not https://93.184.216.34/new-path."""
         redirect_response = _make_redirect_response("/new-path")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://example.com/new-path")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://example.com/new-path"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         result, count, _final_url = http_client._follow_redirects_safe(
             response=redirect_response,
@@ -104,18 +193,17 @@ class TestRelativeRedirectResolution:
         )
 
         # validate_url_for_ssrf should receive hostname-based URL
-        mock_validate.assert_called_once_with("https://example.com/new-path", allowed_ranges=())
+        assert ssrf_validator.calls == [ValidationCall("https://example.com/new-path", ())]
         assert result.status_code == 200
         assert count == 1
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_relative_redirect_preserves_scheme_and_host(self, mock_validate, http_client):
+    def test_relative_redirect_preserves_scheme_and_host(self, ssrf_validator, http_client):
         """Relative redirect should preserve scheme and host from original URL."""
         redirect_response = _make_redirect_response("/api/v2/resource")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://api.example.com/api/v2/resource")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://api.example.com/api/v2/resource"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -125,20 +213,19 @@ class TestRelativeRedirectResolution:
             original_url="https://api.example.com/api/v1/resource",
         )
 
-        mock_validate.assert_called_once_with("https://api.example.com/api/v2/resource", allowed_ranges=())
+        assert ssrf_validator.calls == [ValidationCall("https://api.example.com/api/v2/resource", ())]
 
 
 class TestAbsoluteRedirectResolution:
     """Absolute redirects carry their own hostname — should work regardless."""
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_absolute_redirect_to_different_host(self, mock_validate, http_client):
+    def test_absolute_redirect_to_different_host(self, ssrf_validator, http_client):
         """Location: https://other.com/page should use other.com, not original host."""
         redirect_response = _make_redirect_response("https://other.com/page")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://other.com/page", ip="198.51.100.1")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://other.com/page", ip="198.51.100.1"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -148,24 +235,23 @@ class TestAbsoluteRedirectResolution:
             original_url="https://example.com/start",
         )
 
-        mock_validate.assert_called_once_with("https://other.com/page", allowed_ranges=())
+        assert ssrf_validator.calls == [ValidationCall("https://other.com/page", ())]
 
 
 class TestChainedRedirects:
     """Redirect chains must track hostname through each hop."""
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_chained_relative_redirects_track_hostname(self, mock_validate, http_client):
+    def test_chained_relative_redirects_track_hostname(self, ssrf_validator, http_client):
         """Relative -> relative should keep resolving against the logical hostname."""
         redirect1 = _make_redirect_response("/step2")
         redirect2 = _make_redirect_response("/step3", url="https://93.184.216.34:443/step2")
         final_response = _make_final_response()
 
-        mock_validate.side_effect = [
+        ssrf_validator.queue(
             _make_ssrf_request("https://example.com/step2"),
             _make_ssrf_request("https://example.com/step3"),
-        ]
-        http_client._ephemeral_mock.get.side_effect = [redirect2, final_response]
+        )
+        http_client._test_ephemeral_client.queue_get(redirect2, final_response)
 
         result, count, _final_url = http_client._follow_redirects_safe(
             response=redirect1,
@@ -175,24 +261,24 @@ class TestChainedRedirects:
             original_url="https://example.com/step1",
         )
 
-        assert mock_validate.call_count == 2
-        mock_validate.assert_any_call("https://example.com/step2", allowed_ranges=())
-        mock_validate.assert_any_call("https://example.com/step3", allowed_ranges=())
+        assert ssrf_validator.calls == [
+            ValidationCall("https://example.com/step2", ()),
+            ValidationCall("https://example.com/step3", ()),
+        ]
         assert result.status_code == 200
         assert count == 2
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_absolute_redirect_updates_hostname_for_subsequent_relative(self, mock_validate, http_client):
+    def test_absolute_redirect_updates_hostname_for_subsequent_relative(self, ssrf_validator, http_client):
         """Absolute redirect to new.com, then relative /page, should resolve as https://new.com/page."""
         redirect1 = _make_redirect_response("https://new.com/")
         redirect2 = _make_redirect_response("/page", url="https://203.0.113.1:443/")
         final_response = _make_final_response()
 
-        mock_validate.side_effect = [
+        ssrf_validator.queue(
             _make_ssrf_request("https://new.com/", ip="203.0.113.1"),
             _make_ssrf_request("https://new.com/page", ip="203.0.113.1"),
-        ]
-        http_client._ephemeral_mock.get.side_effect = [redirect2, final_response]
+        )
+        http_client._test_ephemeral_client.queue_get(redirect2, final_response)
 
         result, count, _final_url = http_client._follow_redirects_safe(
             response=redirect1,
@@ -202,9 +288,10 @@ class TestChainedRedirects:
             original_url="https://example.com/start",
         )
 
-        assert mock_validate.call_count == 2
-        mock_validate.assert_any_call("https://new.com/", allowed_ranges=())
-        mock_validate.assert_any_call("https://new.com/page", allowed_ranges=())
+        assert ssrf_validator.calls == [
+            ValidationCall("https://new.com/", ()),
+            ValidationCall("https://new.com/page", ()),
+        ]
         assert result.status_code == 200
         assert count == 2
 
@@ -212,15 +299,14 @@ class TestChainedRedirects:
 class TestHostHeaderAndSNI:
     """Host header and SNI must use hostname from validate_url_for_ssrf, not IP."""
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_host_header_uses_hostname_not_ip(self, mock_validate, http_client):
+    def test_host_header_uses_hostname_not_ip(self, ssrf_validator, http_client):
         """Host header on redirect hop should be the hostname, not the resolved IP."""
         redirect_response = _make_redirect_response("/new-path")
         final_response = _make_final_response()
 
         ssrf_req = _make_ssrf_request("https://example.com/new-path")
-        mock_validate.return_value = ssrf_req
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(ssrf_req)
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -231,19 +317,17 @@ class TestHostHeaderAndSNI:
         )
 
         # Check the headers passed to client.get()
-        call_kwargs = http_client._ephemeral_mock.get.call_args
-        headers = call_kwargs.kwargs.get("headers") or call_kwargs[1].get("headers")
+        headers = http_client._test_ephemeral_client.get_calls[-1].kwargs["headers"]
         assert headers["Host"] == "example.com"
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_sni_hostname_set_for_https_redirect(self, mock_validate, http_client):
+    def test_sni_hostname_set_for_https_redirect(self, ssrf_validator, http_client):
         """TLS SNI should use the hostname from the redirect target, not IP."""
         redirect_response = _make_redirect_response("/secure-path")
         final_response = _make_final_response()
 
         ssrf_req = _make_ssrf_request("https://secure.example.com/secure-path")
-        mock_validate.return_value = ssrf_req
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(ssrf_req)
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -253,8 +337,7 @@ class TestHostHeaderAndSNI:
             original_url="https://secure.example.com/old-path",
         )
 
-        call_kwargs = http_client._ephemeral_mock.get.call_args
-        extensions = call_kwargs.kwargs.get("extensions") or call_kwargs[1].get("extensions")
+        extensions = http_client._test_ephemeral_client.get_calls[-1].kwargs["extensions"]
         assert extensions["sni_hostname"] == "secure.example.com"
 
 
@@ -281,14 +364,13 @@ class TestNonRedirectPassthrough:
 class TestRedirectAuditRecording:
     """Each redirect hop must be individually recorded in the audit trail."""
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_single_redirect_records_one_hop(self, mock_validate, http_client):
+    def test_single_redirect_records_one_hop(self, ssrf_validator, http_client):
         """A single redirect should produce exactly one HTTP_REDIRECT record_call."""
         redirect_response = _make_redirect_response("/new-path")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://example.com/new-path")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://example.com/new-path"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -299,8 +381,8 @@ class TestRedirectAuditRecording:
         )
 
         recorder = http_client._execution
-        recorder.record_call.assert_called_once()
-        kw = recorder.record_call.call_args.kwargs
+        assert len(recorder.calls) == 1
+        kw = recorder.calls[0]
         assert kw["call_type"] == CallType.HTTP_REDIRECT
         assert kw["status"] == CallStatus.SUCCESS
         assert kw["state_id"] == "test-state-001"
@@ -308,18 +390,17 @@ class TestRedirectAuditRecording:
         assert kw["request_data"].to_dict()["hop_number"] == 1
         assert kw["response_data"].to_dict()["status_code"] == 200
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_chained_redirects_record_multiple_hops(self, mock_validate, http_client):
+    def test_chained_redirects_record_multiple_hops(self, ssrf_validator, http_client):
         """Two redirects should produce two HTTP_REDIRECT record_call invocations."""
         redirect1 = _make_redirect_response("/step2")
         redirect2 = _make_redirect_response("/step3", url="https://93.184.216.34:443/step2")
         final_response = _make_final_response()
 
-        mock_validate.side_effect = [
+        ssrf_validator.queue(
             _make_ssrf_request("https://example.com/step2"),
             _make_ssrf_request("https://example.com/step3"),
-        ]
-        http_client._ephemeral_mock.get.side_effect = [redirect2, final_response]
+        )
+        http_client._test_ephemeral_client.queue_get(redirect2, final_response)
 
         http_client._follow_redirects_safe(
             response=redirect1,
@@ -330,28 +411,27 @@ class TestRedirectAuditRecording:
         )
 
         recorder = http_client._execution
-        assert recorder.record_call.call_count == 2
+        assert len(recorder.calls) == 2
 
         # First hop
-        kw1 = recorder.record_call.call_args_list[0].kwargs
+        kw1 = recorder.calls[0]
         assert kw1["call_type"] == CallType.HTTP_REDIRECT
         assert kw1["request_data"].to_dict()["hop_number"] == 1
         assert kw1["request_data"].to_dict()["url"] == "https://example.com/step2"
 
         # Second hop
-        kw2 = recorder.record_call.call_args_list[1].kwargs
+        kw2 = recorder.calls[1]
         assert kw2["call_type"] == CallType.HTTP_REDIRECT
         assert kw2["request_data"].to_dict()["hop_number"] == 2
         assert kw2["request_data"].to_dict()["url"] == "https://example.com/step3"
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_hop_records_include_redirect_from(self, mock_validate, http_client):
+    def test_hop_records_include_redirect_from(self, ssrf_validator, http_client):
         """redirect_from captures the URL we're redirecting FROM (lineage within chain)."""
         redirect_response = _make_redirect_response("https://other.com/page")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://other.com/page", ip="198.51.100.1")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://other.com/page", ip="198.51.100.1"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -361,18 +441,17 @@ class TestRedirectAuditRecording:
             original_url="https://example.com/start",
         )
 
-        kw = http_client._execution.record_call.call_args.kwargs
+        kw = http_client._execution.calls[0]
         assert kw["request_data"].to_dict()["redirect_from"] == "https://example.com/start"
         assert kw["request_data"].to_dict()["url"] == "https://other.com/page"
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_hop_records_include_resolved_ip(self, mock_validate, http_client):
+    def test_hop_records_include_resolved_ip(self, ssrf_validator, http_client):
         """Each hop record must include the resolved IP from SSRF validation."""
         redirect_response = _make_redirect_response("/new-path")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://example.com/new-path", ip="93.184.216.34")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://example.com/new-path", ip="93.184.216.34"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -382,17 +461,16 @@ class TestRedirectAuditRecording:
             original_url="https://example.com/old-path",
         )
 
-        kw = http_client._execution.record_call.call_args.kwargs
+        kw = http_client._execution.calls[0]
         assert kw["request_data"].to_dict()["resolved_ip"] == "93.184.216.34"
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_hop_records_have_latency(self, mock_validate, http_client):
+    def test_hop_records_have_latency(self, ssrf_validator, http_client):
         """Each hop record must include latency_ms."""
         redirect_response = _make_redirect_response("/new-path")
         final_response = _make_final_response()
 
-        mock_validate.return_value = _make_ssrf_request("https://example.com/new-path")
-        http_client._ephemeral_mock.get.return_value = final_response
+        ssrf_validator.queue(_make_ssrf_request("https://example.com/new-path"))
+        http_client._test_ephemeral_client.queue_get(final_response)
 
         http_client._follow_redirects_safe(
             response=redirect_response,
@@ -402,7 +480,7 @@ class TestRedirectAuditRecording:
             original_url="https://example.com/old-path",
         )
 
-        kw = http_client._execution.record_call.call_args.kwargs
+        kw = http_client._execution.calls[0]
         assert "latency_ms" in kw
         assert isinstance(kw["latency_ms"], float)
         assert kw["latency_ms"] >= 0
@@ -419,7 +497,7 @@ class TestRedirectAuditRecording:
             original_url="https://example.com/page",
         )
 
-        http_client._execution.record_call.assert_not_called()
+        assert http_client._execution.calls == []
 
 
 class TestBug4_7_FailedHopRecordsAuditTrail:
@@ -431,14 +509,13 @@ class TestBug4_7_FailedHopRecordsAuditTrail:
     the failed hop with CallStatus.ERROR before re-raising the exception.
     """
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_failed_hop_recorded_with_error_status(self, mock_validate, http_client):
+    def test_failed_hop_recorded_with_error_status(self, ssrf_validator, http_client):
         """Redirect hop that raises exception is still recorded in audit trail."""
         redirect_response = _make_redirect_response("/new-path")
 
-        mock_validate.return_value = _make_ssrf_request("https://example.com/new-path")
+        ssrf_validator.queue(_make_ssrf_request("https://example.com/new-path"))
         # Simulate a connection error during the hop request
-        http_client._ephemeral_mock.get.side_effect = httpx.ConnectError("Connection refused")
+        http_client._test_ephemeral_client.queue_get(httpx.ConnectError("Connection refused"))
 
         with pytest.raises(httpx.ConnectError):
             http_client._follow_redirects_safe(
@@ -450,8 +527,8 @@ class TestBug4_7_FailedHopRecordsAuditTrail:
             )
 
         # The failed hop MUST still be recorded in the audit trail
-        http_client._execution.record_call.assert_called_once()
-        call_kwargs = http_client._execution.record_call.call_args.kwargs
+        assert len(http_client._execution.calls) == 1
+        call_kwargs = http_client._execution.calls[0]
         assert call_kwargs["call_type"] == CallType.HTTP_REDIRECT
         assert call_kwargs["status"] == CallStatus.ERROR
         assert "ConnectError" in call_kwargs["error"].type
@@ -463,8 +540,7 @@ class TestBug4_7_FailedHopRecordsAuditTrail:
 class TestRedirectValidationFailuresPreserveEvidence:
     """Blocked redirect validation must retain both hop and triggering response evidence."""
 
-    @patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf")
-    def test_blocked_redirect_records_hop_error_and_triggering_3xx_response(self, mock_validate, http_client):
+    def test_blocked_redirect_records_hop_error_and_triggering_3xx_response(self, ssrf_validator, http_client):
         """Redirect validation failures must preserve both redirect target and 3xx response."""
         from elspeth.core.security.web import SSRFBlockedError
 
@@ -476,13 +552,13 @@ class TestRedirectValidationFailuresPreserveEvidence:
             request=httpx.Request("GET", "http://93.184.216.34:80/start"),
         )
 
-        mock_validate.side_effect = SSRFBlockedError("blocked redirect")
-        http_client._ephemeral_mock.get.return_value = redirect_response
+        ssrf_validator.queue(SSRFBlockedError("blocked redirect"))
+        http_client._test_ephemeral_client.queue_get(redirect_response)
 
         with pytest.raises(SSRFBlockedError, match="blocked redirect"):
             http_client.get_ssrf_safe(initial_request, follow_redirects=True)
 
-        calls = [call.kwargs for call in http_client._execution.record_call.call_args_list]
+        calls = http_client._execution.calls
         assert len(calls) == 2
 
         initial_call = next(call for call in calls if call["call_type"] == CallType.HTTP)

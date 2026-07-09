@@ -8,6 +8,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.contracts.sink import FILE_SINK_PLUGIN_SLASH_TEXT
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     PatchOutputOptionsArgumentsModel,
@@ -82,7 +83,7 @@ _SET_OUTPUT_DECLARATION = ToolDeclaration(
             "options": {
                 "type": "object",
                 "description": (
-                    "Plugin-specific config. For csv/json file sinks in runnable web pipelines, "
+                    f"Plugin-specific config. For {FILE_SINK_PLUGIN_SLASH_TEXT} file sinks in runnable web pipelines, "
                     "include path, schema, and explicit collision_policy."
                 ),
             },
@@ -93,6 +94,7 @@ _SET_OUTPUT_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["sink_name", "plugin", "options"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -117,6 +119,7 @@ _REMOVE_OUTPUT_DECLARATION = ToolDeclaration(
             "sink_name": {"type": "string", "description": "Sink name to remove."},
         },
         "required": ["sink_name"],
+        "additionalProperties": False,
     },
 )
 
@@ -140,11 +143,13 @@ def _execute_set_output(
         state,
         component_id=validated.sink_name,
         component_type="output",
+        plugin_type="sink",
+        plugin_name=plugin,
         options=sink_options,
     )
     if credential_error is not None:
         return credential_error
-    path_error = _validate_sink_path(sink_options, context.data_dir)
+    path_error = _validate_sink_path(sink_options, context.data_dir, session_id=context.session_id)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -221,13 +226,15 @@ def _execute_patch_output_options(
         state,
         component_id=sink_name,
         component_type="output",
+        plugin_type="sink",
+        plugin_name=current.plugin,
         options=new_options,
     )
     if credential_error is not None:
         return credential_error
 
     # S2: Validate patched sink paths against allowlist
-    path_error = _validate_sink_path(new_options, context.data_dir)
+    path_error = _validate_sink_path(new_options, context.data_dir, session_id=context.session_id)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -301,6 +308,7 @@ _PATCH_OUTPUT_OPTIONS_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["sink_name", "patch"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )

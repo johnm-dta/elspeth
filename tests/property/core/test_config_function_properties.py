@@ -23,13 +23,15 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.core.config import _expand_env_vars
 from elspeth.core.secrets import (
     SECRET_FIELD_NAMES,
     SECRET_FIELD_SUFFIXES,
+    STRUCTURAL_FIELD_EXEMPTIONS,
+    collect_credential_field_violations,
     is_secret_field,
 )
 
@@ -278,8 +280,14 @@ class TestIsSecretFieldSuffixMatches:
     )
     @settings(max_examples=200)
     def test_suffix_matches_detected(self, prefix: str, suffix: str) -> None:
-        """Property: Any field ending in a secret suffix returns True."""
-        assert is_secret_field(f"{prefix}{suffix}") is True
+        """Property: Any field ending in a secret suffix returns True.
+
+        Exact-name structural exemptions (``STRUCTURAL_FIELD_EXEMPTIONS``)
+        are the deliberate exception and are covered by their own class.
+        """
+        name = f"{prefix}{suffix}"
+        assume(name.lower() not in STRUCTURAL_FIELD_EXEMPTIONS)
+        assert is_secret_field(name) is True
 
     @given(
         prefix=st.text(
@@ -293,7 +301,9 @@ class TestIsSecretFieldSuffixMatches:
     @settings(max_examples=100)
     def test_suffix_matches_case_insensitive(self, prefix: str, suffix: str, case_fn) -> None:
         """Property: Suffix matches are case-insensitive."""
-        field_name = case_fn(f"{prefix}{suffix}")
+        name = f"{prefix}{suffix}"
+        assume(name.lower() not in STRUCTURAL_FIELD_EXEMPTIONS)
+        field_name = case_fn(name)
         assert is_secret_field(field_name) is True
 
 
@@ -325,6 +335,85 @@ class TestIsSecretFieldNoFalsePositives:
         assert is_secret_field("") is False
 
 
+class TestStructuralFieldExemptions:
+    """Exact-name structural fields are exempt from the suffix heuristic.
+
+    Regression fixtures for elspeth-61f2c0732e: the bare ``_key`` suffix
+    false-positived on structural plugin fields (``JSONSource.data_key``,
+    ``DataverseSink.alternate_key``), blocking /validate and /execute for
+    legitimate secret-free pipelines. The fix is a fail-closed exact-name
+    exemption list, NOT a narrower suffix set — real credential fields such
+    as Langfuse tracing's ``secret_key``/``public_key`` are matched *only*
+    by the bare ``_key`` suffix, so weakening the suffix would silently stop
+    fingerprinting them into the audit trail.
+    """
+
+    @given(name=st.sampled_from(sorted(STRUCTURAL_FIELD_EXEMPTIONS)))
+    @settings(max_examples=50)
+    def test_exempt_names_not_secret(self, name: str) -> None:
+        """Property: Every exempted structural name returns False."""
+        assert is_secret_field(name) is False
+
+    @given(
+        name=st.sampled_from(sorted(STRUCTURAL_FIELD_EXEMPTIONS)),
+        case_fn=st.sampled_from([str.upper, str.lower, str.title, str.swapcase]),
+    )
+    @settings(max_examples=50)
+    def test_exempt_names_case_insensitive(self, name: str, case_fn) -> None:
+        """Property: Exemptions apply to any casing, matching the predicate."""
+        assert is_secret_field(case_fn(name)) is False
+
+    @given(name=st.sampled_from(sorted(STRUCTURAL_FIELD_EXEMPTIONS)))
+    @settings(max_examples=50)
+    def test_exemptions_stay_purposeful(self, name: str) -> None:
+        """Property: Every exemption must be a name the suffix heuristic would
+        otherwise catch, and must not collide with an exact secret name.
+
+        An entry failing the first check is dead weight; one failing the
+        second would silently un-protect a known credential field.
+        """
+        assert name == name.lower()
+        assert name.endswith(SECRET_FIELD_SUFFIXES)
+        assert name not in SECRET_FIELD_NAMES
+
+    def test_known_structural_fields_exempt(self) -> None:
+        """The two shipped structural fields that motivated the exemption."""
+        # JSONSource.data_key / azure_blob_source data_key: JSON extraction key
+        assert is_secret_field("data_key") is False
+        # DataverseSink.alternate_key: upsert routing column name
+        assert is_secret_field("alternate_key") is False
+
+    def test_real_credential_key_fields_still_detected(self) -> None:
+        """Leak-regression guard: credential fields that rely on the bare
+        ``_key`` suffix (or other heuristics) must keep matching."""
+        for field in (
+            "secret_key",  # Langfuse tracing — bare _key only
+            "public_key",  # Langfuse tracing — bare _key only
+            "master_key",
+            "signing_key",
+            "sas_key",
+            "account_key",
+            "api_key",
+            "access_token",
+            "client_secret",
+            "db_password",
+            "authorization",
+            "connection_string",
+        ):
+            assert is_secret_field(field) is True, field
+
+    def test_structural_literal_is_not_a_credential_violation(self) -> None:
+        """The reported repro: literal structural values must not be flagged
+        as fabricated credentials by the shared collector."""
+        assert collect_credential_field_violations({"data_key": "results"}) == []
+        assert collect_credential_field_violations({"alternate_key": "crabc_code"}) == []
+
+    def test_credential_literal_still_a_violation(self) -> None:
+        """Positive control: a literal in a true credential field still trips."""
+        assert collect_credential_field_violations({"api_key": "sk-live-1234"}) == ["api_key"]
+        assert collect_credential_field_violations({"secret_key": "sk-lf-1234"}) == ["secret_key"]
+
+
 # =============================================================================
 # _sanitize_dsn Properties
 # =============================================================================
@@ -335,7 +424,7 @@ class TestSanitizeDsnProperties:
 
     def test_password_removed_from_postgresql_dsn(self) -> None:
         """Property: Password is removed from PostgreSQL DSN."""
-        url = "postgresql://user:mysecretpassword@localhost:5432/mydb"
+        url = "postgresql://user:mysecretpassword@localhost:5432/mydb"  # secret-scan: allow-this-line
         # Need fingerprint key for this to work, or use dev mode
         sanitized, _fingerprint, had_password = _sanitize_dsn_dev_mode(url)
         assert "mysecretpassword" not in sanitized
@@ -343,7 +432,7 @@ class TestSanitizeDsnProperties:
 
     def test_password_removed_from_mysql_dsn(self) -> None:
         """Property: Password is removed from MySQL DSN."""
-        url = "mysql://admin:p4ssw0rd@db.host.com/production"
+        url = "mysql://admin:p4ssw0rd@db.host.com/production"  # secret-scan: allow-this-line
         sanitized, _fingerprint, had_password = _sanitize_dsn_dev_mode(url)
         assert "p4ssw0rd" not in sanitized
         assert had_password is True
@@ -366,7 +455,7 @@ class TestSanitizeDsnProperties:
         the host). Real passwords are always longer, so this is not a meaningful
         security gap.
         """
-        url = f"postgresql://user:{password}@localhost/db"
+        url = f"postgresql://user:{password}@localhost/db"  # secret-scan: allow-this-line
         sanitized, _, had_password = _sanitize_dsn_dev_mode(url)
         assert had_password is True
         assert password not in sanitized
@@ -379,7 +468,7 @@ class TestSanitizeDsnProperties:
     @settings(max_examples=100)
     def test_non_password_components_preserved(self, host: str, port: int, database: str) -> None:
         """Property: Host, port, and database survive sanitization."""
-        url = f"postgresql://user:secret@{host}:{port}/{database}"
+        url = f"postgresql://user:secret@{host}:{port}/{database}"  # secret-scan: allow-this-line
         sanitized, _, _ = _sanitize_dsn_dev_mode(url)
         assert host in sanitized
         assert str(port) in sanitized
@@ -395,7 +484,7 @@ class TestSanitizeDsnProperties:
 
     def test_idempotent_sanitization(self) -> None:
         """Property: Sanitizing an already-sanitized URL is a no-op."""
-        url = "postgresql://user:secret@localhost/db"
+        url = "postgresql://user:secret@localhost/db"  # secret-scan: allow-this-line
         sanitized1, _, _ = _sanitize_dsn_dev_mode(url)
         sanitized2, _, had_password = _sanitize_dsn_dev_mode(sanitized1)
         assert sanitized1 == sanitized2

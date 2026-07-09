@@ -12,13 +12,13 @@ while the repo is tested directly.
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import (
     BatchStatus,
@@ -53,12 +53,17 @@ from elspeth.core.landscape.model_loaders import (
     OperationLoader,
     RoutingEventLoader,
 )
-from elspeth.core.landscape.schema import node_states_table
+from elspeth.core.landscape.schema import node_states_table, routing_events_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+@dataclass(frozen=True)
+class _RowcountResult:
+    rowcount: int
 
 
 def _make_repo(
@@ -293,6 +298,56 @@ class TestCompleteNodeStateCrashPaths:
             stable_hash({"row": {"name": "second"}, "artifact_path": "out.csv", "content_hash": "hash"}),
         }
 
+    def test_batch_complete_chunks_validation_and_readback_state_id_selects(self) -> None:
+        """Large batch validation/readback must stay below SQLite parameter ceilings."""
+        _db, repo, fac, _tok = _make_repo_with_token()
+        state_count = 501
+        begin_entries: list[tuple[str, str, str, int, dict[str, object]]] = []
+        for index in range(state_count):
+            row_id = f"row-bulk-{index}"
+            token_id = f"tok-bulk-{index}"
+            fac.data_flow.create_row(
+                "run-1",
+                "source-0",
+                index + 1,
+                {"name": f"bulk-{index}"},
+                row_id=row_id,
+                source_row_index=index + 1,
+                ingest_sequence=index + 1,
+            )
+            fac.data_flow.create_token(row_id, token_id=token_id)
+            begin_entries.append((token_id, "sink-0", "run-1", 2, {"name": f"bulk-{index}"}))
+        states = repo.begin_node_states_many(tuple(begin_entries))
+
+        original_connection = repo._db.write_connection
+        observed_select_sizes: list[int] = []
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def bounded_state_select_connection():
+            with original_connection() as conn:
+                original_execute = conn.execute
+
+                def patched_execute(stmt, *args: Any, **kwargs: Any):
+                    if getattr(stmt, "is_select", False):
+                        compiled = stmt.compile(dialect=conn.dialect, compile_kwargs={"render_postcompile": True})
+                        statement = str(compiled)
+                        if "FROM node_states" in statement and "node_states.state_id IN" in statement:
+                            state_id_param_count = sum(1 for name in compiled.params if name.startswith("state_id_"))
+                            observed_select_sizes.append(state_id_param_count)
+                            assert state_id_param_count <= 500
+                    return original_execute(stmt, *args, **kwargs)
+
+                conn.execute = patched_execute
+                yield conn
+
+        repo._db.write_connection = bounded_state_select_connection  # type: ignore[method-assign]
+
+        repo.complete_node_states_completed_many(tuple((state.state_id, {"completed": index}, 1.0) for index, state in enumerate(states)))
+
+        assert sorted(observed_select_sizes) == [1, 1, 500, 500]
+
     def test_batch_begin_rowcount_mismatch_rolls_back_inserted_open_states(self) -> None:
         """Rowcount mismatches must abort inside the write transaction."""
         db, repo, fac, tok = _make_repo_with_token()
@@ -310,9 +365,7 @@ class TestCompleteNodeStateCrashPaths:
                 def patched_execute(stmt, *args: Any, **kwargs: Any):
                     result = original_execute(stmt, *args, **kwargs)
                     if stmt.is_insert and stmt.table is node_states_table:
-                        mock_result = MagicMock()
-                        mock_result.rowcount = 1
-                        return mock_result
+                        return _RowcountResult(rowcount=1)
                     return result
 
                 conn.execute = patched_execute
@@ -423,6 +476,32 @@ class TestCompleteNodeStateCrashPaths:
         assert isinstance(result_f, NodeStateFailed)
 
 
+class TestCompletedRowLookup:
+    """Exact completed-row lookup for coalesce late-arrival detection."""
+
+    def test_has_completed_row_for_node_scopes_by_run_node_and_row(self) -> None:
+        _db, repo, fac, tok = _make_repo_with_token()
+        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        fac.data_flow.create_token("row-2", token_id="tok-2")
+
+        first = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"name": "test"})
+        second = repo.begin_node_state("tok-2", "transform-1", "run-1", 1, {"name": "second"})
+        repo.complete_node_state(first.state_id, NodeStateStatus.COMPLETED, output_data={"ok": True}, duration_ms=1.0)
+        repo.complete_node_state(second.state_id, NodeStateStatus.COMPLETED, output_data={"ok": True}, duration_ms=1.0)
+
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-1") is True
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-2") is True
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-missing") is False
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="sink-0", row_id="row-1") is False
+        assert repo.has_completed_row_for_node(run_id="run-missing", node_id="transform-1", row_id="row-1") is False
+
+    def test_has_completed_row_for_node_ignores_open_state(self) -> None:
+        _db, repo, _fac, tok = _make_repo_with_token()
+        repo.begin_node_state(tok, "transform-1", "run-1", 1, {"name": "test"})
+
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-1") is False
+
+
 class TestCompleteNodeStateForbiddenFields:
     """Regression tests for elspeth-22e2bca0c1: forbidden fields per status."""
 
@@ -475,7 +554,7 @@ class TestRecordRoutingEventsRowcount:
     """Test that record_routing_events checks INSERT rowcount (H5)."""
 
     def test_zero_rowcount_raises_audit_integrity(self) -> None:
-        """Mocked zero rowcount on routing event INSERT raises AuditIntegrityError.
+        """Fake zero rowcount on routing event INSERT raises AuditIntegrityError.
 
         This simulates a database anomaly where the INSERT succeeds but
         reports zero rows affected.
@@ -495,7 +574,7 @@ class TestRecordRoutingEventsRowcount:
 
         routes = [RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)]
 
-        # Mock the connection's execute to return rowcount=0 for INSERTs
+        # Fake the connection's execute to return rowcount=0 for INSERTs
         original_connection = repo._db.write_connection
 
         from contextlib import contextmanager
@@ -509,9 +588,7 @@ class TestRecordRoutingEventsRowcount:
                     result = original_execute(stmt, *args, **kwargs)
                     # Intercept INSERT results to simulate zero rowcount
                     if stmt.is_insert:
-                        mock_result = MagicMock()
-                        mock_result.rowcount = 0
-                        return mock_result
+                        return _RowcountResult(rowcount=0)
                     return result
 
                 conn.execute = patched_execute
@@ -1198,6 +1275,97 @@ class TestCompleteNodeStateSuccessFailure:
 class TestRecordRoutingEvent:
     """Tests for single routing event recording."""
 
+    def test_record_routing_event_rejects_edge_from_different_run(self) -> None:
+        """A routing event must not connect a node state to another run's edge."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id="transform-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        edge = fac.data_flow.register_edge(
+            run_id="run-2",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="wrong-run",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-run-2",
+        )
+
+        with pytest.raises(LandscapeRecordError, match="same run"):
+            repo.record_routing_event(state.state_id, edge.edge_id, RoutingMode.MOVE)
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table.c.event_id)).all()
+
+        assert rows == []
+
+    def test_routing_events_schema_rejects_cross_run_direct_insert(self) -> None:
+        """The routing_events table must enforce same-run state/edge ownership."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id="transform-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        edge = fac.data_flow.register_edge(
+            run_id="run-2",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="wrong-run",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-run-2",
+        )
+
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
+            conn.execute(
+                routing_events_table.insert().values(
+                    event_id="event-cross-run",
+                    state_id=state.state_id,
+                    edge_id=edge.edge_id,
+                    run_id="run-1",
+                    routing_group_id="group-cross-run",
+                    ordinal=0,
+                    mode=RoutingMode.MOVE,
+                    created_at=state.started_at,
+                )
+            )
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table.c.event_id)).all()
+
+        assert rows == []
+
     def test_record_routing_event_basic(self) -> None:
         """Record a single routing event and verify all fields."""
         _db, repo, fac, tok = _make_repo_with_token()
@@ -1303,6 +1471,60 @@ class TestRecordRoutingEvent:
         # All events in a fork share the same routing_group_id
         assert events[0].routing_group_id == events[1].routing_group_id
 
+    def test_record_routing_events_rejects_edge_from_different_run(self) -> None:
+        """Batch routing writes must roll back when any route targets another run."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="right-run",
+            mode=RoutingMode.COPY,
+            edge_id="edge-run-1",
+        )
+        fac.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id="transform-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_node(
+            run_id="run-2",
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        fac.data_flow.register_edge(
+            run_id="run-2",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="wrong-run",
+            mode=RoutingMode.COPY,
+            edge_id="edge-run-2",
+        )
+
+        with pytest.raises(LandscapeRecordError, match="same run"):
+            repo.record_routing_events(
+                state.state_id,
+                [
+                    RoutingSpec(edge_id="edge-run-1", mode=RoutingMode.COPY),
+                    RoutingSpec(edge_id="edge-run-2", mode=RoutingMode.COPY),
+                ],
+            )
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table.c.event_id)).all()
+
+        assert rows == []
+
     def test_record_routing_events_empty_list_returns_empty(self) -> None:
         """record_routing_events with empty routes list returns empty list."""
         _db, repo, _fac, tok = _make_repo_with_token()
@@ -1359,6 +1581,38 @@ class TestRegisterArtifact:
             idempotency_key="sink-0:row-1:attempt-0",
         )
         assert artifact.idempotency_key == "sink-0:row-1:attempt-0"
+
+    @pytest.mark.parametrize(
+        ("path_or_uri", "match"),
+        [
+            (
+                "db://audit@postgresql://user:secret@db.example.test/audit",  # secret-scan: allow-this-line
+                "raw URL credentials",
+            ),
+            ("https://api.example.test/hook?token=raw-secret", "sensitive query parameters"),
+            (
+                "https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value",
+                "known webhook path secrets",
+            ),
+        ],
+    )
+    def test_register_artifact_rejects_raw_credential_bearing_uris(self, path_or_uri: str, match: str) -> None:
+        """Artifact registration must enforce the ArtifactDescriptor URI secret guard."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"x": 1})
+
+        with pytest.raises(ValueError, match=match):
+            repo.register_artifact(
+                run_id="run-1",
+                state_id=state.state_id,
+                sink_node_id="sink-0",
+                artifact_type="webhook",
+                path=path_or_uri,
+                content_hash="abc123def456",
+                size_bytes=1024,
+            )
+
+        assert repo.get_artifacts("run-1") == []
 
     def test_get_artifacts_filtered_by_sink(self) -> None:
         """get_artifacts with sink_node_id filter returns only matching artifacts."""
@@ -1665,7 +1919,7 @@ class TestCallRecordingWithPayloadStore:
         store = _TrackingPayloadStore()
         _db, repo, _fac, _tok = _make_repo_with_token(payload_store=store)
 
-        with pytest.raises(LandscapeRecordError, match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write: IntegrityError"):
             repo.record_call(
                 "missing-state",
                 0,
@@ -1682,7 +1936,7 @@ class TestCallRecordingWithPayloadStore:
         store = _TrackingPayloadStore()
         _db, repo, _fac, _tok = _make_repo_with_token(payload_store=store)
 
-        with pytest.raises(LandscapeRecordError, match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write: IntegrityError"):
             repo.record_operation_call(
                 "missing-operation",
                 CallType.HTTP,
@@ -1699,7 +1953,7 @@ class TestCallRecordingWithPayloadStore:
         _db, repo, _fac, tok = _make_repo_with_token(payload_store=store)
         state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
 
-        with pytest.raises(LandscapeRecordError, match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match=r"requires existing state_id=.*missing-edge"):
             repo.record_routing_event(
                 state.state_id,
                 "missing-edge",
@@ -1723,7 +1977,7 @@ class TestCallRecordingWithPayloadStore:
             edge_id="edge-a",
         )
 
-        with pytest.raises((LandscapeRecordError, SQLAlchemyError), match="FOREIGN KEY constraint failed"):
+        with pytest.raises(LandscapeRecordError, match=r"requires existing state_id=.*missing-edge"):
             repo.record_routing_events(
                 state.state_id,
                 [

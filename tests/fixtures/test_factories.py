@@ -73,11 +73,9 @@ class TestMakeContext:
         assert node_state.token_id == ctx.token.token_id
 
     def test_explicit_landscape_replaces_mock(self) -> None:
-        from unittest.mock import Mock
-
         from tests.fixtures.factories import make_context
 
-        custom_landscape = Mock()
+        custom_landscape = object()
         ctx = make_context(landscape=custom_landscape)
         assert ctx.landscape is custom_landscape
 

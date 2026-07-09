@@ -7,7 +7,7 @@
    .message-group-separator, .tool-call-*, .pending-proposals-banner*,
    .inline-source-fallback-prompt*, .pending-overlay-pill, .spec-pending-proposal,
    .yaml-pending-summary, .runs-pending-proposal, .composing-*, .template-cards*,
-   .template-card*.
+   .template-card*, .chat-model-chip*, .proposal-diff*.
    Tenants (execution-named but chat-mounted — they render inside the chat
    panel via inline run results):
      .inline-run-results*, .run-outputs-panel*, .run-output-artifact*. */
@@ -22,7 +22,7 @@
      lives on .message-bubble-content below — placed there because that
      selector has equal specificity to .bubble but appears later in
      source order and would otherwise silently win. */
-  max-width: min(85%, 68ch);
+  max-width: min(92%, 74ch);
   padding: var(--space-md) var(--space-lg);
   border-radius: var(--radius-lg);
   word-break: break-word;
@@ -93,6 +93,22 @@
   font-size: var(--font-size-sm);
 }
 
+/* A guided synthetic-failure turn (C-2, composer first-principles review
+   2026-07-04): a scaffold-guard rejection or provider-unavailability reply
+   from POST /guided/chat, discriminated by ChatTurn.assistant_message_kind.
+   Left-aligned like .bubble-assistant (it IS a reply in the transcript
+   position), but styled with the error tokens instead of the assistant
+   tokens so it reads as a distinct, non-authoritative event — never
+   mistakeable for a real assistant reply. Same tokens as .chat-panel-error /
+   .ack-stack-error; no new colours. */
+.bubble-error {
+  align-self: flex-start;
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-left: 2px solid var(--color-error);
+  color: var(--color-text);
+}
+
 /* Action buttons on message bubbles — subtly visible, then emphasized on hover/focus */
 .bubble-copy-btn,
 .bubble-edit-btn {
@@ -134,11 +150,11 @@
   transform: translateX(-50%);
   z-index: var(--z-panel-controls);
   border-radius: var(--radius-pill);
-  padding: 6px var(--space-lg);
+  padding: var(--space-1-5) var(--space-lg);
   min-height: var(--size-control-compact);
   font-size: var(--font-size-sm);
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-popover);
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong);
   color: var(--color-text);
@@ -298,11 +314,11 @@
 }
 
 .run-output-artifact-kind {
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-hover);
   color: var(--color-text-secondary);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: var(--line-height-tight);
   text-transform: uppercase;
@@ -332,7 +348,7 @@
 .run-output-artifact-hash {
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   white-space: nowrap;
 }
 
@@ -387,7 +403,7 @@
 }
 
 .chat-input-upload-alert {
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   margin-bottom: var(--space-sm);
   background-color: var(--color-error-bg);
   color: var(--color-error);
@@ -416,7 +432,7 @@
 }
 
 .chat-input-icon-btn {
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm) var(--space-2-5);
   background-color: transparent;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
@@ -491,9 +507,9 @@
 }
 
 .chat-input-hint {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  padding: 2px 0 var(--space-xs);
+  padding: var(--space-2xs) 0 var(--space-xs);
   text-align: right;
 }
 
@@ -556,6 +572,23 @@
   gap: var(--space-md);
 }
 
+/* Persistent composer-model identity chip in the chat header
+   (elspeth-e9f7678de8). Quiet reference chrome: mono + muted so it reads as
+   provenance metadata, not a control. --color-text-muted passes 4.5:1 on
+   both themes' page backgrounds (pinned by colorContrast.test.ts). */
+.chat-model-chip {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.chat-model-chip-label {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
 .chat-panel-header-title {
   margin: 0;
   font-size: inherit;
@@ -567,11 +600,12 @@
   min-width: 0;
 }
 
-/* "Switch to guided" affordance in the freeform body header.  Visual weight
-   mirrors .guided-exit-button (the symmetric inverse) — quiet outline, hover
-   lift, WCAG 2.5.8 target height — so the two mode-switch controls read as
-   members of the same family. */
-.chat-panel-switch-to-guided {
+/* ModeSwitchButton — the symmetric guided<->freeform toggle in BOTH body
+   headers ("Switch to guided" / "Exit to freeform"). Quiet outline at rest with
+   a hover lift and WCAG 2.5.8 target height. The confirm primary is slightly
+   stronger (accent border) but NOT danger-styled, because switching is
+   non-destructive (the session keeps both modes' state). */
+.mode-switch-btn {
   padding: var(--space-sm) var(--space-md);
   background-color: transparent;
   color: var(--color-text-secondary);
@@ -587,15 +621,64 @@
     color 0.1s ease;
 }
 
-.chat-panel-switch-to-guided:hover {
+.mode-switch-btn:hover {
   background-color: var(--color-surface-elevated);
   border-color: var(--color-border-strong);
   color: var(--color-text);
 }
 
-.chat-panel-switch-to-guided:focus-visible {
+.mode-switch-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+.mode-switch-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.mode-switch-btn:disabled:hover {
+  background-color: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+/* Confirm primary (shown only when the current chat has work). */
+.mode-switch-btn--confirm {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+/* Two-step confirm container: primary + Cancel, wraps if the header is tight. */
+.mode-switch-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+/* C-4b: terminal-guided "Switch to guided" — permanently un-reentrable
+   (solver_exhausted / protocol_violation, not the reversible user exit).
+   Disabled button + adjacent plain-language reason so the affordance never
+   reads as a silent no-op — same register as .chat-panel-error's inline
+   explanation, without borrowing its alert-red treatment (this is expected,
+   not a failure). */
+.mode-switch-disabled {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.mode-switch-disabled-reason {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-switch-btn {
+    transition: none;
+  }
 }
 
 .chat-panel-error {
@@ -650,6 +733,16 @@
   padding: var(--space-lg) 0;
 }
 
+/* The message list is keyboard-focusable (tabIndex=0 in ChatPanel,
+   elspeth-5e43a0c8b2) so keyboard users can arrow-scroll the conversation.
+   Standard app focus ring (base.css :focus-visible idiom), drawn inset
+   because .chat-panel clips overflow — the default +2px offset ring would
+   be invisible on all four sides. */
+.chat-panel-messages:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
 
 /* =============================================================================
    Component-Specific Classes — Migrated from Inline Styles
@@ -664,6 +757,18 @@
 .message-row {
   display: flex;
   padding: var(--space-xs) var(--space-lg);
+  /* Cap the conversation to a centred column so a right-aligned (user) and a
+     left-aligned (assistant) bubble stay near each other instead of pinning to
+     opposite edges of a wide chat column. On WQHD+ the chat column is ~2240px,
+     which left a ~1100px dead gulf down the middle and forced the eye to jump
+     left↔right to follow the thread. 56rem keeps a comfortable reading measure
+     while giving consecutive bubbles a generous horizontal overlap.
+     Applies to freeform AND guided/tutorial — both emit .message-row. The
+     guided workspace widgets (.guided-workspace-*) and full-width run-result
+     panels (.inline-run-results) are NOT .message-row, so they keep full width. */
+  max-width: min(100%, 56rem);
+  margin-inline: auto;
+  width: 100%;
 }
 
 .message-row--user {
@@ -679,14 +784,18 @@
 }
 
 .message-bubble-content {
-  /* Cap measure at ~68ch (Bringhurst's upper range) so wide windows do
-     not stretch the bubble to a 120-char measure that hurts eye-return
-     on long assistant summaries. Small windows keep the 80% behaviour
+  /* Cap measure at ~74ch so wide windows do not stretch the bubble to a
+     120-char measure that hurts eye-return on long assistant summaries.
+     74ch sits just above Bringhurst's ideal band (66) and a touch over the
+     prior 68ch: now that .message-row caps the conversation to a 56rem
+     centred column, the slightly wider bubble gives consecutive left/right
+     bubbles more horizontal overlap (less eye travel) without pushing the
+     line length into fatiguing territory. Small windows keep the % behaviour
      via min(). This is the LIVE cap — .bubble has the same cap as a
      defense-in-depth fallback, but .message-bubble-content has equal
      specificity to .bubble and appears later in source order, so this
      rule wins for every user and assistant bubble. */
-  max-width: min(80%, 68ch);
+  max-width: min(92%, 74ch);
   font-size: var(--font-size-base);
   /* Was --line-height-normal (1.5). .message-bubble-content has the same
      specificity as .bubble but appears later in source, so it overrides
@@ -711,7 +820,7 @@
   cursor: pointer;
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border-radius: var(--radius-sm);
   min-width: 44px;
   min-height: var(--size-control);
@@ -813,7 +922,7 @@
 .message-tools {
   margin-top: var(--space-sm);
   border-top: 1px solid var(--color-border-strong);
-  padding-top: 6px;
+  padding-top: var(--space-1-5);
 }
 
 .message-tools-toggle {
@@ -840,21 +949,21 @@
 }
 
 .message-tools-details {
-  margin-top: 2px;
+  margin-top: var(--space-2xs);
 }
 
 .message-tools-summary {
   cursor: pointer;
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
 }
 
 .message-tools-pre {
-  margin: 2px 0 0;
-  padding: 4px;
+  margin: var(--space-2xs) 0 0;
+  padding: var(--space-xs);
   background-color: var(--color-surface-elevated);
   border-radius: var(--radius-sm);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -865,8 +974,8 @@
    bubble. The horizontal ruler (.message-group-separator) is only painted
    when both groups are present; see MessageBubble.tsx for the guard. */
 .message-sources-created {
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: var(--space-1-5);
+  padding-top: var(--space-1-5);
 }
 
 /* Static section heading — shares the visual weight of .message-tools-toggle
@@ -879,7 +988,7 @@
 }
 
 .message-sources-created-list {
-  margin: 4px 0 0;
+  margin: var(--space-xs) 0 0;
   padding-left: 0;
   font-size: var(--font-size-xs);
 }
@@ -956,7 +1065,7 @@
 }
 
 .message-group-separator {
-  margin: 6px 0 0;
+  margin: var(--space-1-5) 0 0;
   border: 0;
   border-top: 1px solid var(--color-border);
   opacity: 0.6;
@@ -967,7 +1076,7 @@
   gap: var(--space-sm);
   align-items: center;
   margin-top: var(--space-sm);
-  padding: 6px var(--space-sm);
+  padding: var(--space-1-5) var(--space-sm);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
@@ -998,7 +1107,7 @@
   background: transparent;
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   cursor: help;
   /* The trigger is a button so it gets the global :focus-visible ring. */
@@ -1023,7 +1132,7 @@
   color: var(--color-text);
   font-size: var(--font-size-xs);
   line-height: var(--line-height-snug);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-popover);
   /* Hidden until the trigger is hovered or focused. visibility +
      opacity transition together so the bubble can fade in but still be
      pointer-event-inert until visible. */
@@ -1052,10 +1161,10 @@
 
 .tool-call-info-bubble-name {
   display: block;
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
 }
 
 .tool-call-info-bubble-body {
@@ -1103,7 +1212,7 @@
 
 .tool-call-audit-id {
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
 }
 
 .tool-call-summary,
@@ -1115,6 +1224,72 @@
 
 .tool-call-details {
   margin-top: var(--space-sm);
+}
+
+/* ── Proposal change surface (elspeth-10f76f9250) ──────────────────────────
+   Before/after fragment diff on mutating proposal cards. The rows reuse the
+   shared recovery-diff row classes (recovery.css, loaded via the
+   styles/index.css barrel); only the card-local wrapper styles live here. */
+.proposal-diff {
+  margin-top: var(--space-sm);
+}
+
+.proposal-diff-heading {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-xs);
+}
+
+.proposal-diff-empty,
+.tool-call-arg-empty {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.proposal-diff-list {
+  margin: 0;
+}
+
+/* Structured field-level argument rendering — the fallback surface when no
+   before/after projection is derivable (stale/resolved proposals, unknown
+   tools). One row per top-level argument. */
+.tool-call-arg-fields {
+  margin: var(--space-sm) 0 0;
+  display: grid;
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
+}
+
+.tool-call-arg-field {
+  display: grid;
+  grid-template-columns: minmax(90px, max-content) 1fr;
+  gap: var(--space-sm);
+  align-items: start;
+}
+
+.tool-call-arg-field dt {
+  color: var(--color-text-secondary);
+}
+
+.tool-call-arg-field dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.tool-call-arg-nested {
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  max-height: 200px;
+  overflow: auto;
 }
 
 .tool-call-details summary {
@@ -1314,7 +1489,7 @@
   gap: var(--space-sm);
   align-items: center;
   margin-bottom: var(--space-sm);
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm) var(--space-2-5);
   border-left: 4px dashed var(--color-warning);
   background: color-mix(
     in srgb,
@@ -1336,10 +1511,39 @@
   display: flex;
   justify-content: flex-start;
   padding: var(--space-xs) var(--space-lg);
+  /* The indicator is docked as a flex sibling BELOW the scrolling message
+     list (outside the role="log" live region — elspeth-76a0cc485e); never
+     let the column squash it when vertical space runs short. */
+  flex-shrink: 0;
+}
+
+/* Elapsed-time readout on the in-flight card (elspeth-b189b5b3b8): sits
+   inline after the "Working on..." label. aria-hidden in the TSX — the
+   per-second tick must not spam the role="status" region. */
+.composing-elapsed {
+  margin-left: var(--space-sm);
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--color-text-muted);
+  text-transform: none;
+}
+
+/* Keyword-guessed working views (no backend progress snapshot yet) are
+   visually distinct from backend-reported evidence: italics plus the
+   "(estimated)" tag rendered in the TSX (elspeth-b189b5b3b8 part c). */
+.composing-working-view--estimated .composing-title,
+.composing-working-view--estimated .composing-evidence,
+.composing-working-view--estimated .composing-text {
+  font-style: italic;
+}
+
+.composing-estimated-tag {
+  font-weight: 400;
+  color: var(--color-text-muted);
 }
 
 .composing-bubble {
-  padding: 10px 14px;
+  padding: var(--space-2-5) var(--space-md);
   border-radius: var(--radius-md);
   background-color: var(--color-bubble-assistant);
   border: 1px solid var(--color-bubble-assistant-border);
@@ -1352,9 +1556,9 @@
 .composing-pulse {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-xs);
   min-width: 34px;
-  padding-top: 5px;
+  padding-top: var(--space-xs);
 }
 
 .composing-indicator--terminal .composing-bubble {
@@ -1368,26 +1572,26 @@
   justify-content: center;
   min-width: 0;
   min-height: 24px;
-  margin-top: 1px;
+  margin-top: var(--space-2xs);
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .composing-working-view {
   display: grid;
-  gap: 6px;
+  gap: var(--space-1-5);
   min-width: 0;
 }
 
 .composing-section {
   display: grid;
-  gap: 3px;
+  gap: var(--space-2xs);
 }
 
 .composing-label {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   font-weight: 600;
   line-height: 1.25;
@@ -1403,7 +1607,7 @@
 
 .composing-evidence {
   margin: 0;
-  padding-left: 18px;
+  padding-left: var(--space-lg);
   color: var(--color-text-secondary);
   font-size: var(--font-size-xs);
   line-height: 1.45;
@@ -1446,8 +1650,7 @@
 
 .template-cards-grid {
   display: grid;
-  /* The empty-state gallery is deliberately a 4 x 3 desktop field: these
-     are static exemplars, not a responsive picker of clickable actions. */
+  /* 4 x 3 desktop field of domain exemplars. */
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-md);
 }
@@ -1457,14 +1660,16 @@
   flex-direction: column;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 6px;
+  gap: var(--space-1-5);
   aspect-ratio: 1 / 1;
   min-width: 0;
-  min-height: 0;
-  padding: 12px;
+  padding: var(--space-md);
   overflow: hidden;
-  /* Passive exemplar tiles: keep the gallery visible, but fade the chrome so
-     these do not compete with real controls or imply clickability. */
+  /* Exemplar tiles keep faded chrome so the grid reads as reference
+     context; the explicit "Use this example" button inside each card is
+     the interactive affordance (elspeth-b948756c5a). min-height stays
+     auto so the action button can push a card past the square when the
+     content needs the room. */
   background-color: color-mix(
     in srgb,
     var(--color-surface-elevated) 72%,
@@ -1476,10 +1681,15 @@
   text-align: left;
 }
 
+.template-card-action {
+  margin-top: var(--space-xs);
+  align-self: flex-start;
+}
+
 .template-card-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 
 .template-card-icon {
@@ -1499,9 +1709,14 @@
   display: -webkit-box;
   overflow: hidden;
   font-size: var(--font-size-xs);
+  /* No opacity dimming here (dark-contrast carry-over, ux-review-2026-07-02):
+     --color-text-muted itself passes AA, but the previous 0.82 dim
+     composited it below 4.5:1 against the card's color-mix background in
+     BOTH themes (~4.2:1 dark / ~4.3:1 light vs the #173942 dark card mix).
+     The card keeps its faded chrome via the background/border mix above;
+     text stays at full token strength. Pinned by TemplateCards.test.tsx. */
   color: var(--color-text-muted);
   line-height: 1.3;
-  opacity: 0.82;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
@@ -1510,11 +1725,13 @@
   margin-top: auto;
   display: grid;
   grid-template-columns: 1fr;
-  gap: 5px;
-  font-size: var(--font-size-2xs);
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
+  /* Same contrast discipline as .template-card-description above: the old
+     0.76 dim dropped this micro-text to ~3.9:1 on the dark card mix.
+     Muted/secondary tokens at full strength pass AA on the card surface. */
   color: var(--color-text-muted);
   line-height: 1.2;
-  opacity: 0.76;
 }
 
 .template-card-sda div {
@@ -1547,62 +1764,40 @@
   }
 }
 
-/* ── Freeform interpretation-review cards ────────────────────────────────
-   Inline (freeform-mode) counterpart to the guided InterpretationReviewTurn.
-   Execution is gated until these are resolved, so they read as distinct
-   action cards — an elevated surface with an amber left-accent — rather than
-   ordinary assistant prose bubbles. The chat-message / chat-message--assistant
-   classes the component carries have no CSS of their own (the chat bubbles use
-   .bubble*), so before this every element rendered as unstyled, full-width,
-   default-browser content with no card or separation between stacked reviews.
-   The flex column + gap gives uniform internal rhythm; align-self: stretch lets
-   the card use the full message column (these are tasks, not chat prose). */
-.interpretation-review-inline-message {
-  align-self: stretch;
+/* ── Acknowledgement stack (pinned top-of-chat LLM decisions) ─────────────
+   One surface for BOTH guided and freeform. Reframed from approval to
+   acknowledgement: a compact stack of decision cards on an elevated surface
+   with an amber left-accent so it reads as "clear these to proceed" rather
+   than ordinary assistant prose. Replaces the old verbose per-mode widgets. */
+.ack-stack {
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
-  margin: var(--space-sm) 0;
-  padding: var(--space-lg);
+  margin: 0 0 var(--space-sm);
+  padding: var(--space-md);
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong);
   border-left: 3px solid var(--color-warning);
   border-radius: var(--radius-lg);
 }
 
-.interpretation-review-inline-message-heading {
+/* In freeform mode the stack sits above the scrolling message list; pin it so
+   pending decisions stay visible while the operator scrolls the conversation. */
+.chat-panel > .ack-stack {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.ack-stack-header {
   margin: 0;
-  font-size: var(--font-size-md);
+  font-size: var(--font-size-sm);
   font-weight: 600;
   line-height: var(--line-height-tight);
   color: var(--color-text);
 }
 
-.interpretation-review-inline-message-body {
-  margin: 0;
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
-  color: var(--color-text-secondary);
-}
-
-/* Inline emphasis (user term, model name, node id) reads as a value, not
-   italic prose. */
-.interpretation-review-inline-message-body em,
-.interpretation-review-inline-message-user-term,
-.interpretation-review-inline-message-llm-draft {
-  font-style: normal;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.interpretation-review-inline-message-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  margin-top: var(--space-2xs);
-}
-
-.interpretation-review-inline-message-error {
+.ack-stack-error {
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
@@ -1614,69 +1809,202 @@
   font-size: var(--font-size-sm);
 }
 
-.interpretation-review-inline-message-error-heading {
+.ack-stack-error-heading {
   color: var(--color-error);
 }
 
-/* "Change it: I meant…" amend form */
-.interpretation-review-inline-message-amend {
+/* Foot-of-stack session opt-out: a single de-emphasised, divided control. */
+.ack-stack-opt-out {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-top: var(--space-2xs);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.ack-stack-opt-out-link {
+  align-self: flex-start;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ack-stack-opt-out-link:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.ack-stack-opt-out-link:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-muted);
+}
+
+/* ── Acknowledgement card (one decision) ─────────────────────────────────── */
+.ack-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* Title row: humanised step label · kind. De-emphasised; secondary (not muted)
+   clears AA on the surface. */
+.ack-card-title {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  color: var(--color-text-secondary);
+}
+
+.ack-card-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.ack-card-line {
+  flex: 1 1 16rem;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--color-text);
+}
+
+/* Inline value emphasis (user term, draft) reads as a value, not italic prose. */
+.ack-card-line em,
+.ack-card-user-term,
+.ack-card-llm-draft {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.ack-card-model {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.95em;
+}
+
+.ack-card-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.ack-card-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+}
+
+.ack-card-view-toggle {
+  align-self: flex-start;
+  padding: var(--space-2xs) var(--space-sm);
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.ack-card-view-toggle:hover {
+  color: var(--color-text);
+}
+
+.ack-card-prompt-template {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.ack-card-prompt-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+/* Visible scroll-gate explanation for the prompt-template card: says WHY
+   Acknowledge is disabled instead of leaving an unexplained dead control
+   (elspeth-3b35abf148 variant 2). Same element the disabled button's
+   aria-describedby targets. */
+.ack-card-gate-note {
+  margin: 0 0 var(--space-2xs);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.ack-card-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-sm);
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.ack-card-error-heading {
+  color: var(--color-error);
+}
+
+.ack-card-amend {
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
 }
 
-.interpretation-review-inline-message-amend-label {
+.ack-card-amend-label {
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
-.interpretation-review-inline-message-amend-input {
+.ack-card-amend-input {
   width: 100%;
   box-sizing: border-box;
   padding: var(--space-sm);
   font-family: inherit;
   font-size: var(--font-size-sm);
   color: var(--color-text);
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
+  background-color: var(--color-surface-input);
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-md);
   resize: vertical;
 }
 
-.interpretation-review-inline-message-amend-actions {
+.ack-card-amend-actions {
   display: flex;
   gap: var(--space-sm);
 }
 
-.interpretation-review-inline-message-amend-cap-warning {
+.ack-card-amend-cap-warning {
   margin: 0;
   font-size: var(--font-size-xs);
   color: var(--color-warning);
 }
 
-/* Session opt-out: de-emphasised and divided from the card body so it no
-   longer butts straight against the next card's heading. */
-.interpretation-review-inline-message-opt-out {
-  margin-top: var(--space-2xs);
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--color-border);
-}
-
-.interpretation-review-inline-message-opt-out-link {
-  padding: 0;
-  background: none;
-  border: none;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.interpretation-review-inline-message-opt-out-link:hover:not(:disabled) {
-  color: var(--color-text-secondary);
-}
-
-.interpretation-review-inline-message-spinner {
+.ack-card-spinner {
   display: inline-block;
   width: 0.8em;
   height: 0.8em;
@@ -1691,8 +2019,54 @@
 /* Mirror the per-selector reduced-motion guards in animations.css — the
    global guard there is not a universal `*` reset. */
 @media (prefers-reduced-motion: reduce) {
-  .interpretation-review-inline-message-spinner {
+  .ack-card-spinner {
     animation: none;
     opacity: 0.6;
   }
+}
+
+/* Shared CodeBlock outside .markdown-body (e.g. invented-source JSON in a
+   card). Mirrors the markdown code-block chrome so highlighted/plain values
+   read as code, not prose. */
+.ack-card .code-block-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.ack-card .code-block {
+  margin: 0;
+  padding: var(--space-2-5) var(--space-md);
+  overflow-x: auto;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.ack-card .code-block--plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+}
+
+.ack-card .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.ack-card .code-block-wrapper:hover .code-block-copy,
+.ack-card .code-block-copy:focus-visible {
+  opacity: 1;
 }

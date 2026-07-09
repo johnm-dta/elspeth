@@ -16,10 +16,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from elspeth.contracts.freeze import freeze_fields, require_int
-from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
+from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl, _extract_known_webhook_path_secret
 
 if TYPE_CHECKING:
     from elspeth.contracts.errors import MaxRetriesExceeded
@@ -36,6 +36,7 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.routing import RoutingAction
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 
 def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
@@ -48,6 +49,25 @@ def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
             "Build transform output with PipelineRow(data, contract) before returning it."
         )
     return value
+
+
+def _require_shared_contract_identity(rows: Sequence[PipelineRow], *, location: str) -> None:
+    """Reject multi-row outputs whose rows do not share one contract object."""
+    if len(rows) < 2:
+        return
+
+    first_contract = rows[0].contract
+    for i in range(1, len(rows)):
+        if rows[i].contract is not first_contract:
+            other_contract = rows[i].contract
+            raise PluginContractViolation(
+                f"{location} received rows with inconsistent contracts: "
+                f"row 0 has {first_contract.mode if first_contract else None} contract "
+                f"with {len(first_contract.fields) if first_contract else 0} fields, "
+                f"but row {i} has {other_contract.mode if other_contract else None} contract "
+                f"with {len(other_contract.fields) if other_contract else 0} fields. "
+                f"All rows in a multi-row result must share the same contract instance."
+            )
 
 
 _ARTIFACT_TYPES = frozenset({"file", "database", "webhook"})
@@ -120,6 +140,13 @@ def _require_no_artifact_uri_credentials(path_or_uri: str) -> None:
             ]
             if sensitive_keys:
                 raise ValueError(f"path_or_uri must not contain sensitive {section_name} parameters: {sensitive_keys}")
+        if _extract_known_webhook_path_secret(parsed) is not None:
+            raise ValueError("path_or_uri must not contain known webhook path secrets")
+
+
+def require_no_artifact_uri_credentials(path_or_uri: str) -> None:
+    """Reject artifact paths/URIs that would persist raw credential material."""
+    _require_no_artifact_uri_credentials(path_or_uri)
 
 
 def _require_artifact_hash(content_hash: object) -> None:
@@ -183,6 +210,12 @@ class FailureInfo:
     message: str
     attempts: int | None = None
     last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        """Scrub freeform failure text before it reaches durable audit fields."""
+        object.__setattr__(self, "message", scrub_text_for_audit(self.message))
+        if self.last_error is not None:
+            object.__setattr__(self, "last_error", scrub_text_for_audit(self.last_error))
 
     @classmethod
     def from_max_retries_exceeded(cls, e: MaxRetriesExceeded) -> FailureInfo:
@@ -249,6 +282,23 @@ class TransformResult:
                 "Use TransformResult.success(row, success_reason={'action': '...'}) "
                 "to create success results. Missing success_reason is a plugin bug."
             )
+        if self.status == "success":
+            success_reason = self.success_reason
+            assert success_reason is not None
+            try:
+                action = success_reason.get("action")
+            except AttributeError as exc:
+                raise ValueError(
+                    "TransformResult with status='success' MUST provide success_reason as a mapping. "
+                    "Use TransformResult.success(row, success_reason={'action': '...'}) "
+                    "to create success results. Invalid success_reason is a plugin bug."
+                ) from exc
+            if not isinstance(action, str):
+                raise ValueError(
+                    "TransformResult with status='success' MUST include success_reason['action'] as a str. "
+                    "Use TransformResult.success(row, success_reason={'action': '...'}) "
+                    "to create success results. Missing success_reason['action'] is a plugin bug."
+                )
         if self.status == "success" and self.row is None and self.rows is None:
             raise ValueError(
                 "TransformResult with status='success' MUST have output data (row or rows). "
@@ -266,6 +316,7 @@ class TransformResult:
         if self.status == "success" and self.rows is not None:
             for i, row in enumerate(self.rows):
                 _require_pipeline_row(row, location=f"TransformResult.rows[{i}]")
+            _require_shared_contract_identity(self.rows, location="TransformResult.rows")
         if self.status == "error":
             if self.reason is None:
                 raise ValueError(
@@ -373,21 +424,7 @@ class TransformResult:
             raise ValueError("success_multi requires at least one row")
         for i, row in enumerate(output_rows):
             _require_pipeline_row(row, location=f"TransformResult.success_multi(rows[{i}])")
-        # All rows must share the same contract identity. Mixed contracts
-        # would silently mislabel child tokens, corrupting downstream
-        # contract-based validation. Transforms are system-owned code,
-        # so mixed contracts = plugin bug.
-        first_contract = output_rows[0].contract
-        for i in range(1, len(output_rows)):
-            if output_rows[i].contract is not first_contract:
-                raise PluginContractViolation(
-                    f"success_multi() received rows with inconsistent contracts: "
-                    f"row 0 has {first_contract.mode if first_contract else None} contract "
-                    f"with {len(first_contract.fields) if first_contract else 0} fields, "
-                    f"but row {i} has {output_rows[i].contract.mode if output_rows[i].contract else None} contract "
-                    f"with {len(output_rows[i].contract.fields) if output_rows[i].contract else 0} fields. "
-                    f"All rows in a multi-row result must share the same contract instance."
-                )
+        _require_shared_contract_identity(output_rows, location="success_multi()")
         return cls(
             status="success",
             row=None,
@@ -507,6 +544,12 @@ class RowResult:
         error: For ON_ERROR_ROUTED, type-safe error details for audit
         scheduler_pending_sink: True only after the durable scheduler row for
             this exact token has been transitioned to PENDING_SINK.
+        authoritative_error_hash: For ON_ERROR_ROUTED results REBUILT from a
+            persisted pending sink (crash-recovery replay), the ORIGINAL
+            audited error hash. The outcome accumulator prefers this over
+            recomputing from the synthetic replay FailureInfo, so the replayed
+            audit record correlates with the pre-crash one
+            (filigree elspeth-d74d19f901). None for live results.
     """
 
     token: TokenInfo
@@ -516,12 +559,20 @@ class RowResult:
     sink_name: str | None = None
     error: FailureInfo | None = None
     scheduler_pending_sink: bool = False
+    authoritative_error_hash: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.scheduler_pending_sink) is not bool:
             raise OrchestrationInvariantError(
                 f"RowResult.scheduler_pending_sink must be bool, got {type(self.scheduler_pending_sink).__name__}"
             )
+        if self.authoritative_error_hash is not None:
+            if type(self.authoritative_error_hash) is not str or not self.authoritative_error_hash:
+                raise OrchestrationInvariantError("RowResult.authoritative_error_hash must be a non-empty string when set")
+            if self.path != TerminalPath.ON_ERROR_ROUTED:
+                raise OrchestrationInvariantError(
+                    f"RowResult.authoritative_error_hash is only valid for ON_ERROR_ROUTED results, got path={self.path!r}"
+                )
         if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
             raise OrchestrationInvariantError(f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})")
         if self.outcome is None and self.path != TerminalPath.BUFFERED:
@@ -589,7 +640,7 @@ class ArtifactDescriptor:
         """Create descriptor for file-based artifacts."""
         return cls(
             artifact_type="file",
-            path_or_uri=f"file://{path}",
+            path_or_uri=f"file://{quote(path, safe='/:')}",
             content_hash=content_hash,
             size_bytes=size_bytes,
         )
@@ -637,7 +688,10 @@ class ArtifactDescriptor:
         """Create descriptor for webhook artifacts.
 
         URL must be pre-sanitized using SanitizedWebhookUrl.from_raw_url().
-        This ensures tokens are never stored in the audit trail.
+        This removes supported token forms before storing the URL in the audit
+        trail: userinfo, sensitive query/fragment parameters, and known Slack
+        incoming-webhook path tokens. Other path-borne secrets are not
+        generically redacted.
         """
         # Type safety: enforce SanitizedWebhookUrl, not duck-typed objects
         if not isinstance(url, SanitizedWebhookUrl):
@@ -714,6 +768,7 @@ class SourceRow:
             require_int(self.source_row_index, "SourceRow.source_row_index", min_value=0)
             if self.quarantine_error is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_error")
+            _require_non_empty_str(self.quarantine_error, "quarantine_error")
             if self.quarantine_destination is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_destination")
         else:

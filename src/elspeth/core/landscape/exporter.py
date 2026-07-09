@@ -15,16 +15,14 @@ import json
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from elspeth.contracts import (
     BatchMember,
     Call,
     NodeState,
-    NodeStateCompleted,
-    NodeStateOpen,
-    NodeStatePending,
     RoutingEvent,
+    Row,
     Token,
     TokenOutcome,
     TokenParent,
@@ -38,7 +36,6 @@ from elspeth.contracts.export_records import (
     EdgeExportRecord,
     ExportRecord,
     NodeExportRecord,
-    NodeStateExportRecord,
     OperationExportRecord,
     RoutingEventExportRecord,
     RowExportRecord,
@@ -54,7 +51,119 @@ from elspeth.contracts.export_records import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.export_mappers import node_state_to_export_record
 from elspeth.core.landscape.factory import RecorderFactory
+
+
+class ExportReadModel(Protocol):
+    """Read-only repository surface needed by ``LandscapeExporter``."""
+
+    def get_run(self, run_id: str) -> Any | None: ...
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None: ...
+
+    def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_nodes(self, run_id: str) -> list[Any]: ...
+
+    def get_edges(self, run_id: str) -> list[Any]: ...
+
+    def get_operations_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_all_operation_calls_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[Any]: ...
+
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int) -> Iterator[list[Any]]: ...
+
+    def get_tokens_for_rows(self, run_id: str, row_ids: list[str]) -> list[Any]: ...
+
+    def get_token_parents_for_tokens(self, token_ids: list[str]) -> list[Any]: ...
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]: ...
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]: ...
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]: ...
+
+    def get_routing_events_for_states(self, state_ids: list[str]) -> list[Any]: ...
+
+    def get_calls_for_states(self, state_ids: list[str]) -> list[Any]: ...
+
+    def get_batches(self, run_id: str) -> list[Any]: ...
+
+    def get_all_batch_members_for_run(self, run_id: str) -> list[Any]: ...
+
+    def get_artifacts(self, run_id: str) -> list[Any]: ...
+
+
+class RecorderFactoryExportReadModel:
+    """Adapter from the repository factory bundle to the exporter read model."""
+
+    def __init__(self, factory: RecorderFactory) -> None:
+        self._factory = factory
+
+    def get_run(self, run_id: str) -> Any | None:
+        return self._factory.run_lifecycle.get_run(run_id)
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
+        return self._factory.run_lifecycle.get_run_attribution(run_id)
+
+    def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.run_lifecycle.get_secret_resolutions_for_run(run_id)
+
+    def get_nodes(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_nodes(run_id)
+
+    def get_edges(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_edges(run_id)
+
+    def get_operations_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_operations_for_run(run_id)
+
+    def get_all_operation_calls_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_all_operation_calls_for_run(run_id)
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_validation_errors_for_run(run_id)
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.data_flow.get_transform_errors_for_run(run_id)
+
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int) -> Iterator[list[Any]]:
+        return self._factory.query.iter_rows_for_run(run_id, batch_size=batch_size)
+
+    def get_tokens_for_rows(self, run_id: str, row_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_tokens_for_rows(run_id, row_ids)
+
+    def get_token_parents_for_tokens(self, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_token_parents_for_tokens(token_ids)
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_token_outcomes_for_tokens(run_id, token_ids)
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_scheduler_events_for_tokens(run_id, token_ids)
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_node_states_for_tokens(run_id, token_ids)
+
+    def get_routing_events_for_states(self, state_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_routing_events_for_states(state_ids)
+
+    def get_calls_for_states(self, state_ids: list[str]) -> list[Any]:
+        return self._factory.query.get_calls_for_states(state_ids)
+
+    def get_batches(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_batches(run_id)
+
+    def get_all_batch_members_for_run(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_all_batch_members_for_run(run_id)
+
+    def get_artifacts(self, run_id: str) -> list[Any]:
+        return self._factory.execution.get_artifacts(run_id)
 
 
 class LandscapeExporter:
@@ -83,6 +192,16 @@ class LandscapeExporter:
     - batch_member: Batch membership
     - artifact: Sink outputs
 
+    Memory envelope: the row family (rows, tokens, token_parents,
+    token_outcomes, scheduler_events, node_states, routing_events, and
+    state-parented calls) streams in bounded row batches, so its memory
+    cost is O(row_batch_size), not O(run). The run-structure families
+    (nodes, edges, operations + their calls, validation/transform errors,
+    batches + members, artifacts) are each materialized as one full list;
+    they scale with pipeline structure and error/batch counts rather than
+    row volume. export_run_grouped() is the exception: it deliberately
+    materializes the entire export into one dict.
+
     Example:
         db = LandscapeDB.from_url("sqlite:///audit.db")
         exporter = LandscapeExporter(db)
@@ -91,17 +210,19 @@ class LandscapeExporter:
         for record in exporter.export_run(run_id):
             json_file.write(json.dumps(record) + "\\n")
 
-        # Export to CSV (group by record_type)
-        records = list(exporter.export_run(run_id))
-        for rtype in ["run", "node", "edge", "row", "token"]:
-            typed_records = [r for r in records if r["record_type"] == rtype]
-            write_csv(f"{rtype}.csv", typed_records)
+        # Export to CSV without keeping every record in memory
+        for record_type, record in exporter.iter_run_records_by_type(run_id):
+            write_csv_record(record_type, record)
     """
 
     def __init__(
         self,
         db: LandscapeDB,
         signing_key: bytes | None = None,
+        *,
+        include_raw_error_rows: bool = False,
+        row_batch_size: int = 500,
+        read_model: ExportReadModel | None = None,
     ) -> None:
         """Initialize exporter with database connection.
 
@@ -109,10 +230,31 @@ class LandscapeExporter:
             db: LandscapeDB instance to export from
             signing_key: Optional HMAC key for signing exported records.
                         Required if sign=True is passed to export_run().
+            include_raw_error_rows: Include raw failing-row payloads
+                (``row_data_json``) in validation_error / transform_error
+                records. Default False (elspeth-384184c6ab): the export is
+                an external artifact and every other record type already
+                exports hashes/refs instead of raw payloads; error records
+                default to ``row_hash``-only correlation, with the raw row
+                remaining in the audit database.
+            row_batch_size: Rows per streamed batch for the row-family
+                sections of the export (elspeth-3ae79a4775). Bounds export
+                memory: at most this many rows — plus their tokens, node
+                states, and related child records — are resident at once.
+                The exported record sequence is identical for every value.
+            read_model: Optional narrow read surface for export queries.
+                Defaults to a read-model adapter over ``RecorderFactory(db)``.
+
+        Raises:
+            ValueError: If row_batch_size < 1
         """
+        if row_batch_size < 1:
+            raise ValueError(f"row_batch_size must be >= 1, got {row_batch_size}")
         self._db = db
-        self._factory = RecorderFactory(db)
+        self._read_model = read_model if read_model is not None else RecorderFactoryExportReadModel(RecorderFactory(db))
         self._signing_key = signing_key
+        self._include_raw_error_rows = include_raw_error_rows
+        self._row_batch_size = row_batch_size
 
     @staticmethod
     def _parse_tier1_json(raw_json: str, field_name: str, context: str) -> Any:
@@ -200,12 +342,31 @@ class LandscapeExporter:
             manifest["signature"] = self._sign_record(manifest)
             yield manifest
 
+    def iter_run_records_by_type(
+        self,
+        run_id: str,
+        sign: bool = False,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Export audit data as a stream of ``(record_type, record)`` pairs.
+
+        This is the bounded-memory grouping surface for callers that need to
+        route records by type, such as multi-file CSV export. It preserves the
+        same deterministic order and signing behavior as :meth:`export_run`
+        without building a full ``record_type -> list[records]`` map.
+        """
+        for record in self.export_run(run_id, sign=sign):
+            yield record["record_type"], record
+
     def _iter_records(self, run_id: str) -> Iterator[ExportRecord]:
         """Internal: iterate over raw records (no signing).
 
-        Bug 76r fix: Uses batch queries to pre-load all data, avoiding N+1 pattern.
-        Previous implementation did ~25,000 queries for 1000 rows with 5 states each.
-        New implementation does ~10 queries regardless of data size.
+        Query strategy: run-structure collections (nodes, edges, operations,
+        errors, batches, artifacts) load with one batch query per family —
+        the Bug 76r N+1 fix. The row family (rows, tokens, and their child
+        records) streams in bounded row batches (elspeth-3ae79a4775): rows
+        page via keyset pagination and each batch loads its children with
+        set-scoped queries, so memory is bounded by row_batch_size instead
+        of run size, at O(row_count / row_batch_size) queries.
 
         Args:
             run_id: The run ID to export
@@ -217,10 +378,10 @@ class LandscapeExporter:
             ValueError: If run_id is not found
         """
         # Run metadata
-        run = self._factory.run_lifecycle.get_run(run_id)
+        run = self._read_model.get_run(run_id)
         if run is None:
             raise ValueError(f"Run not found: {run_id}")
-        attribution = self._factory.run_lifecycle.get_run_attribution(run_id)
+        attribution = self._read_model.get_run_attribution(run_id)
 
         run_record: RunExportRecord = {
             "record_type": "run",
@@ -239,7 +400,7 @@ class LandscapeExporter:
         yield run_record
 
         # Secret resolutions (run-level provenance for Key Vault secrets)
-        for resolution in self._factory.run_lifecycle.get_secret_resolutions_for_run(run_id):
+        for resolution in self._read_model.get_secret_resolutions_for_run(run_id):
             secret_record: SecretResolutionExportRecord = {
                 "record_type": "secret_resolution",
                 "run_id": run_id,
@@ -255,7 +416,7 @@ class LandscapeExporter:
             yield secret_record
 
         # Nodes
-        for node in self._factory.data_flow.get_nodes(run_id):
+        for node in self._read_model.get_nodes(run_id):
             node_record: NodeExportRecord = {
                 "record_type": "node",
                 "run_id": run_id,
@@ -277,7 +438,7 @@ class LandscapeExporter:
             yield node_record
 
         # Edges
-        for edge in self._factory.data_flow.get_edges(run_id):
+        for edge in self._read_model.get_edges(run_id):
             edge_record: EdgeExportRecord = {
                 "record_type": "edge",
                 "run_id": run_id,
@@ -291,10 +452,10 @@ class LandscapeExporter:
             yield edge_record
 
         # Operations (source loads, sink writes)
-        all_operations = self._factory.execution.get_operations_for_run(run_id)
+        all_operations = self._read_model.get_operations_for_run(run_id)
 
         # Batch query: Pre-load all operation-parented calls (N+1 fix)
-        all_op_calls = self._factory.execution.get_all_operation_calls_for_run(run_id)
+        all_op_calls = self._read_model.get_all_operation_calls_for_run(run_id)
         op_calls_by_operation: defaultdict[str, list[Call]] = defaultdict(list)
         for call in all_op_calls:
             if not call.operation_id:
@@ -322,8 +483,11 @@ class LandscapeExporter:
             }
             yield operation_record
 
-            # External calls for this operation (from pre-loaded dict)
-            for call in op_calls_by_operation[operation.operation_id]:
+            # External calls for this operation (from pre-loaded dict). An
+            # explicit `in` guard (not `.get(key, default)`, which trips R1)
+            # avoids defaultdict inflating itself with a throwaway empty list
+            # for every operation that has no calls.
+            for call in op_calls_by_operation[operation.operation_id] if operation.operation_id in op_calls_by_operation else ():
                 op_call_record: CallExportRecord = {
                     "record_type": "call",
                     "run_id": run_id,
@@ -346,7 +510,11 @@ class LandscapeExporter:
 
         # Source validation and transform error audit evidence.
         # Repository getters provide deterministic created_at ordering.
-        for validation_error in self._factory.data_flow.get_validation_errors_for_run(run_id):
+        # Raw-row minimization (elspeth-384184c6ab): row_data_json is
+        # redacted to None unless the operator opted in — row_hash remains
+        # for correlation back to the audit DB, matching the hash/ref
+        # discipline every other exported record type already follows.
+        for validation_error in self._read_model.get_validation_errors_for_run(run_id):
             validation_error_record: ValidationErrorExportRecord = {
                 "record_type": "validation_error",
                 "run_id": run_id,
@@ -354,7 +522,7 @@ class LandscapeExporter:
                 "node_id": validation_error.node_id,
                 "row_id": validation_error.row_id,
                 "row_hash": validation_error.row_hash,
-                "row_data_json": validation_error.row_data_json,
+                "row_data_json": validation_error.row_data_json if self._include_raw_error_rows else None,
                 "error": validation_error.error,
                 "schema_mode": validation_error.schema_mode,
                 "destination": validation_error.destination,
@@ -367,7 +535,7 @@ class LandscapeExporter:
             }
             yield validation_error_record
 
-        for transform_error in self._factory.data_flow.get_transform_errors_for_run(run_id):
+        for transform_error in self._read_model.get_transform_errors_for_run(run_id):
             transform_error_record: TransformErrorExportRecord = {
                 "record_type": "transform_error",
                 "run_id": run_id,
@@ -375,65 +543,76 @@ class LandscapeExporter:
                 "token_id": transform_error.token_id,
                 "transform_id": transform_error.transform_id,
                 "row_hash": transform_error.row_hash,
-                "row_data_json": transform_error.row_data_json,
+                "row_data_json": transform_error.row_data_json if self._include_raw_error_rows else None,
                 "error_details_json": transform_error.error_details_json,
                 "destination": transform_error.destination,
                 "created_at": transform_error.created_at.isoformat(),
             }
             yield transform_error_record
 
-        # === Bug 76r fix: Pre-load all row-related data with batch queries ===
-        # This replaces the N+1 pattern where nested loops issued per-entity queries.
-        # Now we do 5 batch queries and build lookup dicts in memory.
+        # === Row family: streamed in bounded row batches (elspeth-3ae79a4775) ===
+        # Bug 76r replaced per-entity N+1 queries with full-run preloads; that
+        # fixed the query count but left export memory proportional to the
+        # entire run. The row family now streams: rows page through keyset
+        # pagination and child collections are batch-loaded per row batch, so
+        # memory scales with row_batch_size while the query count stays
+        # O(row_count / row_batch_size).
+        for row_batch in self._read_model.iter_rows_for_run(run_id, batch_size=self._row_batch_size):
+            yield from self._iter_row_batch_records(run_id, row_batch)
 
-        # Batch query 1: All tokens for this run
-        all_tokens = self._factory.query.get_all_tokens_for_run(run_id)
+        yield from self._iter_batch_and_artifact_records(run_id)
+
+    def _iter_row_batch_records(self, run_id: str, row_batch: list[Row]) -> Iterator[ExportRecord]:
+        """Yield row-family records for one bounded batch of rows.
+
+        Loads the batch's child collections (tokens, token parents, token
+        outcomes, scheduler events, node states, routing events, state calls)
+        with set-scoped batch queries and groups them into per-parent lookup
+        dicts, then emits records nested as row -> token -> (parents,
+        outcomes, scheduler events, states -> (routing events, calls)). Every
+        set-scoped query preserves the per-parent ordering of its full-run
+        counterpart, so the emitted record sequence — and therefore every
+        record signature and the manifest hash chain — is independent of
+        row_batch_size.
+        """
+        row_ids = [row.row_id for row in row_batch]
+        batch_tokens = self._read_model.get_tokens_for_rows(run_id, row_ids)
         tokens_by_row: defaultdict[str, list[Token]] = defaultdict(list)
-        for token in all_tokens:
+        for token in batch_tokens:
             tokens_by_row[token.row_id].append(token)
 
-        # Batch query 2: All token parents for this run
-        all_parents = self._factory.query.get_all_token_parents_for_run(run_id)
+        token_ids = [token.token_id for token in batch_tokens]
         parents_by_token: defaultdict[str, list[TokenParent]] = defaultdict(list)
-        for parent in all_parents:
+        for parent in self._read_model.get_token_parents_for_tokens(token_ids):
             parents_by_token[parent.token_id].append(parent)
 
-        # Batch query 3: All node states for this run
-        all_states = self._factory.query.get_all_node_states_for_run(run_id)
+        outcomes_by_token: defaultdict[str, list[TokenOutcome]] = defaultdict(list)
+        for outcome in self._read_model.get_token_outcomes_for_tokens(run_id, token_ids):
+            outcomes_by_token[outcome.token_id].append(outcome)
+
+        scheduler_events_by_token: defaultdict[str, list[Any]] = defaultdict(list)
+        for scheduler_event in self._read_model.get_scheduler_events_for_tokens(run_id, token_ids):
+            scheduler_events_by_token[scheduler_event.token_id].append(scheduler_event)
+
+        batch_states = self._read_model.get_node_states_for_tokens(run_id, token_ids)
         states_by_token: defaultdict[str, list[NodeState]] = defaultdict(list)
-        for state in all_states:
+        for state in batch_states:
             states_by_token[state.token_id].append(state)
 
-        # Batch query 4: All routing events for this run
-        all_routing_events = self._factory.query.get_all_routing_events_for_run(run_id)
+        state_ids = [state.state_id for state in batch_states]
         events_by_state: defaultdict[str, list[RoutingEvent]] = defaultdict(list)
-        for event in all_routing_events:
+        for event in self._read_model.get_routing_events_for_states(state_ids):
             events_by_state[event.state_id].append(event)
 
-        # Batch query 5: All state-parented calls for this run
-        all_calls = self._factory.query.get_all_calls_for_run(run_id)
         calls_by_state: defaultdict[str, list[Call]] = defaultdict(list)
-        for call in all_calls:
+        for call in self._read_model.get_calls_for_states(state_ids):
             if not call.state_id:
                 raise AuditIntegrityError(
                     f"State-parented call '{call.call_id}' has no state_id. Run: {run_id}. This violates the Call XOR constraint."
                 )
             calls_by_state[call.state_id].append(call)
 
-        # Batch query 6: All token outcomes for this run
-        all_token_outcomes = self._factory.query.get_all_token_outcomes_for_run(run_id)
-        outcomes_by_token: defaultdict[str, list[TokenOutcome]] = defaultdict(list)
-        for outcome in all_token_outcomes:
-            outcomes_by_token[outcome.token_id].append(outcome)
-
-        # Batch query 7: All durable scheduler transition events for this run
-        all_scheduler_events = self._factory.query.get_scheduler_events(run_id=run_id)
-        scheduler_events_by_token: defaultdict[str, list[Any]] = defaultdict(list)
-        for scheduler_event in all_scheduler_events:
-            scheduler_events_by_token[scheduler_event.token_id].append(scheduler_event)
-
-        # Now iterate through rows using pre-loaded data (no more per-entity queries)
-        for row in self._factory.query.get_rows(run_id):
+        for row in row_batch:
             if row.source_row_index is None:
                 raise AuditIntegrityError(
                     f"Row '{row.row_id}' has no source_row_index. Run: {run_id}. This violates the multi-source row identity contract."
@@ -456,8 +635,11 @@ class LandscapeExporter:
             }
             yield row_record
 
-            # Tokens for this row (from pre-loaded dict)
-            for token in tokens_by_row[row.row_id]:
+            # Tokens for this row (from pre-loaded dict). An explicit `in`
+            # guard (not `.get(key, default)`, which trips R1) avoids
+            # defaultdict inflating itself with a throwaway empty list for
+            # every row that has no tokens.
+            for token in tokens_by_row[row.row_id] if row.row_id in tokens_by_row else ():
                 token_record: TokenExportRecord = {
                     "record_type": "token",
                     "run_id": run_id,
@@ -472,8 +654,11 @@ class LandscapeExporter:
                 }
                 yield token_record
 
-                # Token parents (from pre-loaded dict)
-                for parent in parents_by_token[token.token_id]:
+                # Token parents (from pre-loaded dict). An explicit `in`
+                # guard (not `.get(key, default)`, which trips R1) avoids
+                # defaultdict inflating itself with a throwaway empty list for
+                # every token that has no parents.
+                for parent in parents_by_token[token.token_id] if token.token_id in parents_by_token else ():
                     token_parent_record: TokenParentExportRecord = {
                         "record_type": "token_parent",
                         "run_id": run_id,
@@ -483,8 +668,11 @@ class LandscapeExporter:
                     }
                     yield token_parent_record
 
-                # Token outcomes (from pre-loaded dict)
-                for outcome in outcomes_by_token[token.token_id]:
+                # Token outcomes (from pre-loaded dict). An explicit `in`
+                # guard (not `.get(key, default)`, which trips R1) avoids
+                # defaultdict inflating itself with a throwaway empty list for
+                # every token that has no outcomes.
+                for outcome in outcomes_by_token[token.token_id] if token.token_id in outcomes_by_token else ():
                     token_outcome_record: TokenOutcomeExportRecord = {
                         "record_type": "token_outcome",
                         "run_id": run_id,
@@ -505,8 +693,11 @@ class LandscapeExporter:
                     }
                     yield token_outcome_record
 
-                # Scheduler transition events (from pre-loaded dict)
-                for event in scheduler_events_by_token[token.token_id]:
+                # Scheduler transition events (from pre-loaded dict). An
+                # explicit `in` guard (not `.get(key, default)`, which trips
+                # R1) avoids defaultdict inflating itself with a throwaway
+                # empty list for every token that has no scheduler events.
+                for event in scheduler_events_by_token[token.token_id] if token.token_id in scheduler_events_by_token else ():
                     scheduler_event_record: SchedulerEventExportRecord = {
                         "record_type": "scheduler_event",
                         "run_id": run_id,
@@ -531,94 +722,19 @@ class LandscapeExporter:
                     }
                     yield scheduler_event_record
 
-                # Node states for this token (from pre-loaded dict)
-                for state in states_by_token[token.token_id]:
-                    # Handle discriminated union types
-                    node_state_record: NodeStateExportRecord
-                    if isinstance(state, NodeStateOpen):
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": None,
-                            "duration_ms": None,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": None,
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": None,  # OPEN states don't have after context
-                            "error_json": None,  # OPEN states aren't failed
-                            "success_reason_json": None,  # OPEN states aren't completed
-                        }
-                    elif isinstance(state, NodeStatePending):
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": None,
-                            "duration_ms": state.duration_ms,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": state.completed_at.isoformat(),
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": state.context_after_json,
-                            "error_json": None,  # PENDING states aren't failed
-                            "success_reason_json": None,  # PENDING states aren't completed yet
-                        }
-                    elif isinstance(state, NodeStateCompleted):
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": state.output_hash,
-                            "duration_ms": state.duration_ms,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": state.completed_at.isoformat(),
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": state.context_after_json,
-                            "error_json": None,  # COMPLETED states aren't failed
-                            "success_reason_json": state.success_reason_json,
-                        }
-                    else:  # NodeStateFailed
-                        node_state_record = {
-                            "record_type": "node_state",
-                            "run_id": run_id,
-                            "state_id": state.state_id,
-                            "token_id": state.token_id,
-                            "node_id": state.node_id,
-                            "step_index": state.step_index,
-                            "attempt": state.attempt,
-                            "status": state.status.value,
-                            "input_hash": state.input_hash,
-                            "output_hash": state.output_hash,
-                            "duration_ms": state.duration_ms,
-                            "started_at": state.started_at.isoformat(),
-                            "completed_at": state.completed_at.isoformat(),
-                            "context_before_json": state.context_before_json,
-                            "context_after_json": state.context_after_json,
-                            "error_json": state.error_json,
-                            "success_reason_json": None,  # FAILED states aren't completed
-                        }
-                    yield node_state_record
+                # Node states for this token (from pre-loaded dict). An
+                # explicit `in` guard (not `.get(key, default)`, which trips
+                # R1) avoids defaultdict inflating itself with a throwaway
+                # empty list for every token that has no node states.
+                for state in states_by_token[token.token_id] if token.token_id in states_by_token else ():
+                    yield node_state_to_export_record(run_id, state)
 
-                    # Routing events for this state (from pre-loaded dict)
-                    for event in events_by_state[state.state_id]:
+                    # Routing events for this state (from pre-loaded dict).
+                    # An explicit `in` guard (not `.get(key, default)`, which
+                    # trips R1) avoids defaultdict inflating itself with a
+                    # throwaway empty list for every state that has no
+                    # routing events.
+                    for event in events_by_state[state.state_id] if state.state_id in events_by_state else ():
                         routing_event_record: RoutingEventExportRecord = {
                             "record_type": "routing_event",
                             "run_id": run_id,
@@ -634,8 +750,11 @@ class LandscapeExporter:
                         }
                         yield routing_event_record
 
-                    # External calls for this state (from pre-loaded dict)
-                    for call in calls_by_state[state.state_id]:
+                    # External calls for this state (from pre-loaded dict).
+                    # An explicit `in` guard (not `.get(key, default)`, which
+                    # trips R1) avoids defaultdict inflating itself with a
+                    # throwaway empty list for every state that has no calls.
+                    for call in calls_by_state[state.state_id] if state.state_id in calls_by_state else ():
                         state_call_record: CallExportRecord = {
                             "record_type": "call",
                             "run_id": run_id,
@@ -656,11 +775,13 @@ class LandscapeExporter:
                         }
                         yield state_call_record
 
+    def _iter_batch_and_artifact_records(self, run_id: str) -> Iterator[ExportRecord]:
+        """Yield batch, batch_member, and artifact records for the run."""
         # Batches
-        all_batches = self._factory.execution.get_batches(run_id)
+        all_batches = self._read_model.get_batches(run_id)
 
         # Batch query: Pre-load all batch members (N+1 fix)
-        all_batch_members = self._factory.execution.get_all_batch_members_for_run(run_id)
+        all_batch_members = self._read_model.get_all_batch_members_for_run(run_id)
         members_by_batch: defaultdict[str, list[BatchMember]] = defaultdict(list)
         for member in all_batch_members:
             members_by_batch[member.batch_id].append(member)
@@ -680,8 +801,11 @@ class LandscapeExporter:
             }
             yield batch_record
 
-            # Batch members (from pre-loaded dict)
-            for member in members_by_batch[batch.batch_id]:
+            # Batch members (from pre-loaded dict). An explicit `in` guard
+            # (not `.get(key, default)`, which trips R1) avoids defaultdict
+            # inflating itself with a throwaway empty list for every batch
+            # that has no members.
+            for member in members_by_batch[batch.batch_id] if batch.batch_id in members_by_batch else ():
                 batch_member_record: BatchMemberExportRecord = {
                     "record_type": "batch_member",
                     "run_id": member.run_id,
@@ -692,7 +816,7 @@ class LandscapeExporter:
                 yield batch_member_record
 
         # Artifacts
-        for artifact in self._factory.execution.get_artifacts(run_id):
+        for artifact in self._read_model.get_artifacts(run_id):
             artifact_record: ArtifactExportRecord = {
                 "record_type": "artifact",
                 "run_id": run_id,
@@ -731,8 +855,7 @@ class LandscapeExporter:
         """
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-        for record in self.export_run(run_id, sign=sign):
-            record_type = record["record_type"]
+        for record_type, record in self.iter_run_records_by_type(run_id, sign=sign):
             groups[record_type].append(record)
 
         # Return as regular dict with deterministic key order

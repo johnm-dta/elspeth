@@ -48,6 +48,16 @@ INTERNAL_DEFAULTS: Final[MappingProxyType[str, MappingProxyType[str, int | float
                 "queue_size": 1000,
             }
         ),
+        # Rate-limit runtime state root.
+        "rate_limit": MappingProxyType(
+            {
+                # Configured SQLite persistence paths are confined under this
+                # application state directory before any sqlite3 connection is
+                # opened. Not user-configurable: letting config choose both the
+                # file and the trust root would defeat the boundary.
+                "state_dir": "data",
+            }
+        ),
     }
 )
 

@@ -52,6 +52,36 @@ describe("SaveForReviewDialog", () => {
     expect(dialog).toHaveAttribute("aria-labelledby", "save-for-review-dialog-title");
   });
 
+  // M09 (WCAG 4.1.2): the dialog used to *announce* aria-modal="true" while
+  // behaving as an in-flow block — no backdrop and no focus management. It is
+  // now a real modal (useFocusTrap + a backdrop sibling), consistent with
+  // GraphModal / ConfirmDialog. These two tests assert the *behaviour*, not
+  // just DOM presence: focus lands inside the dialog on open, and clicking the
+  // backdrop dismisses it.
+  it("moves focus to the Close button when the dialog opens", () => {
+    useShareableReviewStore.setState({ dialogOpen: true, inFlight: true } as never);
+    render(<SaveForReviewDialog />);
+
+    // useFocusTrap's initialFocusSelector (".save-for-review-close") is
+    // load-bearing — if the Close button loses that class the trap silently
+    // moves no focus, which this assertion catches.
+    expect(screen.getByTestId("save-for-review-close")).toHaveFocus();
+  });
+
+  it("closes the dialog when the backdrop is clicked", () => {
+    useShareableReviewStore.setState({
+      dialogOpen: true,
+      latestResponse: _validResponse,
+      sessionIdForResponse: "sess-1",
+    } as never);
+    render(<SaveForReviewDialog />);
+
+    fireEvent.click(screen.getByTestId("save-for-review-dialog-backdrop"));
+
+    expect(useShareableReviewStore.getState().dialogOpen).toBe(false);
+    expect(screen.queryByTestId("save-for-review-dialog")).not.toBeInTheDocument();
+  });
+
   it("shows the error banner and retry button when error is set", () => {
     useShareableReviewStore.setState({
       dialogOpen: true,
@@ -180,9 +210,9 @@ describe("SaveForReviewDialog", () => {
   // requires Esc-to-close focus management on the modal. WAI-ARIA Authoring
   // Practices: any element with `role="dialog"` + `aria-modal="true"` must
   // close on Escape. The listener is attached to `document` rather than the
-  // dialog element itself because the dialog does not auto-focus on open in
-  // jsdom (and would not reliably receive keydown otherwise); document-level
-  // keydown is the canonical pattern for modal Esc handling in React.
+  // dialog element itself — the canonical React modal pattern (GraphModal /
+  // ConfirmDialog do the same) — so Escape closes regardless of which trapped
+  // control currently holds focus.
   it("closes the dialog when Escape is pressed", () => {
     useShareableReviewStore.setState({
       dialogOpen: true,

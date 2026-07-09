@@ -9,14 +9,18 @@
 //      validation entry contains "plugin required".
 //   2. Patch via API to add plugin; banner clears.
 //
-// Why fixme:
-//   See topology.spec.ts — same blocker (no direct state-mutation REST
-//   endpoint; would otherwise need an LLM stub).
+// Why skipped:
+//   State seeding now exists via seedCompositionState(), but this spec body
+//   still needs to be implemented from the outline below. Tracked as
+//   elspeth-7cf763da7c.
 
 import { test } from "@playwright/test";
 
 test.describe("mandatory-fields — transform nodes must declare plugin", () => {
-  test.fixme(true, "Blocked on direct-state-seed REST endpoint or LLM stub server.");
+  test.skip(
+    true,
+    "pending seeded spec implementation — tracked as elspeth-7cf763da7c",
+  );
 
   test("transform without plugin is reported invalid", async () => {
     // 1. createSession via API helper.

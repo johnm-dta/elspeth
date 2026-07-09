@@ -1,1 +1,0 @@
-{"content":"Execute failed again with: \"Transform 'field_mapper' (node ...) emitted output schema semantics inconsistent with its declaration: missing required fields ['batch_size']; field metadata mismatches for ['count','customer_tier','sum']\". The select_only: true is dropping batch_size but it's still in the declared output schema. Please fix."}

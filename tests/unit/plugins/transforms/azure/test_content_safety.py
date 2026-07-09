@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,28 +29,105 @@ def make_token(row_id: str = "row-1", token_id: str | None = None) -> TokenInfo:
     )
 
 
-def _create_mock_http_response(response_data: dict[str, Any]) -> Mock:
-    """Create a mock HTTP response with the given JSON data."""
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = response_data
-    response.raise_for_status = Mock()
-    response.headers = {"content-type": "application/json"}
-    response.text = json.dumps(response_data)
-    response.content = response.text.encode("utf-8")
-    return response
+class _AzureHTTPResponse:
+    """Minimal HTTP response contract used by AuditedHTTPClient and the transform."""
+
+    def __init__(
+        self,
+        response_data: dict[str, Any],
+        *,
+        body: str | None = None,
+        status_code: int = 200,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": "application/json"}
+        self.text = body if body is not None else json.dumps(response_data)
+        self.content = self.text.encode("utf-8")
+        self._response_data = response_data
+
+    def json(self) -> dict[str, Any]:
+        return self._response_data
+
+    def raise_for_status(self) -> None:
+        return None
 
 
-def _create_mock_http_response_body(body: str, *, json_fallback: dict[str, Any]) -> Mock:
+class _PostCallRecorder:
+    """Scriptable replacement for httpx.Client.post with call inspection."""
+
+    def __init__(self) -> None:
+        self.return_value: Any = None
+        self.side_effect: Any = None
+        self.call_args: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+        self.call_args_list: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args = (args, kwargs)
+        self.call_args_list.append(self.call_args)
+
+        if self.side_effect is None:
+            return self.return_value
+
+        if isinstance(self.side_effect, list):
+            next_result = self.side_effect.pop(0)
+            if isinstance(next_result, BaseException):
+                raise next_result
+            return next_result
+
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+
+        if callable(self.side_effect):
+            return self.side_effect(*args, **kwargs)
+
+        raise TypeError(f"Unsupported side_effect type: {type(self.side_effect).__name__}")
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _RecordingHTTPXClient:
+    """Fake underlying httpx.Client used by AuditedHTTPClient in these tests."""
+
+    def __init__(self) -> None:
+        self.post = _PostCallRecorder()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_httpx_client() -> Generator[_RecordingHTTPXClient, None, None]:
+    with patch("httpx.Client") as client_factory:
+        client = _RecordingHTTPXClient()
+        client_factory.return_value = client
+        yield client
+
+
+def _create_mock_http_response(response_data: dict[str, Any]) -> _AzureHTTPResponse:
+    """Create an HTTP response double with the given JSON data."""
+    return _AzureHTTPResponse(response_data)
+
+
+def _create_mock_http_response_body(body: str, *, json_fallback: dict[str, Any]) -> _AzureHTTPResponse:
     """Create a response whose raw body must be parsed instead of .json()."""
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = json_fallback
-    response.raise_for_status = Mock()
-    response.headers = {"content-type": "application/json"}
-    response.text = body
-    response.content = body.encode("utf-8")
-    return response
+    return _AzureHTTPResponse(json_fallback, body=body)
+
+
+def _http_status_error(message: str, status_code: int) -> BaseException:
+    import httpx
+
+    request = httpx.Request("POST", "https://test.cognitiveservices.azure.com/contentsafety/text:analyze")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(message, request=request, response=response)
+
+
+class _RecorderSentinel:
+    pass
 
 
 class TestAzureContentSafetyConfig:
@@ -374,10 +451,7 @@ class TestContentSafetyBatchProcessing:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
     def test_connect_output_required_before_accept(self) -> None:
         """accept() raises RuntimeError if connect_output() not called."""
@@ -424,7 +498,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_content_below_threshold_passes(self, mock_httpx_client: MagicMock) -> None:
+    def test_content_below_threshold_passes(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Content with severity below thresholds passes through."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -470,7 +544,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_content_exceeding_threshold_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_content_exceeding_threshold_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Content exceeding any threshold returns error."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -520,7 +594,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_missing_configured_field_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_missing_configured_field_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Missing value in explicitly-configured field fails CLOSED."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -570,7 +644,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_non_string_configured_field_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_non_string_configured_field_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Non-string value in explicitly-configured field fails CLOSED.
 
         Security transform cannot analyze non-string content. Silently skipping
@@ -627,7 +701,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_all_mode_ignores_non_string_fields(self, mock_httpx_client: MagicMock) -> None:
+    def test_all_mode_ignores_non_string_fields(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """When fields='all', non-string fields are correctly ignored.
 
         In 'all' mode, _get_fields_to_scan pre-filters to string-valued fields,
@@ -678,7 +752,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_malformed_api_response_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_malformed_api_response_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Malformed API responses return error result."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -744,7 +818,7 @@ class TestContentSafetyBatchProcessing:
     )
     def test_raw_json_body_parse_failures_return_malformed_error(
         self,
-        mock_httpx_client: MagicMock,
+        mock_httpx_client: _RecordingHTTPXClient,
         body: str,
         message_fragment: str,
     ) -> None:
@@ -796,7 +870,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_malformed_category_item_returns_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_malformed_category_item_returns_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Malformed category items in API response return error."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -842,7 +916,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_missing_categories_rejected_fail_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_missing_categories_rejected_fail_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Missing expected categories in API response are rejected (fail-closed)."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -890,7 +964,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_threshold_zero_with_severity_zero_passes(self, mock_httpx_client: MagicMock) -> None:
+    def test_threshold_zero_with_severity_zero_passes(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Threshold=0 with severity=0 should pass (not block safe content)."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -937,7 +1011,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_threshold_zero_blocks_severity_one(self, mock_httpx_client: MagicMock) -> None:
+    def test_threshold_zero_blocks_severity_one(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Threshold=0 should block content with severity >= 1."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -987,7 +1061,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_api_called_with_correct_endpoint_and_headers(self, mock_httpx_client: MagicMock) -> None:
+    def test_api_called_with_correct_endpoint_and_headers(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """API is called with correct endpoint, version, and headers."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -1043,7 +1117,7 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_multiple_rows_fifo_order(self, mock_httpx_client: MagicMock) -> None:
+    def test_multiple_rows_fifo_order(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Multiple rows are processed and returned in FIFO order."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -1111,12 +1185,9 @@ class TestContentSafetyFailsClosed:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
-    def test_unknown_category_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+    def test_unknown_category_fails_closed(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Unknown category in API response must cause error, not pass through."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -1163,7 +1234,7 @@ class TestContentSafetyFailsClosed:
         finally:
             transform.close()
 
-    def test_known_categories_still_work_with_explicit_mapping(self, mock_httpx_client: MagicMock) -> None:
+    def test_known_categories_still_work_with_explicit_mapping(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Known Azure categories map correctly with explicit lookup."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
@@ -1213,10 +1284,7 @@ class TestContentSafetyInternalProcessing:
     @pytest.fixture(autouse=True)
     def mock_httpx_client(self):
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
     def test_parse_external_json_response_converts_recursion_error_to_malformed_response(self) -> None:
         """Deeply nested external JSON must fail closed as malformed provider data."""
@@ -1242,17 +1310,11 @@ class TestContentSafetyInternalProcessing:
         ):
             transform._parse_external_json_response(response, label="Content Safety response")
 
-    def test_process_single_with_state_retries_rate_limit_with_configured_budget(self, mock_httpx_client: MagicMock) -> None:
+    def test_process_single_with_state_retries_rate_limit_with_configured_budget(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Rate limit errors retry locally before producing the row result."""
-        import httpx
-
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
-        capacity_error = httpx.HTTPStatusError(
-            "Rate limited",
-            request=Mock(),
-            response=Mock(status_code=429),
-        )
+        capacity_error = _http_status_error("Rate limited", 429)
         mock_httpx_client.post.side_effect = [
             capacity_error,
             _create_mock_http_response(
@@ -1289,17 +1351,11 @@ class TestContentSafetyInternalProcessing:
         assert result.status == "success"
         assert mock_httpx_client.post.call_count == 2
 
-    def test_process_single_with_state_returns_error_on_non_rate_limit_http_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_process_single_with_state_returns_error_on_non_rate_limit_http_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Non-429 HTTP errors return TransformResult.error (not retryable)."""
-        import httpx
-
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
-        mock_httpx_client.post.side_effect = httpx.HTTPStatusError(
-            "Bad Request",
-            request=Mock(),
-            response=Mock(status_code=400),
-        )
+        mock_httpx_client.post.side_effect = _http_status_error("Bad Request", 400)
 
         transform = AzureContentSafety(
             {
@@ -1323,7 +1379,7 @@ class TestContentSafetyInternalProcessing:
         assert result.reason["reason"] == "api_error"
         assert result.retryable is False
 
-    def test_process_single_with_state_raises_retryable_on_network_error(self, mock_httpx_client: MagicMock) -> None:
+    def test_process_single_with_state_raises_retryable_on_network_error(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Network errors raise PluginRetryableError for engine retry."""
         import httpx
 
@@ -1359,8 +1415,7 @@ class TestResourceCleanup:
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
         with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
+            mock_client_class.return_value = _RecordingHTTPXClient()
 
             transform = AzureContentSafety(
                 {
@@ -1420,7 +1475,7 @@ class TestResourceCleanup:
             }
         )
 
-        mock_recorder = MagicMock()
+        mock_recorder = _RecorderSentinel()
         ctx = make_context()
         ctx.landscape = mock_recorder
 
@@ -1447,12 +1502,9 @@ class TestContentSafetySeverityValidation:
     """
 
     @pytest.fixture(autouse=True)
-    def mock_httpx_client(self) -> Generator[MagicMock, None, None]:
+    def mock_httpx_client(self) -> Generator[_RecordingHTTPXClient, None, None]:
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
     def _make_transform(self) -> AzureContentSafety:
         """Create a Content Safety transform for testing."""
@@ -1471,7 +1523,7 @@ class TestContentSafetySeverityValidation:
         transform.on_start(ctx)
         return transform
 
-    def test_bool_true_severity_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_bool_true_severity_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=True (bool) must be rejected even though isinstance(True, int) is True.
 
         Python's bool is a subclass of int: isinstance(True, int) returns True.
@@ -1511,7 +1563,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_bool_false_severity_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_bool_false_severity_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=False (bool) must be rejected.
 
         False == 0 in Python, so without the fix it would silently pass
@@ -1548,7 +1600,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_negative_severity_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_negative_severity_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=-1 must be rejected (out of range 0-6)."""
         mock_response = _create_mock_http_response(
             {
@@ -1582,7 +1634,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_severity_above_six_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_severity_above_six_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=7 must be rejected (Azure only returns 0-6)."""
         mock_response = _create_mock_http_response(
             {
@@ -1615,7 +1667,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_severity_100_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_severity_100_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=100 (large out-of-range) must be rejected."""
         mock_response = _create_mock_http_response(
             {
@@ -1649,7 +1701,7 @@ class TestContentSafetySeverityValidation:
             transform.close()
 
     @pytest.mark.parametrize("valid_severity", [0, 1, 2, 3, 4, 5, 6])
-    def test_valid_severity_range_accepted(self, mock_httpx_client: MagicMock, valid_severity: int) -> None:
+    def test_valid_severity_range_accepted(self, mock_httpx_client: _RecordingHTTPXClient, valid_severity: int) -> None:
         """All valid severities 0-6 must be accepted."""
         mock_response = _create_mock_http_response(
             {
@@ -1687,7 +1739,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_string_severity_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_string_severity_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity="2" (string) must be rejected — wrong type."""
         mock_response = _create_mock_http_response(
             {
@@ -1720,7 +1772,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_none_severity_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_none_severity_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=None must be rejected — would fail open as falsy."""
         mock_response = _create_mock_http_response(
             {
@@ -1753,7 +1805,7 @@ class TestContentSafetySeverityValidation:
         finally:
             transform.close()
 
-    def test_float_severity_rejected(self, mock_httpx_client: MagicMock) -> None:
+    def test_float_severity_rejected(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """severity=2.5 (float) must be rejected — wrong type."""
         mock_response = _create_mock_http_response(
             {
@@ -1797,14 +1849,11 @@ class TestContentSafetyRetryRaceCondition:
     """
 
     @pytest.fixture(autouse=True)
-    def mock_httpx_client(self) -> Generator[MagicMock, None, None]:
+    def mock_httpx_client(self) -> Generator[_RecordingHTTPXClient, None, None]:
         """Patch httpx.Client to prevent real HTTP calls."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+        yield from _patch_httpx_client()
 
-    def test_cleanup_uses_captured_state_id_not_ctx(self, mock_httpx_client: MagicMock) -> None:
+    def test_cleanup_uses_captured_state_id_not_ctx(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Cleanup uses the local state_id captured at method entry, not ctx.state_id.
 
         If ctx.state_id changes during processing (e.g., retry with new state),
@@ -1847,7 +1896,7 @@ class TestContentSafetyRetryRaceCondition:
         # Verify the original state_id was cleaned up (popped from cache)
         assert original_state_id not in transform._http_clients
 
-    def test_mutated_ctx_state_id_does_not_affect_cleanup(self, mock_httpx_client: MagicMock) -> None:
+    def test_mutated_ctx_state_id_does_not_affect_cleanup(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Even if ctx.state_id is mutated mid-flight, cleanup targets original state_id.
 
         This simulates the retry race: ctx.state_id changes after _process_row starts
@@ -1975,11 +2024,8 @@ class TestDuplicateCategoryDetection:
     """
 
     @pytest.fixture(autouse=True)
-    def mock_httpx_client(self) -> Generator[MagicMock, None, None]:
-        with patch("httpx.Client") as mock_client_class:
-            mock_instance = MagicMock()
-            mock_client_class.return_value = mock_instance
-            yield mock_instance
+    def mock_httpx_client(self) -> Generator[_RecordingHTTPXClient, None, None]:
+        yield from _patch_httpx_client()
 
     def _make_transform(self) -> AzureContentSafety:
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
@@ -1997,7 +2043,7 @@ class TestDuplicateCategoryDetection:
         transform.on_start(ctx)
         return transform
 
-    def test_duplicate_category_raises_malformed_response(self, mock_httpx_client: MagicMock) -> None:
+    def test_duplicate_category_raises_malformed_response(self, mock_httpx_client: _RecordingHTTPXClient) -> None:
         """Duplicate category in response must raise MalformedResponseError."""
         mock_response = _create_mock_http_response(
             {

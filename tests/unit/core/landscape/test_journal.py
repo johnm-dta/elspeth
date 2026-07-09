@@ -4,7 +4,6 @@ Tests cover:
 - Statement classification (_is_write_statement)
 - Parameter normalization (_normalize_parameters)
 - Record serialization (_serialize_record)
-- INSERT statement parsing (_parse_insert_statement)
 - Column-to-values mapping (_columns_to_values)
 - SQLAlchemy event lifecycle (buffer → commit/rollback)
 - Failure circuit breaker with periodic recovery
@@ -14,12 +13,16 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import Column, MetaData, String, Table, create_engine, insert, update
 
 from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.call_data import RawCallPayload
@@ -52,16 +55,42 @@ def _make_journal(
     )
 
 
-def _make_conn(buffer: list[Any] | None = None) -> MagicMock:
-    """Create a mock SQLAlchemy Connection with info dict.
+class _ConnectionDouble:
+    """Small SQLAlchemy connection double for journal event handlers."""
+
+    def __init__(self, buffer: list[Any] | None = None) -> None:
+        self.info: dict[str, Any] = {}
+        if buffer is not None:
+            self.info["landscape_journal_buffer_stack"] = [buffer]
+
+
+class _PayloadStoreDouble:
+    """Configurable payload store double for journal enrichment tests."""
+
+    def __init__(self, *, content: bytes | None = None, error: BaseException | None = None) -> None:
+        self.content = content
+        self.error = error
+        self.refs: list[str] = []
+
+    def retrieve(self, ref: str) -> bytes:
+        self.refs.append(ref)
+        if self.error is not None:
+            raise self.error
+        if self.content is None:
+            raise AssertionError("PayloadStoreDouble content was not configured")
+        return self.content
+
+
+class _EngineSentinel:
+    pass
+
+
+def _make_conn(buffer: list[Any] | None = None) -> _ConnectionDouble:
+    """Create a SQLAlchemy Connection double with an info dict.
 
     When buffer is provided, it becomes the root buffer in the stack.
     """
-    conn = MagicMock()
-    conn.info = {}
-    if buffer is not None:
-        conn.info["landscape_journal_buffer_stack"] = [buffer]
-    return conn
+    return _ConnectionDouble(buffer)
 
 
 # ===========================================================================
@@ -172,41 +201,19 @@ class TestSerializeRecord:
         with pytest.raises(AuditIntegrityError, match="Tier 1 violation"):
             LandscapeJournal._serialize_record(record)
 
-
-# ===========================================================================
-# INSERT statement parsing
-# ===========================================================================
-
-
-class TestParseInsertStatement:
-    """Tests for _parse_insert_statement — extracts table name and columns."""
-
-    def test_basic_insert(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("INSERT INTO calls (call_id, state_id) VALUES (?, ?)")
-        assert table == "calls"
-        assert cols == ["call_id", "state_id"]
-
-    def test_quoted_columns(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement('INSERT INTO "calls" ("call_id", "state_id") VALUES (?, ?)')
-        assert table == "calls"
-        assert cols == ["call_id", "state_id"]
-
-    def test_non_insert_returns_none(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("UPDATE calls SET status = ?")
-        assert table is None
-        assert cols is None
-
-    def test_no_column_list_parses_values_as_columns(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("INSERT INTO calls VALUES (1, 2)")
-        # Parser finds the first '(' which is the VALUES paren, so table name
-        # absorbs "VALUES" and the values parens become the "column list"
-        assert table == "calls values"
-        assert cols == ["1", "2"]
-
-    def test_missing_close_paren_returns_none_columns(self) -> None:
-        table, cols = LandscapeJournal._parse_insert_statement("INSERT INTO calls (col1, col2")
-        assert table == "calls"
-        assert cols is None
+    def test_internal_payload_ref_columns_not_serialized(self) -> None:
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "t",
+                "statement": "INSERT",
+                "parameters": {},
+                "executemany": False,
+                "_payload_ref_columns": ["request_ref"],
+            },
+        )
+        parsed = json.loads(LandscapeJournal._serialize_record(record))
+        assert "_payload_ref_columns" not in parsed
 
 
 # ===========================================================================
@@ -242,6 +249,19 @@ class TestConstructor:
         nested = tmp_path / "deep" / "nested"
         LandscapeJournal(str(nested / "journal.jsonl"), fail_on_error=False)
         assert nested.exists()
+
+    def test_creates_missing_parent_directories_owner_only(self, tmp_path: Path) -> None:
+        old_umask = os.umask(0)
+        try:
+            nested = tmp_path / "deep" / "nested"
+            LandscapeJournal(str(nested / "journal.jsonl"), fail_on_error=False)
+        finally:
+            os.umask(old_umask)
+
+        created_dirs = [tmp_path / "deep", tmp_path / "deep" / "nested"]
+        for created_dir in created_dirs:
+            mode = stat.S_IMODE(created_dir.stat().st_mode)
+            assert mode & 0o077 == 0
 
     def test_include_payloads_requires_base_path(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="payload_base_path is required"):
@@ -336,6 +356,71 @@ class TestAfterCursorExecute:
         )
 
         assert len(existing_buffer) == 1
+
+    def test_payload_hydration_deferred_until_commit(self, tmp_path: Path) -> None:
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        payload_store = _PayloadStoreDouble(content=b"payload content")
+        journal._payload_store = payload_store
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        calls = Table(
+            "calls",
+            metadata,
+            Column("call_id", String),
+            Column("request_ref", String),
+            Column("response_ref", String),
+        )
+        metadata.create_all(engine)
+        journal.attach(engine)
+
+        with engine.connect() as conn:
+            transaction = conn.begin()
+            conn.execute(insert(calls).values(call_id="c1"))
+            conn.execute(update(calls).where(calls.c.call_id == "c1").values(request_ref="req-ref", response_ref="resp-ref"))
+
+            assert payload_store.refs == []
+
+            transaction.commit()
+
+        assert payload_store.refs == ["req-ref", "resp-ref"]
+        records = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
+        call_updates = [record for record in records if record["statement"].lstrip().upper().startswith("UPDATE CALLS SET")]
+        assert call_updates[0]["request_payload"] == "payload content"
+
+    def test_payload_enrichment_uses_structured_sqlalchemy_context_not_sql_parser(self, tmp_path: Path) -> None:
+        assert not hasattr(LandscapeJournal, "_parse_insert_statement")
+        assert not hasattr(LandscapeJournal, "_parse_update_statement")
+
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        journal._payload_store = _PayloadStoreDouble(content=b"payload content")
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        calls = Table(
+            "calls",
+            metadata,
+            Column("call_id", String),
+            Column("request_ref", String),
+            Column("response_ref", String),
+        )
+        metadata.create_all(engine)
+
+        journal.attach(engine)
+        with engine.begin() as conn:
+            conn.execute(insert(calls).values(call_id="c1"))
+            conn.execute(update(calls).where(calls.c.call_id == "c1").values(request_ref="req-ref", response_ref="resp-ref"))
+
+        records = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
+        call_updates = [record for record in records if record["statement"].lstrip().upper().startswith("UPDATE CALLS SET")]
+        assert call_updates[0]["request_ref"] == "req-ref"
+        assert call_updates[0]["request_payload"] == "payload content"
 
 
 class TestAfterCommit:
@@ -434,6 +519,37 @@ class TestAfterRollback:
 class TestAppendRecordsFailureHandling:
     """Tests for _append_records — circuit breaker after consecutive failures."""
 
+    def test_owner_only_open_does_not_probe_os_flags_with_hasattr(self) -> None:
+        import inspect
+
+        assert "hasattr(" not in inspect.getsource(LandscapeJournal._open_owner_only_append)
+        assert "hasattr(" not in inspect.getsource(LandscapeJournal._verify_owner_only_file)
+
+    def test_creates_journal_file_owner_only(self, tmp_path: Path) -> None:
+        journal = _make_journal(tmp_path, fail_on_error=True)
+        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
+
+        old_umask = os.umask(0)
+        try:
+            journal._append_records([record])
+        finally:
+            os.umask(old_umask)
+
+        journal_path = tmp_path / "journal.jsonl"
+        mode = stat.S_IMODE(journal_path.stat().st_mode)
+        assert mode & 0o077 == 0
+
+    def test_rejects_existing_group_readable_journal_file(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        journal_path.write_text("", encoding="utf-8")
+        journal_path.chmod(0o640)
+        journal = _make_journal(tmp_path, fail_on_error=True)
+        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
+
+        with pytest.raises(PermissionError, match="owner-only"):
+            journal._append_records([record])
+        assert journal_path.read_text(encoding="utf-8") == ""
+
     def test_fail_on_error_raises(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path, fail_on_error=True)
         # Make path a directory to cause write failure
@@ -518,7 +634,7 @@ class TestAttach:
 
     def test_registers_six_listeners(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
-        engine = Mock()
+        engine = _EngineSentinel()
 
         with patch("elspeth.core.landscape.journal.event") as mock_event:
             journal.attach(engine)
@@ -563,8 +679,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b'{"key": "value"}'
+        journal._payload_store = _PayloadStoreDouble(content=b'{"key": "value"}')
 
         content, error = journal._load_payload("some-ref")
         assert content == '{"key": "value"}'
@@ -578,8 +693,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = PayloadNotFoundError("deadbeef" * 8)
+        journal._payload_store = _PayloadStoreDouble(error=PayloadNotFoundError("deadbeef" * 8))
 
         content, error = journal._load_payload("some-ref")
         assert content is None
@@ -592,8 +706,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = OSError("disk failure")
+        journal._payload_store = _PayloadStoreDouble(error=OSError("disk failure"))
 
         content, error = journal._load_payload("some-ref")
         assert content is None
@@ -609,8 +722,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = PayloadNotFoundError("deadbeef" * 8)
+        journal._payload_store = _PayloadStoreDouble(error=PayloadNotFoundError("deadbeef" * 8))
 
         with pytest.raises(PayloadNotFoundError):
             journal._load_payload("some-ref")
@@ -622,8 +734,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = OSError("disk failure")
+        journal._payload_store = _PayloadStoreDouble(error=OSError("disk failure"))
 
         with pytest.raises(OSError):
             journal._load_payload("some-ref")
@@ -635,8 +746,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = TypeError("bad type in store")
+        journal._payload_store = _PayloadStoreDouble(error=TypeError("bad type in store"))
 
         with pytest.raises(TypeError, match="bad type in store"):
             journal._load_payload("some-ref")
@@ -657,8 +767,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = IntegrityError("expected abc123, got def456")
+        journal._payload_store = _PayloadStoreDouble(error=IntegrityError("expected abc123, got def456"))
 
         with pytest.raises(AuditIntegrityError, match="corruption or tampering"):
             journal._load_payload("some-ref")
@@ -678,8 +787,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.side_effect = IntegrityError("expected abc123, got def456")
+        journal._payload_store = _PayloadStoreDouble(error=IntegrityError("expected abc123, got def456"))
 
         with pytest.raises(AuditIntegrityError, match="corruption or tampering"):
             journal._load_payload("some-ref")
@@ -690,8 +798,7 @@ class TestLoadPayload:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"\x80\x81\x82"  # Invalid UTF-8
+        journal._payload_store = _PayloadStoreDouble(content=b"\x80\x81\x82")  # Invalid UTF-8
 
         content, error = journal._load_payload("some-ref")
         assert content is None
@@ -702,42 +809,38 @@ class TestLoadPayload:
 class TestEnrichWithPayloads:
     """Tests for _enrich_with_payloads — adds payload data to call records."""
 
-    def test_non_calls_table_skipped(self, tmp_path: Path) -> None:
+    def test_malformed_sqlalchemy_context_crashes_when_payload_columns_requested(self, tmp_path: Path) -> None:
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+
+        with pytest.raises(AuditIntegrityError, match="compiled metadata"):
+            journal._payload_ref_columns_from_context(object(), {})
+
+    def test_raw_sql_compiled_context_without_structured_table_is_skipped(self, tmp_path: Path) -> None:
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        compiled = SimpleNamespace(statement=object(), positiontup=("request_ref",), params={"request_ref": "req"})
+        context = SimpleNamespace(compiled=compiled)
+
+        assert journal._payload_ref_columns_from_context(context, {}) is None
+
+    def test_records_without_structured_payload_columns_skipped(self, tmp_path: Path) -> None:
         journal = _make_journal(
             tmp_path,
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
         record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO rows (id) VALUES (?)",
-            {"id": "r1"},
-            executemany=False,
-        )
+        journal._enrich_with_payloads(record)
         # No payload keys should be added
         assert "request_ref" not in record
         assert "payloads" not in record
-
-    def test_schema_qualified_calls_table_enriched(self, tmp_path: Path) -> None:
-        """Regression: schema-qualified table names like public.calls must match."""
-        journal = _make_journal(
-            tmp_path,
-            include_payloads=True,
-            payload_base_path=str(tmp_path / "payloads"),
-        )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"payload content"
-
-        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO public.calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
-            executemany=False,
-        )
-        assert record["request_ref"] == "req-ref"
-        assert record["request_payload"] == "payload content"
 
     def test_single_call_enriched(self, tmp_path: Path) -> None:
         journal = _make_journal(
@@ -745,16 +848,19 @@ class TestEnrichWithPayloads:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"payload content"
+        journal._payload_store = _PayloadStoreDouble(content=b"payload content")
 
-        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
-            executemany=False,
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "t",
+                "statement": "INSERT",
+                "parameters": {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
+                "executemany": False,
+                "_payload_ref_columns": ["call_id", "request_ref", "response_ref"],
+            },
         )
+        journal._enrich_with_payloads(record)
 
         assert record["request_ref"] == "req-ref"
         assert record["request_payload"] == "payload content"
@@ -766,19 +872,22 @@ class TestEnrichWithPayloads:
             include_payloads=True,
             payload_base_path=str(tmp_path / "payloads"),
         )
-        journal._payload_store = Mock()
-        journal._payload_store.retrieve.return_value = b"payload"
+        journal._payload_store = _PayloadStoreDouble(content=b"payload")
 
-        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": True})
-        journal._enrich_with_payloads(
-            record,
-            "INSERT INTO calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
-            [
-                {"call_id": "c1", "request_ref": "r1", "response_ref": "r2"},
-                {"call_id": "c2", "request_ref": "r3", "response_ref": None},
-            ],
-            executemany=True,
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "t",
+                "statement": "INSERT",
+                "parameters": [
+                    {"call_id": "c1", "request_ref": "r1", "response_ref": "r2"},
+                    {"call_id": "c2", "request_ref": "r3", "response_ref": None},
+                ],
+                "executemany": True,
+                "_payload_ref_columns": ["call_id", "request_ref", "response_ref"],
+            },
         )
+        journal._enrich_with_payloads(record)
 
         assert "payloads" in record
         assert len(record["payloads"]) == 2
@@ -950,6 +1059,15 @@ class TestDeriveJournalPath:
         db_path = tmp_path / "landscape.db"
         url = f"sqlite:///{db_path}"
         assert LandscapeDB._derive_journal_path(url, None) == LandscapeDB._derive_journal_path(url)
+
+    @pytest.mark.parametrize("suffix", ["../escape", "abc/123", "ABC123", "", "abc.123"])
+    def test_derive_journal_path_rejects_non_lowercase_hex_worker_suffix(self, tmp_path: Path, suffix: str) -> None:
+        """Worker suffixes are filename components, so only lowercase hex is accepted."""
+        db_path = tmp_path / "landscape.db"
+        url = f"sqlite:///{db_path}"
+
+        with pytest.raises(ValueError, match="dump_to_jsonl_worker_suffix"):
+            LandscapeDB._derive_journal_path(url, suffix)
 
     def test_two_workers_write_distinct_journal_files(self, tmp_path: Path) -> None:
         """Two follower instances with distinct hex suffixes write separate files.

@@ -87,4 +87,42 @@ describe("HeaderVersionSelector", () => {
 
     expect(revertToVersion).toHaveBeenCalledWith("st-2");
   });
+
+  // elspeth-83eb51334f: focus leaving the selector subtree closes the
+  // dropdown — a keyboard user must not be able to Tab away while the
+  // listbox stays visually open.
+  it("closes the dropdown when focus moves outside the selector", () => {
+    render(
+      <div>
+        <HeaderVersionSelector />
+        <button type="button">outside</button>
+      </div>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /composition history/i }),
+    );
+    const list = screen.getByRole("listbox", { name: /composition history/i });
+    const outside = screen.getByRole("button", { name: /^outside$/i });
+    fireEvent.blur(list, { relatedTarget: outside });
+
+    expect(
+      screen.queryByRole("listbox", { name: /composition history/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the dropdown open when focus moves within the selector", () => {
+    render(<HeaderVersionSelector />);
+
+    const trigger = screen.getByRole("button", {
+      name: /composition history/i,
+    });
+    fireEvent.click(trigger);
+    const list = screen.getByRole("listbox", { name: /composition history/i });
+    fireEvent.blur(list, { relatedTarget: trigger });
+
+    expect(
+      screen.getByRole("listbox", { name: /composition history/i }),
+    ).toBeInTheDocument();
+  });
 });

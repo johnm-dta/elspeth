@@ -27,9 +27,19 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts.enums import OutputMode, RunMode
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
+from elspeth.contracts.sink import FAILSINK_ELIGIBLE_PLUGIN_TEXT
+from elspeth.core import dynaconf_normalization, template_materialization
 from elspeth.core.dependency_config import CollectionProbeConfig, CommencementGateConfig, DependencyConfig
 from elspeth.core.secrets import is_secret_field
+
+DynaconfKeyNormalizer = dynaconf_normalization.DynaconfKeyNormalizer
+TemplateFileError = template_materialization.TemplateFileError
+TemplateOptionMaterializer = template_materialization.TemplateOptionMaterializer
+_lowercase_schema_keys = dynaconf_normalization.lowercase_schema_keys
+_merge_dicts_preserving_env_override = dynaconf_normalization.merge_dicts_preserving_env_override
+_expand_template_files = template_materialization._expand_template_files
 
 # Reserved edge labels that cannot be used as user-defined routing names.
 # "continue" is used for sequential edges, "fork" is a gate-only routing action,
@@ -38,8 +48,8 @@ from elspeth.core.secrets import is_secret_field
 # leading to routing events recorded against wrong edges (audit corruption).
 _RESERVED_EDGE_LABELS = frozenset({"continue", "fork", "on_success"})
 
-# Names used in node_id generation must stay short enough to fit
-# landscape.schema nodes_table.c.node_id (String(64)).
+# Names used in node_id generation must stay short enough to fit the
+# contracts.types.NODE_ID_MAX_LENGTH audit/storage contract.
 # Worst-case generated format overhead is ~25 chars:
 #   "{prefix}_{name}_{hash12}"
 # so keep {name} <= 38.
@@ -86,13 +96,66 @@ _DYNACONF_INTERNAL_KEYS = frozenset(
         "secrets",
     }
 )
-_FILE_BACKED_TEMPLATE_OPTION_KEYS = frozenset(
-    {
-        "template_file",
-        "lookup_file",
-        "system_prompt_file",
-    }
-)
+# The web execution path may substitute up to 1 MiB of inline blob content
+# before this in-memory loader parses resolved YAML. Keep the document cap
+# bounded but above that aggregate payload plus ordinary YAML overhead.
+MAX_IN_MEMORY_PIPELINE_YAML_BYTES = 2 * 1024 * 1024
+MAX_IN_MEMORY_PIPELINE_YAML_NODES = 10_000
+MAX_IN_MEMORY_PIPELINE_YAML_DEPTH = 64
+
+
+class _BoundedInMemoryYamlLoader(yaml.SafeLoader):
+    """SafeLoader variant for web-facing in-memory pipeline YAML."""
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._elspeth_node_count = 0
+        self._elspeth_depth = 0
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        # PyYAML's parser/composer methods are untyped upstream.
+        if self.check_event(yaml.events.AliasEvent):  # type: ignore[no-untyped-call]
+            event = self.get_event()  # type: ignore[no-untyped-call]
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                "aliases are not permitted in in-memory pipeline YAML",
+                event.start_mark,
+            )
+
+        self._elspeth_node_count += 1
+        if self._elspeth_node_count > MAX_IN_MEMORY_PIPELINE_YAML_NODES:
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                f"YAML node count exceeds the {MAX_IN_MEMORY_PIPELINE_YAML_NODES} node limit",
+                self.peek_event().start_mark,  # type: ignore[no-untyped-call]
+            )
+
+        self._elspeth_depth += 1
+        try:
+            if self._elspeth_depth > MAX_IN_MEMORY_PIPELINE_YAML_DEPTH:
+                raise yaml.composer.ComposerError(
+                    None,
+                    None,
+                    f"YAML nesting depth exceeds the {MAX_IN_MEMORY_PIPELINE_YAML_DEPTH} level limit",
+                    self.peek_event().start_mark,  # type: ignore[no-untyped-call]
+                )
+            return super().compose_node(parent, index)
+        finally:
+            self._elspeth_depth -= 1
+
+
+def load_bounded_pipeline_yaml(yaml_content: str) -> Any:
+    """Parse in-memory pipeline YAML with safe construction and local limits."""
+    if len(yaml_content.encode("utf-8")) > MAX_IN_MEMORY_PIPELINE_YAML_BYTES:
+        raise ValueError(f"YAML content exceeds the {MAX_IN_MEMORY_PIPELINE_YAML_BYTES} byte YAML limit")
+    try:
+        # Explicit Loader= is intentional: _BoundedInMemoryYamlLoader subclasses
+        # SafeLoader and only tightens alias/depth/node limits.
+        return yaml.load(yaml_content, Loader=_BoundedInMemoryYamlLoader)
+    except (yaml.YAMLError, RecursionError) as exc:
+        raise ValueError(f"YAML parse failed: {exc.__class__.__name__}") from exc
 
 
 def _validate_max_length(value: str, *, field_label: str, max_length: int) -> str:
@@ -155,6 +218,29 @@ Anchored with \\A...\\Z (not ^...$): $ matches just before a trailing newline, s
 "NAME\\n" would otherwise be wrongly accepted.
 """
 
+_APPROVED_KEYVAULT_HOST_SUFFIXES: tuple[str, ...] = (
+    ".vault.azure.net",  # Azure public cloud
+    ".vault.azure.cn",  # Azure China (Mooncake)
+    ".vault.usgovcloudapi.net",  # Azure US Government
+    ".vault.microsoftazure.de",  # Azure Germany (legacy)
+)
+"""Approved Azure Key Vault DNS suffixes across the public and sovereign clouds.
+
+A ``keyvault`` ``vault_url`` host must end with one of these (elspeth-7572facbc6).
+This is the always-on floor that keeps a settings file from aiming a
+``DefaultAzureCredential``-backed client at an arbitrary host; a deployment may
+tighten further to exact URLs via the ``ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS``
+allowlist enforced at the loader boundary (core/security/config_secrets.py).
+Each suffix carries a leading dot so a look-alike host such as
+``my-vault.vault.azure.net.attacker.com`` cannot pass. Private Link keeps the
+public ``{vault}.vault.azure.net`` host (only DNS resolution changes), so it is
+already covered.
+"""
+
+
+def _contains_control_character(value: str) -> bool:
+    return any(ord(char) < 0x20 or char == "\x7f" for char in value)
+
 
 class SecretsConfig(BaseModel):
     """Configuration for secret loading.
@@ -214,6 +300,17 @@ class SecretsConfig(BaseModel):
         if not isinstance(v, str):
             return v  # Pydantic will reject with clean "str type expected" error
 
+        # Normalize edge whitespace up front so the value we VALIDATE is the value
+        # we STORE. urlparse silently drops leading whitespace (and a trailing tab)
+        # while parsing, so without this a value like " https://x.vault.azure.net"
+        # passes every host/component check on its parsed form yet is persisted —
+        # and later handed to the DefaultAzureCredential-backed client — with the
+        # stray whitespace intact. Stripping only removes edge whitespace, so it
+        # can never turn a rejected host into an accepted one (elspeth-7572facbc6).
+        v = v.strip()
+        if _contains_control_character(v):
+            raise ValueError("vault_url must not contain control characters")
+
         # P0-3: Reject ${VAR} references (chicken-egg problem)
         if "${" in v:
             raise ValueError(
@@ -234,6 +331,32 @@ class SecretsConfig(BaseModel):
         # P0-3: Require HTTPS
         if parsed.scheme.lower() != "https":
             raise ValueError(f"vault_url must use HTTPS protocol, got: {parsed.scheme}://")
+
+        # SSRF / credential-boundary hardening (elspeth-7572facbc6). A well-formed
+        # Key Vault endpoint is host-only: no userinfo, no non-standard port, no
+        # path/query/fragment, and its host is an approved Key Vault suffix.
+        # Rejecting these stops a settings file from aiming a
+        # DefaultAzureCredential-backed client at an arbitrary HTTPS host.
+        if parsed.username or parsed.password:
+            raise ValueError(f"vault_url must not contain userinfo (user:pass@), got: {v}")
+        try:
+            port = parsed.port
+        except ValueError as e:
+            raise ValueError(f"vault_url has an invalid port: {v}") from e
+        if port not in (None, 443):
+            raise ValueError(f"vault_url must not specify a non-standard port, got port {port}")
+        if parsed.path not in ("", "/"):
+            raise ValueError(f"vault_url must not contain a path, got: {parsed.path!r}")
+        if parsed.query:
+            raise ValueError(f"vault_url must not contain a query string, got: {v}")
+        if parsed.fragment:
+            raise ValueError(f"vault_url must not contain a fragment, got: {v}")
+        host = parsed.hostname or ""
+        if not any(host.endswith(suffix) for suffix in _APPROVED_KEYVAULT_HOST_SUFFIXES):
+            raise ValueError(
+                f"vault_url host {host!r} is not an approved Azure Key Vault endpoint "
+                f"(must end with one of {list(_APPROVED_KEYVAULT_HOST_SUFFIXES)})."
+            )
 
         # Normalize: strip trailing slash
         return v.rstrip("/")
@@ -292,6 +415,12 @@ class TriggerConfig(BaseModel):
 
         Individual row data is NOT accessible in trigger conditions. For row-level
         routing decisions, use Gates instead of triggers.
+
+        Time-based condition fire times are sampled-at-evaluation: under
+        "first to fire wins", a condition's fire time is the first instant it
+        was OBSERVED true (bounded by poll cadence), never a computed
+        crossing instant. A condition truly crossing between polls can lose
+        to a timeout that fired in the gap — that is the defined semantic.
 
     Example YAML (combined triggers):
         trigger:
@@ -1053,7 +1182,7 @@ class SinkSettings(BaseModel):
         description=(
             "Per-row write failure handling. Required — pipeline author must decide: "
             "'discard' to drop with audit record, or a sink name to divert to failsink "
-            "(must be csv or json plugin)."
+            f"(must be {FAILSINK_ELIGIBLE_PLUGIN_TEXT} plugin)."
         ),
     )
 
@@ -1094,6 +1223,13 @@ class LandscapeExportSettings(BaseModel):
         default=False,
         description="HMAC sign each record for integrity verification",
     )
+    include_raw_error_rows: bool = Field(
+        default=False,
+        description="Include raw failing-row payloads (row_data_json) in exported "
+        "validation_error/transform_error records. Default False: error records "
+        "export row_hash only and the raw row stays in the audit database "
+        "(raw-payload minimization for the external export artifact).",
+    )
 
 
 class LandscapeSettings(BaseModel):
@@ -1119,8 +1255,13 @@ class LandscapeSettings(BaseModel):
     )
     # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs
     # (pathlib interprets // as a UNC path).
+    # Default lives under data/ alongside the other system DBs (sessions.db,
+    # auth.db, runs/audit.db) so ad-hoc CLI/MCP runs don't scatter a separate
+    # state/ tree. Kept distinct from the web's data/runs/audit.db to avoid
+    # SQLite write-contention with the long-running web service; examples and
+    # explicit deployments override this in their own settings.yaml.
     url: str = Field(
-        default="sqlite:///./state/audit.db",
+        default="sqlite:///./data/audit.db",
         description="Full SQLAlchemy database URL",
     )
     encryption_key_env: str = Field(
@@ -1268,7 +1409,6 @@ class CheckpointSettings(BaseModel):
     enabled: bool = True
     frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
     checkpoint_interval: int | None = Field(default=None, gt=0)  # Required if frequency == "every_n"
-    aggregation_boundaries: bool = True  # Always checkpoint at aggregation flush
 
     @model_validator(mode="after")
     def validate_interval(self) -> "CheckpointSettings":
@@ -1283,8 +1423,8 @@ class RetrySettings(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     max_attempts: int = Field(default=3, gt=0, description="Maximum retry attempts")
-    initial_delay_seconds: float = Field(default=1.0, gt=0, description="Initial backoff delay")
-    max_delay_seconds: float = Field(default=60.0, gt=0, description="Maximum backoff delay")
+    initial_delay_seconds: float = Field(default=1.0, ge=0.01, description="Initial backoff delay")
+    max_delay_seconds: float = Field(default=60.0, ge=0.1, description="Maximum backoff delay")
     exponential_base: float = Field(default=2.0, gt=1.0, description="Exponential backoff base")
 
 
@@ -1654,6 +1794,25 @@ class ElspethSettings(BaseModel):
             raise ValueError(f"duplicate collection_probes for collection(s): {duplicates}")
         return v
 
+    @field_validator("depends_on")
+    @classmethod
+    def validate_unique_dependencies(cls, v: list[DependencyConfig]) -> list[DependencyConfig]:
+        """Reject duplicate dependency labels at the config boundary.
+
+        Dependency results are keyed by dependency name in commencement gate
+        context. Duplicate names would make gate expressions and audit snapshots
+        ambiguous, so reject them before dependency preflight starts.
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for dependency in v:
+            if dependency.name in seen and dependency.name not in duplicates:
+                duplicates.append(dependency.name)
+            seen.add(dependency.name)
+        if duplicates:
+            raise ValueError(f"duplicate depends_on dependency name(s): {duplicates}")
+        return v
+
     @field_validator("sinks")
     @classmethod
     def validate_sink_names_lowercase(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:
@@ -1682,6 +1841,9 @@ class ElspethSettings(BaseModel):
 
 # Regex pattern for ${VAR} or ${VAR:-default} syntax
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_ENV_EXPANSION_FORBIDDEN_PLUGIN_OPTION_FIELDS = {
+    "report_assemble": frozenset({"join_with", "title"}),
+}
 
 
 def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
@@ -1726,6 +1888,42 @@ def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
             return value
 
     return {k: _expand_value(v) for k, v in config.items()}
+
+
+def _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config: Mapping[str, object]) -> None:
+    """Reject env placeholders in plugin options that render into artifacts.
+
+    Some plugin options are user-visible presentation fields rather than secret
+    references. Reject their raw ``${VAR}`` syntax before the loader expands it,
+    so later plugin validation cannot be bypassed by replacing the marker with
+    a host secret value.
+    """
+    for collection_name in ("transforms", "aggregations"):
+        collection = raw_config[collection_name] if collection_name in raw_config else None
+        if type(collection) is not list:
+            continue
+        for index, plugin_config in enumerate(collection):
+            if type(plugin_config) is not dict:
+                continue
+            plugin_name = plugin_config["plugin"] if "plugin" in plugin_config else None
+            if not isinstance(plugin_name, str):
+                continue
+            forbidden_fields = _ENV_EXPANSION_FORBIDDEN_PLUGIN_OPTION_FIELDS.get(plugin_name.lower())
+            if not forbidden_fields:
+                continue
+            options = plugin_config["options"] if "options" in plugin_config else None
+            if type(options) is not dict:
+                continue
+            for option_name in sorted(forbidden_fields):
+                value = options[option_name] if option_name in options else None
+                if not isinstance(value, str) or not _ENV_VAR_PATTERN.search(value):
+                    continue
+                raw_name = plugin_config["name"] if "name" in plugin_config else index
+                raise ValueError(
+                    f"{collection_name}[{raw_name!r}] {plugin_name} option {option_name!r} "
+                    "must not contain environment-variable placeholders before env expansion; "
+                    f"{plugin_name} emits this option in user-visible report output"
+                )
 
 
 def _fingerprint_secrets(
@@ -1834,6 +2032,8 @@ def _sanitize_dsn(
     from sqlalchemy.engine.url import make_url
     from sqlalchemy.exc import ArgumentError
 
+    from elspeth.contracts.url import _scrub_odbc_connect_value
+
     try:
         parsed = make_url(url)
     except ArgumentError as parse_err:
@@ -1867,24 +2067,25 @@ def _sanitize_dsn(
             query_had_password = True
             if query_password_value is None:
                 query_password_value = value if isinstance(value, str) else value[0]
-        elif key.lower() == "odbc_connect" and isinstance(value, str):
-            import re
+        elif key.lower() == "odbc_connect":
+            # SQLAlchemy's URL parser already percent-decodes query values, so
+            # each value is a plain connection string. Operate on it directly
+            # and store the scrubbed result decoded, so URL.create() below
+            # encodes it exactly once. Repeated query params arrive as a tuple.
+            values = value if isinstance(value, tuple) else (value,)
+            scrubbed_values: list[str] = []
+            embedded_password_found = False
+            for connect_value in values:
+                scrubbed_connect, embedded_passwords = _scrub_odbc_connect_value(connect_value)
+                scrubbed_values.append(scrubbed_connect)
+                if embedded_passwords:
+                    embedded_password_found = True
+                    if query_password_value is None:
+                        query_password_value = embedded_passwords[0]
 
-            # SQLAlchemy's URL parser already percent-decodes query values, so `value`
-            # is the plain connection string. Operate on it directly (do NOT unquote
-            # again — that double-decodes any literal '%') and store the scrubbed result
-            # DECODED, so URL.create() below encodes it exactly once. Pre-encoding here
-            # would double-encode the non-secret connection material, making the audit
-            # URL unfaithful (elspeth-f9b8ed91a9).
-            if re.search(r"(?i)(PWD|Password)\s*=", value):
+            if embedded_password_found:
                 query_had_password = True
-                # Extract the password value for fingerprinting
-                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", value)
-                if match and query_password_value is None:
-                    query_password_value = match.group(1)
-                # Scrub PWD/Password from the connect string
-                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", value)
-                scrubbed_query[key] = scrubbed_connect
+                scrubbed_query[key] = tuple(scrubbed_values) if isinstance(value, tuple) else scrubbed_values[0]
             else:
                 scrubbed_query[key] = value
         else:
@@ -1959,59 +2160,12 @@ def _expand_config_templates(
     if settings_path is None:
         return raw_config
 
-    config = dict(raw_config)
-
-    # === Transform plugin options - expand template files ===
-    if "transforms" in config and isinstance(config["transforms"], list):
-        plugins = []
-        for plugin_config in config["transforms"]:
-            if isinstance(plugin_config, dict):
-                plugin = dict(plugin_config)
-                if "options" in plugin and isinstance(plugin["options"], dict):
-                    plugin["options"] = _expand_template_files(plugin["options"], settings_path)
-                plugins.append(plugin)
-            else:
-                plugins.append(plugin_config)
-        config["transforms"] = plugins
-
-    # === Aggregation options - expand template files ===
-    if "aggregations" in config and isinstance(config["aggregations"], list):
-        aggregations = []
-        for agg_config in config["aggregations"]:
-            if isinstance(agg_config, dict):
-                agg = dict(agg_config)
-                if "options" in agg and isinstance(agg["options"], dict):
-                    agg["options"] = _expand_template_files(agg["options"], settings_path)
-                aggregations.append(agg)
-            else:
-                aggregations.append(agg_config)
-        config["aggregations"] = aggregations
-
-    return config
+    return TemplateOptionMaterializer(settings_path).materialize_config(raw_config)
 
 
 def _reject_file_backed_template_options_for_in_memory_loader(raw_config: Mapping[str, object]) -> None:
     """Reject file-backed template expansion options without a settings file root."""
-    for collection_name in ("transforms", "aggregations"):
-        collection = raw_config[collection_name] if collection_name in raw_config else None
-        if type(collection) is not list:
-            continue
-        for index, plugin_config in enumerate(collection):
-            if type(plugin_config) is not dict:
-                continue
-            options = plugin_config["options"] if "options" in plugin_config else None
-            if type(options) is not dict:
-                continue
-            present = sorted(key for key in _FILE_BACKED_TEMPLATE_OPTION_KEYS if key in options)
-            if not present:
-                continue
-            raw_name = plugin_config["name"] if "name" in plugin_config else index
-            raise ValueError(
-                "load_settings_from_yaml_string() cannot expand file-backed template options "
-                f"{present} for {collection_name}[{raw_name!r}] because in-memory web execution "
-                "has no trusted settings file base path. Use load_settings() for file-backed "
-                "configs, or inline prompt_template, lookup, and system_prompt before web validation/execution."
-            )
+    TemplateOptionMaterializer.reject_file_backed_options(raw_config)
 
 
 def _sanitize_dsn_option_for_audit(
@@ -2043,6 +2197,38 @@ def _sanitize_dsn_option_for_audit(
     elif had_password and not fail_if_no_key:
         # Dev mode: password was removed but not fingerprinted.
         options[redacted_name] = True
+
+
+def sanitize_node_config_for_audit(
+    config: Mapping[str, object],
+    *,
+    plugin_name: str | None,
+) -> Mapping[str, object]:
+    """Return an audit-safe node config for graph persistence.
+
+    Node registration stores a flat plugin config, unlike the full resolved
+    settings tree handled by ``_fingerprint_config_for_audit``. Keep the
+    placement-specific database DSN rule here with the rest of the audit
+    sanitization policy so repositories only persist the resulting payload.
+    """
+    import os
+
+    thawed = deep_thaw(config)
+    if type(thawed) is not dict:
+        raise TypeError(f"Node config must thaw to dict[str, object], got {type(thawed).__name__}: {thawed!r}")
+
+    allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+    sanitized = _fingerprint_secrets(thawed, fail_if_no_key=not allow_raw)
+    if plugin_name == "database":
+        # Node config is flat: the DSN sits at top-level `url`.
+        _sanitize_dsn_option_for_audit(
+            sanitized,
+            option_name="url",
+            fingerprint_name="url_password_fingerprint",
+            redacted_name="url_password_redacted",
+            fail_if_no_key=not allow_raw,
+        )
+    return sanitized
 
 
 def _fingerprint_config_for_audit(
@@ -2143,181 +2329,6 @@ def _fingerprint_config_for_audit(
     return config
 
 
-class TemplateFileError(Exception):
-    """Error loading template or lookup file."""
-
-
-def _resolve_template_path(file_ref: str, settings_path: Path, label: str) -> Path:
-    """Resolve a template/lookup/prompt file path with containment check.
-
-    Relative paths are resolved against the settings file's parent directory.
-    Absolute paths are used as-is. In both cases, the resolved path must remain
-    within the settings directory tree to prevent path traversal attacks.
-
-    Args:
-        file_ref: File reference from config (relative or absolute)
-        settings_path: Path to the settings file
-        label: Human-readable label for error messages (e.g. "Template file")
-
-    Returns:
-        Resolved, validated Path
-
-    Raises:
-        TemplateFileError: If path escapes settings directory or file not found
-    """
-    config_root = settings_path.parent.resolve()
-    file_path = Path(file_ref)
-    if not file_path.is_absolute():
-        file_path = (config_root / file_path).resolve()
-    else:
-        file_path = file_path.resolve()
-
-    # Containment check: resolved path must be under the config directory
-    try:
-        file_path.relative_to(config_root)
-    except ValueError as exc:
-        raise TemplateFileError(
-            f"{label} path traversal blocked: {file_ref!r} resolves to {file_path} which is outside config directory {config_root}"
-        ) from exc
-
-    if not file_path.exists():
-        raise TemplateFileError(f"{label} not found: {file_path}")
-
-    return file_path
-
-
-def _expand_template_files(
-    options: dict[str, Any],
-    settings_path: Path,
-) -> dict[str, Any]:
-    """Expand template_file, lookup_file, and system_prompt_file to loaded content.
-
-    Args:
-        options: Plugin options dict
-        settings_path: Path to settings file for resolving relative paths
-
-    Returns:
-        New dict with files loaded and paths recorded:
-        - template_file → prompt_template (content) + prompt_template_source (path)
-        - lookup_file → lookup (content) + lookup_source (path)
-        - system_prompt_file → system_prompt (content) + system_prompt_source (path)
-
-    Raises:
-        TemplateFileError: If files not found, invalid, or path traversal detected
-    """
-    result = dict(options)
-
-    # Handle template_file
-    if "template_file" in result:
-        if "prompt_template" in result:
-            raise TemplateFileError("Cannot specify both 'prompt_template' and 'template_file'")
-        template_file = result.pop("template_file")
-        template_path = _resolve_template_path(template_file, settings_path, "Template file")
-
-        result["prompt_template"] = template_path.read_text(encoding="utf-8")
-        result["prompt_template_source"] = template_file
-
-    # Handle lookup_file
-    if "lookup_file" in result:
-        if "lookup" in result:
-            raise TemplateFileError("Cannot specify both 'lookup' and 'lookup_file'")
-        lookup_file = result.pop("lookup_file")
-        lookup_path = _resolve_template_path(lookup_file, settings_path, "Lookup file")
-
-        try:
-            loaded = yaml.safe_load(lookup_path.read_text(encoding="utf-8"))
-            # Coerce None (empty file) to {} so it gets a distinct hash from "no lookup"
-            # This ensures empty lookup files are auditable as "intentionally empty"
-            result["lookup"] = loaded if loaded is not None else {}
-        except yaml.YAMLError as e:
-            raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
-
-        result["lookup_source"] = lookup_file
-
-    # Handle system_prompt_file
-    if "system_prompt_file" in result:
-        if "system_prompt" in result:
-            raise TemplateFileError("Cannot specify both 'system_prompt' and 'system_prompt_file'")
-        system_prompt_file = result.pop("system_prompt_file")
-        system_prompt_path = _resolve_template_path(system_prompt_file, settings_path, "System prompt file")
-
-        result["system_prompt"] = system_prompt_path.read_text(encoding="utf-8")
-        result["system_prompt_source"] = system_prompt_file
-
-    return result
-
-
-def _lowercase_schema_keys(obj: Any, *, _preserve_nested: bool = False, _in_sinks: bool = False) -> Any:
-    """Lowercase dictionary keys for Pydantic schema matching, preserving user data.
-
-    Dynaconf returns keys in UPPERCASE when they come from environment variables,
-    but Pydantic expects lowercase field names. User data inside 'options' and
-    'routes' dicts must be preserved exactly as written - these contain
-    case-sensitive keys that must match runtime values:
-    - options: {"Score": "score"} where "Score" must match the LLM's JSON field name
-    - routes: {"High": "quality_ok"} where "High" must match the gate condition result
-
-    Sink name handling:
-    - FULLY UPPERCASE names (e.g., 'OUTPUT') are lowercased - these come from
-      env vars like ELSPETH_SINKS__OUTPUT__PLUGIN where Dynaconf uppercases
-    - Mixed-case names (e.g., 'MySink') are PRESERVED so the validator can
-      catch them and give a helpful "use lowercase" error
-
-    Args:
-        obj: Any value - dicts are processed recursively, lists have their
-             elements processed, other types pass through unchanged.
-        _preserve_nested: Internal flag - when True, stop lowercasing keys
-             (we're inside an 'options' or 'routes' dict).
-        _in_sinks: Internal flag - when True, we're processing sink name keys.
-
-    Returns:
-        The input with schema-level dict keys lowercased, but user data preserved.
-    """
-    if isinstance(obj, dict):
-        result = {}
-        for k, v in obj.items():
-            # Determine the new key
-            if _preserve_nested:
-                # Inside options: preserve all keys exactly
-                new_key = k
-            elif _in_sinks:
-                # Sink names: lowercase only if FULLY UPPERCASE (env var origin)
-                # Preserve mixed-case so validator can catch and give helpful error
-                new_key = k.lower() if k.isupper() else k
-            else:
-                # Normal schema keys: always lowercase
-                new_key = k.lower()
-
-            # Determine how to process children
-            if _preserve_nested:
-                # Already inside options/routes: stay in preserve mode, ignore special keys
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
-            elif new_key == "options":
-                # Options: preserve everything inside (user data)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
-            elif new_key == "routes":
-                # Routes: preserve everything inside (user-defined route labels)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
-            elif new_key == "branches":
-                # Branches: preserve everything inside (user-defined coalesce branch names)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
-            elif new_key == "sinks":
-                # Entering sinks dict: next level has sink name keys
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=True)
-            elif _in_sinks:
-                # At sink name level: value is SinkSettings, resume normal lowercasing
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=False)
-            else:
-                # Normal recursion
-                child = _lowercase_schema_keys(v, _preserve_nested=_preserve_nested, _in_sinks=False)
-
-            result[new_key] = child
-        return result
-    if isinstance(obj, list):
-        return [_lowercase_schema_keys(item, _preserve_nested=_preserve_nested, _in_sinks=_in_sinks) for item in obj]
-    return obj
-
-
 def load_settings(config_path: Path) -> ElspethSettings:
     """Load settings from YAML file with environment variable overrides.
 
@@ -2375,6 +2386,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
 
     # Filter Dynaconf internals (now safe — all non-known keys are Dynaconf's)
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config)
 
     # Expand ${VAR} and ${VAR:-default} patterns in config values
     raw_config = _expand_env_vars(raw_config)
@@ -2387,7 +2399,46 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = True) -> ElspethSettings:
+def load_settings_from_config_dict(config_dict: Mapping[str, object], *, expand_env_vars: bool = False) -> ElspethSettings:
+    """Load settings from an already parsed in-memory config dict.
+
+    This is the common post-parse path for web execution and validation.
+    It skips Dynaconf (no env var merging) and file I/O, ensuring resolved
+    secrets and inline blob contents never need to be serialized back to
+    YAML before validation. File-backed template options (template_file,
+    lookup_file, system_prompt_file) are rejected because there is no
+    trusted settings-file root for resolving them.
+
+    Args:
+        config_dict: Parsed YAML configuration mapping.
+        expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
+            patterns from the host environment. Defaults to ``False`` because
+            this in-memory loader is used for web-authored YAML, which is
+            user-controlled. Known secret inventory names are resolved via the
+            audited resolve_secret_refs() path beforehand, and any remaining
+            ``${VAR}`` must stay literal data rather than become a
+            host-environment lookup. Trusted in-process callers that intentionally
+            want host environment expansion must opt in explicitly.
+
+    Returns:
+        Validated ElspethSettings instance.
+    """
+    raw_config = _lowercase_schema_keys(dict(config_dict))
+    known_fields = set(ElspethSettings.model_fields.keys())
+
+    unknown_keys = sorted(k for k in raw_config if k not in known_fields)
+    if unknown_keys:
+        raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
+
+    raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    _reject_file_backed_template_options_for_in_memory_loader(raw_config)
+    _reject_sensitive_plugin_env_placeholders_before_expansion(raw_config)
+    if expand_env_vars:
+        raw_config = _expand_env_vars(raw_config)
+    return ElspethSettings(**raw_config)
+
+
+def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = False) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
     This is used by the web execution service to load pipeline configs
@@ -2400,32 +2451,21 @@ def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool =
     Args:
         yaml_content: YAML configuration as a string.
         expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
-            patterns from the host environment. Keep this enabled for
-            operator-authored, CLI-loaded config files (see load_settings()).
-            The web execution and validation paths pass ``False``: web-authored
-            YAML is user-controlled, known secret inventory names are resolved
-            via the audited resolve_secret_refs() path beforehand, and any
-            remaining ``${VAR}`` must stay literal data rather than become a
-            host-environment lookup.
+            patterns from the host environment. Defaults to ``False`` because
+            this in-memory loader is used for web-authored YAML, which is
+            user-controlled. Known secret inventory names are resolved via the
+            audited resolve_secret_refs() path beforehand, and any remaining
+            ``${VAR}`` must stay literal data rather than become a
+            host-environment lookup. Trusted in-process callers that intentionally
+            want host environment expansion must opt in explicitly.
 
     Returns:
         Validated ElspethSettings instance.
     """
-    config_dict = yaml.safe_load(yaml_content)
+    config_dict = load_bounded_pipeline_yaml(yaml_content)
     if not isinstance(config_dict, dict):
         raise ValueError(f"Configuration must be a YAML mapping (key: value), not {type(config_dict).__name__}")
-    raw_config = _lowercase_schema_keys(config_dict)
-    known_fields = set(ElspethSettings.model_fields.keys())
-
-    unknown_keys = sorted(k for k in raw_config if k not in known_fields)
-    if unknown_keys:
-        raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
-
-    raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
-    _reject_file_backed_template_options_for_in_memory_loader(raw_config)
-    if expand_env_vars:
-        raw_config = _expand_env_vars(raw_config)
-    return ElspethSettings(**raw_config)
+    return load_settings_from_config_dict(config_dict, expand_env_vars=expand_env_vars)
 
 
 def resolve_config(settings: ElspethSettings) -> dict[str, Any]:

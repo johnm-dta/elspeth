@@ -10,7 +10,8 @@ The transform helpers in ``llm_response_parsing.py``:
   ``cache_control: {"type": "ephemeral"}`` to the first system message
   and the trailing tool, returning new lists without mutating the
   inputs. Composer message construction keeps dynamic state in a later
-  system message so the first marker covers only the stable prompt prefix.
+  user-role data message so the first marker covers only the stable prompt
+  prefix.
 
 These tests target the helpers directly so a future change to either
 detection or marker placement fails this file with a focused error,
@@ -270,7 +271,7 @@ class TestCacheMarkersWiredAtCallSite:
     async def test_anthropic_model_emits_cache_control_to_litellm(self) -> None:
         from collections.abc import Mapping
         from dataclasses import dataclass
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from elspeth.web.composer.service import (
             ComposerAvailability,
@@ -308,19 +309,21 @@ class TestCacheMarkersWiredAtCallSite:
 
         with patch(
             "elspeth.web.composer.service._litellm_acompletion",
-            new=AsyncMock(side_effect=fake_acompletion),
+            new=fake_acompletion,
         ):
             await service.compose("Build a CSV pipeline.", [], state)
 
         # The stable system prompt MUST carry cache_control after the transform.
         sent_messages = captured["messages"]
         system_messages = [m for m in sent_messages if m.get("role") == "system"]
-        assert len(system_messages) >= 2
+        assert len(system_messages) == 1
         stable_system_msg = system_messages[0]
-        dynamic_context_msg = system_messages[1]
+        dynamic_context_msg = sent_messages[1]
         assert stable_system_msg["cache_control"] == {"type": "ephemeral"}
         assert "Current pipeline state" not in stable_system_msg["content"]
-        assert dynamic_context_msg["content"].startswith("Current pipeline state and available plugins:")
+        assert dynamic_context_msg["role"] == "user"
+        assert dynamic_context_msg["content"].startswith("Current pipeline state and available plugins")
+        assert "UNTRUSTED DATA" in dynamic_context_msg["content"]
         assert "cache_control" not in dynamic_context_msg
 
         # The trailing tool MUST carry cache_control after the transform.
@@ -338,7 +341,7 @@ class TestCacheMarkersWiredAtCallSite:
         """
         from collections.abc import Mapping
         from dataclasses import dataclass
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from elspeth.web.composer.service import (
             ComposerAvailability,
@@ -376,15 +379,19 @@ class TestCacheMarkersWiredAtCallSite:
 
         with patch(
             "elspeth.web.composer.service._litellm_acompletion",
-            new=AsyncMock(side_effect=fake_acompletion),
+            new=fake_acompletion,
         ):
             await service.compose("Build a CSV pipeline.", [], state)
 
         sent_messages = captured["messages"]
         system_messages = [m for m in sent_messages if m.get("role") == "system"]
-        assert len(system_messages) >= 2
+        assert len(system_messages) == 1
         for system_msg in system_messages:
             assert "cache_control" not in system_msg
+        assert sent_messages[1]["role"] == "user"
+        assert sent_messages[1]["content"].startswith("Current pipeline state and available plugins")
+        assert "UNTRUSTED DATA" in sent_messages[1]["content"]
+        assert "cache_control" not in sent_messages[1]
 
         sent_tools = captured["tools"]
         for tool in sent_tools:

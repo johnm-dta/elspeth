@@ -31,6 +31,7 @@ class _BareTransform:
     example_use: ClassVar[str | None] = None
     capability_tags: ClassVar[tuple[str, ...]] = ()
     audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
+    discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
     config_model = None
     is_batch_aware = False
 
@@ -65,6 +66,7 @@ class _FilledSource:
     usage_when_not_to_use: ClassVar[str | None] = "When the data is inline; use chat instead."
     example_use: ClassVar[str | None] = "source:\n  plugin: filled"
     capability_tags: ClassVar[tuple[str, ...]] = ("file", "csv")
+    discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
     # Declare both "coerce" (Tier-3 boundary trait) and "quarantine"
     # (runtime quarantine routing) explicitly; the catalog service does
     # not infer either, because `_on_validation_failure` is per-instance.
@@ -139,6 +141,7 @@ class _HintedTransform:
     example_use: ClassVar[str | None] = None
     capability_tags: ClassVar[tuple[str, ...]] = ()
     audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
+    discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
     config_model = None
     is_batch_aware = False
 

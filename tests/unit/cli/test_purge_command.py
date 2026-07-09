@@ -2,7 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import typer
@@ -13,6 +13,63 @@ from elspeth.core.landscape import LandscapeDB
 from elspeth.core.retention.purge import PurgeResult
 
 runner = CliRunner()
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> object:
+        return (self.args, self.kwargs)[index]
+
+
+class _CallRecorder:
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value = return_value
+        self.side_effect: object = None
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        if isinstance(self.side_effect, list):
+            return self.side_effect.pop(0)
+        if callable(self.side_effect):
+            return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self.call_args_list) == 1
+
+    def assert_not_called(self) -> None:
+        assert self.call_args_list == []
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        self.assert_called_once()
+        assert self.call_args is not None
+        assert self.call_args.args == args
+        assert self.call_args.kwargs == kwargs
+
+
+class _LandscapeDBDouble:
+    def __init__(self) -> None:
+        self.close = _CallRecorder()
+
+
+class _PayloadStoreDouble:
+    def __init__(self) -> None:
+        self.exists = _CallRecorder(True)
+
+
+class _PurgeManagerDouble:
+    def __init__(self) -> None:
+        self.find_expired_payload_refs = _CallRecorder([])
+        self.purge_payloads = _CallRecorder()
 
 
 def _write_minimal_settings(settings_path: Path, *, landscape_url: str) -> None:
@@ -43,24 +100,24 @@ def _make_purge_mocks(
     purge_result: PurgeResult | None = None,
     exists_side_effect: bool | None = True,
 ):
-    """Create standard mocks for purge command tests.
+    """Create standard fakes for purge command tests.
 
-    Returns (mock_db, mock_payload_store, mock_purge_manager, patches_dict).
+    Returns (db, payload_store, purge_manager).
     """
-    mock_db = MagicMock()
-    mock_payload_store = MagicMock()
-    mock_purge_manager = MagicMock()
+    db = _LandscapeDBDouble()
+    payload_store = _PayloadStoreDouble()
+    purge_manager = _PurgeManagerDouble()
 
     if expired_refs is not None:
-        mock_purge_manager.find_expired_payload_refs.return_value = expired_refs
+        purge_manager.find_expired_payload_refs.return_value = expired_refs
 
     if purge_result is not None:
-        mock_purge_manager.purge_payloads.return_value = purge_result
+        purge_manager.purge_payloads.return_value = purge_result
 
     if exists_side_effect is not None:
-        mock_payload_store.exists.return_value = exists_side_effect
+        payload_store.exists.return_value = exists_side_effect
 
-    return mock_db, mock_payload_store, mock_purge_manager
+    return db, payload_store, purge_manager
 
 
 _PATCH_LANDSCAPE_DB = "elspeth.core.landscape.LandscapeDB"
@@ -71,9 +128,9 @@ _PATCH_RESOLVE_PASSPHRASE = "elspeth.cli_helpers.resolve_audit_passphrase"
 
 def _invoke_purge_with_mocks(
     tmp_path: Path,
-    mock_db: MagicMock,
-    mock_payload_store: MagicMock,
-    mock_purge_manager: MagicMock,
+    mock_db: _LandscapeDBDouble,
+    mock_payload_store: _PayloadStoreDouble,
+    mock_purge_manager: _PurgeManagerDouble,
     *,
     extra_args: list[str] | None = None,
     db_file_name: str = "audit.db",
@@ -253,6 +310,20 @@ class TestPurgeBasicFlow:
         _invoke_purge_with_mocks(tmp_path, mock_db, mock_ps, mock_pm)
 
         # The exception propagates (not caught by CLI), but finally block runs
+        mock_db.close.assert_called_once()
+
+    def test_purge_error_not_masked_by_db_close_failure(self, tmp_path: Path) -> None:
+        """A purge failure remains the reported error if database close also fails."""
+        refs = ["aabb" * 16]
+        mock_db, mock_ps, mock_pm = _make_purge_mocks(expired_refs=refs)
+        mock_pm.purge_payloads.side_effect = OSError("disk full")
+        mock_db.close.side_effect = RuntimeError("close failed")
+
+        result = _invoke_purge_with_mocks(tmp_path, mock_db, mock_ps, mock_pm)
+
+        assert isinstance(result.exception, OSError)
+        assert "disk full" in str(result.exception)
+        assert "close failed" not in str(result.exception)
         mock_db.close.assert_called_once()
 
 
@@ -489,9 +560,8 @@ class TestPurgePayloadPath:
             patch(_PATCH_PURGE_MANAGER) as mock_pm_cls,
             patch(_PATCH_RESOLVE_PASSPHRASE, return_value=None),
         ):
-            mock_ldb_cls.from_url.return_value = MagicMock()
-            mock_pm_instance = MagicMock()
-            mock_pm_instance.find_expired_payload_refs.return_value = []
+            mock_ldb_cls.from_url.return_value = _LandscapeDBDouble()
+            mock_pm_instance = _PurgeManagerDouble()
             mock_pm_cls.return_value = mock_pm_instance
 
             runner.invoke(app, ["purge", "--database", str(db_path), "--yes", "--dry-run"])
@@ -513,9 +583,8 @@ class TestPurgePayloadPath:
             patch(_PATCH_PURGE_MANAGER) as mock_pm_cls,
             patch(_PATCH_RESOLVE_PASSPHRASE, return_value=None),
         ):
-            mock_ldb_cls.from_url.return_value = MagicMock()
-            mock_pm_instance = MagicMock()
-            mock_pm_instance.find_expired_payload_refs.return_value = []
+            mock_ldb_cls.from_url.return_value = _LandscapeDBDouble()
+            mock_pm_instance = _PurgeManagerDouble()
             mock_pm_cls.return_value = mock_pm_instance
 
             runner.invoke(

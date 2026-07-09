@@ -62,6 +62,9 @@ interface InspectAndConfirmTurnProps {
   payload: InspectAndConfirmPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /** Tutorial passive mode: hide the "Edit columns…" editor entry; the learner
+   *  only confirms with "Looks right". */
+  isTutorial?: boolean;
 }
 
 /** Edit-mode state. `null` = inspect view; non-null = edit view. */
@@ -73,6 +76,7 @@ export function InspectAndConfirmTurn({
   payload,
   onSubmit,
   disabled = false,
+  isTutorial = false,
 }: InspectAndConfirmTurnProps) {
   const [editorState, setEditorState] = useState<EditorState | null>(null);
 
@@ -278,15 +282,17 @@ export function InspectAndConfirmTurn({
         >
           Looks right
         </button>
-        <button
-          ref={editButtonRef}
-          type="button"
-          className="guided-inspect-edit-btn"
-          onClick={handleOpenEditor}
-          disabled={disabled}
-        >
-          Edit columns...
-        </button>
+        {!isTutorial && (
+          <button
+            ref={editButtonRef}
+            type="button"
+            className="guided-inspect-edit-btn"
+            onClick={handleOpenEditor}
+            disabled={disabled}
+          >
+            Edit columns...
+          </button>
+        )}
       </div>
     </div>
   );

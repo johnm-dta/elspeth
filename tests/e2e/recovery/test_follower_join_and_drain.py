@@ -114,8 +114,8 @@ def _join_follower(crashed: Any, leader_token: CoordinationToken) -> str:
     """Admit a follower via join_run, mocking stable_hash to the real DB hash."""
     db_hash = _get_db_config_hash(crashed)
     with (
-        patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-        patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+        patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+        patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
     ):
         orch = _orchestrator(crashed)
         return orch.join_run(
@@ -175,6 +175,25 @@ def _assert_no_follower_mutation(crashed: Any, *, run_id: str, seat_before: dict
     assert _coordination_row(crashed.db, run_id) == seat_before, "seat must be byte-identical on refusal"
 
 
+class _DrainFollowerReadyWork:
+    """Small FollowerWorkSource fake that records drain-loop interactions."""
+
+    def __init__(self, *, results: list[list[Any]] | None = None, exception: type[BaseException] | BaseException | None = None) -> None:
+        self.results = results if results is not None else []
+        self.exception = exception
+        self.drain_calls: list[dict[str, Any]] = []
+
+    def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
+        self.drain_calls.append({"ctx": ctx, "before_claim": before_claim})
+        if self.exception is not None:
+            if isinstance(self.exception, type):
+                raise self.exception
+            raise self.exception
+        if self.results:
+            return self.results.pop(0)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # 2A  Admission refusals
 # ---------------------------------------------------------------------------
@@ -195,8 +214,8 @@ class TestJoinRunAdmissionRefusals:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -219,8 +238,8 @@ class TestJoinRunAdmissionRefusals:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -246,8 +265,8 @@ class TestJoinRunAdmissionRefusals:
 
         wrong_hash = "wrong-hash-totally-different-abc999"
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=wrong_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=wrong_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -280,8 +299,8 @@ class TestJoinRunAdmissionRefusals:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -320,9 +339,9 @@ class TestJoinRunAdmissionRefusals:
             return original_access(path, mode, **kwargs)
 
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
-            patch("elspeth.engine.orchestrator.core.os.access", side_effect=_deny_write),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.os.access", side_effect=_deny_write),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -635,18 +654,13 @@ class TestFollowerLifecycle:
 
         Returns (follower, stub_processor, stub_coord_repo).
         """
-        from unittest.mock import MagicMock
-
         run_id = crashed.run_id
         clock = crashed.clock
         coord_repo = crashed.factory.run_coordination
         factory = crashed.factory
 
         # Stub the inner RowProcessor so we control drain results.
-        stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
-        if drain_results is not None:
-            stub_proc._drain_scheduler_claims.side_effect = lambda **kw: drain_results.pop(0) if drain_results else []
+        stub_proc = _DrainFollowerReadyWork(results=drain_results)
 
         recorded_waits: list[float] = wait_calls if wait_calls is not None else []
 
@@ -661,7 +675,7 @@ class TestFollowerLifecycle:
         follower_token = CoordinationToken(run_id=run_id, worker_id=follower_id, leader_epoch=0)
 
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=coord_repo,
             factory=factory,
@@ -678,8 +692,6 @@ class TestFollowerLifecycle:
         _run_is_terminal (run status) on each loop iteration.  We drive two
         idle drain passes before a terminal exit.
         """
-        from unittest.mock import MagicMock
-
         clock = MockClock(start=_T0)
         crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
         clock.advance(_DEFAULT_LEASE_SECONDS + 60)
@@ -692,8 +704,7 @@ class TestFollowerLifecycle:
         real_factory = crashed.factory
 
         # Stub the inner RowProcessor (always idle).
-        stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc = _DrainFollowerReadyWork()
 
         wait_calls: list[float] = []
         loop_count = [0]
@@ -710,7 +721,7 @@ class TestFollowerLifecycle:
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=real_coord,
             factory=real_factory,
@@ -727,13 +738,11 @@ class TestFollowerLifecycle:
         # wait_fn called ≥ once (idle backoff triggered) and loop exited cleanly.
         assert len(wait_calls) >= 1, "idle backoff must call wait_fn at least once"
         # Drain was called each loop iteration.
-        assert stub_proc._drain_scheduler_claims.call_count >= 1
+        assert len(stub_proc.drain_calls) >= 1
         crashed.db.close()
 
     def test_follower_run_terminal_departs_and_exits_zero(self, tmp_path: Path) -> None:
         """L2: leader finalizes COMPLETED while follower idles → follower departs + exits 0."""
-        from unittest.mock import MagicMock
-
         clock = MockClock(start=_T0)
         crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
         clock.advance(_DEFAULT_LEASE_SECONDS + 60)
@@ -746,11 +755,10 @@ class TestFollowerLifecycle:
         with crashed.db.engine.begin() as conn:
             conn.execute(update(runs_table).where(runs_table.c.run_id == crashed.run_id).values(status=RunStatus.FAILED.value))
 
-        stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc = _DrainFollowerReadyWork()
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -774,8 +782,6 @@ class TestFollowerLifecycle:
 
     def test_follower_dead_seat_finishes_then_exits_naming_resume(self, tmp_path: Path) -> None:
         """L3: seat expires mid-drain → follower exits naming elspeth resume, no new claims."""
-        from unittest.mock import MagicMock
-
         clock = MockClock(start=_T0)
         crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
         clock.advance(_DEFAULT_LEASE_SECONDS + 60)
@@ -792,12 +798,11 @@ class TestFollowerLifecycle:
         # Advance clock past the seat window so live_leader returns seat_live=False.
         clock.advance(10.0)
 
-        stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc = _DrainFollowerReadyWork()
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
 
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -832,8 +837,6 @@ class TestFollowerLifecycle:
         The follower catches KeyboardInterrupt during the drain loop, calls
         depart_worker, then re-raises.
         """
-        from unittest.mock import MagicMock
-
         clock = MockClock(start=_T0)
         crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
         clock.advance(_DEFAULT_LEASE_SECONDS + 60)
@@ -841,13 +844,12 @@ class TestFollowerLifecycle:
         leader_token = _seat_run_with_live_leader(crashed, leader_id=leader_id)
         follower_id = _join_follower(crashed, leader_token)
 
-        stub_proc = MagicMock()
         # First drain call raises KeyboardInterrupt (simulates SIGINT mid-loop).
-        stub_proc._drain_scheduler_claims.side_effect = KeyboardInterrupt
+        stub_proc = _DrainFollowerReadyWork(exception=KeyboardInterrupt)
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,

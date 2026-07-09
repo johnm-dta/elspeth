@@ -1,0 +1,126 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Input row field containing the absolute HTTP(S) URL to fetch.",
+        "kind": "text",
+        "label": "URL Field",
+        "name": "url_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "blob_ref",
+        "description": "Output field receiving the payload-store content hash.",
+        "kind": "text",
+        "label": "Blob Ref Field",
+        "name": "blob_ref_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "blob_content_type",
+        "description": "Output field receiving the normalized response Content-Type.",
+        "kind": "text",
+        "label": "Content Type Field",
+        "name": "content_type_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "blob_size_bytes",
+        "description": "Output field receiving the response body size.",
+        "kind": "text",
+        "label": "Size Bytes Field",
+        "name": "size_bytes_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "blob_sha256",
+        "description": "Output field receiving the response body SHA-256 hex digest.",
+        "kind": "text",
+        "label": "Sha256 Field",
+        "name": "sha256_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "fetch_status",
+        "description": "Output field receiving the HTTP status code.",
+        "kind": "text",
+        "label": "Fetch Status Field",
+        "name": "fetch_status_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "fetch_url_final",
+        "description": "Output field receiving the final logical URL after redirects.",
+        "kind": "text",
+        "label": "Fetch URL Final Field",
+        "name": "fetch_url_final_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "fetch_url_final_ip",
+        "description": "Output field receiving the final resolved IP.",
+        "kind": "text",
+        "label": "Fetch URL Final Ip Field",
+        "name": "fetch_url_final_ip_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": [
+          "text/csv",
+          "application/csv",
+          "application/vnd.ms-excel",
+          "text/plain",
+          "application/json",
+          "application/jsonl",
+          "application/x-jsonlines",
+          "application/x-ndjson",
+          "text/jsonl",
+          "application/xml",
+          "text/xml"
+        ],
+        "description": "Exact normalized response Content-Type values accepted for storage.",
+        "kind": "json-value",
+        "label": "Allowed Content Types",
+        "name": "allowed_content_types",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "HTTP fetching policy, timeout, contact, and host allowlist settings.",
+        "kind": "json-object",
+        "label": "HTTP",
+        "name": "http",
+        "nullable": false,
+        "required": true
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "blob_fetch"
+}

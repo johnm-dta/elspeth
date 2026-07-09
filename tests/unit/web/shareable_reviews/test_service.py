@@ -27,15 +27,16 @@ content-addressing covers the readiness fingerprint.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import json
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+import yaml
 from sqlalchemy import select, text
 
 from elspeth.contracts.payload_store import PayloadNotFoundError
@@ -127,6 +128,66 @@ class _StateRecord:
 class _SessionRecord:
     id: UUID
     user_id: str
+
+
+@dataclass(slots=True)
+class _FakeSessionService:
+    current_state: _StateRecord | None
+    session: _SessionRecord | None
+    get_current_state_await_count: int = 0
+    get_session_await_count: int = 0
+
+    async def get_current_state(self, session_id: UUID) -> _StateRecord | None:
+        self.get_current_state_await_count += 1
+        return self.current_state
+
+    async def get_session(self, session_id: UUID) -> _SessionRecord | None:
+        self.get_session_await_count += 1
+        return self.session
+
+
+@dataclass(slots=True)
+class _FakeExecutionService:
+    validation: ValidationResult
+    validate_await_count: int = 0
+    validate_state_await_count: int = 0
+    # Session ids received by validate_state, in call order. The share gate
+    # must thread the owning session id so the session-scoped sink allowlist
+    # (blobs/<session_id>/) matches /validate and /execute.
+    validate_state_session_ids: list[UUID | None] = field(default_factory=list)
+
+    async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult:
+        self.validate_await_count += 1
+        return self.validation
+
+    async def validate_state(
+        self,
+        state: Any,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> ValidationResult:
+        self.validate_state_await_count += 1
+        self.validate_state_session_ids.append(session_id)
+        return self.validation
+
+
+@dataclass(slots=True)
+class _FakeReadinessService:
+    snapshot: AuditReadinessSnapshot
+    compute_snapshot_await_count: int = 0
+
+    async def compute_snapshot(self, *, session_id: UUID, user_id: str) -> AuditReadinessSnapshot:
+        self.compute_snapshot_await_count += 1
+        return self.snapshot
+
+    def reset_counts(self) -> None:
+        self.compute_snapshot_await_count = 0
+
+
+@dataclass(slots=True)
+class _FakeSettings:
+    shareable_link_lifetime_seconds: int = 30 * 24 * 3600
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -301,20 +362,11 @@ def _build_service(
     state_record: _StateRecord,
     validation: ValidationResult,
     readiness: AuditReadinessSnapshot,
-) -> tuple[ShareableReviewService, MagicMock, MagicMock, MagicMock]:
-    session_service = MagicMock()
-    session_service.get_current_state = AsyncMock(return_value=state_record)
-    session_service.get_session = AsyncMock(return_value=session_record)
-
-    execution_service = MagicMock()
-    execution_service.validate = AsyncMock(return_value=validation)
-    execution_service.validate_state = AsyncMock(return_value=validation)
-
-    readiness_service = MagicMock()
-    readiness_service.compute_snapshot = AsyncMock(return_value=readiness)
-
-    settings = MagicMock()
-    settings.shareable_link_lifetime_seconds = 30 * 24 * 3600
+) -> tuple[ShareableReviewService, _FakeSessionService, _FakeExecutionService, _FakeReadinessService]:
+    session_service = _FakeSessionService(current_state=state_record, session=session_record)
+    execution_service = _FakeExecutionService(validation=validation)
+    readiness_service = _FakeReadinessService(snapshot=readiness)
+    settings = _FakeSettings()
 
     # Phase 8 Sub-task 7c — the constructor now requires a telemetry
     # container. Build a fresh fake-counter container per service
@@ -378,6 +430,88 @@ async def test_mark_ready_for_review_happy_path(
     payload = signer.verify(response.token)
     assert payload.session_id == session_record.id
     assert payload.payload_digest == response.payload_digest
+
+
+@pytest.mark.asyncio
+async def test_mark_ready_for_review_passes_session_id_to_validation(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    """validate_state must receive the owning session id.
+
+    The sink path allowlist is session-scoped (blobs/<session_id>/, see
+    elspeth-bdc17cfdb1): validating with session_id=None fails closed to
+    outputs-only and rejects a state whose sink writes to the session's own
+    blob subtree — a state /validate and /execute both accept.
+    """
+    snapshot = _readiness_snapshot(session_record.id)
+    service, _, execution_service, _ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=snapshot,
+    )
+    await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+    assert execution_service.validate_state_session_ids == [session_record.id]
+
+
+@pytest.mark.asyncio
+async def test_mark_ready_for_review_yaml_strips_blob_bound_source_storage_path(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    storage_path = "/data/blobs/session/98b1357d_contact_form_submissions.csv"
+    blob_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
+    blob_state_record = replace(
+        state_record,
+        source={
+            "plugin": "csv",
+            "on_success": "main",
+            "options": {
+                "path": storage_path,
+                "blob_ref": blob_id,
+                "mode": "bind_source",
+                "schema": {"mode": "observed"},
+            },
+            "on_validation_failure": "quarantine",
+        },
+        outputs=[
+            {
+                "name": "main",
+                "plugin": "csv",
+                "options": {"path": "outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            }
+        ],
+    )
+    service, *_ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=blob_state_record,
+        validation=_ok_validation(),
+        readiness=_readiness_snapshot(session_record.id),
+    )
+
+    response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+
+    payload = json.loads(payload_store.retrieve(response.payload_digest.removeprefix("sha256:")).decode("utf-8"))
+    assert storage_path not in payload["yaml"]
+    options = yaml.safe_load(payload["yaml"])["sources"]["source"]["options"]
+    assert "path" not in options
+    assert "blob_ref" not in options
+    assert "mode" not in options
+    assert options["schema"] == {"mode": "observed"}
 
 
 @pytest.mark.asyncio
@@ -541,7 +675,7 @@ async def test_get_shareable_link_rejects_state_drift_even_when_digest_matches(
     await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
 
     drifted_state = replace(state_record, id=uuid4())
-    session_service.get_current_state = AsyncMock(return_value=drifted_state)
+    session_service.current_state = drifted_state
 
     with pytest.raises(CompositionNotRunnableError) as exc_info:
         await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
@@ -644,8 +778,8 @@ async def test_get_shareable_link_requires_mark_ready_event(
     with pytest.raises(CompositionNotRunnableError, match="mark this composition ready"):
         await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
 
-    execution_service.validate_state.assert_not_awaited()
-    readiness_service.compute_snapshot.assert_not_awaited()
+    assert execution_service.validate_state_await_count == 0
+    assert readiness_service.compute_snapshot_await_count == 0
 
 
 @pytest.mark.asyncio
@@ -690,15 +824,16 @@ async def test_resolve_token_returns_frozen_snapshot(
         readiness=mark_time_snapshot,
     )
     response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
-    # Mutate the readiness mock so a re-fetch would return a different snapshot.
+    # Mutate the readiness fake so a re-fetch would return a different snapshot.
     later_snapshot = _readiness_snapshot(session_record.id, version=99)
-    readiness_service.compute_snapshot = AsyncMock(return_value=later_snapshot)
+    readiness_service.snapshot = later_snapshot
+    readiness_service.reset_counts()
 
     resolved = await service.resolve_token(token=response.token, requesting_user_id="bob")
     # Frozen-at-mark-time: composition_version reflects the mark-time view, not the later one.
     assert resolved.audit_readiness.composition_version == 3
     # The readiness service was NOT called during resolve.
-    assert readiness_service.compute_snapshot.call_count == 0
+    assert readiness_service.compute_snapshot_await_count == 0
 
 
 @pytest.mark.asyncio
@@ -796,6 +931,6 @@ async def test_resolve_token_does_not_call_readiness_service(
         readiness=snapshot,
     )
     response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
-    readiness_service.compute_snapshot.reset_mock()
+    readiness_service.reset_counts()
     await service.resolve_token(token=response.token, requesting_user_id="bob")
-    assert readiness_service.compute_snapshot.call_count == 0
+    assert readiness_service.compute_snapshot_await_count == 0

@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import RunStatus
 from elspeth.contracts.payload_store import PayloadStore
+from elspeth.core.landscape.model_loaders import validate_run_lifecycle_row
 from elspeth.core.landscape.reproducibility import update_grade_after_purge
 from elspeth.core.landscape.schema import (
     calls_table,
@@ -26,6 +27,7 @@ from elspeth.core.landscape.schema import (
     routing_events_table,
     rows_table,
     runs_table,
+    tokens_table,
 )
 
 if TYPE_CHECKING:
@@ -97,16 +99,7 @@ class PurgeManager:
                     f"Invalid run status '{row.status}' for run {row.run_id} — expected one of {[status.value for status in RunStatus]}"
                 ) from exc
 
-            if status == RunStatus.RUNNING and row.completed_at is not None:
-                raise contract_errors.AuditIntegrityError(
-                    f"Run {row.run_id} has status='running' but completed_at is set — "
-                    f"audit integrity violation (running runs must not have completed_at)"
-                )
-            if status == RunStatus.COMPLETED and row.completed_at is None:
-                raise contract_errors.AuditIntegrityError(
-                    f"Run {row.run_id} has status='completed' but completed_at is NULL — "
-                    f"audit integrity violation (completed runs must have completed_at)"
-                )
+            validate_run_lifecycle_row(row.run_id, status, row.completed_at)
 
     def _build_ref_union_query(
         self,
@@ -117,8 +110,9 @@ class PurgeManager:
         call_state_join: FromClause,
         call_op_join: FromClause,
         routing_join: FromClause,
+        token_join: FromClause,
     ) -> CompoundSelect[Any]:
-        """Build a UNION of all 8 payload ref sub-queries for a given run condition.
+        """Build a UNION of all payload ref sub-queries for a given run condition.
 
         Each sub-query selects a single ref column from a different table/join,
         filtered by the run condition and a NOT NULL guard on the ref column.
@@ -131,9 +125,10 @@ class PurgeManager:
             call_state_join: Pre-built join for calls → node_states → runs
             call_op_join: Pre-built join for calls → operations → runs
             routing_join: Pre-built join for routing_events → node_states → runs
+            token_join: Pre-built join for tokens → runs
 
         Returns:
-            UNION of all 8 sub-queries
+            UNION of all payload-ref sub-queries
         """
         return union(
             # 1. Row payloads
@@ -164,6 +159,10 @@ class PurgeManager:
             select(routing_events_table.c.reason_ref)
             .select_from(routing_join)
             .where(and_(run_condition, routing_events_table.c.reason_ref.isnot(None))),
+            # 9. Token payloads (expand/coalesce per-token row data)
+            select(tokens_table.c.token_data_ref)
+            .select_from(token_join)
+            .where(and_(run_condition, tokens_table.c.token_data_ref.isnot(None))),
         )
 
     def find_expired_payload_refs(
@@ -178,6 +177,7 @@ class PurgeManager:
         - operations.input_data_ref and operations.output_data_ref (source/sink operation payloads)
         - calls.request_ref and calls.response_ref (external call payloads)
         - routing_events.reason_ref (routing reason payloads)
+        - tokens.token_data_ref (expand/coalesce token payloads)
 
         IMPORTANT: Because payloads are content-addressable, the same hash can
         appear in multiple runs. We must exclude refs that are still used by
@@ -232,6 +232,7 @@ class PurgeManager:
         routing_join = routing_events_table.join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id).join(
             runs_table, node_states_table.c.run_id == runs_table.c.run_id
         )
+        token_join = tokens_table.join(runs_table, tokens_table.c.run_id == runs_table.c.run_id)
 
         expired_refs_query = self._build_ref_union_query(
             run_expired_condition,
@@ -240,6 +241,7 @@ class PurgeManager:
             call_state_join=call_state_join,
             call_op_join=call_op_join,
             routing_join=routing_join,
+            token_join=token_join,
         )
         active_refs_query = self._build_ref_union_query(
             run_active_condition,
@@ -248,6 +250,7 @@ class PurgeManager:
             call_state_join=call_state_join,
             call_op_join=call_op_join,
             routing_join=routing_join,
+            token_join=token_join,
         )
 
         # === Execute both queries and compute set difference ===
@@ -343,6 +346,9 @@ class PurgeManager:
             select(node_states_table.c.run_id).distinct().select_from(routing_join).where(routing_events_table.c.reason_ref.in_(refs_chunk))
         )
 
+        # 6. From tokens.token_data_ref (expand/coalesce per-token row data)
+        token_runs_query = select(tokens_table.c.run_id).distinct().where(tokens_table.c.token_data_ref.in_(refs_chunk))
+
         # Union all run_id queries
         all_runs_query = union(
             row_runs_query,
@@ -353,6 +359,7 @@ class PurgeManager:
             call_op_request_runs_query,
             call_op_response_runs_query,
             routing_runs_query,
+            token_runs_query,
         )
 
         with self._db.connection() as conn:

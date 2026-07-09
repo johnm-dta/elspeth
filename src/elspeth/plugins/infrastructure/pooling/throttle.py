@@ -100,14 +100,20 @@ class AIMDThrottle:
         """Record capacity error - multiply delay (thread-safe).
 
         If current delay is 0, bootstraps to max(recovery_step_ms, min_dispatch_delay_ms)
-        to honor the configured minimum. Otherwise multiplies by backoff_multiplier, capped at max.
+        to honor the configured minimum. At the configured floor, applies the
+        larger of bootstrap and multiplicative backoff so repeated errors do not
+        stick at min_dispatch_delay_ms. Otherwise multiplies by backoff_multiplier,
+        capped at max.
         """
         with self._lock:
-            if self._current_delay_ms <= self._config.min_dispatch_delay_ms:
-                # Bootstrap: at baseline (zero or min floor), start backoff from
-                # recovery_step_ms. Uses max() to honor min_dispatch_delay_ms
-                # even if recovery_step_ms is smaller.
-                self._current_delay_ms = float(max(self._config.recovery_step_ms, self._config.min_dispatch_delay_ms))
+            bootstrap_delay_ms = float(max(self._config.recovery_step_ms, self._config.min_dispatch_delay_ms))
+            if self._current_delay_ms == 0:
+                self._current_delay_ms = bootstrap_delay_ms
+            elif self._current_delay_ms <= self._config.min_dispatch_delay_ms:
+                self._current_delay_ms = max(
+                    bootstrap_delay_ms,
+                    self._current_delay_ms * self._config.backoff_multiplier,
+                )
             else:
                 # Multiplicative increase
                 self._current_delay_ms *= self._config.backoff_multiplier

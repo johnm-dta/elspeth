@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
+from unittest.mock import patch
 
 import pytest
 
@@ -16,6 +19,54 @@ from elspeth.telemetry.factory import (
 )
 from elspeth.telemetry.hookspecs import hookimpl
 from elspeth.telemetry.manager import TelemetryManager
+
+
+@dataclass
+class _RecordingExporter:
+    _name: ClassVar[str] = "recording_exporter"
+    _configure_label: ClassVar[str | None] = None
+    _configure_order: ClassVar[list[str] | None] = None
+    instances: ClassVar[list[_RecordingExporter]] = []
+
+    configured_with: list[Mapping[str, Any]] = field(default_factory=list)
+
+    @property
+    def name(self) -> str:
+        return type(self)._name
+
+    def __post_init__(self) -> None:
+        type(self).instances.append(self)
+
+    def configure(self, config: Mapping[str, Any]) -> None:
+        self.configured_with.append(config)
+        label = type(self)._configure_label
+        order = type(self)._configure_order
+        if label is not None and order is not None:
+            order.append(label)
+
+    def export(self, event: object) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _make_recording_exporter_class(
+    name: str,
+    *,
+    configure_label: str | None = None,
+    configure_order: list[str] | None = None,
+) -> type[_RecordingExporter]:
+    class RecordingExporterClass(_RecordingExporter):
+        _name: ClassVar[str] = name
+        _configure_label: ClassVar[str | None] = configure_label
+        _configure_order: ClassVar[list[str] | None] = configure_order
+        instances: ClassVar[list[_RecordingExporter]] = []
+
+    return RecordingExporterClass
 
 
 def _make_config(
@@ -52,7 +103,7 @@ class TestCreateTelemetryManagerDisabled:
             enabled=False,
             exporter_configs=(ExporterConfig(name="console", options={}),),
         )
-        with patch("elspeth.telemetry.factory._discover_exporter_registry") as mock_discover:
+        with patch("elspeth.telemetry.factory._discover_exporter_registry", autospec=True) as mock_discover:
             result = create_telemetry_manager(config)
             assert result is None
             mock_discover.assert_not_called()
@@ -96,11 +147,14 @@ class TestCreateTelemetryManagerEnabled:
                 manager.close()
 
     def test_exporter_configure_called_with_options(self):
-        mock_exporter = MagicMock()
-        mock_class = MagicMock(return_value=mock_exporter)
+        exporter_class = _make_recording_exporter_class("mock_exp")
         options = {"endpoint": "http://localhost:4317"}
 
-        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
+        with patch(
+            "elspeth.telemetry.factory._discover_exporter_registry",
+            autospec=True,
+            return_value={"mock_exp": exporter_class},
+        ):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options=options),),
@@ -108,17 +162,20 @@ class TestCreateTelemetryManagerEnabled:
             manager = create_telemetry_manager(config)
             try:
                 assert manager is not None
-                mock_class.assert_called_once()
-                mock_exporter.configure.assert_called_once_with(options)
+                assert len(exporter_class.instances) == 1
+                assert exporter_class.instances[0].configured_with == [options]
             finally:
                 if manager is not None:
                     manager.close()
 
     def test_exporter_configure_called_with_empty_options(self):
-        mock_exporter = MagicMock()
-        mock_class = MagicMock(return_value=mock_exporter)
+        exporter_class = _make_recording_exporter_class("mock_exp")
 
-        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
+        with patch(
+            "elspeth.telemetry.factory._discover_exporter_registry",
+            autospec=True,
+            return_value={"mock_exp": exporter_class},
+        ):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options={}),),
@@ -126,20 +183,20 @@ class TestCreateTelemetryManagerEnabled:
             manager = create_telemetry_manager(config)
             try:
                 assert manager is not None
-                mock_exporter.configure.assert_called_once_with({})
+                assert len(exporter_class.instances) == 1
+                assert exporter_class.instances[0].configured_with == [{}]
             finally:
                 if manager is not None:
                     manager.close()
 
     def test_multiple_exporters_all_configured(self):
-        mock_exporter_a = MagicMock()
-        mock_class_a = MagicMock(return_value=mock_exporter_a)
-        mock_exporter_b = MagicMock()
-        mock_class_b = MagicMock(return_value=mock_exporter_b)
+        exporter_class_a = _make_recording_exporter_class("exp_a")
+        exporter_class_b = _make_recording_exporter_class("exp_b")
 
         with patch(
             "elspeth.telemetry.factory._discover_exporter_registry",
-            return_value={"exp_a": mock_class_a, "exp_b": mock_class_b},
+            autospec=True,
+            return_value={"exp_a": exporter_class_a, "exp_b": exporter_class_b},
         ):
             config = _make_config(
                 enabled=True,
@@ -151,29 +208,28 @@ class TestCreateTelemetryManagerEnabled:
             manager = create_telemetry_manager(config)
             try:
                 assert manager is not None
-                mock_class_a.assert_called_once()
-                mock_class_b.assert_called_once()
-                mock_exporter_a.configure.assert_called_once_with({"key": "val_a"})
-                mock_exporter_b.configure.assert_called_once_with({"key": "val_b"})
+                assert len(exporter_class_a.instances) == 1
+                assert len(exporter_class_b.instances) == 1
+                assert exporter_class_a.instances[0].configured_with == [{"key": "val_a"}]
+                assert exporter_class_b.instances[0].configured_with == [{"key": "val_b"}]
             finally:
                 if manager is not None:
                     manager.close()
 
     def test_exporters_instantiated_in_order(self):
         call_order: list[str] = []
-
-        def make_mock(label: str) -> MagicMock:
-            mock = MagicMock()
-            mock.configure.side_effect = lambda _opts: call_order.append(label)
-            return mock
-
-        mock_a = make_mock("first")
-        mock_b = make_mock("second")
-        mock_c = make_mock("third")
+        exporter_class_a = _make_recording_exporter_class("ea", configure_label="first", configure_order=call_order)
+        exporter_class_b = _make_recording_exporter_class("eb", configure_label="second", configure_order=call_order)
+        exporter_class_c = _make_recording_exporter_class("ec", configure_label="third", configure_order=call_order)
 
         with patch(
             "elspeth.telemetry.factory._discover_exporter_registry",
-            return_value={"ea": MagicMock(return_value=mock_a), "eb": MagicMock(return_value=mock_b), "ec": MagicMock(return_value=mock_c)},
+            autospec=True,
+            return_value={
+                "ea": exporter_class_a,
+                "eb": exporter_class_b,
+                "ec": exporter_class_c,
+            },
         ):
             config = _make_config(
                 enabled=True,
@@ -191,10 +247,13 @@ class TestCreateTelemetryManagerEnabled:
                     manager.close()
 
     def test_returned_manager_receives_config(self):
-        mock_exporter = MagicMock()
-        mock_class = MagicMock(return_value=mock_exporter)
+        exporter_class = _make_recording_exporter_class("mock_exp")
 
-        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
+        with patch(
+            "elspeth.telemetry.factory._discover_exporter_registry",
+            autospec=True,
+            return_value={"mock_exp": exporter_class},
+        ):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options={}),),
@@ -208,10 +267,13 @@ class TestCreateTelemetryManagerEnabled:
                     manager.close()
 
     def test_returned_manager_receives_exporters_list(self):
-        mock_exporter = MagicMock()
-        mock_class = MagicMock(return_value=mock_exporter)
+        exporter_class = _make_recording_exporter_class("mock_exp")
 
-        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
+        with patch(
+            "elspeth.telemetry.factory._discover_exporter_registry",
+            autospec=True,
+            return_value={"mock_exp": exporter_class},
+        ):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options={}),),
@@ -220,7 +282,7 @@ class TestCreateTelemetryManagerEnabled:
             try:
                 assert manager is not None
                 assert len(manager._exporters) == 1
-                assert manager._exporters[0] is mock_exporter
+                assert manager._exporters[0] is exporter_class.instances[0]
             finally:
                 if manager is not None:
                     manager.close()

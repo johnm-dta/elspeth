@@ -1,12 +1,19 @@
 """Checkpoint compatibility validation for resume operations.
 
 Validates that a checkpoint can be safely resumed with the current
-pipeline configuration by checking topological compatibility.
+pipeline configuration by checking checkpoint format and topological
+compatibility.
 """
 
 from elspeth.contracts import Checkpoint, ResumeCheck
 from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.dag import ExecutionGraph
+
+
+class IncompatibleCheckpointError(Exception):
+    """Raised when attempting to resume from an incompatible checkpoint."""
+
+    pass
 
 
 class CheckpointCompatibilityValidator:
@@ -15,12 +22,13 @@ class CheckpointCompatibilityValidator:
     Separates topology validation logic from RecoveryManager's concern
     of "can this run be resumed?" (status checks, checkpoint existence).
 
-    A checkpoint is compatible iff the FULL topology (ALL nodes + edges)
-    is unchanged. The full-topology hash embeds every node's id, plugin,
-    type, and config hash, so node-removal and node-config drift are
-    detected by the single hash comparison (the former per-anchor-node
-    existence/config checks were strictly subsumed by it and were deleted
-    with the token/node checkpoint anchor, F2 2026-06-10).
+    A checkpoint is compatible iff the format version matches exactly and
+    the FULL topology (ALL nodes + edges) is unchanged. The full-topology
+    hash embeds every node's id, plugin, type, and config hash, so
+    node-removal and node-config drift are detected by the single hash
+    comparison (the former per-anchor-node existence/config checks were
+    strictly subsumed by it and were deleted with the token/node checkpoint
+    anchor, F2 2026-06-10).
 
     In multi-sink DAGs, upstream-only validation allowed changes to sibling
     branches (other sink paths) to go undetected, causing a single run to
@@ -45,16 +53,55 @@ class CheckpointCompatibilityValidator:
             ResumeCheck with can_resume=True if compatible,
             or can_resume=False with specific reason if not.
         """
+        format_check = self.validate_format_version(checkpoint)
+        if not format_check.can_resume:
+            return format_check
+
         # FULL topology (ALL nodes + edges + per-node config hashes) must be
         # unchanged. Validate the entire DAG; this catches node removal,
         # node-config drift, and changes to sibling branches in multi-sink DAGs.
         current_topology_hash = self.compute_full_topology_hash(current_graph)
+        checkpoint_topology_hash = checkpoint.full_topology_hash
 
-        if checkpoint.upstream_topology_hash != current_topology_hash:
+        if checkpoint_topology_hash != current_topology_hash:
             # Provide detailed diagnostic
-            return self._create_topology_mismatch_error(checkpoint, current_graph, checkpoint.upstream_topology_hash, current_topology_hash)
+            return self._create_topology_mismatch_error(
+                checkpoint,
+                current_graph,
+                checkpoint_topology_hash,
+                current_topology_hash,
+            )
 
         # All validations passed
+        return ResumeCheck(can_resume=True)
+
+    def validate_format_version(
+        self,
+        checkpoint: Checkpoint,
+    ) -> ResumeCheck:
+        """Validate checkpoint format compatibility for resume.
+
+        Cross-version resume is unsupported in both directions: older
+        checkpoints may reference obsolete resume state, and newer checkpoints
+        may carry state this runtime cannot interpret.
+        """
+        if checkpoint.format_version is None:
+            return ResumeCheck(
+                can_resume=False,
+                reason=f"Checkpoint '{checkpoint.checkpoint_id}' is missing format_version. "
+                "Resume not supported for unversioned checkpoints. "
+                "Please restart pipeline from beginning.",
+            )
+
+        if checkpoint.format_version != Checkpoint.CURRENT_FORMAT_VERSION:
+            return ResumeCheck(
+                can_resume=False,
+                reason=f"Checkpoint '{checkpoint.checkpoint_id}' has incompatible format version "
+                f"(checkpoint: v{checkpoint.format_version}, current: v{Checkpoint.CURRENT_FORMAT_VERSION}). "
+                "Resume requires exact format version match. "
+                "Please restart pipeline from beginning.",
+            )
+
         return ResumeCheck(can_resume=True)
 
     def compute_full_topology_hash(

@@ -55,9 +55,12 @@ def _accounting() -> RunAccounting:
 
 
 class TestCreateSessionRequest:
-    def test_default_title(self) -> None:
+    def test_default_title_is_none_for_server_side_minting(self) -> None:
+        # No client-side default: the route mints the app-wide
+        # "Session — <date>" default when title is omitted
+        # (elspeth-ef8c18a6cb — one naming convention, server-side).
         req = CreateSessionRequest()
-        assert req.title == "New session"
+        assert req.title is None
 
     def test_custom_title(self) -> None:
         req = CreateSessionRequest(title="My pipeline")
@@ -447,3 +450,35 @@ class TestSessionResponseHappyPath:
         assert resp.validation_errors == ["boom"]
         assert resp.validation_warnings is not None
         assert resp.validation_warnings[0].component == "c"
+
+
+def test_workflow_profile_response_wire_subset_and_strict() -> None:
+    from elspeth.web.sessions.schemas import WorkflowProfileResponse
+
+    model = WorkflowProfileResponse(coaching=True, bookends=True, recipe_match=True, advisor_checkpoints=True)
+    dumped = model.model_dump()
+    assert set(dumped.keys()) == {
+        "coaching",
+        "bookends",
+        "recipe_match",
+        "advisor_checkpoints",
+    }
+
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        WorkflowProfileResponse(
+            coaching=True,
+            bookends=True,
+            recipe_match=True,
+            advisor_checkpoints=True,
+            injected="leak",
+        )
+
+    with pytest.raises(pydantic.ValidationError):
+        WorkflowProfileResponse(
+            coaching="yes",
+            bookends=True,
+            recipe_match=True,
+            advisor_checkpoints=True,
+        )

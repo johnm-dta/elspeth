@@ -13,8 +13,11 @@ Note: The Azure Monitor SDK is an optional dependency. These tests mock the SDK
 import inside configure() to allow running without installing the package.
 """
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from types import ModuleType
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 from opentelemetry.sdk.trace.export import SpanExportResult
@@ -30,8 +33,42 @@ from elspeth.telemetry.errors import TelemetryExporterError
 from elspeth.telemetry.exporters.azure_monitor import AzureMonitorExporter
 
 
+@dataclass
+class AzureMonitorTraceExporterStub:
+    """Small Azure SDK exporter fake with explicit call recording."""
+
+    export_result: SpanExportResult | None = None
+    export_error: BaseException | None = None
+    shutdown_error: BaseException | None = None
+    export_calls: list[list[Any]] = field(default_factory=list)
+    shutdown_call_count: int = 0
+
+    def export(self, spans: list[Any]) -> SpanExportResult | None:
+        self.export_calls.append(spans)
+        if self.export_error is not None:
+            raise self.export_error
+        return self.export_result
+
+    def shutdown(self) -> None:
+        self.shutdown_call_count += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
+@dataclass
+class AzureMonitorTraceExporterFactory:
+    """Callable replacement for AzureMonitorTraceExporter."""
+
+    instance: AzureMonitorTraceExporterStub = field(default_factory=AzureMonitorTraceExporterStub)
+    constructor_kwargs: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(self, **kwargs: Any) -> AzureMonitorTraceExporterStub:
+        self.constructor_kwargs.append(kwargs)
+        return self.instance
+
+
 @pytest.fixture
-def mock_azure_exporter():
+def azure_monitor_trace_exporter() -> AzureMonitorTraceExporterFactory:
     """Fixture that mocks the Azure Monitor SDK import inside configure().
 
     Uses patch on the specific import location rather than polluting sys.modules.
@@ -41,19 +78,16 @@ def mock_azure_exporter():
     Note: We don't mock the OpenTelemetry SDK (Resource, TracerProvider) because
     they are required to test the proper creation of resource attributes.
     """
-    mock_exporter_class = MagicMock()
-    mock_instance = MagicMock()
-    mock_exporter_class.return_value = mock_instance
+    exporter_factory = AzureMonitorTraceExporterFactory()
+    exporter_module = ModuleType("azure.monitor.opentelemetry.exporter")
+    exporter_module.AzureMonitorTraceExporter = exporter_factory
 
     # Patch the import inside configure() - this is where the SDK is actually imported
     with patch.dict(
         "sys.modules",
-        {"azure.monitor.opentelemetry.exporter": MagicMock(AzureMonitorTraceExporter=mock_exporter_class)},
+        {"azure.monitor.opentelemetry.exporter": exporter_module},
     ):
-        yield {
-            "class": mock_exporter_class,
-            "instance": mock_instance,
-        }
+        yield exporter_factory
 
 
 _VALID_CONFIG: dict[str, object] = {
@@ -63,7 +97,7 @@ _VALID_CONFIG: dict[str, object] = {
 
 
 @pytest.fixture
-def configured_exporter(mock_azure_exporter):
+def configured_exporter(azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> AzureMonitorExporter:
     """Create a configured exporter with mocked Azure SDK."""
     exporter = AzureMonitorExporter()
     exporter.configure(dict(_VALID_CONFIG))
@@ -127,48 +161,48 @@ class TestAzureMonitorExporterConfiguration:
             exporter.configure({**_VALID_CONFIG, "connection_string": "test", "batch_size": 0})
         assert "must be >= 1" in str(exc_info.value)
 
-    def test_configure_success_with_valid_config(self, mock_azure_exporter) -> None:
+    def test_configure_success_with_valid_config(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """Configuration succeeds with valid connection_string."""
         exporter = AzureMonitorExporter()
         exporter.configure(dict(_VALID_CONFIG))
 
-        mock_azure_exporter["class"].assert_called_once()
+        assert len(azure_monitor_trace_exporter.constructor_kwargs) == 1
         assert exporter._configured is True
 
-    def test_configure_passes_connection_string_to_sdk(self, mock_azure_exporter) -> None:
+    def test_configure_passes_connection_string_to_sdk(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """Connection string and tracer_provider are passed to Azure SDK."""
         exporter = AzureMonitorExporter()
         exporter.configure({**_VALID_CONFIG, "connection_string": "InstrumentationKey=my-key-123"})
 
         # Verify connection_string was passed
-        call_kwargs = mock_azure_exporter["class"].call_args.kwargs
+        call_kwargs = azure_monitor_trace_exporter.constructor_kwargs[0]
         assert call_kwargs["connection_string"] == "InstrumentationKey=my-key-123"
         # Verify tracer_provider was passed (fixes ProxyTracerProvider bug)
         assert "tracer_provider" in call_kwargs
         assert call_kwargs["tracer_provider"] is not None
 
-    def test_configure_validates_service_name_type(self, mock_azure_exporter) -> None:
+    def test_configure_validates_service_name_type(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """service_name must be a string if provided."""
         exporter = AzureMonitorExporter()
         with pytest.raises(TelemetryExporterError) as exc_info:
             exporter.configure({**_VALID_CONFIG, "connection_string": "test", "service_name": 123})
         assert "'service_name' must be a string" in str(exc_info.value)
 
-    def test_configure_validates_service_version_type(self, mock_azure_exporter) -> None:
+    def test_configure_validates_service_version_type(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """service_version must be a string or None if provided."""
         exporter = AzureMonitorExporter()
         with pytest.raises(TelemetryExporterError) as exc_info:
             exporter.configure({**_VALID_CONFIG, "connection_string": "test", "service_version": 123})
         assert "'service_version' must be a string or null" in str(exc_info.value)
 
-    def test_configure_validates_deployment_environment_type(self, mock_azure_exporter) -> None:
+    def test_configure_validates_deployment_environment_type(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """deployment_environment must be a string or None if provided."""
         exporter = AzureMonitorExporter()
         with pytest.raises(TelemetryExporterError) as exc_info:
             exporter.configure({**_VALID_CONFIG, "connection_string": "test", "deployment_environment": 123})
         assert "'deployment_environment' must be a string or null" in str(exc_info.value)
 
-    def test_configure_with_service_metadata(self, mock_azure_exporter) -> None:
+    def test_configure_with_service_metadata(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """Service metadata is passed to TracerProvider resource."""
         from opentelemetry.sdk.resources import SERVICE_NAME
         from opentelemetry.sdk.trace import TracerProvider
@@ -184,7 +218,7 @@ class TestAzureMonitorExporterConfiguration:
         )
 
         # Verify tracer_provider was passed with correct resource
-        call_kwargs = mock_azure_exporter["class"].call_args.kwargs
+        call_kwargs = azure_monitor_trace_exporter.constructor_kwargs[0]
         tracer_provider = call_kwargs["tracer_provider"]
         assert isinstance(tracer_provider, TracerProvider)
 
@@ -204,16 +238,20 @@ class TestAzureMonitorExporterConfiguration:
 class TestAzureMonitorExporterBuffering:
     """Tests for event buffering behavior."""
 
-    def test_export_buffers_events(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_export_buffers_events(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """Events are buffered until batch_size is reached."""
         event = make_run_started()
         configured_exporter.export(event)
 
         # Should be buffered, not exported yet
-        mock_azure_exporter["instance"].export.assert_not_called()
+        assert azure_monitor_trace_exporter.instance.export_calls == []
         assert len(configured_exporter._buffer) == 1
 
-    def test_export_flushes_at_batch_size(self, mock_azure_exporter) -> None:
+    def test_export_flushes_at_batch_size(self, azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory) -> None:
         """Buffer is flushed when batch_size is reached."""
         exporter = AzureMonitorExporter()
         exporter.configure(
@@ -227,24 +265,28 @@ class TestAzureMonitorExporterBuffering:
         event2 = make_run_finished()
 
         exporter.export(event1)
-        mock_azure_exporter["instance"].export.assert_not_called()
+        assert azure_monitor_trace_exporter.instance.export_calls == []
 
         exporter.export(event2)
-        mock_azure_exporter["instance"].export.assert_called_once()
+        assert len(azure_monitor_trace_exporter.instance.export_calls) == 1
         assert len(exporter._buffer) == 0
 
 
 class TestAzureMonitorExporterSpanConversion:
     """Tests for event-to-span conversion."""
 
-    def test_span_includes_azure_attributes(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_span_includes_azure_attributes(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """Spans include Azure-specific attributes."""
         event = make_run_started()
         configured_exporter._buffer.append(event)
         configured_exporter._flush_batch()
 
-        mock_azure_exporter["instance"].export.assert_called_once()
-        spans = mock_azure_exporter["instance"].export.call_args[0][0]
+        assert len(azure_monitor_trace_exporter.instance.export_calls) == 1
+        spans = azure_monitor_trace_exporter.instance.export_calls[0]
         assert len(spans) == 1
 
         # Check Azure-specific attributes
@@ -252,7 +294,11 @@ class TestAzureMonitorExporterSpanConversion:
         assert span.attributes.get("cloud.provider") == "azure"
         assert span.attributes.get("elspeth.exporter") == "azure_monitor"
 
-    def test_datetime_serialized_as_iso8601(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_datetime_serialized_as_iso8601(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """Datetime fields are serialized as ISO 8601 strings."""
         timestamp = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
         event = RunStarted(
@@ -265,34 +311,46 @@ class TestAzureMonitorExporterSpanConversion:
         configured_exporter._buffer.append(event)
         configured_exporter._flush_batch()
 
-        spans = mock_azure_exporter["instance"].export.call_args[0][0]
+        spans = azure_monitor_trace_exporter.instance.export_calls[0]
         assert spans[0].attributes.get("timestamp") == "2024-01-15T10:30:00+00:00"
 
-    def test_enum_serialized_as_value(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_enum_serialized_as_value(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """Enum fields are serialized as their values."""
         event = make_run_finished()
         configured_exporter._buffer.append(event)
         configured_exporter._flush_batch()
 
-        spans = mock_azure_exporter["instance"].export.call_args[0][0]
+        spans = azure_monitor_trace_exporter.instance.export_calls[0]
         assert spans[0].attributes.get("status") == "completed"
 
 
 class TestAzureMonitorExporterLifecycle:
     """Tests for flush and close lifecycle."""
 
-    def test_flush_exports_remaining_buffer(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_flush_exports_remaining_buffer(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """flush() exports any buffered events."""
         event = make_run_started()
         configured_exporter.export(event)
-        mock_azure_exporter["instance"].export.assert_not_called()
+        assert azure_monitor_trace_exporter.instance.export_calls == []
 
         configured_exporter.flush()
-        mock_azure_exporter["instance"].export.assert_called_once()
+        assert len(azure_monitor_trace_exporter.instance.export_calls) == 1
 
-    def test_sdk_failure_status_reports_handled_failure(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_sdk_failure_status_reports_handled_failure(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """Azure SDK failure statuses are reported to the telemetry manager."""
-        mock_azure_exporter["instance"].export.return_value = SpanExportResult.FAILURE
+        azure_monitor_trace_exporter.instance.export_result = SpanExportResult.FAILURE
 
         event = make_run_started()
         configured_exporter.export(event)
@@ -300,33 +358,45 @@ class TestAzureMonitorExporterLifecycle:
         result = configured_exporter.flush()
         assert result is False
 
-    def test_flush_logs_ack_when_buffer_empty(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_flush_logs_ack_when_buffer_empty(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """flush() logs acknowledgment when there are no buffered events."""
         with patch("elspeth.telemetry.exporters.azure_monitor.logger.debug") as mock_debug:
             configured_exporter.flush()
 
-        mock_azure_exporter["instance"].export.assert_not_called()
+        assert azure_monitor_trace_exporter.instance.export_calls == []
         mock_debug.assert_called_once_with(
             "Azure Monitor flush requested with empty buffer",
             exporter="azure_monitor",
         )
 
-    def test_close_flushes_and_shuts_down(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_close_flushes_and_shuts_down(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """close() flushes buffer and shuts down SDK."""
         event = make_run_started()
         configured_exporter.export(event)
         configured_exporter.close()
 
-        mock_azure_exporter["instance"].export.assert_called_once()
-        mock_azure_exporter["instance"].shutdown.assert_called_once()
+        assert len(azure_monitor_trace_exporter.instance.export_calls) == 1
+        assert azure_monitor_trace_exporter.instance.shutdown_call_count == 1
 
-    def test_close_is_idempotent(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_close_is_idempotent(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """close() can be called multiple times safely."""
         configured_exporter.close()
         configured_exporter.close()
 
         # shutdown only called once (second close has no exporter)
-        mock_azure_exporter["instance"].shutdown.assert_called_once()
+        assert azure_monitor_trace_exporter.instance.shutdown_call_count == 1
 
 
 class TestAzureMonitorExporterErrorHandling:
@@ -343,9 +413,13 @@ class TestAzureMonitorExporterErrorHandling:
         # Buffer should still be empty (event dropped)
         assert len(exporter._buffer) == 0
 
-    def test_sdk_export_failure_reports_handled_failure(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_sdk_export_failure_reports_handled_failure(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """SDK export transport failures are reported without raising."""
-        mock_azure_exporter["instance"].export.side_effect = ConnectionError("SDK transport error")
+        azure_monitor_trace_exporter.instance.export_error = ConnectionError("SDK transport error")
 
         event = make_run_started()
         configured_exporter._buffer.append(event)
@@ -356,16 +430,24 @@ class TestAzureMonitorExporterErrorHandling:
         # Buffer should be cleared even on failure
         assert len(configured_exporter._buffer) == 0
 
-    def test_sdk_shutdown_failure_does_not_raise(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_sdk_shutdown_failure_does_not_raise(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """SDK shutdown failure is logged but doesn't raise."""
-        mock_azure_exporter["instance"].shutdown.side_effect = ConnectionError("Shutdown transport error")
+        azure_monitor_trace_exporter.instance.shutdown_error = ConnectionError("Shutdown transport error")
 
         # Should not raise
         configured_exporter.close()
 
-    def test_programming_error_in_export_crashes(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_programming_error_in_export_crashes(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """Programming errors (non-transport) must crash — not be swallowed."""
-        mock_azure_exporter["instance"].export.side_effect = ValueError("Bad payload construction")
+        azure_monitor_trace_exporter.instance.export_error = ValueError("Bad payload construction")
 
         event = make_run_started()
         configured_exporter._buffer.append(event)
@@ -377,7 +459,11 @@ class TestAzureMonitorExporterErrorHandling:
 class TestAzureMonitorExporterTokenCompleted:
     """Tests specifically for TokenCompleted event handling."""
 
-    def test_token_completed_converted_to_span(self, configured_exporter, mock_azure_exporter) -> None:
+    def test_token_completed_converted_to_span(
+        self,
+        configured_exporter: AzureMonitorExporter,
+        azure_monitor_trace_exporter: AzureMonitorTraceExporterFactory,
+    ) -> None:
         """TokenCompleted events are properly converted to spans."""
         from elspeth.contracts import TokenCompleted
 
@@ -394,8 +480,8 @@ class TestAzureMonitorExporterTokenCompleted:
         configured_exporter._buffer.append(event)
         configured_exporter._flush_batch()
 
-        mock_azure_exporter["instance"].export.assert_called_once()
-        spans = mock_azure_exporter["instance"].export.call_args[0][0]
+        assert len(azure_monitor_trace_exporter.instance.export_calls) == 1
+        spans = azure_monitor_trace_exporter.instance.export_calls[0]
         assert len(spans) == 1
 
         span = spans[0]

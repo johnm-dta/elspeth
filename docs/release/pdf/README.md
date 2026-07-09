@@ -1,5 +1,10 @@
 # ELSPETH release PDFs
 
+> **Legacy RC-5.2 pack.** These Typst sources and generated-output names have
+> not been refreshed for the 0.7.0 release. Use the Markdown files in
+> `docs/release/`, the root `CHANGELOG.md`, and root `ARCHITECTURE.md` as the
+> current release sources until this PDF pack is regenerated.
+
 This directory builds seven release PDFs covering the project across
 the exec-briefing, engineering-evidence, design-reference, assurance,
 and trust-primer tiers:
@@ -26,8 +31,8 @@ and trust-primer tiers:
   auditors, integrators.
 - `out/elspeth-composer.pdf` — Composer reference (personas,
   default-mode policy, IA decisions, implementation roadmap, chat
-  protocol, audit surfaces). Compresses
-  `docs/composer/ux-redesign-2026-05/`. **Audience:** engineering
+  protocol, audit surfaces). Compresses historical Composer UX records
+  that are no longer active Markdown docs. **Audience:** engineering
   reviewers, UX reviewers, operational stakeholders.
 
 **Assurance tier (no DRAFT banner; describes release-blocking promises):**
@@ -132,9 +137,10 @@ only useful when investigating a partial-build state.
 
 ## Regenerating after editing the source markdown
 
-The Typst sources are not regenerated from `docs/release/*.md`,
-`docs/architecture/*.md`, or `docs/composer/ux-redesign-2026-05/*.md`
-automatically. If a source `.md` changes:
+The Typst sources are not regenerated from `docs/release/*.md` or
+`docs/architecture/*.md` automatically. The Composer PDF also depends on
+historical Composer UX records that are no longer active Markdown docs. If a
+source `.md` changes:
 
 1. **Numbers, dates, and headline metrics** — update `data.typ`. This
    is the single source of truth for all the load-bearing figures
@@ -160,7 +166,7 @@ then carry the change into the corresponding `.typ`:
 | Markdown source | Release PDF | Notes |
 |----|----|----|
 | `docs/architecture/overview.md` and siblings | `architecture.typ` | The overview is the canonical compression source; the ADR index in `architecture.typ` mirrors the ADR set at `docs/architecture/adr/`. |
-| `docs/composer/ux-redesign-2026-05/00-implementation-roadmap.md` and siblings | `composer.typ` | The roadmap is the canonical phase tracker; phase-status claims in `composer.typ` trace to the roadmap and to operator-confirmed merge gates. |
+| Historical Composer UX roadmap and sibling phase records | `composer.typ` | Historical phase-status claims trace through git history or maintainer-local archives and operator-confirmed merge gates. |
 | `docs/release/guarantees.md` | `guarantees.typ` | The markdown is the canonical assurance appendix; the PDF is a shorter reading copy for release reviewers. |
 | `docs/guides/data-trust-and-error-handling.md` | `data-trust.typ` | The markdown remains the implementation guide; the PDF removes internal coding-instruction framing and explains the trust model for interested users and reviewers. |
 
@@ -176,7 +182,7 @@ then carry the change into the corresponding `.typ`:
 | `progress.typ` | Progress report source. |
 | `velocity.typ` | Velocity report source. The hero chart (123 daily bars) and the seven-column phase table are rendered on landscape pages. |
 | `architecture.typ` | Architecture reference source. Reading copy of `docs/architecture/*.md` and the ADR index. No DRAFT banner. |
-| `composer.typ` | Composer reference source. Reading copy of `docs/composer/ux-redesign-2026-05/*.md` (personas, default mode, IA, phase roadmap, chat protocol, audit surfaces). No DRAFT banner. |
+| `composer.typ` | Composer reference source. Reading copy of historical Composer UX records (personas, default mode, IA, phase roadmap, chat protocol, audit surfaces). No DRAFT banner. |
 | `guarantees.typ` | Assurance appendix source. Reading copy of `docs/release/guarantees.md`. No DRAFT banner. |
 | `data-trust.typ` | Data trust primer source. Reading copy of `docs/guides/data-trust-and-error-handling.md`. No DRAFT banner. |
 | `fonts/public-sans/fonts/ttf/` | Public Sans font files (SIL Open Font License, bundled from `uswds/public-sans` v2.001). |

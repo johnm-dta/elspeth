@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 import pytest
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
-from elspeth.web.composer.audit import BufferingRecorder, audit_envelope, begin_dispatch, dispatch_with_audit
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
+from elspeth.web.composer.audit import BufferingRecorder, audit_envelope, begin_dispatch, dispatch_with_audit, llm_call_audit_envelope
 
 
 def _make_invocation(seq: int) -> ComposerToolInvocation:
@@ -109,6 +110,47 @@ def test_audit_envelope_invocation_is_json_serializable() -> None:
     round_tripped = json.loads(serialized)
     assert round_tripped["_kind"] == "audit"
     assert round_tripped["invocation"]["tool_call_id"] == "tc-1"
+
+
+def test_llm_call_audit_envelope_omits_provider_reasoning_artifacts() -> None:
+    t = datetime(2026, 5, 4, 12, 0, tzinfo=UTC)
+    call = ComposerLLMCall(
+        model_requested="openrouter/openai/gpt-5.5",
+        model_returned="openai/gpt-5.5-2026-05-01",
+        status=ComposerLLMCallStatus.SUCCESS,
+        prompt_tokens=13,
+        completion_tokens=8,
+        total_tokens=21,
+        latency_ms=42,
+        provider_request_id="chatcmpl-reasoning",
+        messages_hash="m" * 64,
+        tools_spec_hash="t" * 64,
+        started_at=t,
+        finished_at=t,
+        error_class=None,
+        error_message=None,
+        temperature=0.0,
+        seed=42,
+        reasoning_tokens=5,
+        reasoning_content="hidden prompt and row details",
+        reasoning_details=[{"type": "reasoning.text", "text": "hidden chain detail"}],
+        thinking_blocks=[{"type": "thinking", "thinking": "hidden provider thought"}],
+        provider_cost=0.0037,
+        provider_cost_source="response_usage.cost",
+    )
+
+    env = llm_call_audit_envelope(call)
+
+    assert env["_kind"] == "llm_call_audit"
+    payload = env["call"]
+    assert isinstance(payload, dict)
+    assert payload["provider_request_id"] == "chatcmpl-reasoning"
+    assert payload["reasoning_tokens"] == 5
+    assert payload["provider_cost"] == 0.0037
+    assert "reasoning_content" not in payload
+    assert "reasoning_details" not in payload
+    assert "thinking_blocks" not in payload
+    assert "hidden" not in json.dumps(env)
 
 
 @pytest.mark.asyncio

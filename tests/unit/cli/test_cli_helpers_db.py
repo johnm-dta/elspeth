@@ -6,6 +6,7 @@ TestResolveLatestRunId is deferred to integration tier (uses LandscapeDB).
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -124,8 +125,8 @@ sinks:
 
         url, config = resolve_database_url(database=None, settings_path=settings_file)
 
-        # Should get the default landscape URL
-        assert url == "sqlite:///./state/audit.db"
+        # Should get the default landscape URL (data/ — see LandscapeSettings.url)
+        assert url == "sqlite:///./data/audit.db"
         assert config is not None
 
     def test_uses_default_settings_yaml_when_no_explicit_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,13 +213,9 @@ class TestResolveAuditPassphrase:
 
     def test_returns_passphrase_for_sqlcipher_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When backend=sqlcipher, reads the configured env var."""
-        from unittest.mock import MagicMock
-
         from elspeth.cli_helpers import resolve_audit_passphrase
 
-        settings = MagicMock()
-        settings.backend = "sqlcipher"
-        settings.encryption_key_env = "MY_CUSTOM_KEY"
+        settings = SimpleNamespace(backend="sqlcipher", encryption_key_env="MY_CUSTOM_KEY")
         monkeypatch.setenv("MY_CUSTOM_KEY", "secret-pass")
 
         result = resolve_audit_passphrase(settings)
@@ -226,13 +223,9 @@ class TestResolveAuditPassphrase:
 
     def test_raises_when_sqlcipher_env_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When backend=sqlcipher but env var is missing, raises RuntimeError."""
-        from unittest.mock import MagicMock
-
         from elspeth.cli_helpers import resolve_audit_passphrase
 
-        settings = MagicMock()
-        settings.backend = "sqlcipher"
-        settings.encryption_key_env = "MISSING_KEY_VAR"
+        settings = SimpleNamespace(backend="sqlcipher", encryption_key_env="MISSING_KEY_VAR")
         monkeypatch.delenv("MISSING_KEY_VAR", raising=False)
 
         with pytest.raises(RuntimeError, match="MISSING_KEY_VAR"):
@@ -240,12 +233,9 @@ class TestResolveAuditPassphrase:
 
     def test_returns_none_for_sqlite_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-sqlcipher backends return None (no encryption)."""
-        from unittest.mock import MagicMock
-
         from elspeth.cli_helpers import resolve_audit_passphrase
 
-        settings = MagicMock()
-        settings.backend = "sqlite"
+        settings = SimpleNamespace(backend="sqlite")
         # Even if ELSPETH_AUDIT_KEY is set, non-sqlcipher backend returns None
         monkeypatch.setenv("ELSPETH_AUDIT_KEY", "should-be-ignored")
 
@@ -276,13 +266,9 @@ class TestResolveAuditPassphrase:
 
     def test_custom_encryption_key_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression: custom encryption_key_env is respected, not just ELSPETH_AUDIT_KEY."""
-        from unittest.mock import MagicMock
-
         from elspeth.cli_helpers import resolve_audit_passphrase
 
-        settings = MagicMock()
-        settings.backend = "sqlcipher"
-        settings.encryption_key_env = "CUSTOM_AUDIT_SECRET"
+        settings = SimpleNamespace(backend="sqlcipher", encryption_key_env="CUSTOM_AUDIT_SECRET")
         monkeypatch.setenv("CUSTOM_AUDIT_SECRET", "custom-value")
         monkeypatch.setenv("ELSPETH_AUDIT_KEY", "default-value")
 

@@ -171,3 +171,30 @@ def test_direct_cancel_during_failing_sync_does_not_warn() -> None:
     assert not recorder.has_unretrieved_future_exception(), "run_sync_in_worker did not drain under direct task.cancel():\n" + "\n".join(
         f"  - {msg}" for msg in recorder.messages()
     )
+
+
+def test_uses_shared_bounded_executor() -> None:
+    """run_sync_in_worker shares one bounded pool instead of a new per-call one.
+
+    Concurrent calls run on threads from the same "async-worker" pool, and
+    shutdown_async_workers() tears it down so a fresh pool is lazily rebuilt.
+    """
+    import threading
+
+    async def scenario() -> None:
+        def _get_thread_info() -> tuple[int, str]:
+            return threading.get_ident(), threading.current_thread().name
+
+        tasks = [asyncio.create_task(run_sync_in_worker(_get_thread_info)) for _ in range(5)]
+        results = await asyncio.gather(*tasks)
+
+        for _, name in results:
+            assert name.startswith("async-worker")
+
+        import elspeth.web.async_workers as async_workers
+
+        assert async_workers._SHARED_EXECUTOR is not None
+        await async_workers.shutdown_async_workers()
+        assert async_workers._SHARED_EXECUTOR is None
+
+    _run_in_isolated_loop(scenario)

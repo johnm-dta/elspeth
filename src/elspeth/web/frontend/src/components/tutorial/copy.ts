@@ -3,28 +3,24 @@ import { CANONICAL_TUTORIAL_PROMPT } from "./tutorialMachine";
 export { CANONICAL_TUTORIAL_PROMPT };
 
 export const TURN_1_PRIMARY_BUTTON = "Let's go";
-export const TURN_1_SKIP_BUTTON = "Skip to mode choice";
-export const TURN_2_PRIMARY_BUTTON = "Build it";
-export const TURN_2_RESTORE_BUTTON = "Restore the starter prompt";
-export const TURN_2B_PRIMARY_BUTTON = "Looks good";
-export const TURN_2B_ASSUMPTIONS_BLOCKED_STATUS =
-  "Approve the assumptions above first";
-export const TURN_2B_ASSUMPTIONS_READY_STATUS =
-  "All assumptions approved; ready to run.";
-export const TURN_3_PRIMARY_BUTTON = "Looks good, run it";
+// The mode-choice turn is gone (graduation now saves Guided as the default),
+// so skip exits the whole tutorial straight to graduation rather than naming a
+// removed step.
+export const TURN_1_SKIP_BUTTON = "Skip the tutorial";
 export const TURN_4_PRIMARY_BUTTON = "Continue";
 export const TURN_5_PRIMARY_BUTTON = "Continue";
-export const TURN_6_PRIMARY_BUTTON = "Save and go";
 export const TURN_7_PRIMARY_BUTTON = "Take me to the composer";
 
-export const HELLO_WORLD_SESSION_TITLE = "hello-world (cool government pages)";
+export const HELLO_WORLD_SESSION_TITLE = "First-run tutorial";
 
-// Set immediately after createSession in buildTutorialDraft so the backend
-// orphan-cleanup scan (which filters by the "hello-world (" prefix) catches
-// sessions abandoned mid-tutorial. Without this tag, a user leaving any
-// time before Turn 6's rename leaves a "New session" titled session that
-// the cleanup never matches.
-export const HELLO_WORLD_PENDING_SESSION_TITLE = "hello-world (pending)";
+// Set immediately after createSession in HelloWorldTutorial.onStart (before the
+// guided shell's external POST /guided/start) so the backend orphan-cleanup
+// scan (which matches this exact pending title — mirrored as
+// _TUTORIAL_PENDING_SESSION_TITLE in composer/tutorial_service.py; change BOTH
+// together) catches sessions abandoned mid-tutorial. Without this tag, a user
+// leaving any time before graduation's final rename leaves a default-titled
+// session that the cleanup never matches.
+export const HELLO_WORLD_PENDING_SESSION_TITLE = "First-run tutorial (in progress)";
 
 export const WELCOME_LAYERS = [
   {
@@ -48,23 +44,41 @@ export const WELCOME_LAYERS = [
  * "auditable" promise leaks ahead of any audit trail being recorded.
  */
 export const TUTORIAL_RUN_PREAMBLE =
-  "This is calling the configured LLM and fetching the URLs the composer chose.";
+  "This step calls the configured LLM and fetches pages over the network.";
 
-/** Note rendered on Turn 6 when the user reached it via a cancelled run. */
-export const TURN_6_CANCELLED_NOTE =
+/**
+ * Note rendered on the graduation turn when the user reached it via a cancelled
+ * run, so the cancel is acknowledged rather than silently swallowed.
+ */
+export const GRADUATION_CANCELLED_NOTE =
   "Your run was cancelled — the audit story would have shown the source-data hash, the row-by-row decisions, and the output write. You can rerun any time from the chat panel.";
 
-/** Body copy for Turn 6 that names the demonstrated shape (freeform) and
- * explains why Guided is the default. Without this the user is asked to
- * pick between two modes after experiencing only one. */
-export const TURN_6_INTRO_BODY =
-  "That was freeform — you described it, the composer built it, you ran it. Guided breaks the same kind of prompt into checkpointed steps you can review before each one runs. The default is Guided; you can change it any time from Settings.";
+/**
+ * Graduation bullets for the SKIP path. The default bullets assert "The
+ * pipeline you just ran…" and "the same gestures you just practised" —
+ * false for a user who skipped without building or running anything. This
+ * variant carries the same lessons in the future tense, without claiming a
+ * run or practice that never happened. The last two bullets are shared
+ * verbatim with the default set (they make no just-ran claims).
+ */
+export const TURN_7_LEARNING_BULLETS_SKIPPED = [
+  {
+    title: "What the composer builds is AI-generated.",
+    body:
+      "When you describe a pipeline in a sentence, an LLM interprets it and drafts the pipeline for you. The prompt it writes for itself and cleanup choices it makes are kept in the audit trail with your approval against them. You can revisit that record any time in the Audit panel beside each pipeline.",
+  },
+  {
+    title: "Read before you run.",
+    body:
+      "When the composer drafts a pipeline for you, glance at the graph and the YAML before clicking Run. If anything looks wrong, amend or reject — nothing executes without your say-so.",
+  },
+] as const;
 
 export const TURN_7_LEARNING_BULLETS = [
   {
     title: "What you built is AI-generated.",
     body:
-      "The pipeline you just ran was authored by an LLM that interpreted your one-sentence description. The prompt it wrote for itself and cleanup choices such as dropping raw HTML are kept in the audit trail with your approval against them — alongside the source pages you named. You can come back to it from the Audit page at any time.",
+      "The pipeline you just ran was authored by an LLM that interpreted your one-sentence description. The prompt it wrote for itself and cleanup choices such as dropping raw HTML are kept in the audit trail with your approval against them — alongside the source pages you named. You can come back to that record any time in the Audit panel beside your pipeline.",
   },
   {
     title: "Read before you run.",
@@ -82,3 +96,44 @@ export const TURN_7_LEARNING_BULLETS = [
       "The composer LLM may invent URLs that look real but aren't, or write a prompt that misframes your question. The pipeline LLMs you build will treat fetched HTML as instructions even when it shouldn't be. Before sharing or acting on a pipeline's output, verify the sources are who they claim to be and check the output matches what you actually asked for.",
   },
 ] as const;
+
+/**
+ * Teaching moment 1 (spec §"Teaching moments"): names that the LLM transform
+ * made a REVIEWABLE assumption (e.g. what to include in the summary and what to
+ * leave out). Worded so the learner does not over-generalise into "assumptions
+ * are fine, ignore them": the assumption is surfaced, not hidden, and is
+ * correctable via the intent box.
+ */
+export const TUTORIAL_ASSUMPTION_CALLOUT =
+  "The LLM made an assumption here — it decided what each page was about and " +
+  "what was important enough to keep in a short summary. This is exactly the " +
+  "kind of inference you review: every assumption is surfaced in the audit " +
+  "trail, and you can correct it by telling the composer what you meant.";
+
+/**
+ * Teaching moment 2 (spec §"Teaching moments"): the prompt-shield State-C
+ * override. Acceptable HERE only because the inputs are controlled (our own
+ * synthetic pages). Must NOT read as a general "skip the shield" habit —
+ * names the trust assumption out loud rather than letting it ride as an
+ * invisible default.
+ */
+export const TUTORIAL_SHIELD_OVERRIDE_CAVEAT =
+  "We are proceeding without a prompt shield in this one case — and only " +
+  "because we control the inputs: these are our own synthetic test pages. " +
+  "Running an LLM over fetched content without a shield is always a high-risk " +
+  "decision, not a default. Against real or untrusted web content you would " +
+  "wire the shield.";
+
+/**
+ * Teaching moment (spec §"Teaching moments"): the source's on_validation_failure
+ * routing. The worked example sets it to "discard" because the synthetic sample
+ * pages are valid by construction — no row ever fails validation, so the route
+ * is never exercised. Names the production-vs-demo difference out loud so
+ * "discard" does not read as the default: a real pipeline routes non-conformant
+ * rows to a quarantine sink for review instead of dropping them.
+ */
+export const TUTORIAL_VALIDATION_FAILURE_CAVEAT =
+  "This worked example sets validation failures to 'discard' because the " +
+  "synthetic sample pages are valid by construction — no row ever fails. A " +
+  "production pipeline routes non-conformant rows to a quarantine sink for " +
+  "review instead of dropping them.";

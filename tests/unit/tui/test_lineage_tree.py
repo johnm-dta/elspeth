@@ -1,8 +1,63 @@
 """Tests for lineage tree widget."""
 
+import ast
+import inspect
+import textwrap
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import cast, get_type_hints
+
 import pytest
 
+from elspeth.contracts import Determinism, NodeType, RoutingMode
+from elspeth.contracts.audit import Edge, Node
 from elspeth.tui.types import LineageData, NodeInfo, SourceInfo, TokenDisplayInfo
+
+
+def _node(node_id: str, plugin_name: str, node_type: NodeType, *, sequence: int) -> Node:
+    return Node(
+        node_id=node_id,
+        run_id="run-1",
+        plugin_name=plugin_name,
+        node_type=node_type,
+        plugin_version="1.0",
+        determinism=Determinism.DETERMINISTIC,
+        config_hash="cfg",
+        config_json="{}",
+        registered_at=datetime(2026, 1, 1, tzinfo=UTC),
+        sequence_in_pipeline=sequence,
+    )
+
+
+def _edge(edge_id: str, from_node_id: str, to_node_id: str, label: str) -> Edge:
+    return Edge(
+        edge_id=edge_id,
+        run_id="run-1",
+        from_node_id=from_node_id,
+        to_node_id=to_node_id,
+        label=label,
+        default_mode=RoutingMode.MOVE,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenLike:
+    token_id: str
+    row_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NodeStateLike:
+    node_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _LineageResultLikeStub:
+    token: _TokenLike
+    node_states: tuple[_NodeStateLike, ...]
+    parent_tokens: tuple[_TokenLike, ...] = ()
+    outcome: None = None
 
 
 class TestLineageTreeWidget:
@@ -166,6 +221,320 @@ class TestLineageTreeWidget:
         assert node_types["Gate: threshold_check"] == "gate"
         assert node_types["Aggregation: batch_agg"] == "aggregation"
         assert node_types["Coalesce: merge_results"] == "coalesce"
+
+    def test_graph_view_renders_multiple_sources_without_dropping_second_source(self) -> None:
+        """Graph-backed view preserves multi-source topology and branch labels."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+        from elspeth.tui.widgets.lineage_tree import LineageTree
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src-a", "csv", NodeType.SOURCE, sequence=0),
+                _node("src-b", "json", NodeType.SOURCE, sequence=1),
+                _node("merge", "coalesce", NodeType.COALESCE, sequence=2),
+                _node("sink", "json_sink", NodeType.SINK, sequence=3),
+            ],
+            edges=[
+                _edge("edge-a", "src-a", "merge", "a"),
+                _edge("edge-b", "src-b", "merge", "b"),
+                _edge("edge-sink", "merge", "sink", "default"),
+            ],
+        )
+
+        labels = [node["label"] for node in LineageTree(view).get_tree_nodes()]
+
+        assert "Source: csv" in labels
+        assert "Source: json" in labels
+        assert "Coalesce: coalesce" in labels
+        assert "Branch: a" in labels
+        assert "Branch: b" in labels
+
+    def test_graph_view_orders_unsorted_edges_deterministically(self) -> None:
+        """Graph renderer sorts outgoing edges by label then destination."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("branch-b", "b_mapper", NodeType.TRANSFORM, sequence=2),
+                _node("branch-a", "a_mapper", NodeType.TRANSFORM, sequence=1),
+            ],
+            edges=[
+                _edge("edge-b", "src", "branch-b", "b"),
+                _edge("edge-a", "src", "branch-a", "a"),
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+
+        assert labels.index("Branch: a") < labels.index("Branch: b")
+        assert labels.index("Transform: a_mapper") < labels.index("Transform: b_mapper")
+
+    def test_graph_view_diamond_join_terminates_with_repeated_marker(self) -> None:
+        """Diamond DAG joins render once and then show a repeated-node marker."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("left", "left_map", NodeType.TRANSFORM, sequence=1),
+                _node("right", "right_map", NodeType.TRANSFORM, sequence=2),
+                _node("merge", "merge", NodeType.COALESCE, sequence=3),
+                _node("sink", "json_sink", NodeType.SINK, sequence=4),
+            ],
+            edges=[
+                _edge("edge-right", "src", "right", "right"),
+                _edge("edge-left", "src", "left", "left"),
+                _edge("edge-right-merge", "right", "merge", "continue"),
+                _edge("edge-left-merge", "left", "merge", "continue"),
+                _edge("edge-sink", "merge", "sink", "default"),
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+
+        assert labels.count("Coalesce: merge") == 1
+        assert labels.count("Sink: json_sink") == 1
+        assert "Repeated: Coalesce: merge (already shown)" in labels
+        assert len(labels) < 20
+
+    def test_focused_token_uses_exact_diamond_branch_path(self) -> None:
+        """Focused token rows attach to the actual traversed branch instance."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("left", "left_map", NodeType.TRANSFORM, sequence=1),
+                _node("right", "right_map", NodeType.TRANSFORM, sequence=2),
+                _node("merge", "merge", NodeType.COALESCE, sequence=3),
+                _node("sink", "json_sink", NodeType.SINK, sequence=4),
+            ],
+            edges=[
+                _edge("edge-left", "src", "left", "left"),
+                _edge("edge-right", "src", "right", "right"),
+                _edge("edge-left-merge", "left", "merge", "continue"),
+                _edge("edge-right-merge", "right", "merge", "continue"),
+                _edge("edge-sink", "merge", "sink", "default"),
+            ],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-right",
+                    row_id="row-1",
+                    path=["src", "right", "merge", "sink"],
+                )
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+        token_index = labels.index("Token: token-right (row: row-1)")
+
+        assert labels.index("Branch: right") < token_index
+        assert labels.index("Transform: right_map") < token_index
+        assert labels.index("Branch: left") < labels.index("Transform: left_map") < labels.index("Branch: right")
+
+    def test_focused_token_outcome_renders_artifact_selection(self) -> None:
+        """Focused token outcome rows carry sink and artifact evidence."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("sink", "json_sink", NodeType.SINK, sequence=1),
+            ],
+            edges=[_edge("edge-sink", "src", "sink", "default")],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-1",
+                    row_id="row-1",
+                    path=["src", "sink"],
+                    outcome={
+                        "outcome": "success",
+                        "path": "default_flow",
+                        "completed": True,
+                        "sink": "json_sink",
+                        "artifact": {
+                            "artifact_id": "artifact-1",
+                            "artifact_type": "json",
+                            "path_or_uri": "/tmp/out.json",
+                            "content_hash": "sha256:abc",
+                            "size_bytes": 12,
+                            "sink_node_id": "sink",
+                            "produced_by_state_id": "state-sink",
+                        },
+                    },
+                )
+            ],
+        )
+
+        outcome = next(item for item in view.items if item.node_type == "outcome")
+
+        assert outcome.label == "Outcome: success / default_flow -> json_sink"
+        assert outcome.selection == {
+            "kind": "outcome",
+            "run_id": "run-1",
+            "token_id": "token-1",
+            "row_id": "row-1",
+            "outcome": "success",
+            "outcome_path": "default_flow",
+            "completed": True,
+            "sink": "json_sink",
+            "artifact_id": "artifact-1",
+            "artifact_type": "json",
+            "artifact_path_or_uri": "/tmp/out.json",
+            "artifact_hash": "sha256:abc",
+            "artifact_size_bytes": 12,
+            "state_id": "state-sink",
+        }
+
+    def test_focused_token_matches_across_structural_queue_node(self) -> None:
+        """Focused token evidence attaches when structural nodes are absent from state paths."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("queue", "work_queue", NodeType.QUEUE, sequence=1),
+                _node("sink", "json_sink", NodeType.SINK, sequence=2),
+            ],
+            edges=[
+                _edge("edge-queue", "src", "queue", "default"),
+                _edge("edge-sink", "queue", "sink", "default"),
+            ],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-queued",
+                    row_id="row-1",
+                    path=["src", "sink"],
+                    outcome={
+                        "outcome": "success",
+                        "path": "default_flow",
+                        "completed": True,
+                        "sink": "json_sink",
+                    },
+                )
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+
+        assert "Queue: work_queue" in labels
+        assert "Token: token-queued (row: row-1)" in labels
+        assert "Outcome: success / default_flow -> json_sink" in labels
+        assert labels.index("Queue: work_queue") < labels.index("Token: token-queued (row: row-1)")
+
+    def test_focused_token_path_with_missing_traversal_node_crashes(self) -> None:
+        """Traversal paths are built from node_by_id; a missing node is internal corruption."""
+        from elspeth.tui.lineage_view import _token_comparable_path
+
+        node_by_id = {
+            "src": _node("src", "csv", NodeType.SOURCE, sequence=0),
+            "sink": _node("sink", "json_sink", NodeType.SINK, sequence=1),
+        }
+
+        with pytest.raises(KeyError, match="missing"):
+            _token_comparable_path(("src", "missing", "sink"), ("src", "sink"), node_by_id)
+
+    def test_focused_token_path_with_unknown_node_crashes(self) -> None:
+        """Recorded token paths must only reference recorded graph nodes."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        with pytest.raises(KeyError, match="missing"):
+            build_lineage_view_model(
+                run_id="run-1",
+                nodes=[
+                    _node("src", "csv", NodeType.SOURCE, sequence=0),
+                    _node("sink", "json_sink", NodeType.SINK, sequence=1),
+                ],
+                edges=[_edge("edge-sink", "src", "sink", "default")],
+                tokens=[
+                    TokenDisplayInfo(
+                        token_id="token-1",
+                        row_id="row-1",
+                        path=["src", "missing", "sink"],
+                    )
+                ],
+            )
+
+    def test_outcome_label_uses_display_contract_not_runtime_type_guard(self) -> None:
+        """Outcome labels consume TokenOutcomeDisplayInfo without revalidating shape."""
+        from elspeth.tui.lineage_view import _outcome_label
+        from elspeth.tui.types import TokenOutcomeDisplayInfo
+
+        assert get_type_hints(_outcome_label)["outcome"] is TokenOutcomeDisplayInfo
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_outcome_label)))
+        guard_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "isinstance"
+        ]
+        assert guard_calls == []
+
+    def test_focused_token_parent_tokens_are_rendered_as_ancestry(self) -> None:
+        """Fork/coalesce parent token evidence remains visible in the TUI model."""
+        from elspeth.tui.lineage_view import build_lineage_view_model
+
+        view = build_lineage_view_model(
+            run_id="run-1",
+            nodes=[
+                _node("src", "csv", NodeType.SOURCE, sequence=0),
+                _node("merge", "join", NodeType.COALESCE, sequence=1),
+            ],
+            edges=[_edge("edge-merge", "src", "merge", "default")],
+            tokens=[
+                TokenDisplayInfo(
+                    token_id="token-child",
+                    row_id="row-child",
+                    path=["src", "merge"],
+                    parent_tokens=[
+                        {"token_id": "token-parent-a", "row_id": "row-a"},
+                        {"token_id": "token-parent-b", "row_id": "row-b"},
+                    ],
+                )
+            ],
+        )
+
+        labels = [item.label for item in view.items]
+        parent_a = next(item for item in view.items if item.label == "Parent token: token-parent-a (row: row-a)")
+        parent_b = next(item for item in view.items if item.label == "Parent token: token-parent-b (row: row-b)")
+
+        assert labels.index("Token: token-child (row: row-child)") < labels.index("Parent token: token-parent-a (row: row-a)")
+        assert parent_a.depth == parent_b.depth
+        assert parent_a.selection == {
+            "kind": "token",
+            "run_id": "run-1",
+            "token_id": "token-parent-a",
+            "row_id": "row-a",
+        }
+
+    def test_explain_screen_serializes_parent_tokens_for_focused_lineage(self) -> None:
+        """The screen does not drop parent-token evidence before building the view."""
+        from elspeth.tui.screens.explain_screen import ExplainScreen, _LineageResultLike
+
+        lineage_result = cast(
+            _LineageResultLike,
+            _LineageResultLikeStub(
+                token=_TokenLike(token_id="token-child", row_id="row-child"),
+                node_states=(_NodeStateLike(node_id="src"), _NodeStateLike(node_id="merge")),
+                parent_tokens=(
+                    _TokenLike(token_id="token-parent-a", row_id="row-a"),
+                    _TokenLike(token_id="token-parent-b", row_id="row-b"),
+                ),
+            ),
+        )
+
+        token_info = ExplainScreen()._token_display_info(lineage_result, {})
+
+        assert token_info["parent_tokens"] == [
+            {"token_id": "token-parent-a", "row_id": "row-a"},
+            {"token_id": "token-parent-b", "row_id": "row-b"},
+        ]
 
 
 class TestTreeNodeImmutability:

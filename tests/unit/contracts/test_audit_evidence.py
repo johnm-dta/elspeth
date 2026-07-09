@@ -15,13 +15,67 @@ from typing import Any
 import pytest
 
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
-from elspeth.contracts.errors import PassThroughContractViolation, PluginContractViolation
+from elspeth.contracts.errors import (
+    PassThroughContractViolation,
+    PluginContractViolation,
+    ZeroEmissionSuccessContractViolation,
+)
+
+REDACTED = "<redacted-secret>"
 
 
 def test_plugin_contract_violation_is_audit_evidence() -> None:
     # PluginContractViolation inherits AuditEvidenceBase (Task 4 migration).
     err = PluginContractViolation("hello")
     assert isinstance(err, AuditEvidenceBase)
+
+
+def test_plugin_contract_violation_audit_message_is_scrubbed() -> None:
+    err = PluginContractViolation("contract failed with api_key=sk-1234567890abcdef1234567890abcdef")  # secret-scan: allow-this-line
+    payload = err.to_audit_dict()
+    assert payload["message"] == REDACTED
+
+
+def test_zero_emission_success_violation_audit_message_is_scrubbed() -> None:
+    secret = "sk-" + ("a" * 32)
+    err = ZeroEmissionSuccessContractViolation(
+        transform="x",
+        transform_node_id="n",
+        run_id="r",
+        row_id="rw",
+        token_id="t",
+        passes_through_input=True,
+        can_drop_rows=False,
+        emitted_count=0,
+        message=f"contract failed with api_key={secret}",
+    )
+
+    assert secret in str(err), "live exception text remains useful for local debugging"
+    payload = err.to_audit_dict()
+
+    assert payload["message"] == REDACTED
+    assert secret not in payload["message"]
+
+
+def test_pass_through_violation_audit_message_is_scrubbed() -> None:
+    secret = "sk-" + ("a" * 32)
+    err = PassThroughContractViolation(
+        transform="x",
+        transform_node_id="n",
+        run_id="r",
+        row_id="rw",
+        token_id="t",
+        static_contract=frozenset({"id", "secret"}),
+        runtime_observed=frozenset({"id"}),
+        divergence_set=frozenset({"secret"}),
+        message=f"contract failed with api_key={secret}",
+    )
+
+    assert secret in str(err), "live exception text remains useful for local debugging"
+    payload = err.to_audit_dict()
+
+    assert payload["message"] == REDACTED
+    assert secret not in payload["message"]
 
 
 def test_pass_through_violation_is_audit_evidence() -> None:

@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getGuided, respondGuided } from "./client";
+import { getGuided, respondGuided, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
   GuidedRespondRequest,
@@ -32,6 +32,7 @@ function makeGetGuidedResponse(): GetGuidedResponse {
       terminal: null,
       chat_history: [],
       chat_turn_seq: 0,
+      profile: null,
     },
     next_turn: null,
     terminal: null,
@@ -69,6 +70,7 @@ function makeRespondResponse(): GuidedRespondResponse {
       terminal: null,
       chat_history: [],
       chat_turn_seq: 0,
+      profile: null,
     },
     next_turn: {
       type: "single_select",
@@ -186,6 +188,35 @@ describe("api/client guided functions", () => {
         status: 500,
         detail: "boom",
       });
+    });
+  });
+
+  describe("startGuidedSession", () => {
+    it("POSTs the profile discriminator to the full guided-start route", async () => {
+      const body = makeGetGuidedResponse();
+      body.guided_session.profile = {
+        coaching: true,
+        bookends: true,
+        recipe_match: true,
+        advisor_checkpoints: true,
+      };
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => body,
+      } as Response);
+
+      const result = await startGuidedSession("sess-1", "tutorial");
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/guided/start");
+      expect(init.method).toBe("POST");
+      expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+        "application/json",
+      );
+      expect(JSON.parse(init.body as string)).toEqual({ profile: "tutorial" });
+      expect(result.guided_session.profile?.advisor_checkpoints).toBe(true);
     });
   });
 });

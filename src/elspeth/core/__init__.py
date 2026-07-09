@@ -12,6 +12,11 @@ from elspeth.core.checkpoint import (
     ResumeCheck,
     ResumePoint,
 )
+from elspeth.core.clock import (
+    Clock,
+    MonotonicClock,
+    UtcClock,
+)
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -37,7 +42,6 @@ from elspeth.core.dag import (
     GraphValidationWarning,
     NodeConfig,
     NodeInfo,
-    WiredTransform,
 )
 from elspeth.core.events import (
     EventBus,
@@ -60,6 +64,7 @@ __all__ = [
     "CANONICAL_VERSION",
     "CheckpointManager",
     "CheckpointSettings",
+    "Clock",
     "ConcurrencySettings",
     "DatabaseSettings",
     "ElspethSettings",
@@ -76,6 +81,7 @@ __all__ = [
     "IntegrityError",
     "LandscapeExportSettings",
     "LandscapeSettings",
+    "MonotonicClock",
     "NodeConfig",
     "NodeInfo",
     "NullEventBus",
@@ -93,7 +99,7 @@ __all__ = [
     "SinkSettings",
     "SourceSettings",
     "TransformSettings",
-    "WiredTransform",
+    "UtcClock",
     "canonical_json",
     "configure_logging",
     "get_logger",

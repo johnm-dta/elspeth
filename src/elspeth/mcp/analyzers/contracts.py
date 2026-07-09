@@ -10,7 +10,7 @@ from __future__ import annotations
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.mcp.types import (
     ContractViolationsReport,
     ErrorResult,
@@ -18,6 +18,8 @@ from elspeth.mcp.types import (
     FieldNotFoundError,
     RunContractReport,
 )
+
+AnalyzerRepositories = LandscapeReadRepositories | RecorderFactory
 
 
 class _ContractLookupError(Exception):
@@ -35,7 +37,7 @@ class _ContractLookupError(Exception):
         self.payload = payload
 
 
-def _load_first_source_contract(factory: RecorderFactory, run_id: str) -> SchemaContract:
+def _load_first_source_contract(factory: AnalyzerRepositories, run_id: str) -> SchemaContract:
     """Return the contract of the lowest-ordered source for ``run_id``.
 
     Per ADR-025 §3 Decision 5 (G6) schema contracts live exclusively in
@@ -61,7 +63,7 @@ def _load_first_source_contract(factory: RecorderFactory, run_id: str) -> Schema
     return source_records[first_source_node_id].schema_contract
 
 
-def get_run_contract(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunContractReport | ErrorResult:
+def get_run_contract(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> RunContractReport | ErrorResult:
     """Get schema contract for a run.
 
     Shows the source schema contract with field resolution:
@@ -117,7 +119,7 @@ def get_run_contract(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> 
 
 
 def explain_field(
-    db: LandscapeDB, factory: RecorderFactory, run_id: str, field_name: str
+    db: LandscapeDB, factory: AnalyzerRepositories, run_id: str, field_name: str
 ) -> FieldExplanation | ErrorResult | FieldNotFoundError:
     """Trace a field's provenance through the pipeline.
 
@@ -176,7 +178,7 @@ def explain_field(
 
 
 def list_contract_violations(
-    db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int = 100
+    db: LandscapeDB, factory: AnalyzerRepositories, run_id: str, limit: int = 100
 ) -> ContractViolationsReport | ErrorResult:
     """List contract violations for a run.
 

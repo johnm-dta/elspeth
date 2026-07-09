@@ -13,15 +13,17 @@ unmocked end-to-end.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from elspeth.contracts.value_source import register_value_source_plugin
 from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
-from elspeth.engine.orchestrator.types import (
+from elspeth.engine.orchestrator.value_source_validation import (
     ValueSourceFinding,
     ValueSourceValidationError,
 )
@@ -70,10 +72,7 @@ class TestWalkerL2Direct:
     def test_passes_with_transforms_lacking_value_sources(self) -> None:
         # A WiredTransform whose plugin has no `config` attribute and no
         # VALUE_SOURCES is silently skipped.
-        plugin = MagicMock(spec=[])  # no `config` attribute
-        wired = MagicMock()
-        wired.plugin = plugin
-        wired.settings = MagicMock(name="settings_obj")
+        wired = _FakeWiredTransform(plugin=_PluginWithoutValueSources(), settings=SimpleNamespace(name="settings_obj"))
         validate_value_source_compliance([wired])
 
     def test_catalog_membership_pass(self) -> None:
@@ -202,7 +201,7 @@ class TestWalkerL2Direct:
     def test_catalog_check_skipped_when_applies_when_predicate_fails(self) -> None:
         """Predicated catalog check (elspeth-ea207837d9): when the config's
         sibling field doesn't match the ``applies_when`` predicate (e.g.
-        base_url overridden to a chaos test endpoint), the catalog check
+        base_url overridden to a private compatible endpoint), the catalog check
         skips entirely — the catalog isn't authoritative for this config.
         Supports chaos test pipelines using fake model identifiers
         (``chaosllm/fake-gpt-4``) against errorworks/chaosllm servers.
@@ -211,7 +210,7 @@ class TestWalkerL2Direct:
             config_class=_FakeOpenRouterConfigWithBaseUrl,
             config_kwargs={
                 "model": "chaosllm/fake-gpt-4",
-                "base_url": "http://127.0.0.1:8199/v1",
+                "base_url": "https://chaos.example.test/v1",
             },
             settings_name="chaos_node_1",
         )
@@ -281,8 +280,7 @@ class TestWalkerInValidatePipeline:
         ``instantiate_plugins_from_config`` which is the single source of
         truth for value-source compliance under the Option-B refactor.
         """
-        mock_yaml_gen = MagicMock()
-        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        yaml_gen = _StaticYamlGenerator()
 
         # Construct the same exception shape the walker would raise — one
         # structured finding, attributable to a specific component.
@@ -302,14 +300,17 @@ class TestWalkerInValidatePipeline:
         state = _make_state()
         settings = _make_settings()
 
+        def raise_value_source_error(_settings: object, *, preflight_mode: bool = False) -> None:
+            raise injected_error
+
         with (
-            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", new=_load_settings_from_yaml_string),
             patch(
                 "elspeth.web.execution.validation.instantiate_runtime_plugins",
-                side_effect=injected_error,
+                new=raise_value_source_error,
             ),
         ):
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            result = validate_pipeline(state, settings, yaml_gen)
 
         assert result.is_valid is False
         check_by_name = {c.name: c for c in result.checks}
@@ -329,26 +330,19 @@ class TestWalkerInValidatePipeline:
         """When ``instantiate_runtime_plugins`` returns a bundle without
         raising, both PLUGINS and VALUE_SOURCE are recorded as passed and
         validation continues into graph construction."""
-        mock_yaml_gen = MagicMock()
-        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
-
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
-        mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
-        mock_bundle.aggregations = {}
+        yaml_gen = _StaticYamlGenerator()
+        bundle = _RuntimePluginBundleStub()
 
         state = _make_state()
         settings = _make_settings()
 
         with (
-            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
-            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=mock_bundle),
-            patch("elspeth.web.execution.validation.build_runtime_graph", return_value=MagicMock()),
-            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", new=_load_settings_from_yaml_string),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", new=_runtime_plugins_returning(bundle)),
+            patch("elspeth.web.execution.validation.build_runtime_graph", new=_build_runtime_graph),
+            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", new=_assemble_and_validate_pipeline_config),
         ):
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            result = validate_pipeline(state, settings, yaml_gen)
 
         assert result.is_valid is True
         check_by_name = {c.name: c for c in result.checks}
@@ -397,6 +391,64 @@ class _FakePlugin:
 
     def __init__(self, provider_config: object) -> None:
         self.provider_config = provider_config
+
+
+class _PluginWithoutValueSources:
+    """Unregistered plugin stand-in for the walker skip path."""
+
+
+@dataclass(frozen=True)
+class _FakeWiredTransform:
+    plugin: object
+    settings: object
+
+
+@dataclass(frozen=True)
+class _StaticYamlGenerator:
+    yaml: str = "source:\n  plugin: csv_source\n  options: {}"
+
+    def generate_yaml(self, _state: CompositionState) -> str:
+        return self.yaml
+
+
+@dataclass(frozen=True)
+class _RuntimeGraphStub:
+    validation_warnings: tuple[Any, ...] = ()
+
+    def validate(self) -> None:
+        return None
+
+    def validate_edge_compatibility(self) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class _RuntimePluginBundleStub:
+    source: object = field(default_factory=object)
+    source_settings: object = field(default_factory=object)
+    sources: dict[str, object] = field(default_factory=lambda: {"source": object()})
+    transforms: tuple[object, ...] = ()
+    sinks: dict[str, object] = field(default_factory=lambda: {"primary": object()})
+    aggregations: dict[str, object] = field(default_factory=dict)
+
+
+def _load_settings_from_yaml_string(_yaml_content: str, *, expand_env_vars: bool = True) -> object:
+    return SimpleNamespace(expand_env_vars=expand_env_vars)
+
+
+def _runtime_plugins_returning(bundle: _RuntimePluginBundleStub):
+    def instantiate_runtime_plugins(_settings: object, *, preflight_mode: bool = False) -> _RuntimePluginBundleStub:
+        return bundle
+
+    return instantiate_runtime_plugins
+
+
+def _build_runtime_graph(_settings: object, _bundle: _RuntimePluginBundleStub) -> _RuntimeGraphStub:
+    return _RuntimeGraphStub()
+
+
+def _assemble_and_validate_pipeline_config(**_kwargs: object) -> None:
+    return None
 
 
 # Register the fake plugin once at module import. The L0 registry is
@@ -468,10 +520,7 @@ def _build_wired_with_config(
 
     plugin = _FakePlugin(provider_config=config)
 
-    wired = MagicMock()
-    wired.plugin = plugin
-    wired.settings = MagicMock()
-    wired.settings.name = settings_name
+    wired = _FakeWiredTransform(plugin=plugin, settings=SimpleNamespace(name=settings_name))
     return plugin, wired
 
 

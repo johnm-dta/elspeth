@@ -15,11 +15,11 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0.5px;
   text-transform: uppercase;
   white-space: nowrap;
@@ -74,10 +74,10 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-xs);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
@@ -107,46 +107,10 @@
   color: var(--color-status-cancelled);
 }
 
-/* Cancel-pending badge — same colour family as cancelled but distinguished
-   by a pulsing glyph that signals "still running, stop requested" rather
-   than "done, was cancelled".  Without this, the only visual distinction
-   between the two states is a 3-character text suffix ("cancelling" vs
-   "cancelled") which is easy to miss in the uppercase 13px badge. */
-.status-badge-cancelling {
-  background-color: rgba(227, 132, 68, 0.15);
-  color: var(--color-status-cancelled);
-}
-
-.status-badge-icon {
-  display: inline-block;
-  line-height: 1;
-}
-
-.status-badge-icon--cancelling {
-  display: inline-block;
-  animation: pulse-dot 1.2s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .status-badge-icon--cancelling {
-    animation: none;
-    opacity: 0.7;
-  }
-}
-
-/* Phase 2.2 (elspeth-0de989c56d): widened taxonomy.
-   - completed_with_failures: reuses --color-status-completed (teal) so the
-     run is visually grouped with successful runs, but the warning glyph
-     ⚠ signals "completed, with caveats."  No new color token needed.
-   - empty: a distinct neutral grey (separate from the teal-grey of pending)
-     paired with the empty-set glyph ∅ so an operator can tell at a glance
-     that the run produced zero rows.  Adds one new --color-status-empty
-     custom property to the root theme. */
-.status-badge-completed-with-failures {
-  background-color: rgba(20, 176, 174, 0.15);
-  color: var(--color-status-completed);
-}
-
+/* Phase 2.2 (elspeth-0de989c56d): empty is a distinct neutral grey (separate
+   from the teal-grey of pending) paired with the empty-set glyph ∅ so an
+   operator can tell at a glance that the run produced zero rows. Adds one
+   new --color-status-empty custom property to the root theme. */
 .status-badge-empty {
   background-color: rgba(128, 128, 128, 0.15);
   color: var(--color-status-empty);
@@ -168,7 +132,7 @@
   color: var(--color-text);
   font-family: var(--font-sans);
   font-size: var(--font-size-base);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   min-height: var(--size-control);
   cursor: pointer;
   transition: background-color var(--transition-fast),
@@ -176,7 +140,14 @@
   white-space: nowrap;
 }
 
-.btn:hover:not(:disabled):not([aria-disabled="true"]) {
+/* Base hover. The :disabled / aria-disabled guards live inside :where() so
+   they contribute ZERO specificity: the selector stays at (0,2,0), below the
+   variant hovers (.btn-primary:hover / .btn-danger:hover at (0,3,0)). With
+   bare :not() chains the base rule sat at (0,4,0) and beat every variant
+   hover, so filled primary/danger buttons dropped to the translucent surface
+   wash at the moment of use (elspeth-b293bbd3c0). Gated by
+   styles/buttonCascade.test.ts — keep the guards inside :where(). */
+.btn:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) {
   background-color: var(--color-surface-hover);
   border-color: var(--color-border-strong);
 }
@@ -185,7 +156,7 @@
    which silently fails WCAG 1.4.3 contrast against any non-white chrome. We
    use --color-bg as the background (rather than --color-surface-elevated) so
    the disabled button reads as "merged into the page" — the muted text on
-   page-background pair passes AA in both themes (dark 4.78:1, light 6.32:1).
+   page-background pair passes AA in both themes (dark 6.45:1, light 6.32:1).
    The border stays at --color-border-strong so the button outline remains
    distinguishable from the page. aria-disabled gets the same treatment
    because we use it on the Save-for-review button while validation pends. */
@@ -213,7 +184,7 @@
   color: var(--color-text);
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   min-height: var(--size-control-compact);
   cursor: pointer;
   transition: background-color var(--transition-fast),
@@ -221,7 +192,10 @@
   white-space: nowrap;
 }
 
-.btn-compact:hover:not(:disabled):not([aria-disabled="true"]) {
+/* Guards in :where() for the same cascade reason as .btn:hover above —
+   .btn-compact composes with .btn-primary (e.g. the inline-source fallback
+   Accept button), so this base hover must stay below (0,3,0). */
+.btn-compact:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) {
   background-color: var(--color-surface-hover);
   border-color: var(--color-border-strong);
 }
@@ -232,6 +206,25 @@
   color: var(--color-text-muted);
   border-color: var(--color-border-strong);
   cursor: not-allowed;
+}
+
+/* Side-rail action buttons (Run pipeline / Save for review / Export YAML) sit
+   on the warm inspection surface (--color-surface-inspector), where the global
+   disabled fill (--color-bg) reads as a raised dark chip rather than
+   "inactive" — so a disabled action (e.g. Run with "No pipeline yet") can be
+   mistaken for a clickable one. Re-merge disabled rail buttons into the rail
+   surface so they read as a recessed, outlined slot against the raised teal of
+   the enabled buttons. The global .btn:disabled rule is intentionally
+   unchanged — --color-bg merges into the page background and is gated by
+   colorContrast.test.ts; this only re-targets the surface the rail sits on.
+   Text stays --color-text-muted, AA-verified on --color-surface-inspector
+   (dark 6.53:1, light 6.33:1); the --color-border-strong outline is inherited
+   so the disabled control stays distinguishable. */
+.layout-siderail .btn:disabled,
+.layout-siderail .btn[aria-disabled="true"],
+.layout-siderail .btn-compact:disabled,
+.layout-siderail .btn-compact[aria-disabled="true"] {
+  background-color: var(--color-surface-inspector);
 }
 
 .btn-primary {
@@ -256,6 +249,19 @@
   border-color: var(--color-btn-danger-bg-hover);
 }
 
+/* Ghost variant — emitted by the components/ui Button (variant="ghost"). Without
+   it the ghost variant silently degraded to the bordered base .btn. Mirrors
+   website/tokens/primitives.css. */
+.btn-ghost {
+  background-color: transparent;
+  border-color: transparent;
+}
+
+.btn-ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border);
+}
+
 /* .btn-small predates .btn-compact and is retained at its existing call sites.
    New buttons that need a chrome-row size should compose .btn-compact instead. */
 .btn-small {
@@ -276,6 +282,67 @@
 
 
 /* ---------------------------------------------------------------------------
+   Form inputs (ui/Input primitive; .textarea/.select kept for parity)
+
+   Mirrors the canonical Inputs block in website/tokens/primitives.css. The
+   design-system merge (d56197fde) added the components/ui primitive library
+   but its CSS lived only in the standalone website/ tree, which is not in the
+   app's Vite bundle — so .input / .field-label / .field-hint / .input-mono
+   were undefined here and the migrated LoginPage exemplar rendered as default
+   browser inputs. Ported as one cohesive block (input/textarea/select).
+   The ui/Textarea component was retired unused (elspeth-e1c5ad0b53) but the
+   .textarea rule stays: it is gated by inputPrimitives/colorContrast style
+   tests and mirrors the website token sheet as one block.
+   --------------------------------------------------------------------------- */
+.input,
+.textarea,
+.select {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: 1.4;
+}
+.input::placeholder,
+.textarea::placeholder {
+  /* --color-text-muted is only ~3.84:1 on --color-surface-elevated (the input
+     background) — below AA. --color-text-secondary clears 4.5:1 on elevated in
+     both themes (gated by colorContrast.test.ts "placeholder text" assertion). */
+  color: var(--color-text-secondary);
+}
+.input:focus-visible,
+.textarea:focus-visible,
+.select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.textarea {
+  resize: vertical;
+}
+.input-mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.field-label {
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text);
+}
+.field-hint {
+  margin-top: var(--space-xs);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+
+/* ---------------------------------------------------------------------------
    Tab Strip Styles
    --------------------------------------------------------------------------- */
 .tab-strip {
@@ -292,7 +359,7 @@
   color: var(--color-text-muted);
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   cursor: pointer;
   transition: color var(--transition-fast),
     border-color var(--transition-fast);
@@ -367,14 +434,14 @@
   background-color: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-modal);
   padding: var(--space-xl);
 }
 
 .confirm-dialog-title {
   margin: 0 0 var(--space-sm);
   font-size: var(--font-size-lg);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text);
 }
 
@@ -403,15 +470,62 @@
 .app-layout {
   display: grid;
   grid-template-rows: 100%;
+  /* Rail width is tokenised (--siderail-width) — it was previously a
+     hardcoded inline style in Layout.tsx, which no media query could
+     override (elspeth-49dd290c7a). */
+  grid-template-columns: minmax(0, 1fr) var(--siderail-width);
   grid-template-areas: "chat siderail";
   height: 100%;
   min-width: 640px;
   overflow: hidden;
 }
 
-/* When the side rail is hidden or overlayed, the grid only has chat. */
-.app-layout--overlay {
+/* Single-column shell: Layout renders no .layout-siderail column when its
+   siderail prop is null (a guided build is active — the workspace inside the
+   chat panel carries its own rail at --siderail-width, so the chat column
+   takes the full width and the geometry matches the two-column freeform
+   shell). Also declared inside the ≤960px collapse below so the stacked
+   template can't resurrect a phantom second row. */
+.app-layout--chat-only {
+  grid-template-columns: minmax(0, 1fr);
   grid-template-areas: "chat";
+}
+
+/* Responsive collapse (elspeth-49dd290c7a, WCAG 1.4.10 Reflow). Below 960px
+   (640px chat minimum + 320px rail) the two-column shell cannot fit, and with
+   body{overflow:hidden} the rail was clipped with no scroll path. Collapse to
+   ONE column with the conversation + composer first and the rail stacked
+   below as a bounded, independently-scrolling panel — the same discipline as
+   the guided (900px) and tutorial (760px) workspaces. This replaces the
+   never-wired .app-layout--overlay chat-only fallback: hiding the rail
+   outright would strand Run / Save-for-review / Export YAML. */
+@media (max-width: 960px) {
+  .app-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "chat"
+      "siderail";
+    min-width: 0;
+  }
+
+  .layout-siderail {
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+    /* Cap the rail so the chat column keeps the majority of the viewport;
+       the rail scrolls its own content (overflow-y) instead of clipping it
+       (the base rule's overflow:hidden relied on the full-height .side-rail
+       child owning the scroll, which no longer applies when stacked). */
+    max-height: 45vh;
+    overflow-y: auto;
+  }
+
+  /* Chat-only shell has no rail row to stack — keep the single bounded row
+     or the auto second row leaves a dead band under the composer. */
+  .app-layout--chat-only {
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "chat";
+  }
 }
 
 .layout-chat {
@@ -507,48 +621,48 @@
 .validation-banner-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 
 .validation-banner-summary {
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .validation-banner-checks {
   margin: 0;
-  padding: 0 0 0 22px;
+  padding: 0 0 0 var(--space-xl);
   font-size: var(--font-size-xs);
   color: var(--color-success);
 }
 
 .validation-banner-check-item {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
 }
 
 .validation-banner-warnings-section {
-  margin-top: 6px;
+  margin-top: var(--space-1-5);
 }
 
 .validation-banner-warnings-title {
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   font-size: var(--font-size-xs);
   color: var(--color-warning);
 }
 
 .validation-banner-warnings-list {
-  margin: 2px 0 0;
-  padding: 0 0 0 22px;
+  margin: var(--space-2xs) 0 0;
+  padding: 0 0 0 var(--space-xl);
   font-size: var(--font-size-xs);
   color: var(--color-warning);
 }
 
 .validation-banner-warn-item {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
 }
 
 .validation-banner-fail-title {
   padding: var(--space-sm) var(--space-md);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .validation-banner-fail-list {
@@ -563,7 +677,7 @@
 .validation-banner-suggestion {
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
-  margin-top: 2px;
+  margin-top: var(--space-2xs);
 }
 
 .validation-banner-component-btn {

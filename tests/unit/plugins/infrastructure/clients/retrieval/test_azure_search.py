@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -16,6 +18,81 @@ from elspeth.plugins.infrastructure.clients.retrieval.azure_search import (
 )
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
+
+
+@dataclass
+class _FakeCall:
+    call_id: str
+
+
+@dataclass
+class _FakeExecutionRecorder:
+    call_indices: dict[str, int] = field(default_factory=dict)
+    operation_call_indices: dict[str, int] = field(default_factory=dict)
+    recorded_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def allocate_call_index(self, state_id: str) -> int:
+        index = self.call_indices.get(state_id, 0)
+        self.call_indices[state_id] = index + 1
+        return index
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        index = self.operation_call_indices.get(operation_id, 0)
+        self.operation_call_indices[operation_id] = index + 1
+        return index
+
+    def record_call(self, **kwargs: Any) -> _FakeCall:
+        self.recorded_calls.append(kwargs)
+        return _FakeCall(call_id=f"call-{len(self.recorded_calls)}")
+
+    def record_operation_call(self, **kwargs: Any) -> _FakeCall:
+        return self.record_call(**kwargs)
+
+
+@dataclass
+class _TelemetrySink:
+    events: list[Any] = field(default_factory=list)
+
+    def __call__(self, event: Any) -> None:
+        self.events.append(event)
+
+
+@dataclass
+class _FakeAzureCredential:
+    token: str = "managed-identity-token-123"
+    error: BaseException | None = None
+    scopes: list[tuple[str, ...]] = field(default_factory=list)
+    close_calls: int = 0
+
+    def get_token(self, *scopes: str) -> SimpleNamespace:
+        self.scopes.append(scopes)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(token=self.token)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+@dataclass
+class _FakeHTTPClientContext:
+    response: httpx.Response
+    get_calls: list[SimpleNamespace] = field(default_factory=list)
+
+    def __enter__(self) -> _FakeHTTPClientContext:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        return False
+
+    def get(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        self.get_calls.append(SimpleNamespace(args=args, kwargs=kwargs))
+        return self.response
+
+
+class _FakeLimiter:
+    def acquire(self, weight: int = 1, timeout: float | None = None) -> None:
+        pass
 
 
 class TestAzureSearchProviderConfig:
@@ -110,8 +187,8 @@ class TestAzureSearchProviderSearch:
             api_key="test-key",
             search_mode=search_mode,
         )
-        execution = MagicMock()
-        telemetry_emit = MagicMock()
+        execution = _FakeExecutionRecorder()
+        telemetry_emit = _TelemetrySink()
         return AzureSearchProvider(
             config=config,
             execution=execution,
@@ -189,9 +266,9 @@ class TestScoreNormalization:
         )
         return AzureSearchProvider(
             config=config,
-            execution=MagicMock(),
+            execution=_FakeExecutionRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySink(),
         )
 
     def test_keyword_mid_range(self):
@@ -228,9 +305,9 @@ class TestScoreNormalization:
         )
         provider = AzureSearchProvider(
             config=config,
-            execution=MagicMock(),
+            execution=_FakeExecutionRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySink(),
         )
         assert provider._normalize_score(2.0) == pytest.approx(0.5)
 
@@ -264,9 +341,9 @@ class TestBuildRequestBody:
         config = AzureSearchProviderConfig(**config_data)
         return AzureSearchProvider(
             config=config,
-            execution=MagicMock(),
+            execution=_FakeExecutionRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySink(),
         )
 
     def test_keyword_body(self):
@@ -305,9 +382,9 @@ class TestParseResponse:
         )
         return AzureSearchProvider(
             config=config,
-            execution=MagicMock(),
+            execution=_FakeExecutionRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySink(),
         )
 
     def test_missing_value_key_raises(self):
@@ -452,25 +529,20 @@ class TestAzureSearchProviderReadiness:
         )
         return AzureSearchProvider(
             config=config,
-            execution=MagicMock(),
+            execution=_FakeExecutionRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySink(),
         )
 
-    def _mock_response(self, *, status_code: int = 200, text: str = "0") -> MagicMock:
-        resp = MagicMock()
-        type(resp).status_code = PropertyMock(return_value=status_code)
-        type(resp).text = PropertyMock(return_value=text)
-        resp.raise_for_status = MagicMock()
-        if status_code >= 400:
-            import httpx
-
-            resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-                f"HTTP {status_code}",
-                request=MagicMock(),
-                response=resp,
-            )
-        return resp
+    def _mock_response(self, *, status_code: int = 200, text: str = "0") -> httpx.Response:
+        return httpx.Response(
+            status_code=status_code,
+            text=text,
+            request=httpx.Request(
+                "GET",
+                "https://test.search.windows.net/indexes/test-index/docs/$count?api-version=2024-07-01",
+            ),
+        )
 
     def test_index_with_documents_is_ready(self) -> None:
         """Index exists and has documents."""
@@ -572,21 +644,18 @@ class TestAzureSearchProviderReadiness:
         )
         provider = AzureSearchProvider(
             config=config,
-            execution=MagicMock(),
+            execution=_FakeExecutionRecorder(),
             run_id="run-1",
-            telemetry_emit=MagicMock(),
+            telemetry_emit=_TelemetrySink(),
         )
 
-        mock_token = MagicMock()
-        mock_token.token = "managed-identity-token-123"
-        mock_credential = MagicMock()
-        mock_credential.get_token.return_value = mock_token
+        credential = _FakeAzureCredential()
 
         with (
             patch.object(provider, "_readiness_get", return_value=self._mock_response(text="10")) as mock_get,
             patch(
                 "azure.identity.DefaultAzureCredential",
-                return_value=mock_credential,
+                return_value=credential,
             ),
         ):
             result = provider.check_readiness()
@@ -598,6 +667,66 @@ class TestAzureSearchProviderReadiness:
         assert "Authorization" in call_headers
         assert call_headers["Authorization"] == "Bearer managed-identity-token-123"
         assert "api-key" not in call_headers
+
+    def test_managed_identity_missing_azure_identity_raises_retrieval_error(self) -> None:
+        """Optional Azure dependency absence must be normalized at the retrieval boundary."""
+        import builtins
+
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            use_managed_identity=True,
+        )
+        provider = AzureSearchProvider(
+            config=config,
+            execution=_FakeExecutionRecorder(),
+            run_id="run-1",
+            telemetry_emit=_TelemetrySink(),
+        )
+        real_import = builtins.__import__
+
+        def fail_azure_identity_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "azure.identity":
+                raise ImportError("No module named 'azure.identity'")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fail_azure_identity_import),
+            pytest.raises(RetrievalError, match="azure-identity is not installed") as exc_info,
+        ):
+            provider._auth_headers()
+
+        assert not exc_info.value.retryable
+        assert provider._managed_identity_credential is None
+
+    def test_managed_identity_readiness_token_failure_raises_retrieval_error(self) -> None:
+        """Readiness token failures propagate as RetrievalError for transform on_start handling."""
+        from azure.core.exceptions import ClientAuthenticationError
+
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            use_managed_identity=True,
+        )
+        provider = AzureSearchProvider(
+            config=config,
+            execution=_FakeExecutionRecorder(),
+            run_id="run-1",
+            telemetry_emit=_TelemetrySink(),
+        )
+        auth_error = ClientAuthenticationError("DefaultAzureCredential failed")
+        credential = _FakeAzureCredential(error=auth_error)
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=credential),
+            patch.object(provider, "_readiness_get") as mock_get,
+            pytest.raises(RetrievalError, match="Azure managed identity token acquisition failed") as exc_info,
+        ):
+            provider.check_readiness()
+
+        assert not exc_info.value.retryable
+        assert exc_info.value.__cause__ is auth_error
+        mock_get.assert_not_called()
 
     def test_readiness_uses_pinned_connection_url_with_host_and_sni(self) -> None:
         provider = self._make_provider()
@@ -619,19 +748,14 @@ class TestAzureSearchProviderReadiness:
         with (
             patch("elspeth.core.security.web.validate_url_for_ssrf", return_value=safe_request),
             patch("httpx.get", side_effect=AssertionError("readiness must not request the hostname URL directly")),
-            patch("httpx.Client") as mock_client_class,
+            patch("httpx.Client", return_value=_FakeHTTPClientContext(mock_response)) as client_cls,
         ):
-            mock_client = MagicMock()
-            mock_client.__enter__ = MagicMock(return_value=mock_client)
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.return_value = mock_response
-            mock_client_class.return_value = mock_client
-
             result = provider.check_readiness()
 
         assert result.reachable is True
         assert result.count == 12
-        call = mock_client.get.call_args
+        fake_client = client_cls.return_value
+        call = fake_client.get_calls[0]
         assert call.args[0] == safe_request.connection_url
         assert call.kwargs["headers"]["Host"] == "test.search.windows.net"
         assert call.kwargs["headers"]["api-key"] == "test-key"
@@ -683,8 +807,8 @@ class TestExecuteSearchHTTP:
             index="test-index",
             api_key="test-key",
         )
-        execution = MagicMock()
-        telemetry_emit = MagicMock()
+        execution = _FakeExecutionRecorder()
+        telemetry_emit = _TelemetrySink()
         return AzureSearchProvider(
             config=config,
             execution=execution,
@@ -698,8 +822,8 @@ class TestExecuteSearchHTTP:
             index="test-index",
             use_managed_identity=True,
         )
-        execution = MagicMock()
-        telemetry_emit = MagicMock()
+        execution = _FakeExecutionRecorder()
+        telemetry_emit = _TelemetrySink()
         return AzureSearchProvider(
             config=config,
             execution=execution,
@@ -714,11 +838,11 @@ class TestExecuteSearchHTTP:
             api_key="test-key",
             request_timeout=12.5,
         )
-        execution = MagicMock()
-        telemetry_emit = MagicMock()
-        limiter = MagicMock()
+        execution = _FakeExecutionRecorder()
+        telemetry_emit = _TelemetrySink()
+        limiter = _FakeLimiter()
 
-        with patch("elspeth.plugins.infrastructure.clients.http.AuditedHTTPClient") as client_cls:
+        with patch("elspeth.plugins.infrastructure.clients.http.AuditedHTTPClient", autospec=True) as client_cls:
             provider = AzureSearchProvider(
                 config=config,
                 execution=execution,
@@ -804,13 +928,10 @@ class TestExecuteSearchHTTP:
                 {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
             ]
         }
-        mock_token = MagicMock()
-        mock_token.token = "managed-identity-token-123"
-        mock_credential = MagicMock()
-        mock_credential.get_token.return_value = mock_token
+        credential = _FakeAzureCredential()
 
         with (
-            patch("azure.identity.DefaultAzureCredential", return_value=mock_credential),
+            patch("azure.identity.DefaultAzureCredential", return_value=credential),
             respx.mock,
         ):
             route = respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json=response_body))
@@ -818,11 +939,61 @@ class TestExecuteSearchHTTP:
             result = provider._execute_search("test query", top_k=5, state_id="s1", token_id="t1")
 
         assert result == response_body
-        mock_credential.get_token.assert_called_once_with("https://search.azure.com/.default")
+        assert credential.scopes == [("https://search.azure.com/.default",)]
         assert route.calls.last is not None
         request_headers = route.calls.last.request.headers
         assert request_headers["Authorization"] == "Bearer managed-identity-token-123"
         assert "api-key" not in request_headers
+
+    def test_execute_search_managed_identity_token_failure_raises_retrieval_error(self) -> None:
+        from azure.core.exceptions import ClientAuthenticationError
+
+        provider = self._make_managed_identity_provider()
+        auth_error = ClientAuthenticationError("DefaultAzureCredential failed")
+        credential = _FakeAzureCredential(error=auth_error)
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=credential),
+            respx.mock,
+        ):
+            route = respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+
+            with pytest.raises(RetrievalError, match="Azure managed identity token acquisition failed") as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id="t1")
+
+        assert not exc_info.value.retryable
+        assert exc_info.value.__cause__ is auth_error
+        assert not route.called
+
+    def test_managed_identity_credential_is_cached_and_closed(self) -> None:
+        provider = self._make_managed_identity_provider()
+        response_body = {
+            "value": [
+                {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
+            ]
+        }
+        credential = _FakeAzureCredential()
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=credential) as credential_cls,
+            respx.mock,
+        ):
+            respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json=response_body))
+
+            provider._execute_search("first query", top_k=5, state_id="s1", token_id="t1")
+            provider._execute_search("second query", top_k=5, state_id="s2", token_id="t2")
+            provider.close()
+
+        credential_cls.assert_called_once_with()
+        assert len(credential.scopes) == 2
+        assert credential.close_calls == 1
+
+    def test_managed_identity_credential_without_close_fails_loudly(self) -> None:
+        provider = self._make_managed_identity_provider()
+        provider._managed_identity_credential = object()
+
+        with pytest.raises(AttributeError, match="close"):
+            provider.close()
 
     def test_execute_search_updates_audit_context_with_token(self) -> None:
         provider = self._make_provider()

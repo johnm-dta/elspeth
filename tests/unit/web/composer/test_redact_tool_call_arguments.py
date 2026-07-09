@@ -51,6 +51,8 @@ from pydantic import BaseModel, ConfigDict
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.redaction import (
     REDACTED_SENSITIVE_NO_SUMMARIZER,
+    REDACTED_UNKNOWN_ARGUMENT_KEY,
+    REDACTED_UNKNOWN_ARGUMENTS_FIELD,
     HandlesNoSensitiveDataReason,
     Sensitive,
     ToolRedaction,
@@ -415,6 +417,229 @@ def test_declarative_non_sensitive_keys_passthrough(
     assert result["path"] == "<sum>"
     assert result["name"] == "alpha"
     assert result["count"] == 42
+
+
+def test_advisor_declarative_unknown_argument_keys_are_sentinelised() -> None:
+    """Advisor persists LLM args; unknown keys must not pass through raw."""
+    tel = NoopRedactionTelemetry()
+    raw_extra_context = "RAW_EXTRA_CONTEXT: private traceback and schema excerpt"
+
+    result = redact_tool_call_arguments(
+        "request_advisor_hint",
+        {
+            "trigger": "proactive_security_safety",
+            "problem_summary": "stuck on provider options",
+            "recent_errors": ["validator echoed a private column"],
+            "attempted_actions": ["set_pipeline with sensitive options"],
+            "full_context": raw_extra_context,
+        },
+        telemetry=tel,
+    )
+
+    assert result["problem_summary"].startswith("<advisor-problem-summary:")
+    assert "full_context" not in result
+    assert result["_unknown_arguments"] == "<redacted-unknown-argument-key>"
+    assert raw_extra_context not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("list_blobs", {}),
+        ("list_composer_blobs", {}),
+        ("get_blob_metadata", {"blob_id": "11111111-1111-4111-8111-111111111111"}),
+        ("inspect_source", {"blob_id": "11111111-1111-4111-8111-111111111111"}),
+    ],
+)
+def test_blob_discovery_unknown_argument_keys_are_sentinelised(
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Blob discovery arguments are persisted; extra LLM-authored keys must not pass through raw."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_BLOB_DISCOVERY_PAYLOAD: uploaded CSV excerpt or PII"
+
+    result = redact_tool_call_arguments(
+        tool_name,
+        {**arguments, "note": raw_payload},
+        telemetry=tel,
+    )
+
+    assert "note" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+    for key, value in arguments.items():
+        assert result[key] == value
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("delete_blob", {"blob_id": "11111111-1111-4111-8111-111111111111"}),
+        (
+            "wire_blob_inline_ref",
+            {
+                "field_path": "node:llm.options.prompt_template",
+                "blob_id": "11111111-1111-4111-8111-111111111111",
+            },
+        ),
+    ],
+)
+def test_blob_mutation_unknown_argument_keys_are_sentinelised(
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Blob mutation arguments are persisted; extra LLM-authored keys must not pass through raw."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_BLOB_MUTATION_PAYLOAD: prompt-injected private data"
+
+    result = redact_tool_call_arguments(
+        tool_name,
+        {**arguments, "note": raw_payload},
+        telemetry=tel,
+    )
+
+    assert "note" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+    for key, value in arguments.items():
+        assert result[key] == value
+
+
+def test_wire_secret_ref_unknown_argument_keys_are_sentinelised() -> None:
+    """Secret mutation arguments are persisted before handler validation; unknown keys must fail closed."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_SECRET_PAYLOAD: sk-should-not-persist"
+
+    result = redact_tool_call_arguments(
+        "wire_secret_ref",
+        {
+            "name": "OPENROUTER_API_KEY",
+            "target": "source",
+            "option_key": "api_key",
+            "secret_value": raw_payload,
+        },
+        telemetry=tel,
+    )
+
+    assert "secret_value" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+    assert result["name"] == "OPENROUTER_API_KEY"
+    assert result["target"] == "source"
+    assert result["option_key"] == "api_key"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "passthrough_keys", "summarized_keys"),
+    [
+        ("clear_source", {"source_name": "source"}, ("source_name",), ()),
+        ("remove_node", {"id": "normalize_rows"}, ("id",), ()),
+        ("remove_edge", {"id": "e_fetch_to_clean"}, ("id",), ()),
+        (
+            "upsert_edge",
+            {
+                "id": "e_fetch_to_clean",
+                "from_node": "fetch",
+                "to_node": "clean",
+                "edge_type": "on_success",
+                "label": "clean rows",
+            },
+            ("id", "from_node", "to_node", "edge_type", "label"),
+            (),
+        ),
+        ("remove_output", {"sink_name": "records_out"}, ("sink_name",), ()),
+        (
+            "upsert_node",
+            {
+                "id": "normalize_rows",
+                "node_type": "transform",
+                "input": "raw_rows",
+                "plugin": "normalize",
+                "on_success": "clean_rows",
+                "on_error": "failed_rows",
+                "options": {"path": "INNER_MUTATION_VALUE"},
+                "condition": "row['enabled']",
+                "routes": {"true": "clean_rows", "false": "discard"},
+                "fork_to": ["audit_rows"],
+                "branches": {"left": "clean_rows", "right": "audit_rows"},
+                "policy": "all",
+                "merge": "prefer_left",
+                "trigger": {"count": 10},
+                "output_mode": "transform",
+                "expected_output_count": 1,
+            },
+            (
+                "id",
+                "node_type",
+                "input",
+                "plugin",
+                "on_success",
+                "on_error",
+                "condition",
+                "fork_to",
+                "branches",
+                "policy",
+                "merge",
+                "output_mode",
+                "expected_output_count",
+            ),
+            ("options", "routes", "trigger"),
+        ),
+        ("set_metadata", {"patch": {"name": "pipeline", "description": "INNER_MUTATION_VALUE"}}, (), ("patch",)),
+        (
+            "set_output",
+            {
+                "sink_name": "records_out",
+                "plugin": "json",
+                "options": {"path": "INNER_MUTATION_VALUE"},
+                "on_write_failure": "discard",
+            },
+            ("sink_name", "plugin", "on_write_failure"),
+            ("options",),
+        ),
+    ],
+)
+def test_mutation_declarative_unknown_argument_keys_are_sentinelised(
+    tool_name: str,
+    arguments: dict[str, object],
+    passthrough_keys: tuple[str, ...],
+    summarized_keys: tuple[str, ...],
+) -> None:
+    """Mutation tool args are persisted; unexpected LLM keys must fail closed."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_MUTATION_ARGUMENT_PAYLOAD"
+
+    result = redact_tool_call_arguments(
+        tool_name,
+        {**arguments, "unauthorized_payload": raw_payload},
+        telemetry=tel,
+    )
+
+    assert "unauthorized_payload" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+
+    for key in passthrough_keys:
+        assert result[key] == arguments[key]
+    for key in summarized_keys:
+        assert key in result
+        assert result[key] != arguments[key]
+
+
+def test_set_metadata_patch_summary_redacts_unknown_patch_key_names() -> None:
+    """Nested metadata patch keys are LLM-controlled and must not echo raw."""
+    tel = NoopRedactionTelemetry()
+    raw_key = "sk-live-secret-as-patch-key"
+
+    result = redact_tool_call_arguments(
+        "set_metadata",
+        {"patch": {"name": "pipeline", raw_key: "value"}},
+        telemetry=tel,
+    )
+
+    assert result["patch"] == "<metadata-patch:name,unknown>"
+    assert raw_key not in str(result)
 
 
 # ---------------------------------------------------------------------------

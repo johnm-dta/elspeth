@@ -9,16 +9,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
+import { Button, StatusBadge } from "@/components/ui";
+import { isTerminalRunStatus } from "@/types/index";
 import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
 
 interface RunsHistoryDrawerProps {
   onClose: () => void;
   runsOverride?: ReadonlyArray<Run>;
 }
-
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 function counted(label: string, count: number): string {
   return count === 1 ? `1 ${label}` : `${count.toLocaleString()} ${label}s`;
@@ -72,43 +73,28 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
   const diagnosticsWorkingViewByRunId = useExecutionStore((s) => s.diagnosticsWorkingViewByRunId);
   const loadRunDiagnostics = useExecutionStore((s) => s.loadRunDiagnostics);
   const evaluateRunDiagnostics = useExecutionStore((s) => s.evaluateRunDiagnostics);
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const cancel = useExecutionStore((s) => s.cancel);
+  // Title-first convention (HeaderSessionSwitcher): never surface the raw
+  // session UUID in user-facing chrome (elspeth-ef8c18a6cb).
+  const activeSessionTitle = useSessionStore(
+    (s) =>
+      s.sessions.find((session) => session.id === s.activeSessionId)?.title ??
+      null,
+  );
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [cancelTargetRunId, setCancelTargetRunId] = useState<string | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    closeBtnRef.current?.focus();
-  }, []);
+  // M08 (WCAG 2.4.3): the shared focus trap moves focus to the Close button on
+  // open, wraps Tab/Shift+Tab, and — unlike the previous bespoke trap —
+  // restores focus to the opener when the drawer unmounts.
+  useFocusTrap(drawerRef, true, ".runs-history-drawer-header button");
 
+  // useFocusTrap does not own Escape; keep the drawer's own close-on-Escape.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         onClose();
-        return;
-      }
-      if (e.key !== "Tab") {
-        return;
-      }
-
-      const drawer = drawerRef.current;
-      if (!drawer) {
-        return;
-      }
-      const focusables = drawer.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
-      if (focusables.length === 0) {
-        return;
-      }
-
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && (active === first || !drawer.contains(active))) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && (active === last || !drawer.contains(active))) {
-        e.preventDefault();
-        first.focus();
       }
     }
 
@@ -126,30 +112,44 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
     >
       <header className="runs-history-drawer-header">
         <h2>Past runs</h2>
-        <button
-          ref={closeBtnRef}
-          type="button"
-          aria-label="Close past runs"
-          onClick={onClose}
-          className="btn"
-        >
+        <Button aria-label="Close past runs" onClick={onClose}>
           Close
-        </button>
+        </Button>
       </header>
       <div className="runs-history-drawer-body">
         {runs.length === 0 ? (
-          <p>No prior runs for session {activeSessionId ?? "(none)"}.</p>
+          <p>
+            No prior runs for{" "}
+            {activeSessionTitle ? `"${activeSessionTitle}"` : "this session"}.
+          </p>
         ) : (
           <ul className="runs-history-list">
             {runs.map((run) => (
               <li key={run.id} className="runs-history-item">
                 <div className="runs-history-item-summary">
                   <span className="runs-history-item-id">{run.id}</span>
-                  <span className="runs-history-item-status">
+                  {/* ui/StatusBadge carries the a11y glyph map (⚠ / ∅) so
+                      completed_with_failures and empty are not colour-only
+                      distinctions (elspeth-e1c5ad0b53). */}
+                  <StatusBadge status={run.status}>
                     {run.status.replace(/_/g, " ")}
-                  </span>
-                  <button
-                    type="button"
+                  </StatusBadge>
+                  {/* REST-backed Cancel for live runs (elspeth-90db33baac):
+                      works without the in-memory activeRunId/WebSocket that
+                      gates ProgressView's Cancel, so a run stays cancellable
+                      after a page reload. */}
+                  {!isTerminalRunStatus(run.status) && (
+                    <Button
+                      variant="danger"
+                      className="btn-small"
+                      aria-label={`Cancel run ${run.id}`}
+                      disabled={run.cancel_requested === true}
+                      onClick={() => setCancelTargetRunId(run.id)}
+                    >
+                      {run.cancel_requested === true ? "Cancelling..." : "Cancel"}
+                    </Button>
+                  )}
+                  <Button
                     aria-expanded={expandedRunId === run.id}
                     aria-controls={`run-history-diagnostics-${run.id}`}
                     aria-label={
@@ -157,7 +157,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                         ? `Hide detail for ${run.id}`
                         : `Show detail for ${run.id}`
                     }
-                    className="btn btn-small"
+                    className="btn-small"
                     onClick={() => {
                       const nextRunId = expandedRunId === run.id ? null : run.id;
                       setExpandedRunId(nextRunId);
@@ -167,7 +167,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                     }}
                   >
                     {expandedRunId === run.id ? "Hide detail" : "Show detail"}
-                  </button>
+                  </Button>
                 </div>
                 <div
                   id={`run-history-diagnostics-${run.id}`}
@@ -195,6 +195,19 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
           </ul>
         )}
       </div>
+      {cancelTargetRunId !== null && (
+        <ConfirmDialog
+          title="Cancel pipeline"
+          message="Cancel the running pipeline? This cannot be undone."
+          confirmLabel="Cancel pipeline"
+          variant="danger"
+          onConfirm={() => {
+            void cancel(cancelTargetRunId);
+            setCancelTargetRunId(null);
+          }}
+          onCancel={() => setCancelTargetRunId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -235,17 +248,16 @@ function RunDiagnosticsPanel({
           {diagnostics?.summary.preview_truncated ? `, first ${diagnostics.summary.preview_limit}` : ""}
         </span>
         <span className="run-diagnostics-actions">
-          <button type="button" className="btn btn-small" onClick={onRefresh} disabled={isLoading}>
+          <Button className="btn-small" onClick={onRefresh} disabled={isLoading}>
             Refresh
-          </button>
-          <button
-            type="button"
-            className="btn btn-small"
+          </Button>
+          <Button
+            className="btn-small"
             onClick={onExplain}
             disabled={isEvaluating || isLoading || !diagnostics}
           >
             {isEvaluating ? "Explaining..." : "Explain"}
-          </button>
+          </Button>
         </span>
       </div>
 

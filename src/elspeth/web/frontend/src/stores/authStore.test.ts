@@ -3,6 +3,9 @@ import { useAuthStore } from "./authStore";
 import { useBlobStore } from "./blobStore";
 import { usePreferencesStore } from "./preferencesStore";
 import { useSecretsStore } from "./secretsStore";
+import { useShareableReviewStore } from "./shareableReviewStore";
+import * as shareableReviewsApi from "../api/shareableReviews";
+import * as apiClient from "@/api/client";
 import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
@@ -12,12 +15,70 @@ vi.mock("@/api/client", () => ({
   updateUserComposerPreferences: vi.fn(),
 }));
 
+describe("authStore interactive login", () => {
+  beforeEach(() => {
+    resetStore(useAuthStore);
+    // Simulate a completed boot: loadFromStorage has already resolved.
+    useAuthStore.setState({ isLoading: false });
+    localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("failed login sets the generic error, returns false, and never flips isLoading", async () => {
+    // Regression for elspeth-d49f8ad511: login() used to set isLoading=true,
+    // which drove AuthGuard's "Checking authentication" spinner and
+    // UNMOUNTED the LoginPage mid-attempt — a failed login then remounted
+    // a blank form, wiping the username (WCAG 3.3.7 Redundant Entry).
+    vi.mocked(apiClient.login).mockRejectedValue({
+      status: 401,
+      detail: "Invalid credentials",
+    });
+    const isLoadingSamples: boolean[] = [];
+    const unsubscribe = useAuthStore.subscribe((state) => {
+      isLoadingSamples.push(state.isLoading);
+    });
+
+    const succeeded = await useAuthStore.getState().login("alice", "wrong");
+    unsubscribe();
+
+    expect(succeeded).toBe(false);
+    expect(isLoadingSamples).not.toContain(true);
+    expect(useAuthStore.getState()).toMatchObject({
+      token: null,
+      user: null,
+      loginError: "Invalid username or password.",
+      isLoading: false,
+    });
+    expect(localStorage.getItem("auth_token")).toBeNull();
+  });
+
+  it("successful login returns true, stores the token, and loads the user", async () => {
+    vi.mocked(apiClient.login).mockResolvedValue({ access_token: "tok-1" });
+    vi.mocked(apiClient.fetchCurrentUser).mockResolvedValue({
+      user_id: "u-1",
+      username: "alice",
+      display_name: "Alice",
+      email: null,
+      groups: [],
+    });
+
+    const succeeded = await useAuthStore.getState().login("alice", "pw");
+
+    expect(succeeded).toBe(true);
+    expect(useAuthStore.getState().token).toBe("tok-1");
+    expect(useAuthStore.getState().user).toMatchObject({ username: "alice" });
+    expect(useAuthStore.getState().loginError).toBeNull();
+    expect(localStorage.getItem("auth_token")).toBe("tok-1");
+  });
+});
+
 describe("authStore account-scoped store reset", () => {
   beforeEach(() => {
     resetStore(useAuthStore);
     resetStore(useBlobStore);
     resetStore(usePreferencesStore);
     resetStore(useSecretsStore);
+    useShareableReviewStore.getState().reset();
     localStorage.clear();
     vi.clearAllMocks();
   });
@@ -99,6 +160,110 @@ describe("authStore account-scoped store reset", () => {
       secrets: [],
       isLoading: false,
       error: null,
+    });
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
+    });
+  });
+
+  it("logout clears a minted share-review token before another account can see it", async () => {
+    vi.spyOn(shareableReviewsApi, "markReadyForReview").mockResolvedValueOnce({
+      token: "alice-share-token",
+      share_url: "/#/shared/alice-share-token",
+      expires_at: "2026-06-19T00:00:00+00:00",
+      payload_digest: "sha256:" + "ab".repeat(32),
+    });
+    useAuthStore.setState({
+      token: "token-for-alice",
+      user: {
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    });
+    await useShareableReviewStore.getState().openAndMark("alice-session");
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: true,
+      latestResponse: expect.objectContaining({
+        token: "alice-share-token",
+        share_url: "/#/shared/alice-share-token",
+      }),
+      sessionIdForResponse: "alice-session",
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
+    });
+  });
+
+  it("logout prevents an in-flight share-review response from repopulating the store", async () => {
+    let resolveMint: (
+      response: Awaited<ReturnType<typeof shareableReviewsApi.markReadyForReview>>,
+    ) => void = () => {};
+    const pendingMint = new Promise<
+      Awaited<ReturnType<typeof shareableReviewsApi.markReadyForReview>>
+    >((resolve) => {
+      resolveMint = resolve;
+    });
+    vi.spyOn(shareableReviewsApi, "markReadyForReview").mockReturnValueOnce(
+      pendingMint,
+    );
+    useAuthStore.setState({
+      token: "token-for-alice",
+      user: {
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    });
+
+    const mintPromise =
+      useShareableReviewStore.getState().openAndMark("alice-session");
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: true,
+      inFlight: true,
+      sessionIdForResponse: "alice-session",
+    });
+
+    await useAuthStore.getState().logout();
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
+    });
+
+    resolveMint({
+      token: "late-alice-share-token",
+      share_url: "/#/shared/late-alice-share-token",
+      expires_at: "2026-06-19T00:00:00+00:00",
+      payload_digest: "sha256:" + "cd".repeat(32),
+    });
+    await mintPromise;
+
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
     });
   });
 });

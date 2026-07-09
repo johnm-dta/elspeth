@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -35,6 +34,53 @@ class _StubSink:
 
     def set_output_contract(self, contract: Any) -> None:
         self._output_contract = contract
+
+
+class _GetSourceFieldResolution:
+    def __init__(
+        self,
+        *,
+        return_value: dict[str, str] | None = None,
+        side_effect: BaseException | None = None,
+    ) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls: list[str] = []
+
+    def __call__(self, run_id: str) -> dict[str, str] | None:
+        self.calls.append(run_id)
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    def assert_not_called(self) -> None:
+        assert self.calls == []
+
+
+class _LandscapeDouble:
+    def __init__(
+        self,
+        *,
+        field_resolution: dict[str, str] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.get_source_field_resolution = _GetSourceFieldResolution(return_value=field_resolution, side_effect=error)
+
+
+_DEFAULT_LANDSCAPE = object()
+
+
+class _ContextDouble:
+    def __init__(
+        self,
+        *,
+        contract: Any = None,
+        landscape: _LandscapeDouble | None | object = _DEFAULT_LANDSCAPE,
+        run_id: str = "run-1",
+    ) -> None:
+        self.contract = contract
+        self.landscape = _LandscapeDouble() if landscape is _DEFAULT_LANDSCAPE else landscape
+        self.run_id = run_id
 
 
 class TestGetEffectiveDisplayHeaders:
@@ -132,8 +178,7 @@ class TestResolveContractFromContext:
         )
 
         sink = _StubSink(HeaderMode.ORIGINAL)
-        ctx = MagicMock()
-        ctx.contract = MagicMock()
+        ctx = _ContextDouble(contract=object())
         resolve_contract_from_context_if_needed(sink, ctx)
         assert sink._output_contract is ctx.contract
 
@@ -143,8 +188,7 @@ class TestResolveContractFromContext:
         )
 
         sink = _StubSink(HeaderMode.NORMALIZED)
-        ctx = MagicMock()
-        ctx.contract = MagicMock()
+        ctx = _ContextDouble(contract=object())
         resolve_contract_from_context_if_needed(sink, ctx)
         assert sink._output_contract is None
 
@@ -169,8 +213,7 @@ class TestResolveContractFromContext:
         )
         sink = _StubSink(HeaderMode.ORIGINAL)
         sink._output_contract = existing
-        ctx = MagicMock()
-        ctx.contract = existing
+        ctx = _ContextDouble(contract=existing)
         resolve_contract_from_context_if_needed(sink, ctx)
         assert sink._output_contract is existing
 
@@ -194,19 +237,20 @@ class TestResolveContractFromContext:
             ),
             locked=True,
         )
-        ctx = MagicMock()
-        ctx.contract = SchemaContract(
-            mode="FLEXIBLE",
-            fields=(
-                FieldContract(
-                    normalized_name="amount",
-                    original_name="Amount B",
-                    python_type=int,
-                    required=True,
-                    source="declared",
+        ctx = _ContextDouble(
+            contract=SchemaContract(
+                mode="FLEXIBLE",
+                fields=(
+                    FieldContract(
+                        normalized_name="amount",
+                        original_name="Amount B",
+                        python_type=int,
+                        required=True,
+                        source="declared",
+                    ),
                 ),
-            ),
-            locked=True,
+                locked=True,
+            )
         )
 
         with pytest.raises(ValueError, match="same normalized field maps to different original headers"):
@@ -232,19 +276,20 @@ class TestResolveContractFromContext:
             ),
             locked=True,
         )
-        ctx = MagicMock()
-        ctx.contract = SchemaContract(
-            mode="FLEXIBLE",
-            fields=(
-                FieldContract(
-                    normalized_name="customer_id",
-                    original_name="Customer ID",
-                    python_type=str,
-                    required=True,
-                    source="declared",
+        ctx = _ContextDouble(
+            contract=SchemaContract(
+                mode="FLEXIBLE",
+                fields=(
+                    FieldContract(
+                        normalized_name="customer_id",
+                        original_name="Customer ID",
+                        python_type=str,
+                        required=True,
+                        source="declared",
+                    ),
                 ),
-            ),
-            locked=True,
+                locked=True,
+            )
         )
 
         resolve_contract_from_context_if_needed(sink, ctx)
@@ -262,13 +307,14 @@ class TestResolveDisplayHeadersIfNeeded:
         )
 
         sink = _StubSink(HeaderMode.ORIGINAL)
-        ctx = MagicMock()
-        # Landscape returns original -> normalized mapping
-        ctx.landscape.get_source_field_resolution.return_value = {
-            "Amount USD": "amount_usd",
-            "Customer ID": "customer_id",
-        }
-        ctx.run_id = "run-1"
+        ctx = _ContextDouble(
+            landscape=_LandscapeDouble(
+                field_resolution={
+                    "Amount USD": "amount_usd",
+                    "Customer ID": "customer_id",
+                }
+            )
+        )
         resolve_display_headers_if_needed(sink, ctx)
         # Should build reverse: normalized -> original
         assert sink._resolved_display_headers == {
@@ -284,7 +330,7 @@ class TestResolveDisplayHeadersIfNeeded:
 
         sink = _StubSink(HeaderMode.ORIGINAL)
         sink._display_headers_resolved = True
-        ctx = MagicMock()
+        ctx = _ContextDouble()
         resolve_display_headers_if_needed(sink, ctx)
         # Should not call landscape
         ctx.landscape.get_source_field_resolution.assert_not_called()
@@ -295,8 +341,7 @@ class TestResolveDisplayHeadersIfNeeded:
         )
 
         sink = _StubSink(HeaderMode.ORIGINAL)
-        ctx = MagicMock()
-        ctx.landscape = None
+        ctx = _ContextDouble(landscape=None)
         with pytest.raises(ValueError, match="requires Landscape"):
             resolve_display_headers_if_needed(sink, ctx)
 
@@ -306,9 +351,7 @@ class TestResolveDisplayHeadersIfNeeded:
         )
 
         sink = _StubSink(HeaderMode.ORIGINAL)
-        ctx = MagicMock()
-        ctx.landscape.get_source_field_resolution.return_value = None
-        ctx.run_id = "run-1"
+        ctx = _ContextDouble(landscape=_LandscapeDouble(field_resolution=None))
         with pytest.raises(ValueError, match="did not record field resolution"):
             resolve_display_headers_if_needed(sink, ctx)
 
@@ -325,9 +368,7 @@ class TestResolveDisplayHeadersIfNeeded:
         sink = _StubSink(HeaderMode.ORIGINAL)
 
         # First call: Landscape query raises
-        ctx = MagicMock()
-        ctx.landscape.get_source_field_resolution.side_effect = RuntimeError("DB locked")
-        ctx.run_id = "run-1"
+        ctx = _ContextDouble(landscape=_LandscapeDouble(error=RuntimeError("DB locked")))
         with pytest.raises(RuntimeError, match="DB locked"):
             resolve_display_headers_if_needed(sink, ctx)
 
@@ -350,12 +391,14 @@ class TestResolveDisplayHeadersIfNeeded:
         )
 
         sink = _StubSink(HeaderMode.ORIGINAL)
-        ctx = MagicMock()
-        ctx.landscape.get_source_field_resolution.return_value = {
-            "Amount A": "amount",
-            "Amount B": "amount",  # Duplicate normalized name
-        }
-        ctx.run_id = "run-1"
+        ctx = _ContextDouble(
+            landscape=_LandscapeDouble(
+                field_resolution={
+                    "Amount A": "amount",
+                    "Amount B": "amount",  # Duplicate normalized name
+                }
+            )
+        )
         with pytest.raises(ValueError, match="duplicate normalized names"):
             resolve_display_headers_if_needed(sink, ctx)
 

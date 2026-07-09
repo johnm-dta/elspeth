@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -31,6 +32,89 @@ PATCH_AUTH = "elspeth.plugins.infrastructure.azure_auth.AzureAuthConfig.create_b
 ACCOUNT_URL = "https://fakestorage.blob.core.windows.net"
 
 
+@dataclass(frozen=True, slots=True)
+class _RecordedCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class _CallRecorder:
+    """Minimal callable fake exposing the call assertions used in this file."""
+
+    def __init__(self, return_value: Any = None, side_effect: BaseException | None = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args=args, kwargs=dict(kwargs)))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        if self.call_count != 1:
+            raise AssertionError(f"Expected 1 call, got {self.call_count}")
+
+
+@dataclass(slots=True)
+class _SourceContextFake:
+    run_id: str = "test-run"
+    node_id: str | None = "source"
+    operation_id: str | None = "operation-001"
+    landscape: Any = None
+    telemetry_emit: _CallRecorder = field(default_factory=_CallRecorder)
+    record_call: _CallRecorder = field(default_factory=_CallRecorder)
+    record_validation_error: _CallRecorder = field(default_factory=_CallRecorder)
+
+
+@dataclass(slots=True)
+class _BlobDownloadFake:
+    data: bytes
+
+    def readall(self) -> bytes:
+        return self.data
+
+
+@dataclass(slots=True)
+class _BlobClientFake:
+    data: bytes = b""
+    download_error: BaseException | None = None
+
+    def download_blob(self) -> _BlobDownloadFake:
+        if self.download_error is not None:
+            raise self.download_error
+        return _BlobDownloadFake(self.data)
+
+
+@dataclass(slots=True)
+class _BlobContainerClientFake:
+    blob_client: _BlobClientFake
+
+    def get_blob_client(self, _blob_path: str) -> _BlobClientFake:
+        return self.blob_client
+
+
+@dataclass(slots=True)
+class _BlobServiceClientFake:
+    container_client: _BlobContainerClientFake
+
+    def get_container_client(self, _container: str) -> _BlobContainerClientFake:
+        return self.container_client
+
+
+def _fake_blob_service(data: bytes = b"", *, download_error: BaseException | None = None) -> _BlobServiceClientFake:
+    return _BlobServiceClientFake(_BlobContainerClientFake(_BlobClientFake(data=data, download_error=download_error)))
+
+
 def _base_config(**overrides: Any) -> dict[str, Any]:
     """Build a minimal valid config with connection_string auth."""
     config: dict[str, Any] = {
@@ -44,21 +128,11 @@ def _base_config(**overrides: Any) -> dict[str, Any]:
     return config
 
 
-def _mock_blob_download(data: bytes) -> MagicMock:
-    """Create a mock service client that returns data from download_blob().readall()."""
-    mock_blob_client = MagicMock()
-    mock_blob_client.download_blob.return_value.readall.return_value = data
-    mock_service = MagicMock()
-    mock_service.get_container_client.return_value.get_blob_client.return_value = mock_blob_client
-    return mock_service
-
-
 def _make_source(config: dict[str, Any]) -> Any:
-    """Create AzureBlobSource with patched auth so no real Azure calls happen."""
+    """Create AzureBlobSource; Azure clients are created lazily during load()."""
     from elspeth.plugins.sources.azure_blob_source import AzureBlobSource
 
-    with patch(PATCH_AUTH, return_value=MagicMock()):
-        return AzureBlobSource(config)
+    return AzureBlobSource(config)
 
 
 # ---------------------------------------------------------------------------
@@ -73,8 +147,7 @@ class TestAzureBlobSourceConfig:
         """Connection string config sets name and output_schema."""
         from elspeth.plugins.sources.azure_blob_source import AzureBlobSource
 
-        with patch(PATCH_AUTH, return_value=MagicMock()):
-            source = AzureBlobSource(_base_config())
+        source = AzureBlobSource(_base_config())
 
         assert source.name == "azure_blob"
         assert source.output_schema is not None
@@ -88,8 +161,7 @@ class TestAzureBlobSourceConfig:
             sas_token="sv=2021-06-08&ss=b",
             account_url=ACCOUNT_URL,
         )
-        with patch(PATCH_AUTH, return_value=MagicMock()):
-            source = AzureBlobSource(cfg)
+        source = AzureBlobSource(cfg)
 
         assert source._auth_config.auth_method == "sas_token"
 
@@ -102,8 +174,7 @@ class TestAzureBlobSourceConfig:
             use_managed_identity=True,
             account_url=ACCOUNT_URL,
         )
-        with patch(PATCH_AUTH, return_value=MagicMock()):
-            source = AzureBlobSource(cfg)
+        source = AzureBlobSource(cfg)
 
         assert source._auth_config.auth_method == "managed_identity"
 
@@ -118,8 +189,7 @@ class TestAzureBlobSourceConfig:
             client_secret="csec",
             account_url=ACCOUNT_URL,
         )
-        with patch(PATCH_AUTH, return_value=MagicMock()):
-            source = AzureBlobSource(cfg)
+        source = AzureBlobSource(cfg)
 
         assert source._auth_config.auth_method == "service_principal"
 
@@ -150,6 +220,13 @@ class TestAzureBlobSourceConfig:
         with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
 
+    @pytest.mark.parametrize("container", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_container_names(self, container: str) -> None:
+        from elspeth.plugins.sources.azure_blob_source import AzureBlobSourceConfig
+
+        cfg = AzureBlobSourceConfig.from_dict(_base_config(container=container))
+        assert cfg.container == container
+
     def test_empty_blob_path_raises(self) -> None:
         """Empty blob_path raises PluginConfigError."""
         cfg = _base_config(blob_path="")
@@ -161,6 +238,13 @@ class TestAzureBlobSourceConfig:
         cfg = _base_config(blob_path=blob_path)
         with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
+
+    @pytest.mark.parametrize("blob_path", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_blob_paths(self, blob_path: str) -> None:
+        from elspeth.plugins.sources.azure_blob_source import AzureBlobSourceConfig
+
+        cfg = AzureBlobSourceConfig.from_dict(_base_config(blob_path=blob_path))
+        assert cfg.blob_path == blob_path
 
     def test_columns_rejected_for_json(self) -> None:
         """columns option rejected for JSON format."""
@@ -225,7 +309,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"id,name,value\n1,alice,100\n2,bob,200\n3,carol,300\n"
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 3
@@ -244,7 +328,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"User ID,user-id,data\n1,2,3\n"
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -257,7 +341,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"id;name\n1;alice\n"
         source = _make_source(_base_config(csv_options={"delimiter": ";"}))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -268,7 +352,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"id,name\n1,caf\xe9\n"
         source = _make_source(_base_config(csv_options={"encoding": "latin-1"}))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -284,7 +368,7 @@ class TestAzureBlobSourceCSV:
             )
         )
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -310,7 +394,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"id,name,value\n1,alice,100\n2,bob\n3,carol,300\n"
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         # 3 total rows: 2 valid + 1 quarantined
@@ -336,7 +420,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b'id,name,value\n1,alice,100\n4,"bad"quote,6\n7,carol,300\n'
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         valid = [r for r in rows if not r.is_quarantined]
@@ -354,7 +438,7 @@ class TestAzureBlobSourceCSV:
         """Empty CSV file quarantines (no header row)."""
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(b"")):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(b"")):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -367,7 +451,7 @@ class TestAzureBlobSourceCSV:
         bad_bytes = b"\xff\xfe\x00\x01"
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(bad_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(bad_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -379,7 +463,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"id,name\n1,alice\n2\n3,carol\n"
         source = _make_source(_base_config(on_validation_failure="discard"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         # Only valid rows yielded; quarantined row discarded
@@ -391,7 +475,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"id,name\n1,alice\n\n2,bob\n"
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         valid = [r for r in rows if not r.is_quarantined]
@@ -402,7 +486,7 @@ class TestAzureBlobSourceCSV:
         csv_bytes = b"ID,Full Name\n1,Alice\n"
         source = _make_source(_base_config(field_mapping={"full_name": "display_name"}))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -411,7 +495,7 @@ class TestAzureBlobSourceCSV:
     def test_close_nulls_client(self, ctx: PluginContext) -> None:
         """close() sets _blob_client to None."""
         source = _make_source(_base_config())
-        source._blob_client = MagicMock()
+        source._blob_client = _BlobClientFake()
         source.close()
         assert source._blob_client is None
 
@@ -440,7 +524,7 @@ class TestAzureBlobSourceJSON:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -459,7 +543,7 @@ class TestAzureBlobSourceJSON:
             )
         )
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -475,7 +559,7 @@ class TestAzureBlobSourceJSON:
             )
         )
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -492,7 +576,7 @@ class TestAzureBlobSourceJSON:
             )
         )
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -504,7 +588,7 @@ class TestAzureBlobSourceJSON:
         blob_bytes = json.dumps({"a": 1}).encode()
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -515,7 +599,7 @@ class TestAzureBlobSourceJSON:
         """Invalid JSON quarantines."""
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(b"{invalid json")):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(b"{invalid json")):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -527,7 +611,7 @@ class TestAzureBlobSourceJSON:
         blob_bytes = b'[{"value": NaN}]'
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -538,7 +622,7 @@ class TestAzureBlobSourceJSON:
         bad_bytes = b"\xff\xfe\x00\x01"
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(bad_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(bad_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -561,7 +645,7 @@ class TestAzureBlobSourceJSON:
         """JSON and JSONL normalize external keys and retain audit mapping."""
         source = _make_source(_base_config(format=source_format))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -575,7 +659,7 @@ class TestAzureBlobSourceJSON:
             "Customer Name": "customer_name",
             "Order ID": "order_id",
         }
-        assert normalization_version == "1.0.0"
+        assert normalization_version == "1.0.1"
 
     def test_json_field_mapping_overrides_normalized_keys(self, ctx: PluginContext) -> None:
         """JSON field_mapping can override names after source-boundary normalization."""
@@ -587,7 +671,7 @@ class TestAzureBlobSourceJSON:
             )
         )
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(json.dumps(data).encode())):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -605,7 +689,7 @@ class TestAzureBlobSourceJSON:
         data = [{"id": 1}, "not_an_object", {"id": 2}]
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(json.dumps(data).encode())):
             rows = list(source.load(ctx))
 
         valid = [r for r in rows if not r.is_quarantined]
@@ -614,25 +698,32 @@ class TestAzureBlobSourceJSON:
         assert len(quarantined) == 1
         assert "Expected JSON object" in quarantined[0].quarantine_error
 
-    def test_json_field_mapping_collision_crashes_not_quarantines(self, ctx: PluginContext) -> None:
-        """A field_mapping that collapses two distinct fields into one final name is a
-        CONFIG fault (ours), not bad source data: it must crash, not be quarantined.
-
-        Here field_mapping maps 'a' -> 'x' while the row also carries a passthrough
-        'x', so resolve_field_names raises a plain ValueError ('field_mapping creates
-        collision'). After narrowing _validate_and_yield to catch only the Tier-3
-        ExternalHeaderError marker, this config ValueError propagates and crashes —
-        mirroring the CSV header path (which lets the same plain ValueError escape).
-        Previously the broad `except ValueError` masked it as a per-row quarantine.
+    @pytest.mark.parametrize(
+        ("data", "quarantine_index"),
+        [
+            ([{"a": 1, "x": 2}, {"a": 3}], 0),
+            ([{"a": 1}, {"a": 2, "x": 3}, {"a": 4}], 1),
+        ],
+    )
+    def test_json_field_mapping_collision_quarantines_not_crashes(
+        self,
+        data: list[dict[str, int]],
+        quarantine_index: int,
+        ctx: PluginContext,
+    ) -> None:
+        """Azure Blob JSON rows are external data, so row-created mapping collisions
+        must route through on_validation_failure instead of aborting the run.
         """
-        data = [{"a": 1, "x": 2}]
         source = _make_source(_base_config(format="json", field_mapping={"a": "x"}))
 
-        with (
-            patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())),
-            pytest.raises(ValueError, match="collision"),
-        ):
-            list(source.load(ctx))
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(json.dumps(data).encode())):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == len(data)
+        assert rows[quarantine_index].is_quarantined is True
+        assert rows[quarantine_index].quarantine_error is not None
+        assert "field_mapping creates collision" in rows[quarantine_index].quarantine_error
+        assert [row.row for row in rows if not row.is_quarantined] == [{"x": row["a"]} for row in data if "x" not in row]
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +743,7 @@ class TestAzureBlobSourceJSONL:
         blob_bytes = b'{"id": 1, "name": "alice"}\n{"id": 2, "name": "bob"}\n'
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -664,7 +755,7 @@ class TestAzureBlobSourceJSONL:
         blob_bytes = b'{"id": 1}\n\n{"id": 2}\n\n'
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -674,7 +765,7 @@ class TestAzureBlobSourceJSONL:
         blob_bytes = b'{"id": 1}\n{bad json}\n{"id": 3}\n'
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 3
@@ -687,7 +778,7 @@ class TestAzureBlobSourceJSONL:
         blob_bytes = b'{"id": 1}\n{bad}\n{"id": 3}\n'
         source = _make_source(_base_config(format="jsonl", on_validation_failure="discard"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         # Only valid rows
@@ -699,7 +790,7 @@ class TestAzureBlobSourceJSONL:
         blob_bytes = b'{"id": 1}\n{"value": NaN}\n'
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -711,7 +802,7 @@ class TestAzureBlobSourceJSONL:
         bad_bytes = b"\xff\xfe\x00\x01"
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(bad_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(bad_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -723,7 +814,7 @@ class TestAzureBlobSourceJSONL:
         blob_bytes = b'{"id": 1}\n\xff\xfe\n{"id": 3}\n'
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 3
@@ -757,7 +848,7 @@ class TestAzureBlobSourceSchemaValidation:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json", schema=FIXED_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -773,7 +864,7 @@ class TestAzureBlobSourceSchemaValidation:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json", schema=FIXED_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -785,7 +876,7 @@ class TestAzureBlobSourceSchemaValidation:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json", schema=FLEXIBLE_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         contract = source.get_schema_contract()
@@ -799,7 +890,7 @@ class TestAzureBlobSourceSchemaValidation:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json", schema=DYNAMIC_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         contract = source.get_schema_contract()
@@ -812,7 +903,7 @@ class TestAzureBlobSourceSchemaValidation:
         blob_bytes = b"not valid json"
         source = _make_source(_base_config(format="json", schema=DYNAMIC_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             list(source.load(ctx))
 
         # Contract should be locked even with no valid rows
@@ -826,7 +917,7 @@ class TestAzureBlobSourceSchemaValidation:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json", schema=DYNAMIC_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -850,7 +941,7 @@ class TestAzureBlobSourceSchemaValidation:
         """Later sparse JSON/JSONL keys must stay under schema-contract custody."""
         source = _make_source(_base_config(format=source_format, schema=DYNAMIC_SCHEMA))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -889,7 +980,7 @@ class TestAzureBlobSourceFieldResolutionUnion:
         blob_bytes = b'{"id": 1, "name": "alice"}\n{"id": 2, "email": "bob@example.com"}\n'
         source = _make_source(_base_config(format="jsonl"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -919,14 +1010,10 @@ class TestAzureBlobSourceAuditAndErrors:
     def test_download_failure_raises_runtime_error(self, ctx: PluginContext) -> None:
         """Azure download failure raises RuntimeError."""
         source = _make_source(_base_config())
-
-        mock_service = MagicMock()
-        mock_service.get_container_client.return_value.get_blob_client.return_value.download_blob.side_effect = Exception(
-            "connection refused"
-        )
+        fake_service = _fake_blob_service(download_error=Exception("connection refused"))
 
         with (
-            patch(PATCH_AUTH, return_value=mock_service),
+            patch(PATCH_AUTH, return_value=fake_service),
             pytest.raises(RuntimeError, match="Failed to download blob"),
         ):
             list(source.load(ctx))
@@ -944,12 +1031,10 @@ class TestAzureBlobSourceAuditAndErrors:
     def test_programming_errors_crash_directly(self, ctx: PluginContext) -> None:
         """Programming errors (TypeError) crash through, not caught."""
         source = _make_source(_base_config())
-
-        mock_service = MagicMock()
-        mock_service.get_container_client.return_value.get_blob_client.return_value.download_blob.side_effect = TypeError("bad argument")
+        fake_service = _fake_blob_service(download_error=TypeError("bad argument"))
 
         with (
-            patch(PATCH_AUTH, return_value=mock_service),
+            patch(PATCH_AUTH, return_value=fake_service),
             pytest.raises(TypeError, match="bad argument"),
         ):
             list(source.load(ctx))
@@ -959,13 +1044,16 @@ class TestAzureBlobSourceAuditAndErrors:
         source = _make_source(_base_config())
 
         blob_bytes = b"id,name\n1,alice\n"
-        mock_service = _mock_blob_download(blob_bytes)
+        fake_service = _fake_blob_service(blob_bytes)
 
         # Make record_call raise to simulate audit failure
-        ctx.record_call = MagicMock(side_effect=Exception("db write failed"))  # type: ignore[method-assign]
+        def failing_record_call(*_args: Any, **_kwargs: Any) -> Any:
+            raise Exception("db write failed")
+
+        ctx.record_call = failing_record_call  # type: ignore[method-assign,assignment]
 
         with (
-            patch(PATCH_AUTH, return_value=mock_service),
+            patch(PATCH_AUTH, return_value=fake_service),
             pytest.raises(AuditIntegrityError, match="audit trail"),
         ):
             list(source.load(ctx))
@@ -986,10 +1074,10 @@ class TestAzureBlobSourceAuditAndErrors:
     ) -> None:
         """Normal success paths keep probative facts in audit, not info logs."""
         source = _make_source(_base_config(format=blob_format, blob_path=blob_path))
-        ctx = MagicMock()
+        ctx = _SourceContextFake()
 
         with (
-            patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)),
+            patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)),
             patch("elspeth.plugins.sources.azure_blob_source.logger.info") as mock_info,
         ):
             rows = list(source.load(ctx))
@@ -1011,7 +1099,7 @@ class TestAzureBlobSourceAuditAndErrors:
         csv_bytes = b"ID,Full Name\n1,Alice\n"
         source = _make_source(_base_config())
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(csv_bytes)):
             list(source.load(ctx))
 
         result = source.get_field_resolution()
@@ -1026,7 +1114,7 @@ class TestAzureBlobSourceAuditAndErrors:
         blob_bytes = json.dumps(data).encode()
         source = _make_source(_base_config(format="json"))
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+        with patch(PATCH_AUTH, return_value=_fake_blob_service(blob_bytes)):
             list(source.load(ctx))
 
         result = source.get_field_resolution()

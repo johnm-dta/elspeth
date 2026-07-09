@@ -7,16 +7,15 @@ and TUI. Does NOT need LandscapeDB — only read-only database ops for queries.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, select
 
 from elspeth.contracts import (
     Call,
     NodeState,
-    NodeStateStatus,
-    NodeType,
     RoutingEvent,
     Row,
     RowLineage,
@@ -43,7 +42,6 @@ from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.landscape.schema import (
     calls_table,
     node_states_table,
-    nodes_table,
     routing_events_table,
     rows_table,
     scheduler_events_table,
@@ -176,7 +174,14 @@ class QueryRepository:
         except PayloadIntegrityError as e:
             raise AuditIntegrityError(f"Payload integrity check failed for row {row_id} (ref={source_data_ref}): {e}") from e
         except OSError as e:
-            raise AuditIntegrityError(f"Payload retrieval failed for row {row_id} (ref={source_data_ref}): {type(e).__name__}: {e}") from e
+            logger.warning(
+                "payload_retrieval_failed",
+                row_id=row_id,
+                source_data_ref=source_data_ref,
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+            raise AuditIntegrityError(f"Payload retrieval failed for row {row_id}: reason=payload_store_os_error") from e
 
         try:
             decoded_data = json.loads(payload_bytes.decode("utf-8"))
@@ -268,6 +273,35 @@ class QueryRepository:
         if r is None:
             return None
         return self._token_loader.load(r)
+
+    def get_token_for_run(self, run_id: str, token_id: str) -> Token | None:
+        """Get a token by ID, scoped to a run."""
+        query = select(tokens_table).where(tokens_table.c.run_id == run_id, tokens_table.c.token_id == token_id)
+        r = self._ops.execute_fetchone(query)
+        if r is None:
+            return None
+        return self._token_loader.load(r)
+
+    def get_tokens_by_ids(self, token_ids: Sequence[str]) -> list[Token]:
+        """Get tokens by ID with one chunked batch query per input chunk.
+
+        Results follow the first-seen order of ``token_ids`` and omit missing
+        tokens. This read is intentionally unscoped by run so callers that
+        validate Tier-1 lineage relationships can distinguish missing parents
+        from cross-run parent corruption after hydration.
+        """
+        if not token_ids:
+            return []
+
+        ordered_token_ids = tuple(dict.fromkeys(token_ids))
+        tokens_by_id: dict[str, Token] = {}
+        for offset in range(0, len(ordered_token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = ordered_token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = select(tokens_table).where(tokens_table.c.token_id.in_(chunk))
+            for row in self._ops.execute_fetchall(query):
+                tokens_by_id[row.token_id] = self._token_loader.load(row)
+
+        return [tokens_by_id[token_id] for token_id in ordered_token_ids if token_id in tokens_by_id]
 
     def get_token_parents(self, token_id: str) -> list[TokenParent]:
         """Get parent relationships for a token (backward lineage).
@@ -386,7 +420,7 @@ class QueryRepository:
         if not state_ids:
             return []
 
-        all_db_rows = []
+        queries = []
         for offset in range(0, len(state_ids), self._QUERY_CHUNK_SIZE):
             chunk = state_ids[offset : offset + self._QUERY_CHUNK_SIZE]
             query = (
@@ -395,11 +429,18 @@ class QueryRepository:
                     node_states_table.c.step_index,
                     node_states_table.c.attempt,
                 )
-                .join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
+                .join(
+                    node_states_table,
+                    and_(
+                        routing_events_table.c.state_id == node_states_table.c.state_id,
+                        routing_events_table.c.run_id == node_states_table.c.run_id,
+                    ),
+                )
                 .where(routing_events_table.c.state_id.in_(chunk))
             )
-            all_db_rows.extend(self._ops.execute_fetchall(query))
+            queries.append(query)
 
+        all_db_rows = [row for db_rows in self._ops.execute_fetchall_many(queries) for row in db_rows]
         # Sort with total ordering: state_id breaks ties when multiple tokens
         # share the same step_index/attempt (e.g., forked paths at the same step).
         all_db_rows.sort(key=lambda r: (r.step_index, r.attempt, r.state_id, r.ordinal, r.event_id))
@@ -425,7 +466,7 @@ class QueryRepository:
         if not state_ids:
             return []
 
-        all_db_rows = []
+        queries = []
         for offset in range(0, len(state_ids), self._QUERY_CHUNK_SIZE):
             chunk = state_ids[offset : offset + self._QUERY_CHUNK_SIZE]
             query = (
@@ -437,8 +478,9 @@ class QueryRepository:
                 .join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id)
                 .where(calls_table.c.state_id.in_(chunk))
             )
-            all_db_rows.extend(self._ops.execute_fetchall(query))
+            queries.append(query)
 
+        all_db_rows = [row for db_rows in self._ops.execute_fetchall_many(queries) for row in db_rows]
         # Sort with total ordering: state_id breaks ties when multiple tokens
         # share the same step_index/attempt (e.g., forked paths at the same step).
         all_db_rows.sort(key=lambda r: (r.step_index, r.attempt, r.state_id, r.call_index))
@@ -503,8 +545,14 @@ class QueryRepository:
         # JOIN through node_states to filter by run_id
         query = (
             select(routing_events_table)
-            .join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
-            .where(node_states_table.c.run_id == run_id)
+            .join(
+                node_states_table,
+                and_(
+                    routing_events_table.c.state_id == node_states_table.c.state_id,
+                    routing_events_table.c.run_id == node_states_table.c.run_id,
+                ),
+            )
+            .where(routing_events_table.c.run_id == run_id)
             .order_by(
                 node_states_table.c.step_index,
                 node_states_table.c.attempt,
@@ -582,193 +630,214 @@ class QueryRepository:
         db_rows = self._ops.execute_fetchall(query)
         return [self._token_outcome_loader.load(r) for r in db_rows]
 
-    def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
-        """Count the distinct source rows that reached a terminal outcome.
+    # === Chunked Export Read APIs (elspeth-3ae79a4775: bounded-memory export) ===
+    #
+    # These methods let the exporter stream a run's row family in bounded
+    # batches instead of preloading every child collection for the run.
+    # Contract: grouping a set-scoped result by parent id yields exactly the
+    # same per-parent sequences as grouping the corresponding full-run getter.
+    # Each parent's children always land in a single IN-chunk (chunks partition
+    # the parent ids) ordered by the same ORDER BY, so per-parent order is
+    # exact. The flat cross-parent order follows input-chunk order — callers
+    # must group by parent id, not rely on the flat sequence.
+    #
+    # Note: Each chunk/page is a separate query. For completed runs this is
+    # safe. For in-progress runs, concurrent writes between queries could
+    # produce inconsistent results. Query only completed runs.
 
-        ``rows_processed`` semantics — the canonical definition (F2,
-        elspeth-resume-fork-reemit) — is "one per *source row*", NOT one per
-        terminal token.  The live processing loops increment ``rows_processed``
-        exactly once per source row pulled from the source iterator
-        (``resume.py`` ``run_resume_processing_loop`` and the main
-        ``_run_main_processing_loop``), and structural fan-out
-        (fork / expand) or fan-in (aggregation / coalesce) never moves that
-        counter.  Reconstructing it from the audit trail therefore CANNOT be a
-        per-token tally: a 1-source-row fork emits two leaf tokens, a
-        3-source-row aggregation emits one result token, a 1-source-row expand
-        emits N children — yet each contributes exactly its *source rows* to
-        ``rows_processed`` (1, 3, 1 respectively).
+    def iter_rows_for_run(self, run_id: str, *, batch_size: int = _QUERY_CHUNK_SIZE) -> Iterator[list[Row]]:
+        """Iterate rows for a run in bounded batches (keyset pagination).
 
-        ``row_id`` is the stable source-row identity (CLAUDE.md DAG model):
-        fork and expand children inherit their parent's ``row_id``
-        (``tokens.expand_token`` / ``fork_token`` pass ``row_id=parent.row_id``),
-        and aggregation's ``BATCH_CONSUMED`` tokens retain their own source
-        ``row_id`` while the synthetic result token reuses one of them.  So the
-        faithful reconstruction is the count of DISTINCT ``row_id`` among tokens
-        that reached a *terminal* outcome (``completed = 1``) — this counts each
-        source row once regardless of how many tokens it spawned, and matches an
-        uninterrupted run field-for-field (verified across fork / aggregation /
-        expand archetypes).
-
-        ``completed = 1`` is the terminal boundary: it includes structural
-        TRANSIENT parents (``FORK_PARENT`` / ``EXPAND_PARENT``) and
-        ``BATCH_CONSUMED`` tokens (all terminal), and excludes non-terminal
-        ``BUFFERED`` rows (``completed = 0``) — a row whose only audit record is
-        ``BUFFERED`` has not yet been processed to a terminal state, so it must
-        not inflate ``rows_processed``.
+        Yields lists of Row models in the same global order as
+        :meth:`get_rows` (``ingest_sequence`` ascending), loading at most
+        ``batch_size`` rows per query. ``ingest_sequence`` is ``NOT NULL``
+        and unique per run (``UniqueConstraint("run_id", "ingest_sequence")``),
+        so it is an exact keyset cursor: no row can be skipped or duplicated
+        between pages.
 
         Args:
             run_id: Run ID
+            batch_size: Maximum rows per yielded batch (must be >= 1)
 
-        Returns:
-            Distinct source-row count among terminal token outcomes.
+        Yields:
+            Non-empty lists of Row models, ordered by ingest_sequence
 
         Raises:
-            AuditIntegrityError: If the count query returns no row — a
-                ``COUNT`` aggregate always returns exactly one row, so a NULL
-                result indicates Tier-1 audit-database corruption.
+            ValueError: If batch_size < 1
+            AuditIntegrityError: If a row has NULL ingest_sequence — the
+                schema declares the column NOT NULL, so this is Tier-1
+                audit-database corruption
         """
-        query = (
-            select(func.count(func.distinct(tokens_table.c.row_id)))
-            .select_from(
-                token_outcomes_table.join(
-                    tokens_table,
-                    (token_outcomes_table.c.token_id == tokens_table.c.token_id) & (token_outcomes_table.c.run_id == tokens_table.c.run_id),
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        last_ingest_sequence: int | None = None
+        while True:
+            query = select(rows_table).where(rows_table.c.run_id == run_id)
+            if last_ingest_sequence is not None:
+                query = query.where(rows_table.c.ingest_sequence > last_ingest_sequence)
+            query = query.order_by(rows_table.c.ingest_sequence).limit(batch_size)
+            db_rows = self._ops.execute_fetchall(query)
+            if not db_rows:
+                return
+            last_ingest_sequence = db_rows[-1].ingest_sequence
+            if last_ingest_sequence is None:
+                raise AuditIntegrityError(
+                    f"Row '{db_rows[-1].row_id}' in run {run_id!r} has NULL ingest_sequence — the schema "
+                    f"declares it NOT NULL, so this is a Tier-1 audit-database integrity violation."
                 )
-            )
-            .where(token_outcomes_table.c.run_id == run_id)
-            .where(token_outcomes_table.c.completed == 1)
-        )
-        r = self._ops.execute_fetchone(query)
-        if r is None:
-            raise AuditIntegrityError(
-                f"count_distinct_source_rows_with_terminal_outcome returned no row for run {run_id!r} — "
-                f"a COUNT aggregate must always return exactly one row; a NULL result is a Tier-1 "
-                f"audit-database integrity violation."
-            )
-        return int(r[0])
+            yield [self._row_loader.load(r) for r in db_rows]
+            if len(db_rows) < batch_size:
+                return
 
-    def count_failed_coalesce_barrier_rows(self, run_id: str) -> int:
-        """Count distinct (coalesce node, source row) join barriers that FAILED.
+    def get_tokens_for_rows(self, run_id: str, row_ids: Sequence[str]) -> list[Token]:
+        """Get tokens for a set of rows (chunked batch query).
 
-        ``rows_coalesce_failed`` semantics (elspeth-7294de558e): the counter is
-        per failed *barrier* — one pending key ``(coalesce_name, row_id)`` that
-        failed to merge — NOT per branch token.  The durable evidence is the
-        family of FAILED ``node_states`` that
-        ``CoalesceExecutor._fail_pending`` writes at the coalesce node: one
-        FAILED state per *arrived branch token*, all sharing the same
-        ``(node_id, row_id)``.  A naive count of FAILED states (or of the
-        per-branch ``(FAILURE, UNROUTED)`` ``token_outcomes``, which carry no
-        node attribution at all) over-reports a 2-branch barrier failure as 2;
-        the faithful reconstruction is the count of DISTINCT
-        ``(node_id, row_id)`` pairs.
-
-        ANCHOR CHOICE (pinned by
-        ``tests/unit/core/landscape/test_query_methods.py::TestCountFailedCoalesceBarrierRows``):
-        the query anchors on ``node_states.status = 'failed'`` joined to
-        ``nodes.node_type = 'coalesce'`` — both indexed, structural columns —
-        rather than on the ``failure_reason`` strings inside ``error_json``
-        (stringly, unindexed, and ambiguous: ``all_branches_lost`` is written
-        by two different resolution paths).  ``row_id`` comes from the
-        ``tokens`` join (branch tokens of one barrier inherit the same source
-        ``row_id`` — the pending key IS ``(coalesce_name, row_id)``).
-
-        ONE exclusion, applied Python-side on the parsed error payload: a
-        ``late_arrival_after_merge`` state is a straggler token rejected AFTER
-        the barrier already resolved — it is not itself a barrier failure.
-        After a *failed* merge the pair is already counted via the barrier's
-        own ``_fail_pending`` states (the DISTINCT collapse absorbs the
-        straggler); after a *successful* merge the pair must not be counted at
-        all, which only the reason exclusion guarantees.
-
-        DELIBERATE breadth: arrival-time barrier failures (branch-lost
-        cascades via ``_evaluate_after_loss``, immediate merge failures such
-        as ``select_branch_not_arrived``) ARE counted here even though the
-        live accumulator only increments ``rows_coalesce_failed`` for barriers
-        resolved by the timeout/flush sweeps (``outcomes.py``) — those
-        arrival-time failures are real failed barriers and the durable record
-        is the broader truth.  Conversely a zero-arrival best-effort timeout
-        (``best_effort_timeout_no_arrivals``) consumed no tokens and leaves no
-        node_states, so it is invisible here by construction.  Reconciling the
-        live accumulator with this durable breadth is tracked:
-        elspeth-ff6d48c180.
-
-        Cumulativity: resume re-drives record under the SAME ``run_id``
-        (resume provenance lives in ``resume_checkpoint_id``), so a single
-        run-scoped query covers run-1 failures AND resumed-run failures, and
-        the DISTINCT collapse dedupes a barrier that recorded states in both.
+        Within each row, tokens are ordered by (created_at, token_id) — the
+        same per-row ordering as :meth:`get_tokens` and
+        :meth:`get_all_tokens_for_run`. Chunks row_ids to stay within
+        SQLite's SQLITE_MAX_VARIABLE_NUMBER limit (default 999).
 
         Args:
-            run_id: Run ID
+            run_id: Run ID (guards against cross-run contamination)
+            row_ids: Row IDs to fetch tokens for
 
         Returns:
-            Distinct failed-barrier count for the run (run-1 + all resumes).
-
-        Raises:
-            AuditIntegrityError: If a FAILED coalesce node_state carries no
-                parseable ``error_json`` — the write side requires an error
-                payload for FAILED states, so its absence is Tier-1
-                audit-database corruption.
+            List of Token models; group by row_id for per-row sequences
         """
-        query = (
-            select(
-                node_states_table.c.node_id,
-                tokens_table.c.row_id,
-                node_states_table.c.error_json,
+        if not row_ids:
+            return []
+        tokens: list[Token] = []
+        for offset in range(0, len(row_ids), self._QUERY_CHUNK_SIZE):
+            chunk = row_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(tokens_table)
+                .where(tokens_table.c.run_id == run_id)
+                .where(tokens_table.c.row_id.in_(chunk))
+                .order_by(tokens_table.c.row_id, tokens_table.c.created_at, tokens_table.c.token_id)
             )
-            .select_from(
-                node_states_table.join(
-                    nodes_table,
-                    (node_states_table.c.node_id == nodes_table.c.node_id) & (node_states_table.c.run_id == nodes_table.c.run_id),
-                ).join(
-                    tokens_table,
-                    (node_states_table.c.token_id == tokens_table.c.token_id) & (node_states_table.c.run_id == tokens_table.c.run_id),
+            tokens.extend(self._token_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return tokens
+
+    def get_token_parents_for_tokens(self, token_ids: Sequence[str]) -> list[TokenParent]:
+        """Get parent relationships for a set of tokens (chunked batch query).
+
+        Within each token, parents are ordered by ordinal — the same
+        per-token ordering as :meth:`get_token_parents` and
+        :meth:`get_all_token_parents_for_run`. Chunks token_ids to stay
+        within SQLite's SQLITE_MAX_VARIABLE_NUMBER limit (default 999).
+
+        Args:
+            token_ids: Child token IDs to fetch parent links for
+
+        Returns:
+            List of TokenParent models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        parents: list[TokenParent] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(token_parents_table)
+                .where(token_parents_table.c.token_id.in_(chunk))
+                .order_by(token_parents_table.c.token_id, token_parents_table.c.ordinal)
+            )
+            parents.extend(self._token_parent_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return parents
+
+    def get_node_states_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[NodeState]:
+        """Get node states for a set of tokens (chunked batch query).
+
+        Within each token, states are ordered by (step_index, attempt) — the
+        same per-token ordering as :meth:`get_node_states_for_token` and
+        :meth:`get_all_node_states_for_run`. Chunks token_ids to stay within
+        SQLite's SQLITE_MAX_VARIABLE_NUMBER limit (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            token_ids: Token IDs to fetch states for
+
+        Returns:
+            List of NodeState models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        states: list[NodeState] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(node_states_table)
+                .where(node_states_table.c.run_id == run_id)
+                .where(node_states_table.c.token_id.in_(chunk))
+                .order_by(
+                    node_states_table.c.token_id,
+                    node_states_table.c.step_index,
+                    node_states_table.c.attempt,
                 )
             )
-            .where(node_states_table.c.run_id == run_id)
-            .where(node_states_table.c.status == NodeStateStatus.FAILED.value)
-            .where(nodes_table.c.node_type == NodeType.COALESCE.value)
-        )
-        failed_barriers: set[tuple[str, str]] = set()
-        for db_row in self._ops.execute_fetchall(query):
-            if db_row.error_json is None:
-                raise AuditIntegrityError(
-                    f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
-                    f"{run_id!r} has no error_json — the write side requires an error payload for FAILED "
-                    f"states, so this is a Tier-1 audit-database integrity violation."
+            states.extend(self._node_state_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return states
+
+    def get_token_outcomes_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[TokenOutcome]:
+        """Get token outcomes for a set of tokens (chunked batch query).
+
+        Within each token, outcomes are ordered by recorded_at — the same
+        per-token ordering as :meth:`get_all_token_outcomes_for_run`. Chunks
+        token_ids to stay within SQLite's SQLITE_MAX_VARIABLE_NUMBER limit
+        (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            token_ids: Token IDs to fetch outcomes for
+
+        Returns:
+            List of TokenOutcome models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        outcomes: list[TokenOutcome] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(token_outcomes_table)
+                .where(token_outcomes_table.c.run_id == run_id)
+                .where(token_outcomes_table.c.token_id.in_(chunk))
+                .order_by(token_outcomes_table.c.token_id, token_outcomes_table.c.recorded_at)
+            )
+            outcomes.extend(self._token_outcome_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return outcomes
+
+    def get_scheduler_events_for_tokens(self, run_id: str, token_ids: Sequence[str]) -> list[SchedulerEvent]:
+        """Get scheduler transition events for a set of tokens (chunked batch query).
+
+        Within each token, events are ordered by (recorded_at, event_id) —
+        the same per-token ordering as :meth:`get_scheduler_events`. Chunks
+        token_ids to stay within SQLite's SQLITE_MAX_VARIABLE_NUMBER limit
+        (default 999).
+
+        Args:
+            run_id: Run ID (guards against cross-run contamination)
+            token_ids: Token IDs to fetch scheduler events for
+
+        Returns:
+            List of SchedulerEvent models; group by token_id for per-token sequences
+        """
+        if not token_ids:
+            return []
+        events: list[SchedulerEvent] = []
+        for offset in range(0, len(token_ids), self._QUERY_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + self._QUERY_CHUNK_SIZE]
+            query = (
+                select(scheduler_events_table)
+                .where(scheduler_events_table.c.run_id == run_id)
+                .where(scheduler_events_table.c.token_id.in_(chunk))
+                .order_by(
+                    scheduler_events_table.c.recorded_at,
+                    scheduler_events_table.c.event_id,
                 )
-            try:
-                error_payload = json.loads(db_row.error_json)
-            except json.JSONDecodeError as exc:
-                raise AuditIntegrityError(
-                    f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
-                    f"{run_id!r} has unparseable error_json — Tier-1 audit-database integrity violation: {exc}"
-                ) from exc
-            # error_json for a FAILED coalesce node_state is polymorphic across
-            # two legitimate writers: coalesce_executor records a
-            # CoalesceFailureReason (a dict WITH a required failure_reason) for
-            # accept/merge failure outcomes, and the merge-cleanup handler
-            # records an ExecutionError (a dict WITHOUT failure_reason, keys
-            # {exception,type,phase}) for merge-time exceptions. Both are valid
-            # FAILED barrier rows. A non-dict parsed payload is producible by
-            # NEITHER writer (both .to_dict() to objects), so it is Tier-1 audit
-            # corruption — crash with provenance, consistent with the null /
-            # unparseable guards above.
-            if not isinstance(error_payload, dict):
-                raise AuditIntegrityError(
-                    f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
-                    f"{run_id!r} has a non-object error_json payload (got {type(error_payload).__name__}) — the "
-                    f"write side serializes a CoalesceFailureReason or ExecutionError object, so this is a "
-                    f"Tier-1 audit-database integrity violation."
-                )
-            # Exclude only the benign late-arrival-after-merge case (a
-            # CoalesceFailureReason discriminator). Every other FAILED payload —
-            # including ExecutionError shapes with no failure_reason — is a real
-            # failed barrier. .get() reads the OPTIONAL discriminator across the
-            # two valid payload shapes without crashing on the keyless one.
-            if error_payload.get("failure_reason") == "late_arrival_after_merge":
-                continue
-            failed_barriers.add((db_row.node_id, db_row.row_id))
-        return len(failed_barriers)
+            )
+            events.extend(self._scheduler_event_loader.load(r) for r in self._ops.execute_fetchall(query))
+        return events
 
     # === Explain Methods (Graceful Degradation) ===
 

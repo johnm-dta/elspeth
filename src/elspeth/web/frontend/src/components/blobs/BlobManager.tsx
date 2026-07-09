@@ -1,7 +1,8 @@
 // src/components/blobs/BlobManager.tsx
-import { useEffect, useRef, useCallback, useMemo } from "react";
+import { useEffect, useRef, useCallback, useMemo, useState } from "react";
 import { useBlobStore } from "@/stores/blobStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { BlobRow } from "./BlobRow";
 import type { BlobMetadata, BlobCategory } from "@/types/api";
 
@@ -39,6 +40,13 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
   const { blobs, isLoading, error, loadBlobs, uploadBlob, deleteBlob, downloadBlob } =
     useBlobStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Blob queued for deletion, awaiting confirmation. Blobs are pipeline
+  // inputs/outputs, so deletion is irreversible data loss (WCAG 3.3.4). We
+  // capture the session the blob belongs to alongside the blob: if the active
+  // session changes while the dialog is open (e.g. via the global Ctrl/Cmd+N
+  // shortcut), the delete must still target the originating session, not
+  // whichever session happens to be active at confirmation time.
+  const [pendingDelete, setPendingDelete] = useState<{ blob: BlobMetadata; sessionId: string } | null>(null);
 
   useEffect(() => {
     if (activeSessionId) {
@@ -75,13 +83,25 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
     [activeSessionId, uploadBlob],
   );
 
-  const handleDelete = useCallback(
+  // Row delete buttons only *request* deletion; the actual delete fires from
+  // confirmDelete once the user confirms in the dialog.
+  const handleRequestDelete = useCallback(
     (blobId: string) => {
       if (!activeSessionId) return;
-      deleteBlob(activeSessionId, blobId);
+      const blob = blobs.find((b) => b.id === blobId);
+      if (!blob) return;
+      setPendingDelete({ blob, sessionId: activeSessionId });
     },
-    [activeSessionId, deleteBlob],
+    [blobs, activeSessionId],
   );
+
+  const confirmDelete = useCallback(() => {
+    if (!pendingDelete) return;
+    // Use the session captured when deletion was requested, not the current
+    // activeSessionId — they can differ if the session changed mid-dialog.
+    deleteBlob(pendingDelete.sessionId, pendingDelete.blob.id);
+    setPendingDelete(null);
+  }, [pendingDelete, deleteBlob]);
 
   const handleDownload = useCallback(
     (blobId: string) => {
@@ -154,7 +174,7 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
                     blob={blob}
                     sessionId={activeSessionId}
                     onDownload={handleDownload}
-                    onDelete={handleDelete}
+                    onDelete={handleRequestDelete}
                     onUseAsInput={onUseAsInput}
                   />
                 ))}
@@ -163,6 +183,17 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
           })
         )}
       </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete file"
+          message={`Delete "${pendingDelete.blob.filename}"? This cannot be undone.`}
+          confirmLabel="Delete"
+          variant="danger"
+          onConfirm={confirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }

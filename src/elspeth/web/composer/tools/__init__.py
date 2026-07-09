@@ -74,10 +74,12 @@ from elspeth.web.composer.tools.blobs import (
     _persist_prepared_blob_create,
     _prepare_blob_create,
     _session_blob_lock,
+    _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
     _sync_list_blobs,
 )
 from elspeth.web.composer.tools.discovery import (
+    is_approval_required_blob_store_only_mutation_tool,
     is_blob_store_only_mutation_tool,
     is_cacheable_discovery_tool,
     is_discovery_tool,
@@ -169,6 +171,7 @@ __all__ = [
     "_prevalidate_plugin_options",
     "_resolve_source_blob",
     "_session_blob_lock",
+    "_sync_get_blob_by_id",
     "_sync_get_blob_by_storage_path",
     "_sync_list_blobs",
     "_utc_day_start",
@@ -177,6 +180,7 @@ __all__ = [
     "execute_tool",
     "get_expression_grammar",
     "get_tool_definitions",
+    "is_approval_required_blob_store_only_mutation_tool",
     "is_blob_store_only_mutation_tool",
     "is_cacheable_discovery_tool",
     "is_discovery_tool",

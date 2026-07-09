@@ -21,6 +21,8 @@ Properties tested:
 
 from __future__ import annotations
 
+import math
+
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -455,3 +457,118 @@ class TestNoTriggerProperties:
         assert evaluator.should_trigger() is False
         assert evaluator.which_triggered() is None
         assert evaluator.get_trigger_type() is None
+
+
+# =============================================================================
+# Condition Fire-Time Sampling Properties (elspeth-06df383e4a)
+# =============================================================================
+
+
+class TestConditionFireTimeSamplingProperties:
+    """Condition fire times are sampled-at-evaluation, never backdated."""
+
+    @given(
+        threshold=st.floats(min_value=0.5, max_value=50.0, allow_nan=False, allow_infinity=False),
+        false_fraction=st.floats(min_value=0.0, max_value=0.9, allow_nan=False, allow_infinity=False),
+        past_delay=st.floats(min_value=0.0, max_value=50.0, allow_nan=False, allow_infinity=False),
+    )
+    def test_condition_fire_time_never_backdated_into_known_false_interval(
+        self, threshold: float, false_fraction: float, past_delay: float
+    ) -> None:
+        """Property: the latched condition fire offset is >= the last
+        known-false check time and equals the first true observation."""
+        config = TriggerConfig(condition=f"row['batch_age_seconds'] >= {threshold}")
+        clock = MockClock(start=0.0)
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        false_check_time = threshold * false_fraction
+        clock.advance(false_check_time)
+        assume(evaluator.batch_age_seconds < threshold)
+        assert evaluator.should_trigger() is False
+
+        true_check_time = threshold + past_delay
+        clock.advance(true_check_time - false_check_time)
+        # Float summation of advances can land the observed age a few ULPs
+        # below the threshold when past_delay≈0 — discard exact-boundary
+        # cases; the property under test is fire-time backdating, not
+        # crossing detection.
+        assume(evaluator.batch_age_seconds >= threshold)
+        assert evaluator.should_trigger() is True
+
+        offset = evaluator.get_condition_fire_offset()
+        assert offset is not None
+        assert offset >= false_check_time
+        assert math.isclose(offset, true_check_time, rel_tol=1e-9, abs_tol=1e-9)
+
+
+# =============================================================================
+# Anchor-Rewind Recompute Properties (elspeth-eed319ed3d)
+# =============================================================================
+
+
+class TestAnchorRewindPermutationInvariance:
+    """Count/condition latches are pure functions of the durable member set.
+
+    ADR-030 §E.2 intake adopts rows in (barrier_key, ingest_sequence,
+    work_item_id) order — not blocked-at order — so record_accept must land
+    the same latch instants for ANY adoption order of the same durable
+    arrivals.
+    """
+
+    @given(
+        arrivals=st.lists(
+            st.floats(min_value=0.0, max_value=10_000.0, allow_nan=False, allow_infinity=False),
+            min_size=1,
+            max_size=20,
+        ),
+        count_threshold=st.integers(min_value=1, max_value=20),
+        data=st.data(),
+    )
+    def test_count_latch_and_offset_are_permutation_invariant(
+        self, arrivals: list[float], count_threshold: int, data: st.DataObject
+    ) -> None:
+        permuted = data.draw(st.permutations(arrivals))
+        config = TriggerConfig(count=count_threshold)
+
+        def run(order: list[float]) -> tuple[float | None, float | None]:
+            evaluator = TriggerEvaluator(config, clock=MockClock(start=100_000.0))
+            for arrival in order:
+                evaluator.record_accept(accept_time=arrival)
+            return evaluator._count_fire_time, evaluator.get_count_fire_offset()
+
+        fire_sorted, offset_sorted = run(sorted(arrivals))
+        fire_permuted, offset_permuted = run(list(permuted))
+
+        assert fire_permuted == fire_sorted
+        assert offset_permuted == offset_sorted
+        if len(arrivals) >= count_threshold:
+            assert fire_sorted == sorted(arrivals)[count_threshold - 1], "count fires at the N-th smallest durable arrival"
+        else:
+            assert fire_sorted is None
+
+    @given(
+        arrivals=st.lists(
+            st.floats(min_value=0.0, max_value=10_000.0, allow_nan=False, allow_infinity=False),
+            min_size=1,
+            max_size=20,
+        ),
+        count_threshold=st.integers(min_value=1, max_value=20),
+        data=st.data(),
+    )
+    def test_condition_latch_is_permutation_invariant(self, arrivals: list[float], count_threshold: int, data: st.DataObject) -> None:
+        permuted = data.draw(st.permutations(arrivals))
+        config = TriggerConfig(condition=f"row['batch_count'] >= {count_threshold}")
+
+        def run(order: list[float]) -> tuple[float | None, float | None]:
+            evaluator = TriggerEvaluator(config, clock=MockClock(start=100_000.0))
+            for arrival in order:
+                evaluator.record_accept(accept_time=arrival)
+            return evaluator._condition_fire_time, evaluator.get_condition_fire_offset()
+
+        fire_sorted, offset_sorted = run(sorted(arrivals))
+        fire_permuted, offset_permuted = run(list(permuted))
+
+        assert fire_permuted == fire_sorted
+        assert offset_permuted == offset_sorted

@@ -65,6 +65,17 @@ vi.mock("./components/audit/AuditReadinessPanel", () => ({
   AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
 }));
 
+// GraphMiniView and GraphView render @xyflow flow graphs whenever the
+// composition has content; xyflow needs ResizeObserver, which jsdom lacks.
+// Stubbed — their behaviour is covered in their own test files.
+vi.mock("./components/sidebar/GraphMiniView", () => ({
+  GraphMiniView: () => <div data-testid="graph-mini-view-stub" />,
+}));
+
+vi.mock("./components/inspector/GraphView", () => ({
+  GraphView: () => <div data-testid="graph-view-stub" />,
+}));
+
 vi.mock("./components/sidebar/SideRailValidationBanner", () => ({
   SideRailValidationBanner: () => (
     <div data-testid="side-rail-validation-banner-stub" />
@@ -127,6 +138,10 @@ vi.mock("./api/client", () => ({
   sendMessage: vi.fn(),
   recompose: vi.fn(),
   fetchMessages: vi.fn(),
+  // YamlView (inside ExportYamlModal) fetches the rendered YAML when the
+  // modal opens — reachable now that the Ctrl+Shift+Y test seeds a
+  // non-empty composition.
+  fetchYaml: vi.fn().mockResolvedValue({ yaml: "sources: {}" }),
   // refreshAll fans out to refreshInterpretationEventsForSession on session
   // select, so this is called incidentally during App render. Without the mock
   // entry the call throws "no export defined on the mock" as an unhandled error
@@ -139,6 +154,10 @@ vi.mock("./api/client", () => ({
     default_mode: "guided",
     banner_dismissed_at: null,
     tutorial_completed_at: "2026-05-19T00:00:00Z",
+    tutorial_stage: null,
+    tutorial_session_id: null,
+    tutorial_run_id: null,
+    tutorial_source_data_hash: null,
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),
@@ -267,6 +286,9 @@ describe("App banner roles", () => {
   });
 
   it("mounts audit readiness and validation through side rail slots", async () => {
+    // An active session keeps the composer shell mounted — with no sessions
+    // at all App now renders the empty landing instead (elspeth-e69642fede).
+    useSessionStore.setState({ activeSessionId: "session-1" });
     render(<App />);
 
     await waitFor(() => {
@@ -277,6 +299,63 @@ describe("App banner roles", () => {
       screen.getByTestId("side-rail-validation-banner-stub"),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("inspector-panel-stub")).toBeNull();
+  });
+
+  it("suppresses the SideRail while a guided build is active — the workspace rail inside ChatPanel replaces it", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      // Non-terminal guided session at step_3 with no server turn — the
+      // cold-start arm of isGuidedBuildActive, the same predicate ChatPanel's
+      // workspace branch renders under. Rendering the SideRail alongside it
+      // would put two rails side by side.
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal: null,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      } as unknown as import("./types/guided").GuidedSession,
+      guidedNextTurn: null,
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    // The composer shell is still mounted...
+    expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
+    // ...but App passed siderail={null}: no rail slots render.
+    expect(screen.queryByTestId("audit-readiness-stub")).toBeNull();
+    expect(screen.queryByTestId("side-rail-validation-banner-stub")).toBeNull();
+  });
+
+  it("restores the SideRail when the guided session reaches a terminal (Run/Export live in the rail post-completion)", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      guidedSession: {
+        step: "step_4_wire",
+        history: [],
+        terminal: {
+          kind: "completed",
+          reason: null,
+          pipeline_yaml: "pipeline: {}",
+        },
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      } as unknown as import("./types/guided").GuidedSession,
+      guidedNextTurn: null,
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId("audit-readiness-stub")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("side-rail-validation-banner-stub"),
+    ).toBeInTheDocument();
   });
 
   it("loads sessions on startup after SessionSidebar removal", async () => {
@@ -338,6 +417,15 @@ describe("App banner roles", () => {
     const onOpenYaml = vi.fn();
     window.addEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
     window.addEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
+    // Ctrl+Shift+Y is content-gated (elspeth-bff8043d33 residual): seed a
+    // non-empty composition so the YAML dispatch fires.
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: {
+        ...makeState(1),
+        sources: { source: { plugin: "csv", options: {} } },
+      },
+    });
 
     render(<App />);
     await waitFor(() => {
@@ -718,12 +806,111 @@ describe("App shared-route Layout suppression (Phase 6B Task 8)", () => {
   it("renders the composer Layout when the hash is NOT a shared route", async () => {
     // Counterpoint: with no hash, the regular composer flow runs. This
     // protects the test above from a false-positive caused by the
-    // Layout mock simply never rendering.
+    // Layout mock simply never rendering. An active session keeps the
+    // shell mounted (no sessions at all → empty landing instead,
+    // elspeth-e69642fede).
     window.history.replaceState(null, "", "/");
+    useSessionStore.setState({ activeSessionId: "session-1" });
 
     render(<App />);
 
     expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
     expect(screen.queryByTestId("shared-inspect-loading")).toBeNull();
+  });
+});
+
+// ── elspeth-e69642fede: returning-user landing ────────────────────────────
+describe("App empty landing and auto-resume", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    useExecutionStore.getState().reset();
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+    vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
+  });
+
+  it("renders a real empty state with primary actions when no sessions exist", async () => {
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
+
+    render(<App />);
+
+    expect(await screen.findByText(/no sessions yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /new session/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /browse the catalog/i }),
+    ).toBeInTheDocument();
+    // The composer shell is replaced, not layered under.
+    expect(screen.queryByTestId("layout-stub")).toBeNull();
+  });
+
+  it("auto-resumes the most recently active session for a returning user", async () => {
+    const older: Session = {
+      id: "older",
+      title: "Older",
+      created_at: "2026-06-01T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+    };
+    const newest: Session = {
+      id: "newest",
+      title: "Newest",
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    };
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([older, newest]);
+    vi.spyOn(api, "fetchMessages").mockResolvedValue([]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(useSessionStore.getState().activeSessionId).toBe("newest");
+    });
+    // With a session active, the composer shell renders — not the landing.
+    expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
+    expect(screen.queryByText(/no sessions yet/i)).toBeNull();
+  });
+
+  it("does not open the YAML modal on Ctrl+Shift+Y when the pipeline is empty", async () => {
+    const onOpenYaml = vi.fn();
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1), // no sources/nodes/outputs
+    });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "Y",
+      code: "KeyY",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+
+    expect(onOpenYaml).not.toHaveBeenCalled();
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
   });
 });

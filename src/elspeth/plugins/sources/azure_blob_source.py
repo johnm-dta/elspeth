@@ -24,17 +24,20 @@ from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, S
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.identifiers import validate_field_names
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
-from elspeth.core.identifiers import validate_field_names
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sources._safe_validation_errors import safe_validation_error_text
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
+    FieldMappingCollisionError,
     FieldResolution,
+    extend_field_resolution,
     normalize_field_name,
     resolve_field_names,
 )
@@ -302,7 +305,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return reject_placeholder_value(v, field_name="container")
+        return reject_operator_required_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -310,7 +313,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return reject_placeholder_value(v, field_name="blob_path")
+        return reject_operator_required_placeholder_value(v, field_name="blob_path")
 
     @field_validator("on_validation_failure")
     @classmethod
@@ -359,7 +362,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:eff7b45f9f07f269"
+    source_file_hash: str | None = "sha256:83094aed497ad823"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -989,12 +992,7 @@ class AzureBlobSource(BaseSource):
         raw_keys = [key for key, _ in row_items]
 
         if self._field_resolution is None:
-            self._field_resolution = resolve_field_names(
-                raw_headers=raw_keys,
-                field_mapping=self._field_mapping,
-                columns=None,
-                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
-            )
+            self._field_resolution = self._resolve_json_field_names(raw_keys)
 
             if self._contract_builder is None and self.get_schema_contract() is None:
                 initial_contract = create_contract_from_config(
@@ -1005,7 +1003,7 @@ class AzureBlobSource(BaseSource):
 
         mapping = self._field_resolution.resolution_mapping
         normalized: dict[str, Any] = {}
-        has_unmapped_fields = False
+        new_raw_keys: list[str] = []
         for key, value in row_items:
             if key in mapping:
                 normalized[mapping[key]] = value
@@ -1017,24 +1015,35 @@ class AzureBlobSource(BaseSource):
                 nk = normalize_field_name(key)
                 final_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
                 normalized[final_name] = value
-                has_unmapped_fields = True
+                new_raw_keys.append(key)
 
-        if has_unmapped_fields:
-            # Rebuild from the UNION of previously-seen keys and this row's new
-            # keys. Using only list(row.keys()) would REPLACE the mapping with
-            # just the current row's fields, discarding keys from earlier rows
-            # and corrupting the Landscape field-resolution audit record (B4.3).
-            # dict.fromkeys preserves first-seen order while deduplicating.
+        if new_raw_keys:
+            # Extend with just the new raw keys while preserving B4.3 union
+            # semantics. Rebuilding the full historical key set on every sparse
+            # row is quadratic in attacker-controlled fields.
             assert self._field_resolution is not None  # set on first row above
-            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
-            self._field_resolution = resolve_field_names(
-                raw_headers=union_keys,
+            try:
+                self._field_resolution = extend_field_resolution(
+                    self._field_resolution,
+                    raw_headers=new_raw_keys,
+                    field_mapping=self._field_mapping,
+                )
+            except FieldMappingCollisionError as exc:
+                raise ExternalHeaderError(str(exc)) from exc
+
+        return normalized
+
+    def _resolve_json_field_names(self, raw_keys: list[str]) -> FieldResolution:
+        """Resolve sparse JSON keys, classifying row-created collisions as data faults."""
+        try:
+            return resolve_field_names(
+                raw_headers=raw_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
-
-        return normalized
+        except FieldMappingCollisionError as exc:
+            raise ExternalHeaderError(str(exc)) from exc
 
     def _validate_and_yield(self, row: Any, ctx: SourceContext, *, source_row_index: int) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
@@ -1053,14 +1062,12 @@ class AzureBlobSource(BaseSource):
         try:
             row_to_validate = self._normalize_row_keys(row) if self._format in ("json", "jsonl") else row
         except ExternalHeaderError as e:
-            # Tier-3 data faults only: a non-object row (ExternalHeaderError from
-            # _normalize_row_keys) or a collision in the external row's own keys
-            # (ExternalHeaderError from resolve_field_names). Config/our-code faults
-            # — a bad field_mapping (plain ValueError: keys-not-found / creates-
-            # collision) or a normalization-algorithm bug (plain ValueError) — are
-            # ours and must crash, so they are NOT caught here. This mirrors the CSV
-            # header path (_load_csv catches ExternalHeaderError, lets plain
-            # ValueError propagate; see the comment there and field_normalization.py).
+            # Tier-3 data faults only: a non-object row, external-key
+            # normalization failure, or a row-created mapping collision reclassified
+            # by _resolve_json_field_names. Config/our-code faults — bad
+            # field_mapping keys/values or a normalization-algorithm bug — remain
+            # plain ValueError and must crash, so they are NOT caught here. This
+            # mirrors the CSV header path's ExternalHeaderError/ValueError split.
             error_msg = f"Field normalization failed: {e}"
             ctx.record_validation_error(
                 row=row,
@@ -1147,10 +1154,13 @@ class AzureBlobSource(BaseSource):
                 )
         except ValidationError as e:
             # Record validation failure in audit trail
-            # This is a trust boundary: external data may be invalid
+            # This is a trust boundary: external data may be invalid.
+            # Input-free text: str(e) echoes the offending Tier-3 value
+            # into audit surfaces (elspeth-a300402c58).
+            error_text = safe_validation_error_text(e)
             ctx.record_validation_error(
                 row=row_to_validate,
-                error=str(e),
+                error=error_text,
                 schema_mode=self._schema_config.mode,
                 destination=self._on_validation_failure,
             )
@@ -1160,7 +1170,7 @@ class AzureBlobSource(BaseSource):
             if self._on_validation_failure != "discard":
                 yield SourceRow.quarantined(
                     row=row_to_validate,
-                    error=str(e),
+                    error=error_text,
                     destination=self._on_validation_failure,
                     source_row_index=source_row_index,
                 )

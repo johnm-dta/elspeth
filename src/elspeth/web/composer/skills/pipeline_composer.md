@@ -653,7 +653,7 @@ incomplete, even when the authored rubric appears only inside the prompt text.
 Do not stop with prose saying the rubric is part of the reviewed prompt; stage
 the separate rubric/semantics requirement and call its review tool.
 
-LLM node preflight has three independent review checks:
+LLM node preflight has four independent review checks:
 
 - Did I author the prompt text? Nothing to do — the `llm_prompt_template` review
   is auto-staged and backend-surfaced. Do NOT call its review tool.
@@ -670,6 +670,13 @@ LLM node preflight has three independent review checks:
   authored. The auto-stager guarantees the requirement exists when
   `options.model` is set on an `llm` node; if you see the requirement is
   already pending, do not skip its review tool.
+- Does public, internet-originated, externally controlled, or otherwise
+  untrusted remote text flow into this LLM without an authorized prompt-injection
+  shield? Stage `pipeline_decision` with
+  `user_term="prompt_injection_shield_recommendation"` on the LLM node,
+  recommending an available authorized prompt-injection shield. Use
+  `azure_prompt_shield` only when it appears in `available_plugins.transforms`,
+  or name the deployment equivalent when one is available.
 
 **HARD RULE — never leave a bare `{{interpretation:<term>}}` token.** Any
 `{{interpretation:<term>}}` token you place in a prompt (in `prompt_template` or
@@ -687,19 +694,7 @@ prose. (`request_interpretation_review(kind="vague_term", ...)` is still called
 after the mutation succeeds, per the wiring rule below; staging and wiring happen
 in the `set_pipeline`.)
 
-<!-- SUPPRESSED elspeth-abb2cb0931 — prompt-injection-shield preflight check.
-Restore this fourth bullet (and the "four independent review checks" wording)
-once plugin discovery gates plugins on configured secret availability, so the
-LLM only recommends shields it can actually instantiate.
-
-- Does public, internet-originated, externally controlled, or otherwise
-  untrusted remote text flow into this LLM without an authorized prompt-injection
-  shield? Stage `pipeline_decision` with
-  `user_term="prompt_injection_shield_recommendation"` on the LLM node,
-  recommending `azure_prompt_shield` or the deployment equivalent.
--->
-
-These checks stack. A web-scrape-to-LLM scoring node may need all three LLM-node
+These checks stack. A web-scrape-to-LLM scoring node may need all four LLM-node
 review requirements in the same `interpretation_requirements` list before
 `set_pipeline`.
 
@@ -707,11 +702,13 @@ Every create, update, upsert, or patch of an LLM node with a `prompt_template`
 must repeat this preflight. Validation repair is not permission to drop review
 requirements from the LLM options. When repairing an LLM node, carry forward
 existing pending LLM interpretation requirements and add any missing ones for
-the authored prompt and authored judgement semantics before stopping.
+the authored prompt, authored judgement semantics, model choice, and
+prompt-shield recommendation before stopping.
 
 Interpretation reviews are not pipeline stages. Never create a transform,
 passthrough node, sink, output, edge, or placeholder plugin to represent
-`vague_term`, `llm_prompt_template`, `invented_source`, <!-- SUPPRESSED elspeth-abb2cb0931: prompt-shield recommendation, --> or cleanup review cards. Put each review requirement in the
+`vague_term`, `llm_prompt_template`, `invented_source`, prompt-shield
+recommendation, or cleanup review cards. Put each review requirement in the
 `interpretation_requirements` array on the source or node that implements the
 decision. If a rejected `set_pipeline` attempted to add a fake review node,
 resubmit the full requested topology without that node and with the review entry
@@ -904,32 +901,28 @@ context does not by itself require a `vague_term` review. Add one only if you
 author extra subjective semantics, ranking, scoring, or thresholds beyond the
 objective extraction.
 
-<!-- SUPPRESSED elspeth-abb2cb0931 — entire "Internet content flowing into LLMs"
-section. Restore once plugin discovery gates `azure_prompt_shield` (and any
-other prompt-injection shield plugin) on configured secret availability. As of
-2026-05-25 the composer was recommending a shield plugin the operator could not
-necessarily instantiate; that misleading advice was worse than no advice.
-
 ### Internet content flowing into LLMs
 
 If a workflow routes public internet content, externally controlled web content,
 search results, crawled pages, or other untrusted remote text into an `llm`
 transform, treat prompt-injection defence as a material cyber risk.
 
-Before finalising the workflow, surface a clear recommendation to add
-`azure_prompt_shield` or the deployment's equivalent prompt-injection shield
-between the external-content fetch/extraction step and the LLM.
+Before finalising the workflow, surface a clear recommendation to add an
+available authorized prompt-injection shield between the external-content
+fetch/extraction step and the LLM. Use `azure_prompt_shield` only when it appears
+in `available_plugins.transforms`, or name the deployment's equivalent when one
+is available.
 
 When you are not authorized to add that shield and the draft routes the
 internet-controlled text directly into an LLM, stage that direct-routing choice
 as a pending `kind="pipeline_decision"` requirement on the LLM node before
 `set_pipeline`, then call `request_interpretation_review` after the mutation
 succeeds. Use `user_term="prompt_injection_shield_recommendation"` and a draft
-that explicitly recommends `azure_prompt_shield` or the deployment equivalent
+that explicitly recommends an available authorized prompt-injection shield
 between the external-content step and the LLM while stating that the current
 draft sends internet-controlled text directly to the LLM without that shield.
 
-A recommendation is not permission to add a node. Do not add `azure_prompt_shield` merely because content is public internet; first surface the recommendation and let the user or policy authorize the topology change.
+A recommendation is not permission to add a node. Do not add `azure_prompt_shield` merely because content is public internet, and do not name it as the recommended control unless discovery says it is available; first surface the recommendation and let the user or policy authorize the topology change.
 Do not add passthrough, placeholder, no-op, or renamed utility nodes to imply
 prompt-injection shielding. A recommendation is prose, not a fake topology step;
 only a real prompt-injection shield plugin, explicitly authorized or
@@ -953,7 +946,6 @@ For intranet or controlled internal pages, do not assume external
 prompt-shielding is required. Surface the recommendation only when the content
 is externally controlled, user-submitted, internet-originated, or the
 operator's policy treats the source as untrusted.
--->
 
 ### Raw Scraped-Content Cleanup
 
@@ -1181,7 +1173,8 @@ stop.
 Pending review terminal state is valid only when every user-requested workflow
 capability is still present, every required interpretation requirement has been
 staged on the component that implements it, and the raw-content cleanup
-requirement is staged when required, <!-- SUPPRESSED elspeth-abb2cb0931: the prompt-injection shield recommendation review is staged when untrusted internet content flows directly into an LLM, --> and
+requirement is staged when required, the prompt-injection shield recommendation
+review is staged when untrusted internet content flows directly into an LLM, and
 no non-review validation errors remain.
 Do not stop in pending-review state when schema contract, missing field, or
 unreferenced output errors remain. Do not tell the user review cards are waiting
@@ -1198,14 +1191,9 @@ Review acceptance is not required before adding a missing cleanup `field_mapper`
 or repairing a dead cleanup stream; carry the pending review requirements
 forward and repair the structure first.
 Do not treat a subset of pending review cards as enough. If the workflow includes
-authored LLM judgement semantics, a missing `vague_term` review is still
+authored LLM judgement semantics or direct untrusted content into an LLM, a
+missing `vague_term` or prompt-injection recommendation review is still
 non-terminal even when other review cards are present.
-<!-- SUPPRESSED elspeth-abb2cb0931: prompt-injection-recommendation review
-is omitted from the non-terminal list while the prompt-shield advice is
-suppressed. Original wording: "If the workflow includes authored LLM judgement
-semantics or direct untrusted content into an LLM, a missing `vague_term` or
-prompt-injection recommendation review is still non-terminal even when other
-review cards are present." Restore when ticket elspeth-abb2cb0931 lands. -->
 
 
 ## Mechanical Repairs

@@ -1,9 +1,0 @@
-ticket_id,subject,body,customer_tier,amount
-T-001,Login broken,Cannot log in since the update — page just refreshes.,enterprise,100
-T-002,Invoice question,My latest invoice charged me twice for the seat add-on.,pro,50
-T-003,Feature ask,Would love a CSV export from the dashboard.,enterprise,200
-T-004,Random thanks,Just wanted to say the new UI is great.,starter,10
-T-005,Crash on save,App crashes whenever I save a settings change. Logs attached.,pro,75
-T-006,Refund request,Please refund the unused months from last quarter.,enterprise,150
-T-007,Shipping ask,Can you ship to NZ?,starter,5
-T-008,Token rotated,Service Principal rotated — please regenerate keys.,pro,80

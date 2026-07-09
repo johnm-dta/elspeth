@@ -5,7 +5,7 @@ Tokens are correlated by row_id (same source row that was forked).
 """
 
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -33,12 +33,14 @@ from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.clock import DEFAULT_CLOCK
+from elspeth.engine.coalesce_policy import CoalesceAction, CoalesceEvent, decide_coalesce
+from elspeth.engine.journal_restore import CoalesceJournalRestorer
 from elspeth.engine.spans import SpanFactory
 
 if TYPE_CHECKING:
+    from elspeth.core.landscape.scheduler import BarrierRestoreReadModel
     from elspeth.engine.clock import Clock
     from elspeth.engine.tokens import TokenManager
 
@@ -134,6 +136,298 @@ def _resolve_first_wins(
     return new_merged, new_origins
 
 
+_MergeDataFn = Callable[
+    [CoalesceSettings, dict[str, _BranchEntry]],
+    tuple[
+        dict[str, Any],
+        dict[str, list[str]],
+        dict[str, str],
+        dict[str, list[tuple[str, Any]]],
+    ],
+]
+_MergeWithOriginalNamesFn = Callable[
+    [SchemaContract, dict[str, SchemaContract], dict[str, str]],
+    SchemaContract,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class CoalesceMergePlan:
+    """Pure merge plan produced before token or audit side effects."""
+
+    merged_data: PipelineRow
+    consumed_tokens: tuple[TokenInfo, ...]
+    metadata: CoalesceMetadata
+
+
+def _lost_branch_expected_fields(
+    branch_expected_fields: Mapping[str, tuple[str, ...]] | None,
+    lost_branches: Mapping[str, str],
+) -> dict[str, tuple[str, ...]] | None:
+    if branch_expected_fields is None:
+        return None
+    if not lost_branches:
+        return None
+
+    result: dict[str, tuple[str, ...]] = {}
+    for branch_name in lost_branches:
+        if branch_name in branch_expected_fields:
+            result[branch_name] = tuple(branch_expected_fields[branch_name])
+    return result if result else None
+
+
+def _merge_with_original_names(
+    precomputed: SchemaContract,
+    branch_contracts: dict[str, SchemaContract],
+    field_origins: dict[str, str],
+) -> SchemaContract:
+    """Merge precomputed schema semantics with original names from branch contracts."""
+    # Build lookup of (normalized_name, branch_name) -> original_name from all branches
+    # so we can retrieve original_name from the winning branch per field.
+    branch_original_names: dict[tuple[str, str], str] = {}
+    for branch_name, contract in branch_contracts.items():
+        for fc in contract.fields:
+            branch_original_names[(fc.normalized_name, branch_name)] = fc.original_name
+
+    # Fields not contributed by any arrived branch fall back to first-seen
+    # original names from arrived contracts, then normalized names.
+    fallback_original_names: dict[str, str] = {}
+    for contract in branch_contracts.values():
+        for fc in contract.fields:
+            if fc.normalized_name not in fallback_original_names:
+                fallback_original_names[fc.normalized_name] = fc.original_name
+
+    merged_fields: list[FieldContract] = []
+    for fc in precomputed.fields:
+        if fc.normalized_name in field_origins:
+            winning_branch = field_origins[fc.normalized_name]
+            original_name = branch_original_names[(fc.normalized_name, winning_branch)]
+        elif fc.normalized_name in fallback_original_names:
+            original_name = fallback_original_names[fc.normalized_name]
+        else:
+            # Field carried by no arrived branch (its only source branch was
+            # lost in a partial coalesce): no original-name provenance exists,
+            # so the canonical normalized name is the declared fallback
+            # identifier.
+            original_name = fc.normalized_name
+        merged_fields.append(
+            FieldContract(
+                normalized_name=fc.normalized_name,
+                original_name=original_name,
+                python_type=fc.python_type,
+                required=fc.required,
+                source=fc.source,
+                nullable=fc.nullable,
+            )
+        )
+
+    return SchemaContract(
+        mode=precomputed.mode,
+        fields=tuple(merged_fields),
+        locked=precomputed.locked,
+    )
+
+
+def _merge_data(
+    settings: CoalesceSettings,
+    branches: dict[str, _BranchEntry],
+) -> tuple[
+    dict[str, Any],
+    dict[str, list[str]],
+    dict[str, str],
+    dict[str, list[tuple[str, Any]]],
+]:
+    """Merge row data from arrived tokens based on strategy."""
+    if settings.merge == "union":
+        # Combine all fields from all branches.
+        # On name collision, the last branch in settings.branches wins by default
+        # (union_collision_policy="last_wins"). field_origins and collision_values
+        # are always recorded so auditors can reconstruct lineage and inspect
+        # overwritten values. Policy enforcement happens in build_coalesce_merge().
+        merged: dict[str, Any] = {}
+        field_origins: dict[str, str] = {}
+        collisions: dict[str, list[str]] = {}
+        collision_values: dict[str, list[tuple[str, Any]]] = {}
+        for branch_name in settings.branches:
+            if branch_name in branches:
+                branch_data = branches[branch_name].token.row_data.to_dict()
+                for merge_field, value in branch_data.items():
+                    if merge_field in field_origins:
+                        if merge_field not in collisions:
+                            prior_branch = field_origins[merge_field]
+                            prior_value = merged[merge_field]
+                            collisions[merge_field] = [prior_branch]
+                            collision_values[merge_field] = [(prior_branch, prior_value)]
+                        collisions[merge_field].append(branch_name)
+                        collision_values[merge_field].append((branch_name, value))
+                    field_origins[merge_field] = branch_name
+                    merged[merge_field] = value
+        return merged, collisions, field_origins, collision_values
+
+    if settings.merge == "nested":
+        return (
+            {branch_name: branches[branch_name].token.row_data.to_dict() for branch_name in settings.branches if branch_name in branches},
+            {},
+            {},
+            {},
+        )
+
+    if settings.merge == "select":
+        if settings.select_branch is None:
+            raise RuntimeError(
+                f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
+            )
+        if settings.select_branch not in branches:
+            raise RuntimeError(
+                f"select_branch '{settings.select_branch}' not in arrived branches {list(branches.keys())}. "
+                f"This indicates a bug in _execute_merge validation (Bug 2ho fix should have caught this)."
+            )
+        return branches[settings.select_branch].token.row_data.to_dict(), {}, {}, {}
+
+    raise RuntimeError(f"Unknown merge strategy: {settings.merge!r}")
+
+
+def build_coalesce_merge(
+    *,
+    settings: CoalesceSettings,
+    pending: _PendingCoalesce,
+    coalesce_name: str,
+    now: float,
+    output_schema: SchemaContract | None,
+    branch_expected_fields: Mapping[str, tuple[str, ...]] | None,
+    merge_data: _MergeDataFn | None = None,
+    merge_with_original_names: _MergeWithOriginalNamesFn | None = None,
+) -> CoalesceMergePlan:
+    """Build the pure merge plan; callers apply token and audit side effects."""
+    merge_data_fn = merge_data or _merge_data
+    merge_with_original_names_fn = merge_with_original_names or _merge_with_original_names
+
+    merged_data_dict, union_collisions, field_origins, collision_values = merge_data_fn(settings, pending.branches)
+
+    branch_contracts: dict[str, SchemaContract] = {}
+    for branch_name, entry in pending.branches.items():
+        contract = entry.token.row_data.contract
+        if contract is None:
+            raise OrchestrationInvariantError(
+                f"Token {entry.token.token_id} on branch '{branch_name}' has no contract. "
+                f"Cannot coalesce without contracts on all parents. "
+                f"This indicates a bug in fork or transform execution."
+            )
+        branch_contracts[branch_name] = contract
+    contracts: list[SchemaContract] = list(branch_contracts.values())
+
+    if settings.merge == "union":
+        all_branches_observed = all(c.mode == "OBSERVED" for c in contracts)
+
+        if output_schema is not None:
+            precomputed = output_schema
+            use_precomputed = precomputed.mode != "OBSERVED"
+        else:
+            if not all_branches_observed:
+                raise OrchestrationInvariantError(
+                    f"Coalesce '{settings.name}' has typed branch contracts but no "
+                    f"output_schema for union merge. The DAG builder must provide "
+                    f"output_schema via register_coalesce(). "
+                    f"If this is a test, use TestCoalesceExecutor from conftest."
+                )
+            precomputed = None
+            use_precomputed = False
+
+        if use_precomputed:
+            assert precomputed is not None
+            merged_contract = merge_with_original_names_fn(precomputed, branch_contracts, field_origins)
+        else:
+            merged_contract = merge_union_contracts(
+                branch_contracts,
+                require_all=settings.has_all_branch_semantics,
+                collision_policy=settings.union_collision_policy,
+                branch_order=tuple(settings.branches),
+                coalesce_id=settings.name,
+            )
+
+    elif settings.merge == "nested":
+        branch_fields = tuple(
+            FieldContract(
+                original_name=branch_name,
+                normalized_name=branch_name,
+                python_type=object,
+                required=branch_name in pending.branches,
+                source="declared",
+            )
+            for branch_name in settings.branches
+        )
+        merged_contract = SchemaContract(
+            fields=branch_fields,
+            mode="FIXED",
+            locked=True,
+        )
+
+    elif settings.merge == "select":
+        if settings.select_branch is None:
+            raise RuntimeError(
+                f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
+            )
+        selected_entry = pending.branches[settings.select_branch]
+        selected_contract = selected_entry.token.row_data.contract
+        if selected_contract is None:
+            raise OrchestrationInvariantError(
+                f"Token {selected_entry.token.token_id} on branch '{settings.select_branch}' has no contract. "
+                f"Cannot coalesce without contracts on all parents. "
+                f"This indicates a bug in fork or transform execution."
+            )
+        merged_contract = selected_contract
+
+    else:
+        raise RuntimeError(f"Unknown merge strategy: {settings.merge}")
+
+    coalesce_metadata = CoalesceMetadata.for_merge(
+        policy=CoalescePolicy(settings.policy),
+        merge_strategy=MergeStrategy(settings.merge),
+        expected_branches=tuple(settings.branches),
+        branches_arrived=tuple(pending.branches.keys()),
+        branches_lost=pending.lost_branches,
+        lost_branch_expected_fields=_lost_branch_expected_fields(branch_expected_fields, pending.lost_branches),
+        arrival_order=[
+            ArrivalOrderEntry(
+                branch=branch,
+                arrival_offset_ms=(entry.arrival_time - pending.first_arrival) * 1000,
+            )
+            for branch, entry in sorted(pending.branches.items(), key=lambda x: x[1].arrival_time)
+        ],
+        wait_duration_ms=(now - pending.first_arrival) * 1000,
+    )
+
+    if settings.merge == "union":
+        coalesce_metadata = CoalesceMetadata.with_union_result(
+            coalesce_metadata,
+            field_origins=field_origins,
+            collisions=union_collisions if union_collisions else None,
+            collision_values=collision_values if collision_values else None,
+        )
+
+        if union_collisions:
+            if settings.union_collision_policy == "fail":
+                raise CoalesceCollisionError(
+                    f"union merge collisions in coalesce '{coalesce_name}': {sorted(union_collisions)}",
+                    metadata=coalesce_metadata,
+                )
+            if settings.union_collision_policy == "first_wins":
+                merged_data_dict, first_wins_origins = _resolve_first_wins(merged_data_dict, field_origins, collision_values)
+                if use_precomputed:
+                    assert precomputed is not None
+                    merged_contract = merge_with_original_names_fn(precomputed, branch_contracts, first_wins_origins)
+                coalesce_metadata = replace(
+                    coalesce_metadata,
+                    union_field_origins=first_wins_origins,
+                )
+
+    return CoalesceMergePlan(
+        merged_data=PipelineRow(merged_data_dict, merged_contract),
+        consumed_tokens=tuple(e.token for e in pending.branches.values()),
+        metadata=coalesce_metadata,
+    )
+
+
 class CoalesceExecutor:
     """Executes coalesce operations with audit recording.
 
@@ -167,6 +461,7 @@ class CoalesceExecutor:
         data_flow: DataFlowRepository,
         clock: "Clock | None" = None,
         max_completed_keys: int = 10000,
+        barrier_restore_reads: "BarrierRestoreReadModel | None" = None,
     ) -> None:
         """Initialize executor.
 
@@ -185,8 +480,11 @@ class CoalesceExecutor:
         """
         if max_completed_keys <= 0:
             raise OrchestrationInvariantError(f"max_completed_keys must be > 0, got {max_completed_keys}")
+        if barrier_restore_reads is None:
+            raise OrchestrationInvariantError("barrier_restore_reads is required for coalesce restore/late-arrival reads")
 
         self._execution = execution
+        self._barrier_restore_reads = barrier_restore_reads
         self._data_flow = data_flow
         self._spans = span_factory
         self._token_manager = token_manager
@@ -205,11 +503,11 @@ class CoalesceExecutor:
         # restore_from_journal(). Branch schemas come from fresh graph data each run,
         # not from resume state — the journal stores token payloads and the checkpoint
         # row stores only lost-branch scalars.
-        self._branch_expected_fields: dict[str, dict[str, tuple[str, ...]]] = {}
+        self._branch_expected_fields: dict[str, dict[str, tuple[str, ...]] | None] = {}
         # Pre-computed output schemas: coalesce_name -> SchemaContract
         # Used to ensure runtime contracts match DAG-computed schemas (P2 fix).
         # When populated, _execute_merge() uses this instead of runtime merge().
-        self._output_schemas: dict[str, SchemaContract] = {}
+        self._output_schemas: dict[str, SchemaContract | None] = {}
         # Pending tokens: (coalesce_name, row_id) -> _PendingCoalesce
         self._pending: dict[tuple[str, str], _PendingCoalesce] = {}
         # Completed coalesces: tracks keys that have already merged/failed
@@ -246,10 +544,8 @@ class CoalesceExecutor:
         """
         self._settings[settings.name] = settings
         self._node_ids[settings.name] = node_id
-        if branch_schemas is not None:
-            self._branch_expected_fields[settings.name] = branch_schemas
-        if output_schema is not None:
-            self._output_schemas[settings.name] = output_schema
+        self._branch_expected_fields[settings.name] = branch_schemas
+        self._output_schemas[settings.name] = output_schema
 
     def get_registered_names(self) -> list[str]:
         """Get names of all registered coalesce points.
@@ -308,9 +604,11 @@ class CoalesceExecutor:
         clock (clamped at 0 against wall-clock skew), and each branch's
         arrival_time preserves the absolute blocked-at offsets.
 
-        Completed keys are reconstructed from the Landscape (source of truth),
-        unchanged from the blob-restore era — see
-        ``_reconstruct_completed_keys_from_landscape``.
+        Validation, token rehydration, scalar-only handling, and completed-key
+        reconstruction from the Landscape (source of truth) live in
+        ``CoalesceJournalRestorer`` (the restore/hydration boundary); this
+        method applies the returned frozen state wholesale. Late-arrival
+        point lookups stay on the executor (``_check_landscape_for_completion``).
 
         Caller obligations (Task 3.1):
 
@@ -323,10 +621,8 @@ class CoalesceExecutor:
           from ``scalars`` are already recorded — re-deriving losses from
           audit and calling ``notify_branch_lost`` for a key that already
           carries them raises ``OrchestrationInvariantError`` (duplicate
-          loss). For zero-arrival loss-only keys dropped by the stale-scalars
-          arm, re-notification of genuinely-completed keys is safe: the
-          Landscape completed-keys check inside ``notify_branch_lost``
-          returns None for them.
+          loss). For zero-arrival loss-only keys restored from scalars, replay
+          dedup consults ``has_recorded_branch_loss`` before notifying again.
 
         Args:
             items: BLOCKED journal rows for coalesce barriers (all keys).
@@ -334,10 +630,10 @@ class CoalesceExecutor:
                 row. A key with journal items but no scalars entry restores
                 with empty lost_branches (the writer only emits keys with
                 recorded losses — D3). A scalars entry whose key has NO
-                journal items is STALE (that pending key flushed/completed
-                after the checkpoint — a legitimate window under D3's
-                staleness model, since the checkpoint may be older than the
-                journal) and is dropped with a log line rather than rejected.
+                journal items but non-empty lost_branches is a zero-arrival
+                pending key unless the Landscape says the key already
+                completed. Empty, unknown, or completed scalar-only entries
+                are stale and are dropped with a log line rather than rejected.
             state_ids: Per-token node_state hold id — the PENDING node_states
                 at the coalesce node, one per restored token (written at
                 accept() time, derived from audit tables). Every journal
@@ -355,189 +651,56 @@ class CoalesceExecutor:
                 unknown coalesce, duplicate journal rows, duplicate branch
                 claims, missing attempt offset, missing state_id.
         """
-        # Validate and group ALL items before touching executor state — if
-        # validation fails, the in-memory state must remain intact for error
-        # recovery (same discipline as the old blob restore).
-        grouped: dict[tuple[str, str], dict[str, TokenWorkItem]] = {}
-        blocked_at_by_token: dict[str, datetime] = {}
-        for item in items:
-            if not item.coalesce_name:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, "
-                    f"resume checkpoint {resume_checkpoint_id!r}) has no coalesce_name — "
-                    "coalesce barrier rows always carry the coalesce cursor; journal corruption."
-                )
-            if item.coalesce_name not in self._settings:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, "
-                    f"resume checkpoint {resume_checkpoint_id!r}) references unknown coalesce "
-                    f"'{item.coalesce_name}'. Configured coalesces: {sorted(self._settings)}"
-                )
-            if item.barrier_blocked_at is None:
-                # Every post-epoch-20 BLOCKED row is stamped by mark_blocked.
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
-                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
-                    f"{resume_checkpoint_id!r}) has NULL barrier_blocked_at — journal "
-                    "corruption (every BLOCKED row is stamped at mark_blocked time)."
-                )
-            if not item.branch_name:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
-                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
-                    f"{resume_checkpoint_id!r}) has no branch_name — only forked branch "
-                    "tokens block at a coalesce barrier; journal corruption."
-                )
-            if item.token_id in blocked_at_by_token:
-                raise AuditIntegrityError(
-                    f"Duplicate BLOCKED journal rows for token {item.token_id!r} at "
-                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — journal corruption."
-                )
-            if attempt_offsets.get(item.token_id) is None:
-                raise AuditIntegrityError(
-                    f"No entry in attempt_offsets for journal token {item.token_id!r} at "
-                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — audit-derived offsets must "
-                    "cover every BLOCKED journal row."
-                )
-            if state_ids.get(item.token_id) is None:
-                # The PENDING node_state hold is written at accept() time, before
-                # the journal row blocks; a BLOCKED row with no hold means the
-                # journal and the audit trail disagree — corruption, not a default.
-                raise AuditIntegrityError(
-                    f"No entry in state_ids for journal token {item.token_id!r} at "
-                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — every BLOCKED coalesce row "
-                    "holds a PENDING node_state in the audit trail; a missing hold is "
-                    "an audit inconsistency."
-                )
+        restored = CoalesceJournalRestorer(
+            settings=self._settings,
+            node_ids=self._node_ids,
+            barrier_restore_reads=self._barrier_restore_reads,
+            run_id=self._run_id,
+            clock=self._clock,
+        ).restore(
+            items=items,
+            scalars=scalars,
+            state_ids=state_ids,
+            attempt_offsets=attempt_offsets,
+            resume_checkpoint_id=resume_checkpoint_id,
+            now=now,
+        )
 
-            key = (item.coalesce_name, item.row_id)
-            branch_items = grouped.setdefault(key, {})
-            if item.branch_name in branch_items:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal rows for tokens "
-                    f"{branch_items[item.branch_name].token_id!r} and {item.token_id!r} "
-                    f"both claim branch '{item.branch_name}' at coalesce "
-                    f"{item.coalesce_name!r} for row {item.row_id!r} (run {self._run_id!r}, "
-                    f"resume checkpoint {resume_checkpoint_id!r}) — accept() crashes on a "
-                    "duplicate arrival, so this is journal corruption."
-                )
-            branch_items[item.branch_name] = item
-            blocked_at_by_token[item.token_id] = item.barrier_blocked_at
-
-        monotonic_now = self._clock.monotonic()
-        new_pending: dict[tuple[str, str], _PendingCoalesce] = {}
-        for key, branch_items in grouped.items():
-            min_blocked_at = min(blocked_at_by_token[it.token_id] for it in branch_items.values())
-            # Pending age derives from the absolute blocked-at stamp of the
-            # OLDEST branch (first arrival of this pending key), clamped at 0:
-            # a wall-clock backward step must not put first_arrival in the
-            # monotonic future.
-            first_arrival = monotonic_now - max(0.0, (now - min_blocked_at).total_seconds())
-            branches: dict[str, _BranchEntry] = {}
-            for branch_name, branch_item in branch_items.items():
-                token = token_from_journal_item(
-                    branch_item,
-                    attempt_offset=attempt_offsets[branch_item.token_id],
-                    resume_checkpoint_id=resume_checkpoint_id,
-                )
-                branches[branch_name] = _BranchEntry(
-                    token=token,
-                    arrival_time=first_arrival + (blocked_at_by_token[branch_item.token_id] - min_blocked_at).total_seconds(),
-                    state_id=state_ids[branch_item.token_id],
-                )
-
-            key_scalars = scalars.get(key)
-            new_pending[key] = _PendingCoalesce(
-                branches=branches,
-                first_arrival=first_arrival,
-                lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {},
-            )
-
-        # Stale scalars: a key with a checkpoint lost_branches record but no
-        # journal items means that pending key flushed/completed after the
-        # checkpoint was written (the crash landed between the flush
-        # terminalizing the BLOCKED rows and the next checkpoint — a
-        # legitimate window under D3's staleness model, so rejecting would
-        # refuse valid resumes). Drop them, logged.
-        #
-        # NOTE: a zero-arrival pending key whose ONLY state was lost_branches
-        # (losses notified before any branch arrived) has the same signature —
-        # no BLOCKED rows — and is dropped with it. The journal is authoritative
-        # for pending membership; if a branch later arrives for such a row, a
-        # fresh pending entry forms without the loss record and resolves via
-        # timeout/flush instead of early loss-accounting (degraded latency,
-        # not corruption). The resume restore path must not re-notify losses
-        # restored from scalars; see this method's "Caller obligations".
-        for stale_key in scalars.keys() - grouped.keys():
-            slog.info(
-                "coalesce_journal_restore_dropped_stale_scalars",
-                coalesce_name=stale_key[0],
-                row_id=stale_key[1],
-                run_id=self._run_id,
-                resume_checkpoint_id=resume_checkpoint_id,
-                lost_branches=dict(scalars[stale_key].lost_branches),
-            )
-
-        # Reconstruct completed keys from Landscape (source of truth) —
-        # unchanged from the blob-restore era. This eliminates:
-        # - FIFO eviction gap (Landscape has ALL completed, not just last 10K)
-        # - Checkpoint-Landscape divergence risk
-        # Queried BEFORE any mutation: a Landscape error mid-restore must not
-        # leave the executor cleared-but-unrestored.
-        completed_keys = self._reconstruct_completed_keys_from_landscape()
-
+        # Apply the validated state wholesale — the restorer has already
+        # raised on any journal/audit disagreement (validate-before-mutate:
+        # a failed restore leaves the executor's in-memory state intact).
         self._pending.clear()
         self._completed_keys.clear()
-        for completed_key in completed_keys:
-            self._completed_keys[completed_key] = None
-        self._pending.update(new_pending)
+        for completed_key in restored.completed_keys:
+            self._mark_completed(completed_key)
+        for group in restored.pending:
+            self._pending[group.key] = _PendingCoalesce(
+                branches={
+                    branch.branch_name: _BranchEntry(
+                        token=branch.token,
+                        arrival_time=branch.arrival_time,
+                        state_id=branch.state_id,
+                    )
+                    for branch in group.branches
+                },
+                first_arrival=group.first_arrival,
+                lost_branches=dict(group.lost_branches),
+            )
 
         slog.info(
             "coalesce_journal_restored",
-            pending_keys=len(new_pending),
-            token_count=len(blocked_at_by_token),
+            pending_keys=len(restored.pending),
+            token_count=restored.token_count,
             run_id=self._run_id,
             resume_checkpoint_id=resume_checkpoint_id,
         )
-
-    def _reconstruct_completed_keys_from_landscape(self) -> list[tuple[str, str]]:
-        """Read completed coalesce keys from the Landscape audit trail.
-
-        Queries node_states for completed entries at coalesce node IDs, joined
-        with tokens to get row_ids. Maps node_id → coalesce_name via the
-        reverse of self._node_ids.
-
-        This is the source-of-truth path: the Landscape records ALL completed
-        coalesces (no FIFO eviction), so late-arrival detection works correctly
-        even for pipelines with >max_completed_keys coalesced rows.
-
-        Returns the keys instead of mutating ``_completed_keys`` so the caller
-        (``restore_from_journal``) can run the Landscape query BEFORE clearing
-        executor state — a Landscape failure mid-restore must not leave the
-        executor cleared-but-unrestored.
-        """
-        if not self._node_ids:
-            return []
-
-        # Build reverse map: node_id → coalesce_name
-        node_id_to_name: dict[str, str] = {str(nid): name for name, nid in self._node_ids.items()}
-
-        completed_pairs = self._execution.get_completed_row_ids_for_nodes(
-            run_id=self._run_id,
-            node_ids=frozenset(node_id_to_name.keys()),
-        )
-
-        return [(node_id_to_name[node_id_str], row_id) for node_id_str, row_id in completed_pairs if node_id_str in node_id_to_name]
 
     def _check_landscape_for_completion(self, coalesce_name: str, row_id: str) -> bool:
         """Check the Landscape for whether a coalesce key has completed.
 
         Cache-miss fallback for late-arrival detection. When the FIFO cache
-        (self._completed_keys) doesn't contain a key, this queries the
-        Landscape before allowing a new pending entry. If the Landscape
+        (self._completed_keys) doesn't contain a key, this queries the exact
+        Landscape row before allowing a new pending entry. If the Landscape
         shows the coalesce completed, the key is added to the cache and
         the token is treated as a late arrival.
 
@@ -555,17 +718,9 @@ class CoalesceExecutor:
             return False
         node_id = self._node_ids[coalesce_name]
 
-        completed_pairs = self._execution.get_completed_row_ids_for_nodes(
-            run_id=self._run_id,
-            node_ids=frozenset({str(node_id)}),
-        )
-
-        # Check if any of the completed pairs match our row_id
-        for _nid, completed_row_id in completed_pairs:
-            if completed_row_id == row_id:
-                # Cache hit: add to FIFO so subsequent lookups are fast
-                self._completed_keys[(coalesce_name, row_id)] = None
-                return True
+        if self._barrier_restore_reads.has_completed_row_for_node(run_id=self._run_id, node_id=str(node_id), row_id=row_id):
+            self._mark_completed((coalesce_name, row_id))
+            return True
         return False
 
     def _mark_completed(self, key: tuple[str, str]) -> None:
@@ -585,14 +740,6 @@ class CoalesceExecutor:
         # late arrivals for evicted keys.
         while len(self._completed_keys) > self._max_completed_keys:
             self._completed_keys.popitem(last=False)
-
-    def _require_quorum_count(self, settings: CoalesceSettings) -> int:
-        """Return quorum_count or crash if None — config validation should have caught this."""
-        if settings.quorum_count is None:
-            raise RuntimeError(
-                f"quorum_count is None for quorum policy at coalesce '{settings.name}'. This indicates a config validation bug."
-            )
-        return settings.quorum_count
 
     def accept(
         self,
@@ -771,27 +918,20 @@ class CoalesceExecutor:
         settings: CoalesceSettings,
         pending: _PendingCoalesce,
     ) -> bool:
-        """Check if merge conditions are met based on policy."""
-        arrived_count = len(pending.branches)
-        expected_count = len(settings.branches)
+        """Check if merge conditions are met based on policy.
 
-        if settings.policy == "require_all":
-            return arrived_count == expected_count
-
-        elif settings.policy == "first":
-            return arrived_count >= 1
-
-        elif settings.policy == "quorum":
-            return arrived_count >= self._require_quorum_count(settings)
-
-        elif settings.policy == "best_effort":
-            # Merge on timeout (checked elsewhere) or when all branches accounted for.
-            # Lost branches count as "accounted for" — they won't arrive but we know about them.
-            accounted_count = arrived_count + len(pending.lost_branches)
-            return accounted_count >= expected_count
-
-        else:
-            raise RuntimeError(f"Unknown coalesce policy: {settings.policy!r}")
+        Thin delegate over :func:`decide_coalesce` (ARRIVAL event) — the
+        policy matrix lives in ``elspeth.engine.coalesce_policy``. ARRIVAL
+        never yields FAIL, so a boolean is a faithful projection of the
+        decision.
+        """
+        decision = decide_coalesce(
+            settings,
+            CoalesceEvent.ARRIVAL,
+            arrived_count=len(pending.branches),
+            lost_branches=pending.lost_branches,
+        )
+        return decision.action is CoalesceAction.MERGE
 
     def _get_lost_branch_expected_fields(
         self,
@@ -820,12 +960,12 @@ class CoalesceExecutor:
             Mapping of lost branch name to its expected fields, or None if
             field information is unavailable (see semantics above).
         """
-        if coalesce_name not in self._branch_expected_fields:
-            return None
         if not lost_branches:
             return None
 
-        branch_fields = self._branch_expected_fields[coalesce_name]
+        branch_fields = self._registered_branch_expected_fields(coalesce_name)
+        if branch_fields is None:
+            return None
         result: dict[str, tuple[str, ...]] = {}
         for branch_name in lost_branches:
             if branch_name in branch_fields:
@@ -833,6 +973,24 @@ class CoalesceExecutor:
             # If branch_name not in branch_fields, the branch used observed-mode
             # schema with no declared fields — omit from result rather than crash.
         return result if result else None
+
+    def _registered_output_schema(self, coalesce_name: str) -> SchemaContract | None:
+        try:
+            return self._output_schemas[coalesce_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Missing output schema registry entry for registered coalesce '{coalesce_name}'. "
+                "This indicates register_coalesce() state corruption."
+            ) from exc
+
+    def _registered_branch_expected_fields(self, coalesce_name: str) -> dict[str, tuple[str, ...]] | None:
+        try:
+            return self._branch_expected_fields[coalesce_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Missing branch expected fields registry entry for registered coalesce '{coalesce_name}'. "
+                "This indicates register_coalesce() state corruption."
+            ) from exc
 
     def _fail_pending(
         self,
@@ -975,190 +1133,29 @@ class CoalesceExecutor:
         # for early failures (e.g., contract merge) where no metadata exists yet.
         metadata_for_audit: CoalesceMetadata | None = None
         try:
-            # ─────────────────────────────────────────────────────────────────────
-            # Merge row data according to strategy (returns dict)
-            # We do this FIRST so we can derive contract from actual data shape
-            # ─────────────────────────────────────────────────────────────────────
-            merged_data_dict, union_collisions, field_origins, collision_values = self._merge_data(settings, pending.branches)
-
-            # ─────────────────────────────────────────────────────────────────────
-            # Build contract based on merge strategy and actual data shape
-            # ─────────────────────────────────────────────────────────────────────
-            # Keyed by branch name so _merge_with_original_names can look up winning branch
-            branch_contracts: dict[str, SchemaContract] = {
-                branch_name: e.token.row_data.contract for branch_name, e in pending.branches.items()
-            }
-            contracts: list[SchemaContract] = list(branch_contracts.values())
-
-            if settings.merge == "union":
-                # Both union paths derive from one canonical algorithm
-                # (elspeth.contracts.union_merge.merge_union_field_flags):
-                # - Typed schemas use the precomputed build-time result of
-                #   merge_union_fields(), overlaid with branch original_names
-                #   via _merge_with_original_names (P2 alignment guarantee).
-                # - All-OBSERVED schemas have an empty precomputed contract
-                #   (types are inferred at runtime), so the branch contracts
-                #   are merged directly with merge_union_contracts().
-                all_branches_observed = all(c.mode == "OBSERVED" for c in contracts)
-
-                if settings.name in self._output_schemas:
-                    precomputed = self._output_schemas[settings.name]
-                    # Use precomputed only for typed schemas (mode != OBSERVED)
-                    use_precomputed = precomputed.mode != "OBSERVED"
-                else:
-                    # No precomputed registered. Only allowed for all-OBSERVED branches.
-                    if not all_branches_observed:
-                        raise OrchestrationInvariantError(
-                            f"Coalesce '{settings.name}' has typed branch contracts but no "
-                            f"output_schema for union merge. The DAG builder must provide "
-                            f"output_schema via register_coalesce(). "
-                            f"If this is a test, use TestCoalesceExecutor from conftest."
-                        )
-                    use_precomputed = False
-
-                if use_precomputed:
-                    # Typed schemas: use precomputed semantics (required/nullable/type) but
-                    # preserve original_name from branch contracts. The precomputed contract
-                    # only has normalized names (from config); branch contracts carry the
-                    # original headers from the source.
-                    # P2 fix: use field_origins to pick original_name from winning branch,
-                    # not first-arrived branch.
-                    merged_contract = self._merge_with_original_names(precomputed, branch_contracts, field_origins)
-                else:
-                    # All-OBSERVED (or observed-mode precomputed): merge branch
-                    # contracts directly with the policy-aware union algorithm.
-                    # Type conflicts are still possible when types are inferred
-                    # from data.
-                    try:
-                        merged_contract = merge_union_contracts(
-                            branch_contracts,
-                            require_all=settings.has_all_branch_semantics,
-                            collision_policy=settings.union_collision_policy,
-                            branch_order=tuple(settings.branches),
-                            coalesce_id=settings.name,
-                        )
-                    except ContractMergeError as e:
-                        # Type conflict between branches — fail this row gracefully.
-                        return self._fail_pending(
-                            settings=settings,
-                            key=key,
-                            step=step,
-                            failure_reason=f"contract_type_conflict: {e}",
-                        )
-
-            elif settings.merge == "nested":
-                # Nested: Contract declares branch keys with object type
-                # Data shape is {branch_a: {...}, branch_b: {...}} where each value
-                # is the full row data from that branch as a plain dict.
-                # We use object (the "any" type in VALID_FIELD_TYPES) because dict
-                # is not a valid FieldContract type and the contract only needs to
-                # declare that the field exists, not constrain its inner structure.
-                branch_fields = tuple(
-                    FieldContract(
-                        original_name=branch_name,
-                        normalized_name=branch_name,
-                        python_type=object,
-                        required=branch_name in pending.branches,
-                        source="declared",
-                    )
-                    for branch_name in settings.branches
+            try:
+                plan = build_coalesce_merge(
+                    settings=settings,
+                    pending=pending,
+                    coalesce_name=coalesce_name,
+                    now=now,
+                    output_schema=self._registered_output_schema(settings.name),
+                    branch_expected_fields=self._registered_branch_expected_fields(coalesce_name),
+                    merge_data=self._merge_data,
+                    merge_with_original_names=self._merge_with_original_names,
                 )
-                merged_contract = SchemaContract(
-                    fields=branch_fields,
-                    mode="FIXED",
-                    locked=True,
+            except ContractMergeError as e:
+                # Type conflict between branches -- fail this row gracefully.
+                return self._fail_pending(
+                    settings=settings,
+                    key=key,
+                    step=step,
+                    failure_reason=f"contract_type_conflict: {e}",
                 )
-
-            elif settings.merge == "select":
-                # Select: Use selected branch's contract directly (data has only those fields)
-                # Find the selected branch's contract
-                if settings.select_branch is None:
-                    raise RuntimeError(
-                        f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
-                    )
-
-                # Get the token for the selected branch
-                selected_entry = pending.branches[settings.select_branch]
-                merged_contract = selected_entry.token.row_data.contract
-
-            else:
-                # Unreachable - config validation ensures merge is one of the above
-                raise RuntimeError(f"Unknown merge strategy: {settings.merge}")
-
-            # Build audit metadata BEFORE token creation so union_collision_policy
-            # enforcement can attach collision provenance to failures, and so
-            # first_wins resolution rewrites the merged data before the token is minted.
-            # (Bug l4h fix retained: metadata is still finalized before node-state completion.)
-            coalesce_metadata = CoalesceMetadata.for_merge(
-                policy=CoalescePolicy(settings.policy),
-                merge_strategy=MergeStrategy(settings.merge),
-                expected_branches=tuple(settings.branches),
-                branches_arrived=tuple(pending.branches.keys()),
-                branches_lost=pending.lost_branches,
-                lost_branch_expected_fields=self._get_lost_branch_expected_fields(coalesce_name, pending.lost_branches),
-                arrival_order=[
-                    ArrivalOrderEntry(
-                        branch=branch,
-                        arrival_offset_ms=(entry.arrival_time - pending.first_arrival) * 1000,
-                    )
-                    for branch, entry in sorted(pending.branches.items(), key=lambda x: x[1].arrival_time)
-                ],
-                wait_duration_ms=(now - pending.first_arrival) * 1000,
-            )
-
-            # Layer union-merge provenance onto metadata. field_origins is always
-            # recorded; collisions/collision_values populate only when the union
-            # merge produced overlapping fields. CoalesceMetadata redacts raw
-            # collision_values into value fingerprints before audit serialization.
-            if settings.merge == "union":
-                coalesce_metadata = CoalesceMetadata.with_union_result(
-                    coalesce_metadata,
-                    field_origins=field_origins,
-                    collisions=union_collisions if union_collisions else None,
-                    collision_values=collision_values if collision_values else None,
-                )
-                # Capture enriched metadata for the failure handler so a subsequent
-                # CoalesceCollisionError (fail policy) can persist the redacted
-                # collision record to complete_node_state(context_after=...).
-                metadata_for_audit = coalesce_metadata
-
-                # Apply union_collision_policy — only meaningful when collisions occurred.
-                if union_collisions:
-                    if settings.union_collision_policy == "fail":
-                        # Metadata is captured; raise with it attached so the orchestrator's
-                        # failure path can persist collision provenance to the audit trail.
-                        raise CoalesceCollisionError(
-                            f"union merge collisions in coalesce '{coalesce_name}': {sorted(union_collisions)}",
-                            metadata=coalesce_metadata,
-                        )
-                    if settings.union_collision_policy == "first_wins":
-                        merged_data_dict, first_wins_origins = _resolve_first_wins(merged_data_dict, field_origins, collision_values)
-                        # Rebuild contract with first_wins origins so original_name
-                        # mapping matches the winning branch, not last-wins default.
-                        # (P2 fix: _merge_with_original_names was called with field_origins
-                        # before _resolve_first_wins computed the correct origins.)
-                        if use_precomputed:
-                            merged_contract = self._merge_with_original_names(precomputed, branch_contracts, first_wins_origins)
-                        # Rebuild metadata with the updated origins; collision
-                        # fingerprints unchanged (still records every contributing
-                        # branch in order).
-                        coalesce_metadata = replace(
-                            coalesce_metadata,
-                            union_field_origins=first_wins_origins,
-                        )
-                        metadata_for_audit = coalesce_metadata
-                    # last_wins: no-op; merged_data_dict already reflects last-wins.
-            else:
-                # nested/select: capture the base metadata so any post-build failure
-                # still propagates branches_arrived/arrival_order to the audit trail.
-                metadata_for_audit = coalesce_metadata
-
-            # Create PipelineRow with strategy-appropriate contract (after any
-            # first_wins rewrite so the merged token reflects the resolved data).
-            merged_data = PipelineRow(merged_data_dict, merged_contract)
-
-            # Get list of consumed tokens
-            consumed_tokens = tuple(e.token for e in pending.branches.values())
+            coalesce_metadata = plan.metadata
+            metadata_for_audit = coalesce_metadata
+            merged_data = plan.merged_data
+            consumed_tokens = plan.consumed_tokens
 
             # Create merged token via TokenManager
             merged_token = self._token_manager.coalesce_tokens(
@@ -1227,6 +1224,8 @@ class CoalesceExecutor:
             # recording any further FAILED states to the untrustworthy DB.
             raise
         except Exception as merge_exc:
+            if metadata_for_audit is None and isinstance(merge_exc, CoalesceCollisionError):
+                metadata_for_audit = merge_exc.metadata
             # Generate error_hash once for all branches (consistent audit trail).
             error_hash = compute_error_hash(str(merge_exc), exception_type=type(merge_exc).__name__)
 
@@ -1278,75 +1277,8 @@ class CoalesceExecutor:
         branch_contracts: dict[str, SchemaContract],
         field_origins: dict[str, str],
     ) -> SchemaContract:
-        """Merge precomputed schema semantics with original names from branch contracts.
-
-        The precomputed contract has correct required/nullable/type semantics from
-        build-time analysis, but only has normalized names (original_name == normalized_name).
-        Branch contracts carry the actual original→normalized mapping from the source.
-
-        This method creates a new contract that preserves:
-        - Field definitions (type, required, nullable, source) from precomputed
-        - original_name from the winning branch per field_origins (policy-aware)
-
-        Args:
-            precomputed: Contract from create_contract_from_config() with build-time semantics
-            branch_contracts: Map of branch_name -> contract from branch tokens
-            field_origins: Map of field_name -> winning branch_name (from _merge_data)
-
-        Returns:
-            Merged contract with preserved original names
-        """
-        # Build lookup of (normalized_name, branch_name) -> original_name from all branches
-        # This allows us to retrieve original_name from the winning branch per field
-        branch_original_names: dict[tuple[str, str], str] = {}
-        for branch_name, contract in branch_contracts.items():
-            for fc in contract.fields:
-                branch_original_names[(fc.normalized_name, branch_name)] = fc.original_name
-
-        # Fallback lookup for fields not in field_origins (e.g., non-colliding fields)
-        # Uses first-seen semantics across all branches
-        fallback_original_names: dict[str, str] = {}
-        for contract in branch_contracts.values():
-            for fc in contract.fields:
-                if fc.normalized_name not in fallback_original_names:
-                    fallback_original_names[fc.normalized_name] = fc.original_name
-
-        # Rebuild precomputed fields with original names from winning branches
-        merged_fields: list[FieldContract] = []
-        for fc in precomputed.fields:
-            # _merge_data populates field_origins[name] for every contributed field
-            # under union semantics (not just collisions — it tracks the winning
-            # branch for every field). branch_original_names is built from the same
-            # branch contracts, so (normalized_name, winning_branch) MUST be present
-            # whenever the field is in field_origins. Direct indexing — a missing
-            # key would be an audit-load-bearing schema/contract integrity violation
-            # (precomputed and branch contracts diverged) and must crash, not coerce.
-            if fc.normalized_name in field_origins:
-                winning_branch = field_origins[fc.normalized_name]
-                original_name = branch_original_names[(fc.normalized_name, winning_branch)]
-            else:
-                # Precomputed-declared field not contributed by any branch
-                # (e.g., nullable field with no data this row). fallback_original_names
-                # is built from every branch contract's fields, so a precomputed field
-                # absent here means precomputed and branch contracts disagree on
-                # schema — crash on the integrity violation.
-                original_name = fallback_original_names[fc.normalized_name]
-            merged_fields.append(
-                FieldContract(
-                    normalized_name=fc.normalized_name,
-                    original_name=original_name,
-                    python_type=fc.python_type,
-                    required=fc.required,
-                    source=fc.source,
-                    nullable=fc.nullable,
-                )
-            )
-
-        return SchemaContract(
-            mode=precomputed.mode,
-            fields=tuple(merged_fields),
-            locked=precomputed.locked,
-        )
+        """Compatibility adapter for tests that patch executor internals."""
+        return _merge_with_original_names(precomputed, branch_contracts, field_origins)
 
     def _merge_data(
         self,
@@ -1358,88 +1290,8 @@ class CoalesceExecutor:
         dict[str, str],
         dict[str, list[tuple[str, Any]]],
     ]:
-        """Merge row data from arrived tokens based on strategy.
-
-        Note: row_data is PipelineRow, so we use to_dict() to get raw dict.
-
-        Returns:
-            Tuple of ``(merged_data, union_collisions, field_origins, collision_values)``:
-
-            * ``merged_data``: the merged dict to wrap in a PipelineRow.
-            * ``union_collisions``: field name -> list of contributing branch names,
-              populated only for union merges where field names overlap.
-            * ``field_origins``: field name -> the branch that produced the winning
-              value under ``last_wins`` semantics. Populated for every union merge;
-              empty dict for nested/select.
-            * ``collision_values``: field name -> ordered list of ``(branch, value)``
-              entries for every contributing branch. Populated only for union
-              merges that actually collided; empty dict otherwise.
-        """
-        if settings.merge == "union":
-            # Combine all fields from all branches.
-            # On name collision, the last branch in settings.branches wins by default
-            # (union_collision_policy="last_wins"). field_origins and collision_values
-            # are always recorded so auditors can reconstruct lineage and inspect
-            # overwritten values. Policy enforcement happens at the call site.
-            merged: dict[str, Any] = {}
-            field_origins: dict[str, str] = {}
-            collisions: dict[str, list[str]] = {}
-            collision_values: dict[str, list[tuple[str, Any]]] = {}
-            for branch_name in settings.branches:
-                if branch_name in branches:
-                    branch_data = branches[branch_name].token.row_data.to_dict()
-                    for merge_field, value in branch_data.items():
-                        if merge_field in field_origins:
-                            # Collision: capture the prior branch's value before overwriting.
-                            if merge_field not in collisions:
-                                prior_branch = field_origins[merge_field]
-                                prior_value = merged[merge_field]
-                                # Seed with the prior entry now; the current branch's
-                                # entry is appended immediately below. This guarantees
-                                # collision_values[merge_field] always has >= 2 entries
-                                # on first detection — an invariant that _resolve_first_wins
-                                # relies on when it unconditionally indexes entries[0].
-                                collisions[merge_field] = [prior_branch]
-                                collision_values[merge_field] = [(prior_branch, prior_value)]
-                            collisions[merge_field].append(branch_name)
-                            collision_values[merge_field].append((branch_name, value))
-                        field_origins[merge_field] = branch_name
-                        merged[merge_field] = value
-            return merged, collisions, field_origins, collision_values
-
-        elif settings.merge == "nested":
-            # Each branch as nested object (use to_dict() for serializable dict)
-            return (
-                {
-                    branch_name: branches[branch_name].token.row_data.to_dict()
-                    for branch_name in settings.branches
-                    if branch_name in branches
-                },
-                {},
-                {},
-                {},
-            )
-
-        elif settings.merge == "select":
-            # Take specific branch output
-            # Note: _execute_merge validates select_branch presence before calling this method
-            # If we get here without select_branch, it's a bug in our code
-            if settings.select_branch is None:
-                raise RuntimeError(
-                    f"select_branch is None for select merge strategy at coalesce '{settings.name}'. This indicates a config validation bug."
-                )
-            if settings.select_branch not in branches:
-                # This should be unreachable - _execute_merge catches this case first
-                # Per "Plugin Ownership" principle: crash on our bugs, don't hide them
-                raise RuntimeError(
-                    f"select_branch '{settings.select_branch}' not in arrived branches {list(branches.keys())}. "
-                    f"This indicates a bug in _execute_merge validation (Bug 2ho fix should have caught this)."
-                )
-            # Return copy of dict (to_dict() returns a copy already)
-            return branches[settings.select_branch].token.row_data.to_dict(), {}, {}, {}
-
-        else:
-            raise RuntimeError(f"Unknown merge strategy: {settings.merge!r}")
+        """Compatibility adapter for tests that patch executor internals."""
+        return _merge_data(settings, branches)
 
     def _resolve_pending(
         self,
@@ -1455,7 +1307,11 @@ class CoalesceExecutor:
         """Resolve a pending coalesce by dispatching on policy.
 
         Shared helper for check_timeouts() and flush_pending(). Decides whether
-        to merge (enough branches arrived) or fail (not enough) based on policy.
+        to merge (enough branches arrived) or fail (not enough) via
+        :func:`decide_coalesce` (TIMEOUT/FLUSH events) — the policy matrix
+        lives in ``elspeth.engine.coalesce_policy``. TIMEOUT/FLUSH never
+        yield WAIT (resolution is forced), so the WAIT arm below is an
+        exhaustiveness guard, not a reachable path.
 
         Args:
             settings: Coalesce settings for this point
@@ -1467,60 +1323,32 @@ class CoalesceExecutor:
             is_timeout: True when triggered by timeout (affects failure reasons
                 and is_timeout flag on _fail_pending)
         """
-        if settings.policy == "best_effort":
-            if len(pending.branches) > 0:
-                return self._execute_merge(
-                    settings=settings,
-                    node_id=node_id,
-                    pending=pending,
-                    step=step,
-                    key=key,
-                    coalesce_name=coalesce_name,
-                )
+        event = CoalesceEvent.TIMEOUT if is_timeout else CoalesceEvent.FLUSH
+        decision = decide_coalesce(
+            settings,
+            event,
+            arrived_count=len(pending.branches),
+            lost_branches=pending.lost_branches,
+            row_id=key[1],
+        )
+        if decision.action is CoalesceAction.MERGE:
+            return self._execute_merge(
+                settings=settings,
+                node_id=node_id,
+                pending=pending,
+                step=step,
+                key=key,
+                coalesce_name=coalesce_name,
+            )
+        if decision.action is CoalesceAction.FAIL:
             return self._fail_pending(
                 settings,
                 key,
                 step,
-                failure_reason="best_effort_timeout_no_arrivals" if is_timeout else "all_branches_lost",
+                failure_reason=decision.require_failure_reason(),
                 is_timeout=is_timeout,
             )
-
-        elif settings.policy == "quorum":
-            if len(pending.branches) >= self._require_quorum_count(settings):
-                return self._execute_merge(
-                    settings=settings,
-                    node_id=node_id,
-                    pending=pending,
-                    step=step,
-                    key=key,
-                    coalesce_name=coalesce_name,
-                )
-            return self._fail_pending(
-                settings,
-                key,
-                step,
-                failure_reason="quorum_not_met_at_timeout" if is_timeout else "quorum_not_met",
-                is_timeout=is_timeout,
-            )
-
-        elif settings.policy == "require_all":
-            return self._fail_pending(
-                settings,
-                key,
-                step,
-                failure_reason="incomplete_branches",
-                is_timeout=is_timeout,
-            )
-
-        elif settings.policy == "first":
-            raise RuntimeError(
-                f"Invariant violation: 'first' policy should never have pending entries "
-                f"at coalesce '{coalesce_name}', row_id='{key[1]}'. "
-                f"'first' merges immediately on arrival — bug in accept()."
-            )
-
-        else:
-            raise RuntimeError(f"Unknown coalesce policy: {settings.policy!r}")
+        raise RuntimeError("unreachable: decide_coalesce never returns WAIT for TIMEOUT/FLUSH")
 
     def check_timeouts(
         self,
@@ -1530,6 +1358,8 @@ class CoalesceExecutor:
 
         For best_effort policy, merges whatever has arrived when timeout expires.
         For quorum policy with timeout, merges if quorum met when timeout expires.
+        For first policy, only a zero-arrival loss-created pending entry can
+        time out; that fails cleanly rather than tripping the arrival invariant.
 
         Step position is resolved internally via the injected StepResolver
         from the coalesce point's registered node_id.
@@ -1585,7 +1415,9 @@ class CoalesceExecutor:
         For best_effort policy: merges whatever arrived.
         For quorum policy: merges if quorum met, returns failure otherwise.
         For require_all policy: returns failure (never partial merge).
-        For first policy: should never have pending (merges immediately).
+        For first policy: arrived tokens should never be pending (merges
+        immediately); a zero-arrival entry created by branch-loss accounting
+        fails cleanly.
 
         Step positions are resolved internally via the injected StepResolver
         from each coalesce point's registered node_id.
@@ -1642,10 +1474,18 @@ class CoalesceExecutor:
         A completed/unknown key returns False — ``notify_branch_lost``'s own
         completed-keys check makes that replay a no-op.
         """
-        pending = self._pending.get((coalesce_name, row_id))
-        if pending is None:
+        key = (coalesce_name, row_id)
+        if key in self._pending:
+            return branch_name in self._pending[key].lost_branches
+        # Absent entry: distinguish the two legitimate states rather than
+        # conflating them into one silent default.
+        if key in self._completed_keys or self._check_landscape_for_completion(coalesce_name, row_id):
+            # Completed: the merge already resolved this row's losses;
+            # notify_branch_lost's completed-keys check no-ops the replay.
             return False
-        return branch_name in pending.lost_branches
+        # Never seen: the loss precedes the first branch arrival, so nothing
+        # is recorded yet — notify_branch_lost creates the entry and records it.
+        return False
 
     def notify_branch_lost(
         self,
@@ -1736,11 +1576,11 @@ class CoalesceExecutor:
     ) -> CoalesceOutcome | None:
         """Re-evaluate merge conditions after a branch loss notification.
 
-        Policy-specific consequences:
-        - require_all: ANY lost branch = immediate failure
-        - quorum: fail if quorum is now impossible, merge if already met
-        - best_effort: merge immediately if all branches accounted for
-        - first: no action (should have merged on first arrival)
+        Thin delegate over :func:`decide_coalesce` (LOSS event) — the policy
+        matrix (require_all fails on ANY lost branch; quorum fails when
+        impossible, merges when already met; best_effort merges when all
+        branches are accounted for; first fails only when every branch is
+        lost before any arrival) lives in ``elspeth.engine.coalesce_policy``.
 
         Args:
             settings: Coalesce settings for the affected point
@@ -1751,54 +1591,21 @@ class CoalesceExecutor:
             CoalesceOutcome if merge/failure triggered, None if still waiting.
         """
         pending = self._pending[key]
-        arrived_count = len(pending.branches)
-        total_branches = len(settings.branches)
-        lost_count = len(pending.lost_branches)
-
-        if settings.policy == "require_all":
-            # require_all: ANY lost branch = immediate failure
+        decision = decide_coalesce(
+            settings,
+            CoalesceEvent.LOSS,
+            arrived_count=len(pending.branches),
+            lost_branches=pending.lost_branches,
+            row_id=key[1],
+        )
+        if decision.action is CoalesceAction.MERGE:
+            node_id = self._node_ids[settings.name]
+            return self._execute_merge(settings, node_id, pending, step, key, settings.name)
+        if decision.action is CoalesceAction.FAIL:
             return self._fail_pending(
                 settings,
                 key,
                 step,
-                failure_reason=f"branch_lost:{','.join(sorted(pending.lost_branches.keys()))}",
+                failure_reason=decision.require_failure_reason(),
             )
-
-        elif settings.policy == "quorum":
-            quorum = self._require_quorum_count(settings)
-            # Check if quorum is now impossible
-            max_possible = total_branches - lost_count
-            if max_possible < quorum:
-                return self._fail_pending(
-                    settings,
-                    key,
-                    step,
-                    failure_reason=f"quorum_impossible:need={quorum},max_possible={max_possible}",
-                )
-            # Check if arrived count already meets quorum
-            if arrived_count >= quorum:
-                node_id = self._node_ids[settings.name]
-                return self._execute_merge(settings, node_id, pending, step, key, settings.name)
-            return None  # Still waiting
-
-        elif settings.policy == "best_effort":
-            # All branches accounted for (arrived + lost)?
-            if arrived_count + lost_count >= total_branches:
-                if arrived_count > 0:
-                    node_id = self._node_ids[settings.name]
-                    return self._execute_merge(settings, node_id, pending, step, key, settings.name)
-                return self._fail_pending(
-                    settings,
-                    key,
-                    step,
-                    failure_reason="all_branches_lost",
-                )
-            return None  # Still waiting for remaining branches
-
-        elif settings.policy == "first":
-            # first: should already have merged on first arrival
-            # If no arrivals yet, nothing to merge
-            return None
-
-        else:
-            raise RuntimeError(f"Unknown coalesce policy: {settings.policy!r}")
+        return None  # WAIT — still waiting for remaining branches

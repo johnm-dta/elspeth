@@ -9,7 +9,7 @@ Error and artifact display types follow the Tier 1 trust model:
 - Display code accesses fields directly (crash on missing = bug)
 """
 
-from typing import Any, Required, TypedDict
+from typing import Any, Literal, Required, TypedDict
 
 
 class NodeInfo(TypedDict):
@@ -27,16 +27,48 @@ class SourceInfo(TypedDict):
     node_id: str | None
 
 
-class TokenDisplayInfo(TypedDict):
+class TuiArtifactInfo(TypedDict):
+    """Artifact evidence attached to a focused token outcome."""
+
+    artifact_id: str
+    artifact_type: str
+    path_or_uri: str
+    content_hash: str
+    size_bytes: int
+    sink_node_id: str
+    produced_by_state_id: str
+
+
+class TokenOutcomeDisplayInfo(TypedDict, total=False):
+    """Terminal outcome evidence attached to a focused token."""
+
+    outcome: Required[str]
+    path: Required[str]
+    completed: Required[bool]
+    sink: str
+    error_hash: str
+    artifact: TuiArtifactInfo
+
+
+class TokenParentDisplayInfo(TypedDict):
+    """Parent token evidence attached to a focused token."""
+
+    token_id: str
+    row_id: str
+
+
+class TokenDisplayInfo(TypedDict, total=False):
     """Token information formatted for TUI display.
 
     Note: This is a DISPLAY type, not the canonical TokenInfo from contracts.
     It contains presentation-specific fields like 'path' for breadcrumb display.
     """
 
-    token_id: str
-    row_id: str
-    path: list[str]
+    token_id: Required[str]
+    row_id: Required[str]
+    path: Required[list[str]]
+    outcome: TokenOutcomeDisplayInfo
+    parent_tokens: list[TokenParentDisplayInfo]
 
 
 class LineageData(TypedDict):
@@ -64,9 +96,41 @@ class TreeNodeDict(TypedDict):
     label: str
     node_id: str | None
     node_type: str
+    selection: "TreeSelection | None"
     depth: int
     has_children: bool
     expanded: bool
+
+
+class TreeSelection(TypedDict, total=False):
+    """Selection payload for lineage tree rows.
+
+    The ``kind`` discriminator prevents token, edge, outcome, and run rows from
+    being mistaken for pipeline nodes just because they have an identifier.
+    """
+
+    kind: Required[Literal["run", "node", "token", "edge", "outcome", "status"]]
+    run_id: Required[str]
+    node_id: str
+    node_type: str
+    token_id: str
+    row_id: str
+    sink: str
+    state_id: str
+    edge_id: str
+    from_node_id: str
+    to_node_id: str
+    edge_label: str
+    outcome: str
+    outcome_path: str
+    completed: bool
+    error_hash: str
+    artifact_id: str
+    artifact_type: str
+    artifact_path_or_uri: str
+    artifact_hash: str
+    artifact_size_bytes: int
+    message: str
 
 
 class NodeStateInfo(TypedDict, total=False):
@@ -113,6 +177,32 @@ class NodeStateInfo(TypedDict, total=False):
     success_reason_json: str
     context_after_json: str
     artifact: dict[str, Any]
+
+
+class SelectionDetailInfo(TypedDict, total=False):
+    """Non-node tree selection detail for the TUI detail panel."""
+
+    detail_kind: Required[Literal["run", "token", "edge", "outcome", "status"]]
+    title: Required[str]
+    run_id: str
+    token_id: str
+    row_id: str
+    sink: str
+    edge_id: str
+    from_node_id: str
+    to_node_id: str
+    edge_label: str
+    state_id: str
+    outcome: str
+    outcome_path: str
+    completed: bool
+    error_hash: str
+    artifact_id: str
+    artifact_type: str
+    artifact_path_or_uri: str
+    artifact_hash: str
+    artifact_size_bytes: int
+    message: str
 
 
 class ExecutionErrorDisplay(TypedDict, total=False):

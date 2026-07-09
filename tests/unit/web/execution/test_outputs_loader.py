@@ -8,8 +8,8 @@ can enumerate and re-fetch every sink output the run produced.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -19,9 +19,18 @@ from elspeth.contracts import NodeType
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.web.execution.outputs import load_run_outputs_for_settings, load_run_outputs_from_db
+from elspeth.web.execution.outputs import load_run_outputs_for_settings, load_run_outputs_from_db, path_or_uri_to_filesystem_path
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+@dataclass(frozen=True)
+class _SettingsFake:
+    landscape_url: str
+    landscape_passphrase: str | None = None
+
+    def get_landscape_url(self) -> str:
+        return self.landscape_url
 
 
 def _register_node(
@@ -122,9 +131,7 @@ def test_load_run_outputs_records_exists_now_filesystem_check(tmp_path: Path) ->
 
 
 def test_load_run_outputs_for_settings_raises_when_sqlite_audit_db_missing(tmp_path: Path) -> None:
-    settings = MagicMock()
-    settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'missing-audit.db'}"
-    settings.landscape_passphrase = None
+    settings = _SettingsFake(landscape_url=f"sqlite:///{tmp_path / 'missing-audit.db'}")
 
     with pytest.raises(RuntimeError, match="audit database"):
         load_run_outputs_for_settings(
@@ -166,6 +173,53 @@ def test_load_run_outputs_strips_file_uri_prefix_in_exists_check(tmp_path: Path)
         )
         response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
         assert response.artifacts[0].exists_now is True
+
+
+def test_load_run_outputs_decodes_file_uri_path_for_exists_check(tmp_path: Path) -> None:
+    """Encoded file URI delimiters are literal filename bytes, not URI query params."""
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-encoded-file-uri"
+        target = tmp_path / "results?token=literal.jsonl"
+        target.write_bytes(b'{"x":1}\n')
+
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", f"file://{tmp_path}/results%3Ftoken%3Dliteral.jsonl", "a" * 64, target.stat().st_size, "sink_r")],
+        )
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
+        assert response.artifacts[0].exists_now is True
+
+
+def test_load_run_outputs_preserves_legacy_raw_percent_file_uri_when_it_exists(tmp_path: Path) -> None:
+    """Historical raw file:// rows may contain literal percent-looking filenames."""
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-legacy-raw-percent-file-uri"
+        legacy_target = tmp_path / "results%3Ftoken=literal.jsonl"
+        decoded_target = tmp_path / "results?token=literal.jsonl"
+        legacy_target.write_bytes(b'{"legacy":true}\n')
+
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", f"file://{tmp_path}/results%3Ftoken=literal.jsonl", "a" * 64, legacy_target.stat().st_size, "sink_r")],
+        )
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
+
+        assert response.artifacts[0].exists_now is True
+        assert legacy_target.exists()
+        assert not decoded_target.exists()
+
+
+def test_file_uri_path_resolution_prefers_decoded_candidate_when_both_exist(tmp_path: Path) -> None:
+    raw_target = tmp_path / "results%3Ftoken%3Dliteral.jsonl"
+    decoded_target = tmp_path / "results?token=literal.jsonl"
+    raw_target.write_bytes(b'{"raw":true}\n')
+    decoded_target.write_bytes(b'{"decoded":true}\n')
+
+    resolved = path_or_uri_to_filesystem_path(f"file://{tmp_path}/results%3Ftoken%3Dliteral.jsonl")
+
+    assert resolved == decoded_target
 
 
 def test_load_run_outputs_returns_empty_artifacts_for_unknown_run(tmp_path: Path) -> None:

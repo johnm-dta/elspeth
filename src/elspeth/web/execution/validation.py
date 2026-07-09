@@ -41,19 +41,20 @@ from elspeth.core.blobs_inline import (
     _substitute_blob_content_refs_for_validation,
     _validate_blob_content_refs_sync,
 )
-from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_config_dict, load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    redact_secret_refs_for_validation,
     resolve_secret_refs,
     secret_env_ref_name,
 )
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import (
     RouteValidationError,
-    ValueSourceValidationError,
 )
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
@@ -82,6 +83,9 @@ from elspeth.web.execution.schemas import (
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
     CHECK_INTERPRETATION_REVIEW,
+    CHECK_LLM_BASE_URL_POLICY,
+    CHECK_LLM_RETRY_BUDGET_POLICY,
+    CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
@@ -109,6 +113,11 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
+from elspeth.web.provider_config_policy import (
+    web_llm_base_url_policy_error,
+    web_llm_retry_budget_policy_error,
+    web_rag_provider_config_policy_error,
+)
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
@@ -119,6 +128,9 @@ _CHECK_BLOB_INLINE_REFS = CHECK_BLOB_INLINE_REFS
 _CHECK_SEMANTIC_CONTRACTS = CHECK_SEMANTIC_CONTRACTS
 _CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
 _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
+_CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
+_CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
+_CHECK_LLM_BASE_URL_POLICY = CHECK_LLM_BASE_URL_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -126,6 +138,8 @@ _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
 _CHECK_ROUTE_TARGETS = CHECK_ROUTE_TARGETS
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
+
+_WEB_FETCH_TRANSFORMS = frozenset({"blob_fetch", "web_scrape"})
 
 
 def _execution_ready() -> ValidationReadiness:
@@ -452,7 +466,7 @@ def _build_edge_contract_suggestion(
     return "\n".join(parts)
 
 
-def _skipped_checks(from_check: str) -> list[ValidationCheck]:
+def _skipped_checks(from_check: str, *, already_emitted: frozenset[str] = frozenset()) -> list[ValidationCheck]:
     """Generate skipped check records for all checks after from_check."""
     skipping = False
     result: list[ValidationCheck] = []
@@ -460,7 +474,7 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
         if name == from_check:
             skipping = True
             continue
-        if skipping:
+        if skipping and name not in already_emitted:
             result.append(
                 ValidationCheck(
                     name=name,
@@ -471,6 +485,10 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                 )
             )
     return result
+
+
+def _append_skipped_checks(checks: list[ValidationCheck], from_check: str) -> None:
+    checks.extend(_skipped_checks(from_check, already_emitted=frozenset(check.name for check in checks)))
 
 
 def _format_interpretation_site(site: InterpretationReviewSite) -> str:
@@ -680,6 +698,61 @@ def _blob_inline_validation_error(violation: BlobInlineValidationViolation) -> V
     )
 
 
+# The two required-with-no-default top-level parts of ElspethSettings (see
+# core/config.py). A composition missing either fails assembly with a raw
+# pydantic "Field required" dump; ``_reframe_settings_missing_parts`` maps each
+# to a novice-register finding keyed on this table.
+_SETTINGS_MISSING_PART_REFRAMES: dict[str, tuple[str, str, str]] = {
+    # pydantic loc field -> (error_code, message, suggestion)
+    "sources": (
+        "missing_source",
+        "Add a data source so your pipeline has data to read.",
+        "Pick a data source like a CSV file or text input, then validate again.",
+    ),
+    "sinks": (
+        "missing_sink",
+        "Add an output step so your pipeline has somewhere to send its results.",
+        "Pick an output like CSV or JSON and connect your last step to it, then validate again.",
+    ),
+}
+
+
+def _reframe_settings_missing_parts(exc: PydanticValidationError) -> list[ValidationError]:
+    """Reframe ElspethSettings "Field required" failures on the required
+    top-level parts (``sources`` / ``sinks``) into novice-register findings.
+
+    Returns one finding per missing part, in a stable source-before-sink order
+    (so a lone-transform composition surfaces two honest findings). Returns
+    ``[]`` when the failure is anything other than a missing top-level part —
+    the caller then falls back to ``str(exc)``. Detection is over the
+    *structured* ``exc.errors()`` (``type == "missing"`` at the top of ``loc``),
+    never the version-stamped human ``str(exc)`` text.
+    """
+    missing_parts: set[str] = set()
+    for error in exc.errors():
+        if error.get("type") != "missing":
+            continue
+        loc = error.get("loc") or ()
+        # pydantic ``loc`` entries are ``int | str`` (ints index list fields);
+        # our required parts are top-level string keys, so narrow to str.
+        part = loc[0] if loc else None
+        if isinstance(part, str) and part in _SETTINGS_MISSING_PART_REFRAMES:
+            missing_parts.add(part)
+    # Emit in the canonical source-before-sink order regardless of pydantic's
+    # error ordering, so the paired findings read consistently.
+    return [
+        ValidationError(
+            component_id=None,
+            component_type=None,
+            message=_SETTINGS_MISSING_PART_REFRAMES[part][1],
+            suggestion=_SETTINGS_MISSING_PART_REFRAMES[part][2],
+            error_code=_SETTINGS_MISSING_PART_REFRAMES[part][0],
+        )
+        for part in _SETTINGS_MISSING_PART_REFRAMES
+        if part in missing_parts
+    ]
+
+
 @trust_boundary(
     tier=3,
     source="composer-authored CompositionState (pipeline nodes/options) re-read at dry-run validation",
@@ -700,8 +773,13 @@ def validate_pipeline(
     user_id: str | None = None,
     blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
     allow_pending_interpretation_placeholders: bool = False,
+    session_id: str | None = None,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
+
+    ``session_id`` scopes the sink-path allowlist to the caller's own
+    ``blobs/<session>/`` subtree (elspeth-bdc17cfdb1). ``None`` fails
+    closed: blob-targeted sink paths are rejected outright.
 
     Steps:
     1. Source path allowlist check (C3/S2 defense-in-depth)
@@ -770,8 +848,8 @@ def validate_pipeline(
                 ValidationError(
                     component_id=None,
                     component_type=None,
-                    message=("Pipeline is empty. Add a source and at least one output to begin building."),
-                    suggestion=("Pick a source plugin (e.g. text, csv) and an output destination, then validate again."),
+                    message=("Pipeline is empty. Add a data source and an output step to begin building."),
+                    suggestion=("Pick a data source like a CSV file or text input, and an output like CSV or JSON, then validate again."),
                     error_code="empty_pipeline",
                 ),
             ],
@@ -794,7 +872,7 @@ def validate_pipeline(
     )
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
-    allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
+    allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir), session_id=session_id)
     path_checked = False
     for source_name, source in state.sources.items():
         source_options = dict(source.options)
@@ -861,7 +939,7 @@ def validate_pipeline(
                                 component_id=output.name,
                                 component_type="sink",
                                 message=f"Path traversal blocked: sink '{output.name}' {key}='{value}' resolves outside allowed directories",
-                                suggestion="Use a path within the outputs or blobs directory.",
+                                suggestion="Use a path within the outputs directory or this session's own blobs subtree.",
                                 error_code=None,
                             ),
                         ],
@@ -906,7 +984,7 @@ def validate_pipeline(
                                 component_id=node.id,
                                 component_type="transform",
                                 message=f"Path traversal blocked: transform '{node.id}' {key}='{value}' resolves outside allowed directories",
-                                suggestion="Use a path within the outputs or blobs directory.",
+                                suggestion="Use a path within the outputs directory or this session's own blobs subtree.",
                                 error_code=None,
                             ),
                         ],
@@ -940,9 +1018,9 @@ def validate_pipeline(
             )
         )
 
-    web_scrape_network_errors: list[ValidationError] = []
+    web_fetch_network_errors: list[ValidationError] = []
     for node in state.nodes:
-        if node.plugin != "web_scrape":
+        if node.plugin not in _WEB_FETCH_TRANSFORMS:
             continue
         http_options = node.options["http"] if "http" in node.options else None
         if not isinstance(http_options, Mapping):
@@ -952,48 +1030,49 @@ def validate_pipeline(
         allowed_hosts = http_options["allowed_hosts"]
         if allowed_hosts == "allow_private":
             message = (
-                "web_scrape.http.allowed_hosts='allow_private' is not permitted in web execution. "
+                f"{node.plugin}.http.allowed_hosts='allow_private' is not permitted in web execution. "
                 "Web-authored pipelines may only use public SSRF policy; private-network fetching requires "
                 "an operator-owned runtime outside the web composer."
             )
         elif isinstance(allowed_hosts, Sequence) and not isinstance(allowed_hosts, str):
             message = (
-                "web_scrape.http.allowed_hosts CIDR allowlists are not permitted in web execution. "
+                f"{node.plugin}.http.allowed_hosts CIDR allowlists are not permitted in web execution. "
                 "Web-authored pipelines may only use allowed_hosts='public_only'; private-network fetching "
                 "requires an operator-owned runtime outside the web composer."
             )
         else:
             continue
-        web_scrape_network_errors.append(
+        error_code = "web_scrape_private_network_not_allowed" if node.plugin == "web_scrape" else "web_fetch_private_network_not_allowed"
+        web_fetch_network_errors.append(
             ValidationError(
                 component_id=node.id,
                 component_type="transform",
                 message=message,
-                suggestion="Set web_scrape.http.allowed_hosts to 'public_only' or remove the option.",
-                error_code="web_scrape_private_network_not_allowed",
+                suggestion=f"Set {node.plugin}.http.allowed_hosts to 'public_only' or remove the option.",
+                error_code=error_code,
             )
         )
 
-    if web_scrape_network_errors:
-        affected_nodes = tuple(error.component_id for error in web_scrape_network_errors if error.component_id is not None)
+    if web_fetch_network_errors:
+        affected_nodes = tuple(error.component_id for error in web_fetch_network_errors if error.component_id is not None)
         checks.append(
             ValidationCheck(
                 name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
                 passed=False,
-                detail="web_scrape private-network allowlists are not permitted in web execution",
+                detail="web fetch transform private-network allowlists are not permitted in web execution",
                 affected_nodes=affected_nodes,
                 outcome_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_WEB_SCRAPE_NETWORK_POLICY))
+        _append_skipped_checks(checks, _CHECK_WEB_SCRAPE_NETWORK_POLICY)
         return ValidationResult(
             is_valid=False,
             checks=checks,
-            errors=web_scrape_network_errors,
+            errors=web_fetch_network_errors,
             readiness=_blocked_readiness(
                 code="web_scrape_network_policy",
-                detail="web_scrape private-network allowlists are not permitted in web execution.",
-                component_id=web_scrape_network_errors[0].component_id,
+                detail="web fetch transform private-network allowlists are not permitted in web execution.",
+                component_id=web_fetch_network_errors[0].component_id,
                 component_type="transform",
             ),
         )
@@ -1002,7 +1081,7 @@ def validate_pipeline(
         ValidationCheck(
             name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
             passed=True,
-            detail="No web_scrape private-network allowlists found",
+            detail="No web fetch transform private-network allowlists found",
             affected_nodes=(),
             outcome_code=None,
         )
@@ -1136,7 +1215,7 @@ def validate_pipeline(
                     outcome_code=CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
                 )
             )
-            checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
+            _append_skipped_checks(checks, _CHECK_SECRET_REFS)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1189,7 +1268,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_SEMANTIC_CONTRACTS))
+        _append_skipped_checks(checks, _CHECK_SEMANTIC_CONTRACTS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1247,7 +1326,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_BATCH_TRANSFORM_OPTIONS))
+        _append_skipped_checks(checks, _CHECK_BATCH_TRANSFORM_OPTIONS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1293,7 +1372,7 @@ def validate_pipeline(
             )
             for site in materialized_state.sites
         )
-        checks.extend(_skipped_checks(_CHECK_INTERPRETATION_REVIEW))
+        _append_skipped_checks(checks, _CHECK_INTERPRETATION_REVIEW)
         single_site = materialized_state.sites[0] if len(materialized_state.sites) == 1 else None
         return ValidationResult(
             is_valid=False,
@@ -1324,7 +1403,7 @@ def validate_pipeline(
     pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
 
     if blob_get_metadata is not None and "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml:
-        config_dict = yaml.safe_load(pipeline_yaml)
+        config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
         if type(config_dict) is not dict:
             raise TypeError(
                 f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
@@ -1347,7 +1426,7 @@ def validate_pipeline(
                 )
             )
             errors.extend(_blob_inline_validation_error(violation) for violation in blob_violations)
-            checks.extend(_skipped_checks(_CHECK_BLOB_INLINE_REFS))
+            _append_skipped_checks(checks, _CHECK_BLOB_INLINE_REFS)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1389,6 +1468,157 @@ def validate_pipeline(
             )
         )
 
+    # managed_identity_policy (#8) and llm_retry_budget_policy (#9) run here to
+    # match their declared position in VALIDATION_BLOCKING_CHECK_NAMES — AFTER
+    # web_scrape_network_policy (#2) through blob_inline_refs (#7). Emitting them
+    # earlier left their pass records in ``checks`` before an earlier-declared
+    # gate could fail, which suppressed the canonical skipped-after-failure record
+    # and made the trail report a later gate passing under an earlier failure.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        provider_policy_error = web_rag_provider_config_policy_error(node.options)
+        if provider_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_MANAGED_IDENTITY_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed managed identity provider_config",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_MANAGED_IDENTITY_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=provider_policy_error,
+                        suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_MANAGED_IDENTITY_POLICY,
+                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_MANAGED_IDENTITY_POLICY,
+            passed=True,
+            detail="No web-authored managed identity provider_config",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+        if llm_retry_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed sequential multi-query LLM retry budget",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_RETRY_BUDGET_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_retry_policy_error,
+                        suggestion=(
+                            "Set max_capacity_retry_seconds to a small positive value or configure pool_size > 1 for pooled retry handling."
+                        ),
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+            passed=True,
+            detail="No unsafe web-authored sequential multi-query LLM retry budget",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    # llm_base_url_policy (#10) — web-authored OpenRouter LLM nodes may not
+    # override base_url. The api_key resolves server-side (possibly a server-
+    # scoped secret the author cannot read), so a custom base_url would direct
+    # the server's bearer to an author-chosen destination — a credential-egress
+    # / SSRF vector. The plugin config-validator tolerates HTTP loopback for the
+    # CLI dev examples; this web-execution gate is the boundary that makes the
+    # single-machine threat model not leak into the hosted path. Mirrors the
+    # managed_identity / web_scrape network policies.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_base_url_policy_error = web_llm_base_url_policy_error(node.plugin, node.options)
+        if llm_base_url_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_BASE_URL_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' overrides OpenRouter base_url in a web-authored pipeline",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_BASE_URL_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_base_url_policy_error,
+                        suggestion="Remove the base_url option to use the canonical OpenRouter endpoint.",
+                        error_code="llm_base_url_not_allowed",
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_BASE_URL_POLICY,
+                    detail=f"transform {node.id} overrides OpenRouter base_url in a web-authored pipeline",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_BASE_URL_POLICY,
+            passed=True,
+            detail="No web-authored OpenRouter base_url override",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
     # Step 3: Settings loading
     #
     # Always uses load_settings_from_yaml_string() — the same loader the
@@ -1403,9 +1633,9 @@ def validate_pipeline(
     # Step 1b's existence check was wrong — that's an internal bug
     # and must crash per the W18 rule.
     try:
-        settings_yaml = pipeline_yaml
+        settings_config: dict[str, Any] | None = None
         if secret_service is not None and user_id is not None and all_refs:
-            config_dict = yaml.safe_load(pipeline_yaml)
+            config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
             if not isinstance(config_dict, dict):
                 raise TypeError(
                     f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
@@ -1416,13 +1646,30 @@ def validate_pipeline(
                 user_id,
                 env_ref_names=env_ref_names,
             )
-            settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
+            settings_config = resolved_dict
+        elif secret_service is None and "secret_ref" in pipeline_yaml:
+            # No-resolver path (YAML-export preflight withholds the resolver so
+            # resolved secret values can never reach plugin error prose). A wired
+            # {secret_ref: NAME} marker is valid wiring, but plugin config models
+            # type credential fields as ``str`` (e.g. OpenRouter ``api_key: str``)
+            # — an unsubstituted marker dict fails instantiation with "Input
+            # should be a valid string" and false-rejects an exportable pipeline.
+            # Substitute a benign placeholder so structural validation proceeds.
+            # The export YAML is generated separately from the original state
+            # (generate_public_yaml), so the real marker is preserved on the wire
+            # — the placeholder lives only in this loader-local copy.
+            config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
+            if isinstance(config_dict, dict):
+                settings_config = redact_secret_refs_for_validation(config_dict)
 
         # Web-authored pipeline YAML must never expand host ${VAR} placeholders
         # (parity with the execution path). Known secret inventory names are
         # resolved above via resolve_secret_refs; any remaining ${VAR} is
         # user-authored data, not a host-environment lookup.
-        elspeth_settings = load_settings_from_yaml_string(settings_yaml, expand_env_vars=False)
+        if settings_config is None:
+            elspeth_settings = load_settings_from_yaml_string(pipeline_yaml, expand_env_vars=False)
+        else:
+            elspeth_settings = load_settings_from_config_dict(settings_config, expand_env_vars=False)
         checks.append(
             ValidationCheck(
                 name=_CHECK_SETTINGS,
@@ -1442,24 +1689,45 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
-        errors.append(
-            ValidationError(
-                component_id=None,
-                component_type=None,
-                message=str(exc),
-                suggestion=None,
-                error_code=None,
+        # Reframe the specific "a required top-level part is missing" failure
+        # (source or sink) into novice-register findings instead of leaking the
+        # raw pydantic dump ("<field> Field required [type=missing] … For
+        # further information visit https://errors.pydantic.dev/…"), which is a
+        # Tier-3 boundary violation on the four surfaces that render
+        # ``errors[].message`` — the rail strip, audit panel, wire-stage
+        # blockers, and chat transcript (elspeth-901a404926). Detected from the
+        # *structured* ``exc.errors()`` (type == "missing" on sources / sinks),
+        # never by parsing ``str(exc)`` — the human string is version-stamped
+        # and fragile. The raw dump is retained above in ``ValidationCheck``
+        # ``detail`` (and the Landscape trail) for the engineer read; other
+        # settings failures still surface ``str(exc)`` verbatim.
+        reframed = _reframe_settings_missing_parts(exc) if isinstance(exc, PydanticValidationError) else []
+        if reframed:
+            errors.extend(reframed)
+            readiness = _blocked_readiness(
+                code="incomplete_pipeline",
+                detail="Pipeline is missing a required source or output.",
             )
-        )
-        checks.extend(_skipped_checks(_CHECK_SETTINGS))
+        else:
+            errors.append(
+                ValidationError(
+                    component_id=None,
+                    component_type=None,
+                    message=str(exc),
+                    suggestion=None,
+                    error_code=None,
+                )
+            )
+            readiness = _blocked_readiness(
+                code="settings_load",
+                detail="Settings failed to load.",
+            )
+        _append_skipped_checks(checks, _CHECK_SETTINGS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
             errors=errors,
-            readiness=_blocked_readiness(
-                code="settings_load",
-                detail="Settings failed to load.",
-            ),
+            readiness=readiness,
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1539,7 +1807,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_VALUE_SOURCE_COMPLIANCE))
+        _append_skipped_checks(checks, _CHECK_VALUE_SOURCE_COMPLIANCE)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1579,7 +1847,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        _append_skipped_checks(checks, _CHECK_PLUGINS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1630,7 +1898,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        _append_skipped_checks(checks, _CHECK_PLUGINS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1678,7 +1946,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_GRAPH))
+        _append_skipped_checks(checks, _CHECK_GRAPH)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1745,7 +2013,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_ROUTE_TARGETS))
+        _append_skipped_checks(checks, _CHECK_ROUTE_TARGETS)
         return ValidationResult(
             is_valid=False,
             checks=checks,

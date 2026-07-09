@@ -1,11 +1,30 @@
 """Tests for RAG query construction."""
 
 import os
+from concurrent.futures import Future
 
 import pytest
 
 from elspeth.plugins.infrastructure.templates import TemplateError
 from elspeth.plugins.transforms.rag.query import QueryBuilder
+
+
+class _RegexPoolFake:
+    def __init__(self, future: Future):
+        self._future = future
+
+    def submit(self, *_args: object, **_kwargs: object) -> Future:
+        return self._future
+
+    def shutdown(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+
+def _replace_regex_pool(builder: QueryBuilder, future: Future) -> None:
+    assert builder._regex_pool is not None
+    builder._regex_pool.shutdown(wait=False)
+    builder._regex_pool = _RegexPoolFake(future)
+
 
 # =============================================================================
 # Field-only mode
@@ -183,9 +202,6 @@ class TestWorkerFailureDetection:
 
     def test_worker_exception_raises_runtime_error(self):
         """When the pool future raises, build() must raise RuntimeError."""
-        from concurrent.futures import Future
-        from unittest.mock import MagicMock
-
         builder = QueryBuilder(
             query_field="text",
             query_pattern=r"issue:\s*(.+)",
@@ -193,18 +209,13 @@ class TestWorkerFailureDetection:
 
         failed_future = Future()
         failed_future.set_exception(ValueError("simulated worker bug"))
-        mock_pool = MagicMock()
-        mock_pool.submit.return_value = failed_future
-        builder._regex_pool = mock_pool
+        _replace_regex_pool(builder, failed_future)
 
         with pytest.raises(RuntimeError, match="Regex worker failed"):
             builder.build({"text": "issue: payment failed"})
 
     def test_worker_error_includes_pattern_and_cause(self):
         """RuntimeError from worker failure includes the pattern for diagnostics."""
-        from concurrent.futures import Future
-        from unittest.mock import MagicMock
-
         builder = QueryBuilder(
             query_field="text",
             query_pattern=r"issue:\s*(.+)",
@@ -212,9 +223,7 @@ class TestWorkerFailureDetection:
 
         failed_future = Future()
         failed_future.set_exception(ValueError("kaboom"))
-        mock_pool = MagicMock()
-        mock_pool.submit.return_value = failed_future
-        builder._regex_pool = mock_pool
+        _replace_regex_pool(builder, failed_future)
 
         with pytest.raises(RuntimeError, match="issue:") as exc_info:
             builder.build({"text": "issue: payment failed"})

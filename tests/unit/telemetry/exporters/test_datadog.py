@@ -13,7 +13,9 @@ Note: These tests mock ddtrace since it may not be installed in the test environ
 
 import sys
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from types import ModuleType
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -35,21 +37,80 @@ _VALID_CONFIG: dict[str, object] = {
 }
 
 
-def create_mock_ddtrace_module() -> tuple[MagicMock, MagicMock, MagicMock]:
-    """Create a mock ddtrace module with tracer.
+class _CallArgs:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> tuple[Any, ...] | dict[str, Any]:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args: _CallArgs | None = None
+        self.call_args_list: list[_CallArgs] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args = _CallArgs(args, kwargs)
+        self.call_args_list.append(self.call_args)
+        if self.side_effect is not None:
+            if isinstance(self.side_effect, BaseException):
+                raise self.side_effect
+            if isinstance(self.side_effect, type) and issubclass(self.side_effect, BaseException):
+                raise self.side_effect()
+            if callable(self.side_effect):
+                return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+    def assert_any_call(self, *args: Any, **kwargs: Any) -> None:
+        assert any(call.args == args and call.kwargs == kwargs for call in self.call_args_list)
+
+
+class _FakeDatadogSpan:
+    def __init__(self) -> None:
+        self.start_ns = 0
+        self.set_tag = _CallRecorder()
+        self.finish = _CallRecorder()
+
+
+class _FakeDatadogTracer:
+    def __init__(self, span: _FakeDatadogSpan) -> None:
+        self.start_span = _CallRecorder(return_value=span)
+        self.flush = _CallRecorder()
+        self.shutdown = _CallRecorder()
+
+
+class _FakeDatadogModule(ModuleType):
+    def __init__(self, tracer: _FakeDatadogTracer) -> None:
+        super().__init__("ddtrace")
+        self.tracer = tracer
+
+
+def create_mock_ddtrace_module() -> tuple[_FakeDatadogModule, _FakeDatadogTracer, _FakeDatadogSpan]:
+    """Create a fake ddtrace module with tracer.
 
     Returns:
-        Tuple of (mock_module, mock_tracer, mock_span)
+        Tuple of (module, tracer, span)
     """
-    mock_span = MagicMock()
-    mock_tracer = MagicMock()
-    # Configure start_span to return the mock span (new API)
-    mock_tracer.start_span.return_value = mock_span
+    span = _FakeDatadogSpan()
+    tracer = _FakeDatadogTracer(span)
+    module = _FakeDatadogModule(tracer)
 
-    mock_module = MagicMock()
-    mock_module.tracer = mock_tracer
-
-    return mock_module, mock_tracer, mock_span
+    return module, tracer, span
 
 
 class TestDatadogExporterConfiguration:
@@ -263,7 +324,7 @@ class TestDatadogExporterConfiguration:
 class TestDatadogExporterSpanCreation:
     """Tests for span creation from telemetry events."""
 
-    def _create_configured_exporter(self) -> tuple[DatadogExporter, MagicMock, MagicMock]:
+    def _create_configured_exporter(self) -> tuple[DatadogExporter, _FakeDatadogTracer, _FakeDatadogSpan]:
         """Create a configured exporter with mocked tracer.
 
         Returns:
@@ -435,7 +496,7 @@ class TestDatadogExporterSpanCreation:
 class TestDatadogExporterTagSerialization:
     """Tests for tag serialization from event fields."""
 
-    def _create_configured_exporter(self) -> tuple[DatadogExporter, MagicMock, MagicMock]:
+    def _create_configured_exporter(self) -> tuple[DatadogExporter, _FakeDatadogTracer, _FakeDatadogSpan]:
         """Create a configured exporter with mocked tracer.
 
         Returns:
@@ -631,7 +692,7 @@ class TestDatadogExporterTagSerialization:
 class TestDatadogExporterLifecycle:
     """Tests for exporter lifecycle (flush, close, error handling)."""
 
-    def _create_configured_exporter(self) -> tuple[DatadogExporter, MagicMock, MagicMock]:
+    def _create_configured_exporter(self) -> tuple[DatadogExporter, _FakeDatadogTracer, _FakeDatadogSpan]:
         """Create a configured exporter with mocked tracer.
 
         Returns:

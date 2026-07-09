@@ -1,9 +1,10 @@
 # tests/plugins/clients/test_verifier.py
 """Tests for CallVerifier."""
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +17,75 @@ from elspeth.plugins.infrastructure.clients.verifier import (
     VerificationReport,
     VerificationResult,
 )
+
+_FindCallSideEffect = Callable[..., Call | None]
+_CallResponseDataSideEffect = Callable[[str], CallDataResult]
+
+
+def _store_not_configured_call_data() -> CallDataResult:
+    return CallDataResult(state=CallDataState.STORE_NOT_CONFIGURED, data=None)
+
+
+@dataclass
+class _FakeExecutionRepository:
+    """Minimal execution repository fake for CallVerifier tests."""
+
+    find_call_return: Call | None = None
+    call_response_data_return: CallDataResult = field(default_factory=_store_not_configured_call_data)
+    find_call_side_effect: _FindCallSideEffect | None = None
+    call_response_data_side_effect: _CallResponseDataSideEffect | BaseException | None = None
+    find_call_by_request_hash_calls: list[dict[str, object]] = field(default_factory=list)
+    get_call_response_data_calls: list[str] = field(default_factory=list)
+
+    def find_call_by_request_hash(
+        self,
+        *,
+        run_id: str,
+        call_type: CallType,
+        request_hash: str,
+        sequence_index: int = 0,
+    ) -> Call | None:
+        self.find_call_by_request_hash_calls.append(
+            {
+                "run_id": run_id,
+                "call_type": call_type,
+                "request_hash": request_hash,
+                "sequence_index": sequence_index,
+            }
+        )
+        if self.find_call_side_effect is not None:
+            return self.find_call_side_effect(
+                run_id,
+                call_type,
+                request_hash,
+                sequence_index=sequence_index,
+            )
+        return self.find_call_return
+
+    def get_call_response_data(self, call_id: str) -> CallDataResult:
+        self.get_call_response_data_calls.append(call_id)
+        if isinstance(self.call_response_data_side_effect, BaseException):
+            raise self.call_response_data_side_effect
+        if self.call_response_data_side_effect is not None:
+            return self.call_response_data_side_effect(call_id)
+        return self.call_response_data_return
+
+    def assert_find_call_by_request_hash_called_once_with(
+        self,
+        *,
+        run_id: str,
+        call_type: CallType,
+        request_hash: str,
+        sequence_index: int,
+    ) -> None:
+        assert self.find_call_by_request_hash_calls == [
+            {
+                "run_id": run_id,
+                "call_type": call_type,
+                "request_hash": request_hash,
+                "sequence_index": sequence_index,
+            }
+        ]
 
 
 class TestVerificationResult:
@@ -335,12 +405,9 @@ class TestVerificationReport:
 class TestCallVerifier:
     """Tests for CallVerifier."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock ExecutionRepository."""
-        recorder = MagicMock()
-        recorder.find_call_by_request_hash = MagicMock(return_value=None)
-        recorder.get_call_response_data = MagicMock(return_value=CallDataResult(state=CallDataState.STORE_NOT_CONFIGURED, data=None))
-        return recorder
+    def _create_fake_recorder(self) -> _FakeExecutionRepository:
+        """Create a fake ExecutionRepository."""
+        return _FakeExecutionRepository()
 
     def _create_mock_call(
         self,
@@ -368,7 +435,7 @@ class TestCallVerifier:
 
     def test_verify_matching_response(self) -> None:
         """Verifier detects matching responses."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -382,8 +449,8 @@ class TestCallVerifier:
         }
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
 
@@ -401,7 +468,7 @@ class TestCallVerifier:
 
     def test_verify_different_response(self) -> None:
         """Verifier detects differences between responses."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
@@ -409,8 +476,8 @@ class TestCallVerifier:
         live_response = {"content": "Different response", "model": "gpt-4"}
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
 
@@ -428,8 +495,8 @@ class TestCallVerifier:
 
     def test_verify_missing_recording(self) -> None:
         """Verifier handles missing baseline gracefully."""
-        recorder = self._create_mock_recorder()
-        recorder.find_call_by_request_hash.return_value = None
+        recorder = self._create_fake_recorder()
+        recorder.find_call_return = None
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         request_data = {"model": "gpt-4", "messages": []}
@@ -447,7 +514,7 @@ class TestCallVerifier:
 
     def test_verify_with_ignore_paths(self) -> None:
         """Verifier excludes specified paths from comparison."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
@@ -456,8 +523,8 @@ class TestCallVerifier:
         live_response = {"content": "Hello", "latency": 200}
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # Ignore latency in comparison
         verifier = CallVerifier(
@@ -478,7 +545,7 @@ class TestCallVerifier:
 
     def test_verification_report_tracks_stats(self) -> None:
         """Report accumulates verification statistics."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
 
         # Set up for multiple calls
         request1 = {"id": 1}
@@ -494,8 +561,8 @@ class TestCallVerifier:
         def get_response_side_effect(call_id: str) -> CallDataResult:
             return CallDataResult(state=CallDataState.AVAILABLE, data={"content": "recorded"})
 
-        recorder.find_call_by_request_hash.side_effect = find_call_side_effect
-        recorder.get_call_response_data.side_effect = get_response_side_effect
+        recorder.find_call_side_effect = find_call_side_effect
+        recorder.call_response_data_side_effect = get_response_side_effect
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
 
@@ -529,12 +596,12 @@ class TestCallVerifier:
 
     def test_success_rate_calculation(self) -> None:
         """Verification report calculates correct success rate."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
 
         # All calls match
         mock_call = self._create_mock_call()
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data={"content": "match"})
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data={"content": "match"})
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
 
@@ -550,7 +617,7 @@ class TestCallVerifier:
         assert report.success_rate == 100.0
 
         # Now add a mismatch
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data={"content": "different"})
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data={"content": "different"})
         verifier.verify(
             call_type=CallType.LLM,
             request_data={"id": 5},
@@ -562,10 +629,10 @@ class TestCallVerifier:
 
     def test_reset_report(self) -> None:
         """reset_report clears accumulated statistics."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         mock_call = self._create_mock_call()
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data={"content": "match"})
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data={"content": "match"})
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
 
@@ -590,14 +657,14 @@ class TestCallVerifier:
 
     def test_source_run_id_property(self) -> None:
         """source_run_id property returns the baseline run."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         verifier = CallVerifier(recorder, source_run_id="run_xyz789")
 
         assert verifier.source_run_id == "run_xyz789"
 
     def test_verify_http_call_type(self) -> None:
         """Verification works for HTTP call types."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {
             "method": "POST",
             "url": "https://api.example.com/data",
@@ -615,8 +682,8 @@ class TestCallVerifier:
             created_at=datetime.now(UTC),
             latency_ms=100.0,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data={"status": 200, "body": "OK"})
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data={"status": 200, "body": "OK"})
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -626,7 +693,7 @@ class TestCallVerifier:
         )
 
         assert result.is_match is True
-        recorder.find_call_by_request_hash.assert_called_once_with(
+        recorder.assert_find_call_by_request_hash_called_once_with(
             run_id="run_abc123",
             call_type=CallType.HTTP,
             request_hash=request_hash,
@@ -639,7 +706,7 @@ class TestCallVerifier:
         When response_ref is set but get_call_response_data returns None,
         the payload was purged. This should be tracked as missing_payload.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
@@ -647,8 +714,8 @@ class TestCallVerifier:
             request_hash=request_hash,
             response_ref="payload_ref_123",  # Response WAS recorded
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -678,7 +745,7 @@ class TestCallVerifier:
         These have response_ref=None, meaning no response was ever recorded.
         This should NOT be counted as payload_missing.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
@@ -687,8 +754,8 @@ class TestCallVerifier:
             status=CallStatus.ERROR,
             response_ref=None,  # Never had a response
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.NEVER_STORED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.NEVER_STORED, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -711,7 +778,7 @@ class TestCallVerifier:
         HTTP error responses (400, 500) include response bodies.
         If that payload was purged, it's a genuine missing payload.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
@@ -721,8 +788,8 @@ class TestCallVerifier:
             response_ref="payload_ref_456",  # Error call with response body
             response_hash="hash_of_response",  # Hash proves response existed
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -742,7 +809,7 @@ class TestCallVerifier:
         is always verifiable." The verifier must compare stable_hash(live_response)
         against the recorded response_hash even when the full payload is gone.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
         original_response = {"content": "Hello, world!", "model": "gpt-4"}
@@ -753,8 +820,8 @@ class TestCallVerifier:
             response_ref="payload_ref_123",
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         # ignore_order=False required for hash-based verification
         verifier = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=False)
@@ -780,7 +847,7 @@ class TestCallVerifier:
         P1-2026-02-05: Drift detection must work even in ATTRIBUTABLE_ONLY runs
         where payloads are purged but response_hash survives.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
         original_response = {"content": "Hello, world!", "model": "gpt-4"}
@@ -791,8 +858,8 @@ class TestCallVerifier:
             response_ref="payload_ref_123",
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         # ignore_order=False required for hash-based verification
         verifier = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=False)
@@ -822,7 +889,7 @@ class TestCallVerifier:
         204 No Content). When response_ref=None and response_hash=None, there is no
         evidence a response was ever recorded, so this is not a missing payload.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
@@ -832,8 +899,8 @@ class TestCallVerifier:
             response_ref=None,
             response_hash=None,  # No response was ever recorded
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.NEVER_STORED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.NEVER_STORED, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -855,7 +922,7 @@ class TestCallVerifier:
     def test_verify_hash_only_uses_hash_based_verification(self) -> None:
         """HASH_ONLY state (response_hash exists, no payload) should use hash-based
         verification — same path as PURGED and STORE_NOT_CONFIGURED."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
         original_response = {"content": "Hello, world!", "model": "gpt-4"}
@@ -865,8 +932,8 @@ class TestCallVerifier:
             request_hash=request_hash,
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.HASH_ONLY, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.HASH_ONLY, data=None)
 
         # ignore_order=False required for hash-based verification
         verifier = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=False)
@@ -885,7 +952,7 @@ class TestCallVerifier:
 
     def test_verify_hash_only_mismatch(self) -> None:
         """HASH_ONLY state with different live response detects hash mismatch."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
         original_response = {"content": "Hello, world!"}
@@ -895,8 +962,8 @@ class TestCallVerifier:
             request_hash=request_hash,
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.HASH_ONLY, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.HASH_ONLY, data=None)
 
         # ignore_order=False required for hash-based verification
         verifier = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=False)
@@ -920,7 +987,7 @@ class TestCallVerifier:
         comparison. When ignore_paths or ignore_order is set, a hash mismatch
         could be a false alarm (the difference might be in an ignored path).
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
         original_response = {"content": "Hello", "latency": 100}
@@ -931,8 +998,8 @@ class TestCallVerifier:
             response_ref="payload_ref_123",
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         # With ignore_paths configured, hash comparison is unreliable
         verifier = CallVerifier(
@@ -961,7 +1028,7 @@ class TestCallVerifier:
         Bug: elspeth-116d98f421 — with ignore_order=True, semantic comparison
         treats [1,2,3] and [3,2,1] as equal, but their hashes differ.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
         original_response = {"items": ["a", "b", "c"]}
@@ -972,8 +1039,8 @@ class TestCallVerifier:
             response_ref="payload_ref_123",
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         # Default ignore_order=True
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
@@ -994,7 +1061,7 @@ class TestCallVerifier:
 
     def test_verify_hash_works_when_strict_comparison(self) -> None:
         """Hash verification proceeds when no ignore_paths and ignore_order=False."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
         original_response = {"content": "Hello"}
@@ -1005,8 +1072,8 @@ class TestCallVerifier:
             response_ref="payload_ref_123",
             response_hash=response_hash,
         )
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         # Strict: no ignore_paths, ignore_order=False
         verifier = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=False)
@@ -1024,7 +1091,7 @@ class TestCallVerifier:
 
     def test_verify_order_independent_with_default_config(self) -> None:
         """Default configuration (ignore_order=True) ignores list ordering."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1032,8 +1099,8 @@ class TestCallVerifier:
         live_response = {"items": ["c", "a", "b"]}  # Same items, different order
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -1047,7 +1114,7 @@ class TestCallVerifier:
 
     def test_verify_nested_differences(self) -> None:
         """Verifier detects nested differences."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1069,8 +1136,8 @@ class TestCallVerifier:
         }
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         result = verifier.verify(
@@ -1084,7 +1151,7 @@ class TestCallVerifier:
 
     def test_multiple_ignore_paths(self) -> None:
         """Verifier can ignore multiple paths."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1100,8 +1167,8 @@ class TestCallVerifier:
         }
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # Ignore both timestamp and request_id
         verifier = CallVerifier(
@@ -1128,7 +1195,7 @@ class TestCallVerifier:
 
         Bug: P1-2026-01-21-replay-request-hash-collisions
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         # Same request data made multiple times
         request_data = {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}
 
@@ -1153,8 +1220,8 @@ class TestCallVerifier:
             idx = int(call_id.split("_")[1])
             return CallDataResult(state=CallDataState.AVAILABLE, data=recorded_responses[idx])
 
-        recorder.find_call_by_request_hash.side_effect = find_call_side_effect
-        recorder.get_call_response_data.side_effect = get_response_side_effect
+        recorder.find_call_side_effect = find_call_side_effect
+        recorder.call_response_data_side_effect = get_response_side_effect
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
 
@@ -1190,7 +1257,7 @@ class TestCallVerifier:
 
     def test_verify_order_sensitive_when_configured(self) -> None:
         """Verifier detects order changes when ignore_order=False."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1198,8 +1265,8 @@ class TestCallVerifier:
         live_response = {"items": ["c", "b", "a"]}  # Same items, different order
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=False)
         result = verifier.verify(
@@ -1216,7 +1283,7 @@ class TestCallVerifier:
 
     def test_ignore_order_handles_duplicate_elements(self) -> None:
         """List comparisons treat lists as multisets when ignore_order=True."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1224,8 +1291,8 @@ class TestCallVerifier:
         live_response = {"tags": ["b", "a", "a"]}  # Same multiset, different order
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # With ignore_order=True (default): should match (same multiset)
         verifier_loose = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=True)
@@ -1247,7 +1314,7 @@ class TestCallVerifier:
 
     def test_ignore_order_applies_recursively_to_nested_lists(self) -> None:
         """Document that ignore_order affects ALL list levels recursively."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1265,8 +1332,8 @@ class TestCallVerifier:
         }
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # With ignore_order=True: matches (recursive order-independence)
         verifier_loose = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=True)
@@ -1288,7 +1355,7 @@ class TestCallVerifier:
 
     def test_ignore_order_does_not_affect_dict_keys(self) -> None:
         """Dict key ordering is always ignored (JSON semantics)."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1297,8 +1364,8 @@ class TestCallVerifier:
         live_response = {"a": 2, "m": 3, "z": 1}  # Same keys/values, different order
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # Both with and without ignore_order: dicts should match
         verifier_loose = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=True)
@@ -1319,7 +1386,7 @@ class TestCallVerifier:
 
     def test_empty_lists_always_match(self) -> None:
         """Empty lists match regardless of ignore_order setting."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
 
@@ -1327,8 +1394,8 @@ class TestCallVerifier:
         live_response: dict[str, list[Any]] = {"items": []}
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # Both settings should match
         for ignore_order in [True, False]:
@@ -1342,7 +1409,7 @@ class TestCallVerifier:
 
     def test_order_sensitivity_with_realistic_llm_response(self) -> None:
         """Verify order handling with actual LLM tool call structure."""
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}
         request_hash = stable_hash(request_data)
 
@@ -1374,8 +1441,8 @@ class TestCallVerifier:
         }
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.AVAILABLE, data=recorded_response)
 
         # With ignore_order=True (default): matches despite tool call reordering
         verifier_loose = CallVerifier(recorder, source_run_id="run_abc123", ignore_order=True)
@@ -1404,11 +1471,8 @@ class TestCallVerifier:
 class TestCallNotFoundRaisesIntegrityError:
     """Tests for elspeth-fd540d3818: CALL_NOT_FOUND should raise AuditIntegrityError."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        recorder = MagicMock()
-        recorder.find_call_by_request_hash = MagicMock(return_value=None)
-        recorder.get_call_response_data = MagicMock(return_value=CallDataResult(state=CallDataState.STORE_NOT_CONFIGURED, data=None))
-        return recorder
+    def _create_fake_recorder(self) -> _FakeExecutionRepository:
+        return _FakeExecutionRepository()
 
     def _create_mock_call(self, *, request_hash: str) -> Call:
         return Call(
@@ -1431,13 +1495,13 @@ class TestCallNotFoundRaisesIntegrityError:
         then says CALL_NOT_FOUND, the call vanished between the two queries. This
         indicates database corruption or a TOCTOU race and must raise AuditIntegrityError.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.CALL_NOT_FOUND, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.CALL_NOT_FOUND, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         with pytest.raises(AuditIntegrityError, match="CALL_NOT_FOUND"):
@@ -1451,11 +1515,8 @@ class TestCallNotFoundRaisesIntegrityError:
 class TestCounterAccountingGap:
     """Tests for elspeth-ddb745ea0e: PURGED/no-hash path must increment a counter."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        recorder = MagicMock()
-        recorder.find_call_by_request_hash = MagicMock(return_value=None)
-        recorder.get_call_response_data = MagicMock(return_value=CallDataResult(state=CallDataState.STORE_NOT_CONFIGURED, data=None))
-        return recorder
+    def _create_fake_recorder(self) -> _FakeExecutionRepository:
+        return _FakeExecutionRepository()
 
     def _create_mock_call(self, *, request_hash: str) -> Call:
         return Call(
@@ -1478,13 +1539,13 @@ class TestCounterAccountingGap:
         mismatches was — the result had is_match=False but should be None
         (indeterminate). Now properly tracked as unverifiable.
         """
-        recorder = self._create_mock_recorder()
+        recorder = self._create_fake_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
 
         mock_call = self._create_mock_call(request_hash=request_hash)
-        recorder.find_call_by_request_hash.return_value = mock_call
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.PURGED, data=None)
+        recorder.find_call_return = mock_call
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.PURGED, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         verifier.verify(
@@ -1524,11 +1585,11 @@ class TestVerifierStateIntegrityOnExceptionalPaths:
 
     def test_call_not_found_leaves_report_and_sequence_state_unchanged(self) -> None:
         """CALL_NOT_FOUND must raise without consuming verifier state."""
-        recorder = MagicMock()
+        recorder = _FakeExecutionRepository()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
-        recorder.find_call_by_request_hash.return_value = self._create_mock_call(request_hash=request_hash)
-        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.CALL_NOT_FOUND, data=None)
+        recorder.find_call_return = self._create_mock_call(request_hash=request_hash)
+        recorder.call_response_data_return = CallDataResult(state=CallDataState.CALL_NOT_FOUND, data=None)
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         sequence_key = (CallType.LLM, request_hash)
@@ -1553,11 +1614,11 @@ class TestVerifierStateIntegrityOnExceptionalPaths:
 
     def test_repository_integrity_error_leaves_report_and_sequence_state_unchanged(self) -> None:
         """Repository-raised AuditIntegrityError must not corrupt verifier state."""
-        recorder = MagicMock()
+        recorder = _FakeExecutionRepository()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
-        recorder.find_call_by_request_hash.return_value = self._create_mock_call(request_hash=request_hash)
-        recorder.get_call_response_data.side_effect = AuditIntegrityError("payload integrity failure")
+        recorder.find_call_return = self._create_mock_call(request_hash=request_hash)
+        recorder.call_response_data_side_effect = AuditIntegrityError("payload integrity failure")
 
         verifier = CallVerifier(recorder, source_run_id="run_abc123")
         sequence_key = (CallType.LLM, request_hash)
@@ -1607,10 +1668,10 @@ class TestGetReportSnapshots:
 
     def test_get_report_returns_defensive_snapshot(self) -> None:
         """Mutating a returned report must not alter verifier internals."""
-        recorder = MagicMock()
+        recorder = _FakeExecutionRepository()
         request_data = {"id": 1}
         request_hash = stable_hash(request_data)
-        recorder.find_call_by_request_hash.return_value = Call(
+        recorder.find_call_return = Call(
             call_id="call_123",
             state_id="state_123",
             call_index=0,
@@ -1622,7 +1683,7 @@ class TestGetReportSnapshots:
             response_ref=None,
             response_hash=None,
         )
-        recorder.get_call_response_data.return_value = CallDataResult(
+        recorder.call_response_data_return = CallDataResult(
             state=CallDataState.AVAILABLE,
             data={"content": "recorded"},
         )

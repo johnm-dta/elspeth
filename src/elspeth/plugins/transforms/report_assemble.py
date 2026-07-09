@@ -10,6 +10,7 @@ flush window and the next flush emits a sibling report.
 from __future__ import annotations
 
 import html
+import re
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -37,6 +38,12 @@ _REPORT_METADATA_FIELDS = frozenset(
         "is_end_of_source_report",
     }
 )
+
+# ``title`` and ``join_with`` are rendered into user-visible report output. A
+# ``${VAR}`` placeholder there would be expanded from the host environment (on
+# the operator CLI loader path) and copied into a downloadable artifact, so
+# these presentation fields reject env-var references outright.
+_ENV_VAR_REFERENCE_PATTERN = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}")
 
 
 class ReportAssembleConfig(TransformDataConfig):
@@ -66,6 +73,16 @@ class ReportAssembleConfig(TransformDataConfig):
             raise ValueError(f"output_field must be a valid Python identifier, got {value!r}")
         return value
 
+    @field_validator("join_with", "title")
+    @classmethod
+    def _reject_env_ref_placeholders(cls, value: str | None, info: Any) -> str | None:
+        if value is not None and _ENV_VAR_REFERENCE_PATTERN.search(value):
+            raise ValueError(
+                f"{info.field_name} must not contain environment-variable placeholders; "
+                "report_assemble emits this value in user-visible report output"
+            )
+        return value
+
     @model_validator(mode="after")
     def _reject_output_field_collision(self) -> ReportAssembleConfig:
         # Detect at config time: process() builds the output dict with the
@@ -85,7 +102,7 @@ class ReportAssemble(BaseTransform):
     name = "report_assemble"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:82cc05ca5602c9f9"
+    source_file_hash: str | None = "sha256:b426d7331ebaacce"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 
@@ -181,7 +198,8 @@ class ReportAssemble(BaseTransform):
         # body elements; the title-to-body separator is a per-format constant
         # (plain_text/markdown use "\n\n"; html_fragment uses "\n" because
         # block-level HTML elements don't require blank-line separation).
-        paragraphs = self._join_with.join(f"<p>{html.escape(line)}</p>" for line in lines)
+        join_with = html.escape(self._join_with)
+        paragraphs = join_with.join(f"<p>{html.escape(line)}</p>" for line in lines)
         if self._title:
             return f"<h1>{html.escape(self._title)}</h1>\n{paragraphs}" if paragraphs else f"<h1>{html.escape(self._title)}</h1>"
         return paragraphs

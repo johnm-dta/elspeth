@@ -4,8 +4,9 @@ Provides the explain() function to compose query results into
 complete lineage for a token or row.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Protocol, cast
 
 from elspeth.contracts import (
     Call,
@@ -15,12 +16,145 @@ from elspeth.contracts import (
     SchedulerEvent,
     Token,
     TokenOutcome,
+    TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
 )
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.query_repository import QueryRepository
+
+
+class LineageDataFlowReadPort(Protocol):
+    """Read-only data-flow methods needed to compose lineage."""
+
+    def get_token_outcomes_for_row(self, run_id: str, row_id: str) -> list[TokenOutcome]: ...
+
+    def get_validation_errors_for_row(
+        self,
+        run_id: str,
+        row_hash: str | None = None,
+        *,
+        row_id: str | None = None,
+    ) -> list[ValidationErrorRecord]: ...
+
+    def get_transform_errors_for_token(self, token_id: str) -> list[TransformErrorRecord]: ...
+
+    def get_token_outcome(self, token_id: str) -> TokenOutcome | None: ...
+
+
+class LineageParentReadPort(Protocol):
+    """Read-only token-parent methods needed by lineage integrity checks."""
+
+    def get_token_parents(self, token_id: str) -> list[TokenParent]: ...
+
+    def get_tokens_by_ids(self, token_ids: Sequence[str]) -> list[Token]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LineageIntegrityValidator:
+    """Validate and hydrate parent-lineage relationships from audit data."""
+
+    def get_parent_tokens_checked(
+        self,
+        query: LineageParentReadPort,
+        token: Token,
+        run_id: str,
+    ) -> tuple[Token, ...]:
+        """Return parent tokens after enforcing lineage integrity invariants."""
+        if token.run_id != run_id:
+            raise AuditIntegrityError(
+                f"Audit integrity violation: requested run '{run_id}' does not match child token "
+                f"'{token.token_id}' run '{token.run_id}'. Parent lineage must be checked against "
+                f"the child token's recorded run."
+            )
+        parents = query.get_token_parents(token.token_id)
+        group_ids = self._group_ids_for(token)
+        self._validate_group_ids(token.token_id, group_ids)
+        self._validate_parent_link_shape(token.token_id, group_ids, parents)
+        return self._hydrate_parent_tokens(query, token.token_id, run_id, parents)
+
+    @staticmethod
+    def _group_ids_for(token: Token) -> dict[str, str | None]:
+        return {
+            "fork": token.fork_group_id,
+            "join": token.join_group_id,
+            "expand": token.expand_group_id,
+        }
+
+    @staticmethod
+    def _validate_group_ids(token_id: str, group_ids: dict[str, str | None]) -> None:
+        # Empty-string group IDs are audit corruption (UUIDs are never empty).
+        for gtype, gval in group_ids.items():
+            if gval is not None and gval == "":
+                raise AuditIntegrityError(
+                    f"Audit integrity violation: token '{token_id}' has empty {gtype}_group_id. "
+                    f"Group IDs must be non-empty UUIDs or NULL. This indicates database corruption."
+                )
+
+        set_groups = [k for k, v in group_ids.items() if v is not None]
+        if len(set_groups) > 1:
+            raise AuditIntegrityError(
+                f"Audit integrity violation: token '{token_id}' has multiple group IDs set: "
+                f"{set_groups}. A token can belong to exactly one lineage operation."
+            )
+
+    @staticmethod
+    def _validate_parent_link_shape(
+        token_id: str,
+        group_ids: dict[str, str | None],
+        parents: list[TokenParent],
+    ) -> None:
+        set_groups = [k for k, v in group_ids.items() if v is not None]
+        if set_groups and not parents:
+            group_type = set_groups[0]
+            group_id = group_ids[group_type]
+            raise AuditIntegrityError(
+                f"Audit integrity violation: token '{token_id}' has {group_type}_group_id='{group_id}' "
+                f"but no parent relationships in token_parents table. Tokens with group IDs must have "
+                f"parent lineage recorded. This indicates missing {group_type} metadata or audit corruption."
+            )
+        if parents and not set_groups:
+            parent_ids = [p.parent_token_id for p in parents]
+            raise AuditIntegrityError(
+                f"Audit integrity violation: token '{token_id}' has parent relationships "
+                f"{parent_ids} but no group ID (fork/join/expand) is set. Parent tokens must "
+                f"be associated with a lineage operation."
+            )
+
+    @staticmethod
+    def _hydrate_parent_tokens(
+        query: LineageParentReadPort,
+        token_id: str,
+        run_id: str,
+        parents: list[TokenParent],
+    ) -> tuple[Token, ...]:
+        parent_token_ids = [parent.parent_token_id for parent in parents]
+        parent_tokens_by_id = {parent.token_id: parent for parent in query.get_tokens_by_ids(parent_token_ids)}
+        parent_tokens: list[Token] = []
+        for parent in parents:
+            parent_token = parent_tokens_by_id.get(parent.parent_token_id)
+            if parent_token is None:
+                # This indicates audit DB corruption - a token_parents record
+                # references a parent that doesn't exist. This should be impossible
+                # with FK constraints enabled, but we crash as defense-in-depth.
+                raise AuditIntegrityError(
+                    f"Audit integrity violation: parent token '{parent.parent_token_id}' "
+                    f"not found for token '{token_id}'. The token_parents table references "
+                    f"a non-existent parent. This indicates database corruption."
+                )
+            # Parent must belong to the same run. Cross-run parent references are
+            # corruption — lineage operations (fork/coalesce/expand) are always
+            # within a single run. (Note: cross-row parents ARE valid for coalesce,
+            # where multiple rows merge into one output token.)
+            if parent_token.run_id != run_id:
+                raise AuditIntegrityError(
+                    f"Audit integrity violation: parent token '{parent.parent_token_id}' "
+                    f"belongs to run '{parent_token.run_id}' but child token '{token_id}' "
+                    f"belongs to run '{run_id}'. Cross-run parent lineage is impossible — "
+                    f"this indicates database corruption in token_parents."
+                )
+            parent_tokens.append(parent_token)
+        return tuple(parent_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +213,7 @@ class LineageResult:
 
 def explain(
     query: QueryRepository,
-    data_flow: DataFlowRepository,
+    data_flow: LineageDataFlowReadPort,
     run_id: str,
     token_id: str | None = None,
     row_id: str | None = None,
@@ -165,8 +299,10 @@ def explain(
     # The token_id is guaranteed non-None at this point by control flow
     token_id = cast(str, token_id)
 
-    # Get the token
-    token = query.get_token(token_id)
+    # Caller-provided tokens are external lookup keys, so scope them to the
+    # requested run before loading row lineage. Tokens resolved from run-scoped
+    # token_outcomes remain Tier 1 data and keep fail-closed corruption checks.
+    token = query.get_token_for_run(run_id, token_id) if caller_provided_token_id else query.get_token(token_id)
     if token is None:
         if not caller_provided_token_id:
             # Token was resolved from our own token_outcomes table — it MUST exist
@@ -193,72 +329,8 @@ def explain(
     routing_events = query.get_routing_events_for_states(state_ids)
     calls = query.get_calls_for_states(state_ids)
 
-    # Get parent tokens
-    # TIER 1 TRUST: token_parents is audit data - crash on any anomaly
-    parent_tokens: list[Token] = []
-    parents = query.get_token_parents(token_id)
-
-    # Validate parent relationships consistency using strict `is not None` checks.
-    # Empty-string group IDs are audit corruption (UUIDs are never empty).
-    group_ids = {
-        "fork": token.fork_group_id,
-        "join": token.join_group_id,
-        "expand": token.expand_group_id,
-    }
-    # Reject empty-string group IDs — they're corruption, not valid values
-    for gtype, gval in group_ids.items():
-        if gval is not None and gval == "":
-            raise AuditIntegrityError(
-                f"Audit integrity violation: token '{token_id}' has empty {gtype}_group_id. "
-                f"Group IDs must be non-empty UUIDs or NULL. This indicates database corruption."
-            )
-    set_groups = [k for k, v in group_ids.items() if v is not None]
-    # At most one group type should be set (fork XOR join XOR expand)
-    if len(set_groups) > 1:
-        raise AuditIntegrityError(
-            f"Audit integrity violation: token '{token_id}' has multiple group IDs set: "
-            f"{set_groups}. A token can belong to exactly one lineage operation."
-        )
-    # Bidirectional consistency: group_id ↔ parents
-    if set_groups and not parents:
-        group_type = set_groups[0]
-        group_id = group_ids[group_type]
-        raise AuditIntegrityError(
-            f"Audit integrity violation: token '{token_id}' has {group_type}_group_id='{group_id}' "
-            f"but no parent relationships in token_parents table. Tokens with group IDs must have "
-            f"parent lineage recorded. This indicates missing {group_type} metadata or audit corruption."
-        )
-    if parents and not set_groups:
-        parent_ids = [p.parent_token_id for p in parents]
-        raise AuditIntegrityError(
-            f"Audit integrity violation: token '{token_id}' has parent relationships "
-            f"{parent_ids} but no group ID (fork/join/expand) is set. Parent tokens must "
-            f"be associated with a lineage operation."
-        )
-
-    for parent in parents:
-        parent_token = query.get_token(parent.parent_token_id)
-        if parent_token is None:
-            # This indicates audit DB corruption - a token_parents record
-            # references a parent that doesn't exist. This should be impossible
-            # with FK constraints enabled, but we crash as defense-in-depth.
-            raise AuditIntegrityError(
-                f"Audit integrity violation: parent token '{parent.parent_token_id}' "
-                f"not found for token '{token_id}'. The token_parents table references "
-                f"a non-existent parent. This indicates database corruption."
-            )
-        # Parent must belong to the same run. Cross-run parent references are
-        # corruption — lineage operations (fork/coalesce/expand) are always
-        # within a single run. (Note: cross-row parents ARE valid for coalesce,
-        # where multiple rows merge into one output token.)
-        if parent_token.run_id != run_id:
-            raise AuditIntegrityError(
-                f"Audit integrity violation: parent token '{parent.parent_token_id}' "
-                f"belongs to run '{parent_token.run_id}' but child token '{token_id}' "
-                f"belongs to run '{run_id}'. Cross-run parent lineage is impossible — "
-                f"this indicates database corruption in token_parents."
-            )
-        parent_tokens.append(parent_token)
+    # TIER 1 TRUST: token_parents is audit data - crash on any anomaly.
+    parent_tokens = LineageIntegrityValidator().get_parent_tokens_checked(query, token, run_id)
 
     # Get validation errors for this row (by hash)
     validation_errors = data_flow.get_validation_errors_for_row(
@@ -282,7 +354,7 @@ def explain(
         node_states=tuple(node_states),
         routing_events=tuple(routing_events),
         calls=tuple(calls),
-        parent_tokens=tuple(parent_tokens),
+        parent_tokens=parent_tokens,
         validation_errors=tuple(validation_errors),
         transform_errors=tuple(transform_errors),
         scheduler_events=tuple(scheduler_events),

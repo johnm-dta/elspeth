@@ -51,10 +51,15 @@ class TestAzureBlobSinkCloseResourceRelease:
     """close() must release Azure SDK resources, not just null the reference."""
 
     def test_close_calls_client_close(self) -> None:
-        from unittest.mock import MagicMock
-
         from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
         from tests.fixtures.base_classes import inject_write_failure
+
+        class _ContainerClientFake:
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
 
         sink = inject_write_failure(
             AzureBlobSink(
@@ -68,12 +73,12 @@ class TestAzureBlobSinkCloseResourceRelease:
             )
         )
 
-        mock_client = MagicMock()
-        sink._container_client = mock_client
+        client = _ContainerClientFake()
+        sink._container_client = client
 
         sink.close()
 
-        mock_client.close.assert_called_once()
+        assert client.close_calls == 1
         assert sink._container_client is None
 
     def test_close_without_client_is_safe(self) -> None:

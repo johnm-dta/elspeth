@@ -8,7 +8,6 @@ and manual PluginContext construction for guard-clause tests.
 import logging
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import Mock
 
 import pytest
 
@@ -153,6 +152,70 @@ class _FakePluginAuditWriter:
         return error_id
 
 
+class _FailingRecordCallWriter:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+        self.allocated_state_ids: list[str] = []
+        self.record_call_kwargs: dict[str, Any] | None = None
+        self.get_node_state_calls: list[str] = []
+
+    def allocate_call_index(self, state_id: str) -> int:
+        self.allocated_state_ids.append(state_id)
+        return 0
+
+    def record_call(
+        self,
+        *,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: RawCallPayload,
+        response_data: RawCallPayload | None = None,
+        error: RawCallPayload | None = None,
+        latency_ms: float | None = None,
+    ) -> Call:
+        self.record_call_kwargs = {
+            "state_id": state_id,
+            "call_index": call_index,
+            "call_type": call_type,
+            "status": status,
+            "request_data": request_data,
+            "response_data": response_data,
+            "error": error,
+            "latency_ms": latency_ms,
+        }
+        raise self.failure
+
+    def get_node_state(self, state_id: str) -> NodeStateCompleted | None:
+        self.get_node_state_calls.append(state_id)
+        return None
+
+
+class _FailingTransformErrorWriter:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+        self.record_transform_error_kwargs: dict[str, Any] | None = None
+
+    def record_transform_error(
+        self,
+        *,
+        ref: TokenRef,
+        transform_id: str,
+        row_data: Any,
+        error_details: Any,
+        destination: str,
+    ) -> str:
+        self.record_transform_error_kwargs = {
+            "ref": ref,
+            "transform_id": transform_id,
+            "row_data": row_data,
+            "error_details": error_details,
+            "destination": destination,
+        }
+        raise self.failure
+
+
 def _token_info(token_id: str) -> TokenInfo:
     return TokenInfo(row_id="row-001", token_id=token_id, row_data=make_pipeline_row({"value": 1}))
 
@@ -171,7 +234,7 @@ class TestRecordValidationErrorGuards:
             )
 
     def test_raises_when_node_id_is_none(self) -> None:
-        ctx = PluginContext(run_id="run-1", config={}, landscape=Mock(), node_id=None)
+        ctx = PluginContext(run_id="run-1", config={}, landscape=object(), node_id=None)
         with pytest.raises(FrameworkBugError, match=r"record_validation_error.*without node_id"):
             ctx.record_validation_error(
                 row={"name": "test"},
@@ -388,14 +451,12 @@ class TestRecordCallGuards:
         assert len(writer.state_calls) == 1
 
     def test_propagates_landscape_record_call_failure_without_telemetry(self) -> None:
-        writer = Mock()
-        writer.allocate_call_index.return_value = 0
-        writer.record_call.side_effect = RuntimeError("landscape call write failed")
+        writer = _FailingRecordCallWriter(RuntimeError("landscape call write failed"))
         emitted_events: list[ExternalCallCompleted] = []
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=writer,
+            landscape=cast(Any, writer),
             state_id="state-001",
             telemetry_emit=emitted_events.append,
         )
@@ -409,10 +470,11 @@ class TestRecordCallGuards:
                 provider="example",
             )
 
-        writer.allocate_call_index.assert_called_once_with("state-001")
-        writer.get_node_state.assert_not_called()
+        assert writer.allocated_state_ids == ["state-001"]
+        assert writer.get_node_state_calls == []
         assert emitted_events == []
-        record_kwargs = writer.record_call.call_args.kwargs
+        record_kwargs = writer.record_call_kwargs
+        assert record_kwargs is not None
         assert record_kwargs["state_id"] == "state-001"
         assert record_kwargs["call_index"] == 0
         assert record_kwargs["call_type"] is CallType.HTTP
@@ -496,6 +558,7 @@ class TestRecordCallHappyPath:
         assert writer.node_state_lookups == []
         assert writer.operation_calls[0]["request_data"].to_dict() == {"path": "/tmp/output.csv"}
         assert writer.operation_calls[0]["error"].to_dict() == {"type": "OSError", "message": "disk full"}
+        assert writer.operation_calls[0]["latency_ms"] is None
 
         assert len(emitted_events) == 1
         event = emitted_events[0]
@@ -503,7 +566,8 @@ class TestRecordCallHappyPath:
         assert event.operation_id == "operation-001"
         assert event.token_id is None
         assert event.provider == "filesystem"
-        assert event.latency_ms == 0.0
+        assert event.latency_ms is None
+        assert event.to_dict()["latency_ms"] is None
         assert event.request_hash == recorded.request_hash
 
 
@@ -529,7 +593,7 @@ class TestRecordTransformErrorHappyPath:
         """Happy path: landscape.record_transform_error is called and token fields are populated.
 
         record_transform_error requires a pre-existing token FK in the DB.
-        Use a Mock landscape to test the delegation and return-value logic
+        Use a small fake landscape to test the delegation and return-value logic
         without needing to build the full token/row/node FK chain — that
         belongs in integration tests (test_recorder_errors.py).
         """
@@ -564,12 +628,11 @@ class TestRecordTransformErrorHappyPath:
         ]
 
     def test_propagates_landscape_write_failure(self) -> None:
-        mock_landscape = Mock()
-        mock_landscape.record_transform_error.side_effect = RuntimeError("transform recorder failed")
+        writer = _FailingTransformErrorWriter(RuntimeError("transform recorder failed"))
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=mock_landscape,
+            landscape=cast(Any, writer),
             node_id="transform-1",
         )
 
@@ -582,10 +645,10 @@ class TestRecordTransformErrorHappyPath:
                 destination="discard",
             )
 
-        mock_landscape.record_transform_error.assert_called_once_with(
-            ref=TokenRef(token_id="tok-1", run_id="run-1"),
-            transform_id="transform-1",
-            row_data={"data": "test"},
-            error_details={"reason": "api_error", "error": "API returned 500"},
-            destination="discard",
-        )
+        assert writer.record_transform_error_kwargs == {
+            "ref": TokenRef(token_id="tok-1", run_id="run-1"),
+            "transform_id": "transform-1",
+            "row_data": {"data": "test"},
+            "error_details": {"reason": "api_error", "error": "API returned 500"},
+            "destination": "discard",
+        }

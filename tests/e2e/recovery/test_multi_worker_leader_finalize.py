@@ -8,7 +8,7 @@ leader's ``has_peer_active_leases()`` / ``has_scheduled_work()`` observe a real
 multi-worker image at finalize time.
 
 To keep the bounded wait fast and deterministic, the loop's ``time.monotonic``
-and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.core``: sleep is
+and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.leader_drain``: sleep is
 a no-op and monotonic returns a scripted, advancing clock so the lease-aware
 deadline is reached in a handful of iterations without any real wall-clock wait.
 
@@ -51,7 +51,7 @@ from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.config import QueueSettings, SourceSettings, TransformSettings
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.dag.models import WiredTransform
+from elspeth.core.dag.wiring import WiredTransform
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
@@ -157,7 +157,7 @@ def _build(rows: list[dict[str, Any]], seed_cb: Any) -> tuple[PipelineConfig, Ex
 class _FastMonotonic:
     """Scripted monotonic clock: every call advances by ``step`` seconds.
 
-    Patched over ``core.time.monotonic`` so the 3x liveness deadline is crossed
+    Patched over ``leader_drain.time.monotonic`` so the 3x liveness deadline is crossed
     after a few iterations — no real wall-clock wait. ``step`` defaults to a
     fraction of the liveness window so a handful of iterations exhausts the
     240s budget.
@@ -370,8 +370,8 @@ def test_wedged_alive_peer_bounded_wait_times_out_then_raises(tmp_path: Path) ->
 
     with (
         structlog.testing.capture_logs() as captured,
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         pytest.raises(OrchestrationInvariantError) as exc_info,
     ):
         orch.run(config, graph=graph, payload_store=payload_store)
@@ -430,8 +430,8 @@ def test_deposed_leader_during_wait_breaks_out_via_latch(tmp_path: Path) -> None
             raise RunWorkerEvictedError(worker_id=self._token.worker_id, run_id=self._token.run_id)
 
     with (
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         patch.object(RunHeartbeatThread, "check_and_raise", _latch),
         pytest.raises(RunWorkerEvictedError),
     ):
@@ -488,8 +488,8 @@ def test_dead_peer_expired_lease_reaped_to_ready_in_loop(tmp_path: Path) -> None
     config, graph, _sink, _source = _build([{"id": 1, "value": 10}], _seed)
 
     with (
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         pytest.raises(OrchestrationInvariantError),
     ):
         orch.run(config, graph=graph, payload_store=payload_store)
@@ -619,12 +619,12 @@ def test_double_flush_guard_no_duplicate_leader_rows(tmp_path: Path) -> None:
     """When 4b accumulates follower results and re-flushes, the leader's own
     already-written tokens are NOT re-emitted.
 
-    The 4b clears pending_tokens before the second flush (write_pending_to_sinks
-    does not consume), so a re-flush would otherwise re-write every leader token
-    and hit the node_states UNIQUE constraint. We run a multi-row leader pipeline
-    that ALSO has a follower PENDING_SINK row to drain, forcing the second flush,
-    and assert: no exception (no node_states IntegrityError); every leader row
-    appears in the sink exactly once; no node_states row is duplicated.
+    write_pending_to_sinks consumes each successfully written pending group, so
+    a 4b re-flush must not re-write leader tokens and hit the node_states UNIQUE
+    constraint. We run a multi-row leader pipeline that ALSO has a follower
+    PENDING_SINK row to drain, forcing the second flush, and assert: no exception
+    (no node_states IntegrityError); every leader row appears in the sink exactly
+    once; no node_states row is duplicated.
     """
     orch, db, payload_store = _make_orch(tmp_path)
 

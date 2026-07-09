@@ -168,7 +168,7 @@
 .select {
   width: 100%;
   padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-md);
   background-color: var(--color-surface-elevated);
   color: var(--color-text);

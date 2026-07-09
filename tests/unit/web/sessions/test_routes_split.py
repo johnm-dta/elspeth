@@ -30,7 +30,7 @@ def test_session_routes_package_preserves_legacy_patch_seams() -> None:
 
     assert callable(routes._dispatch_guided_respond)
     assert callable(routes._persist_tool_invocations)
-    assert hasattr(routes, "slog")
+    _slog = routes.slog
     assert callable(routes.step_advance)
 
 
@@ -45,3 +45,21 @@ def test_session_route_package_uses_explicit_imports() -> None:
                 offenders.append(f"{source_path}:{node.lineno}")
 
     assert offenders == []
+
+
+def test_workflow_profile_response_none_for_empty_profile() -> None:
+    from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
+    from elspeth.web.composer.guided.state_machine import GuidedSession
+    from elspeth.web.sessions.routes._helpers import _workflow_profile_response
+
+    empty_session = GuidedSession.initial()  # default = EMPTY_PROFILE
+    assert empty_session.profile == EMPTY_PROFILE
+    assert _workflow_profile_response(empty_session) is None
+
+    tutorial_session = GuidedSession.initial(profile=TUTORIAL_PROFILE)
+    resp = _workflow_profile_response(tutorial_session)
+    assert resp is not None
+    assert resp.coaching is TUTORIAL_PROFILE.coaching
+    assert resp.bookends is TUTORIAL_PROFILE.bookends
+    assert resp.recipe_match is TUTORIAL_PROFILE.recipe_match
+    assert resp.advisor_checkpoints is TUTORIAL_PROFILE.advisor_checkpoints

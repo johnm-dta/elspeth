@@ -1,16 +1,14 @@
-"""Post-run export and schema reconstruction functions.
+"""Post-run audit export functions.
 
 This module handles:
-1. Exporting the Landscape audit trail to JSON or CSV format after run completion
-2. Reconstructing Pydantic schemas from JSON schema dictionaries (for pipeline resume)
+- Exporting the Landscape audit trail to JSON or CSV format after run completion
 
 The export functions support two modes:
 - JSON format: All records written to a single sink (handles heterogeneous records)
 - CSV format: Separate files per record type (CSV requires homogeneous schemas)
 
-Schema reconstruction is needed when resuming a pipeline from checkpoint - the
-original source schema is stored as JSON in the audit trail and must be
-reconstructed to restore type fidelity (datetime, Decimal, etc.).
+Resume schema reconstruction lives in schema_reconstruction.py. This module
+keeps compatibility re-exports for older import paths.
 
 IMPORTANT: Import Cycle Prevention
 ----------------------------------
@@ -22,10 +20,11 @@ from __future__ import annotations
 
 import csv
 import os
-import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from tempfile import TemporaryFile
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
@@ -33,9 +32,251 @@ if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
 
 from elspeth.contracts import Determinism
-from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.operations import track_operation
+from elspeth.engine.orchestrator.schema_reconstruction import (
+    _create_schema_model as _create_schema_model,
+)
+from elspeth.engine.orchestrator.schema_reconstruction import (
+    _json_schema_to_python_type as _json_schema_to_python_type,
+)
+from elspeth.engine.orchestrator.schema_reconstruction import (
+    _model_name_for_field as _model_name_for_field,
+)
+from elspeth.engine.orchestrator.schema_reconstruction import (
+    reconstruct_schema_from_json as reconstruct_schema_from_json,
+)
+
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+_CSV_FORMULA_ESCAPE_PREFIX = "'"
+_JSON_EXPORT_BATCH_SIZE = 1000
+_PATH_TYPE = type(Path())
+
+
+class _FlushableFile(Protocol):
+    def flush(self) -> None: ...
+
+    def fileno(self) -> int: ...
+
+    def close(self) -> None: ...
+
+
+class _FilesystemJsonlExportSink(Protocol):
+    _path: Path
+    _file: _FlushableFile | None
+
+    def _claim_write_target(self) -> None: ...
+
+
+def _neutralize_csv_formula_cell(value: Any) -> Any:
+    """Prefix spreadsheet-formula-looking string cells for CSV audit exports."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return f"{_CSV_FORMULA_ESCAPE_PREFIX}{value}"
+    return value
+
+
+def _neutralize_csv_formula_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy with spreadsheet-executable string cells neutralized."""
+    return {key: _neutralize_csv_formula_cell(value) for key, value in record.items()}
+
+
+class _CsvRecordTypeSpool:
+    """Bounded-memory spool for one CSV record type."""
+
+    def __init__(self) -> None:
+        self._file = TemporaryFile("w+", newline="", encoding="utf-8")  # noqa: SIM115 - spool owns and closes this file
+        self._writer = csv.writer(self._file)
+        self.fieldnames: set[str] = set()
+        self.count = 0
+
+    def append(self, record: dict[str, Any]) -> None:
+        self.fieldnames.update(record.keys())
+        self._writer.writerow([len(record)])
+        for key, value in record.items():
+            self._writer.writerow([key, value])
+        self.count += 1
+
+    def iter_records(self) -> Iterator[dict[str, Any]]:
+        self._file.seek(0)
+        reader = csv.reader(self._file)
+        while True:
+            try:
+                size_row = next(reader)
+            except StopIteration:
+                return
+            if len(size_row) != 1:
+                raise ValueError("CSV export spool is corrupt: record size row must have one column")
+            field_count = int(size_row[0])
+            record: dict[str, Any] = {}
+            for _ in range(field_count):
+                try:
+                    key, value = next(reader)
+                except StopIteration as exc:
+                    raise ValueError("CSV export spool is corrupt: record ended early") from exc
+                record[key] = value
+            yield record
+
+    def close(self) -> None:
+        self._file.close()
+
+
+class _FileSystemCsvAuditExportWriter:
+    """Filesystem-backed writer for the multi-file CSV audit export capability."""
+
+    def __init__(self, artifact_path: str) -> None:
+        self._artifact_path = artifact_path
+
+    @classmethod
+    def from_sink(cls, *, sink_name: str, sink: SinkProtocol) -> _FileSystemCsvAuditExportWriter:
+        artifact_path = sink.config.get("path")
+        if not isinstance(artifact_path, str) or not artifact_path:
+            raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
+        return cls(artifact_path)
+
+    def write(self, *, exporter: Any, run_id: str, sign: bool) -> None:
+        _export_csv_multifile(
+            exporter=exporter,
+            run_id=run_id,
+            artifact_path=self._artifact_path,
+            sign=sign,
+        )
+
+
+def _write_json_export_batches(
+    *,
+    sink: SinkProtocol,
+    ctx: PluginContext,
+    records: Iterable[dict[str, Any]],
+    batch_size: int = _JSON_EXPORT_BATCH_SIZE,
+) -> tuple[int, int]:
+    """Write JSON export records, batching only for sinks that publish incrementally."""
+    if batch_size < 1:
+        raise ValueError("JSON export batch size must be at least 1")
+
+    if not _sink_supports_incremental_json_export_writes(sink):
+        all_records = list(records)
+        if not all_records:
+            return 0, 0
+        sink.write(all_records, ctx)
+        return len(all_records), 1
+
+    record_count = 0
+    batches_written = 0
+    batch: list[dict[str, Any]] = []
+
+    with _jsonl_export_staging_target(sink):
+        for record in records:
+            batch.append(record)
+            record_count += 1
+            if len(batch) < batch_size:
+                continue
+            sink.write(batch, ctx)
+            batches_written += 1
+            batch = []
+
+        if batch:
+            sink.write(batch, ctx)
+            batches_written += 1
+
+    return record_count, batches_written
+
+
+@contextmanager
+def _jsonl_export_staging_target(sink: SinkProtocol) -> Iterator[None]:
+    """Stage write-mode filesystem JSONL exports and publish only after full success."""
+    final_path = _jsonl_filesystem_sink_path(sink)
+    if final_path is None:
+        yield
+        return
+
+    filesystem_sink = cast("_FilesystemJsonlExportSink", sink)
+    filesystem_sink._claim_write_target()
+    final_path = _jsonl_filesystem_sink_path(sink)
+    if final_path is None:
+        yield
+        return
+
+    temp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    if temp_path.exists():
+        temp_path.unlink()
+
+    filesystem_sink._path = temp_path
+    try:
+        yield
+        _close_sink_file_if_open(sink)
+        if temp_path.exists():
+            os.replace(temp_path, final_path)
+            _fsync_parent_directory(final_path)
+    except BaseException:
+        _close_sink_file_if_open(sink)
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    finally:
+        filesystem_sink._path = final_path
+
+
+def _jsonl_filesystem_sink_path(sink: SinkProtocol) -> Path | None:
+    if not _sink_supports_incremental_json_export_writes(sink):
+        return None
+    sink_attrs = vars(sink)
+    if "_mode" in sink_attrs and sink_attrs["_mode"] == "append":
+        return None
+    if "_path" not in sink_attrs:
+        return None
+    path = sink_attrs["_path"]
+    if type(path) is not _PATH_TYPE:
+        return None
+    return path
+
+
+def _close_sink_file_if_open(sink: SinkProtocol) -> None:
+    sink_attrs = vars(sink)
+    if "_file" not in sink_attrs:
+        return
+    file_obj = sink_attrs["_file"]
+    if file_obj is None:
+        return
+    open_file = cast("_FlushableFile", file_obj)
+    open_file.flush()
+    os.fsync(open_file.fileno())
+    open_file.close()
+    cast("_FilesystemJsonlExportSink", sink)._file = None
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:
+    """Return whether a JSON export sink can publish incrementally without rewriting cumulative content."""
+    sink_attrs = vars(sink)
+    if "_format" in sink_attrs:
+        sink_format = sink_attrs["_format"]
+        if type(sink_format) is not str:
+            return False
+        return sink_format == "jsonl"
+
+    config = sink.config
+    if type(config) is not dict:
+        return False
+
+    if "format" in config:
+        configured_format = config["format"]
+        if type(configured_format) is not str:
+            return False
+        return configured_format == "jsonl"
+
+    if "path" not in config:
+        return False
+    path = config["path"]
+    if type(path) is not str:
+        return False
+    return Path(path).suffix == ".jsonl"
 
 
 def export_landscape(
@@ -75,10 +316,16 @@ def export_landscape(
             key_str = os.environ["ELSPETH_SIGNING_KEY"]
         except KeyError as exc:
             raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export") from exc
+        if not key_str.strip():
+            raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export")
         signing_key = key_str.encode("utf-8")
 
     # Create exporter
-    exporter = LandscapeExporter(db, signing_key=signing_key)
+    exporter = LandscapeExporter(
+        db,
+        signing_key=signing_key,
+        include_raw_error_rows=export_config.include_raw_error_rows,
+    )
 
     sink_name = export_config.sink
     if sink_name is None:
@@ -111,18 +358,7 @@ def export_landscape(
     )
 
     if export_config.format == "csv":
-        if "path" not in sink.config:
-            raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
-        artifact_path: str = sink.config["path"]
-        sink.close()
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id=run_id,
-            artifact_path=artifact_path,
-            sign=export_config.sign,
-        )
-    else:
-        records = list(exporter.export_run(run_id, sign=export_config.sign))
+        csv_writer = _FileSystemCsvAuditExportWriter.from_sink(sink_name=sink_name, sink=sink)
         sink.on_start(ctx)
         try:
             with track_operation(
@@ -131,10 +367,30 @@ def export_landscape(
                 sink.node_id,
                 "sink_write",
                 ctx,
-                input_data={"export_format": "json", "record_count": len(records)},
+                input_data={"export_format": "csv"},
             ):
-                if records:
-                    sink.write(records, ctx)
+                csv_writer.write(exporter=exporter, run_id=run_id, sign=export_config.sign)
+                sink.flush()
+        finally:
+            sink.on_complete(ctx)
+            sink.close()
+    else:
+        sink.on_start(ctx)
+        try:
+            with track_operation(
+                factory.execution,
+                run_id,
+                sink.node_id,
+                "sink_write",
+                ctx,
+                input_data={"export_format": "json"},
+            ) as operation:
+                record_count, batches_written = _write_json_export_batches(
+                    sink=sink,
+                    ctx=ctx,
+                    records=exporter.export_run(run_id, sign=export_config.sign),
+                )
+                operation.output_data = {"record_count": record_count, "batches_written": batches_written}
                 sink.flush()
         finally:
             sink.on_complete(ctx)
@@ -167,329 +423,30 @@ def _export_csv_multifile(
 
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get records grouped by type
-    grouped = exporter.export_run_grouped(run_id, sign=sign)
     formatter = CSVFormatter()
+    spools: dict[str, _CsvRecordTypeSpool] = {}
 
-    # Write each record type to its own CSV file
-    for record_type, records in grouped.items():
-        if not records:
-            continue
+    try:
+        for record_type, record in exporter.iter_run_records_by_type(run_id, sign=sign):
+            spool = spools.get(record_type)
+            if spool is None:
+                spool = _CsvRecordTypeSpool()
+                spools[record_type] = spool
+            spool.append(_neutralize_csv_formula_record(formatter.format(record)))
 
-        csv_path = export_dir / f"{record_type}.csv"
+        # Write each record type to its own CSV file.
+        for record_type, spool in spools.items():
+            if spool.count == 0:
+                continue
 
-        # Flatten all records for CSV
-        flat_records = [formatter.format(r) for r in records]
+            csv_path = export_dir / f"{record_type}.csv"
+            fieldnames = sorted(spool.fieldnames)  # Sorted for determinism
 
-        # Get union of all keys (some records may have optional fields)
-        all_keys: set[str] = set()
-        for rec in flat_records:
-            all_keys.update(rec.keys())
-        fieldnames = sorted(all_keys)  # Sorted for determinism
-
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for rec in flat_records:
-                writer.writerow(rec)
-
-
-def reconstruct_schema_from_json(schema_dict: Mapping[str, object]) -> type:
-    """Reconstruct Pydantic schema class from JSON schema dict.
-
-    Handles complete Pydantic JSON schema including:
-    - Primitive types: string, integer, number, boolean
-    - datetime: string with format="date-time"
-    - Decimal: anyOf with number/string (for precision preservation)
-    - Arrays: type="array" with items schema
-    - Nested objects: type="object" with properties schema
-
-    Args:
-        schema_dict: Pydantic JSON schema dict (from model_json_schema())
-
-    Returns:
-        Dynamically created Pydantic model class
-
-    Raises:
-        AuditIntegrityError: If schema is malformed, empty, or contains unsupported types
-            (stored schema data is Tier 1 — our data from the Landscape DB)
-    """
-    from pydantic import ConfigDict, create_model
-
-    from elspeth.contracts import PluginSchema
-
-    # Extract field definitions from Pydantic JSON schema
-    # This is OUR data (from Landscape DB) - crash if malformed
-    if "properties" not in schema_dict:
-        raise AuditIntegrityError(
-            "Resume failed: Schema JSON has no 'properties' field. This indicates a malformed schema. Cannot reconstruct types."
-        )
-    properties = cast(Mapping[str, object], schema_dict["properties"])
-
-    # Handle observed/dynamic schemas: empty properties with additionalProperties=true
-    # This is the normal JSON schema output for schema.mode=observed (dynamic schemas)
-    # See schema_factory._create_dynamic_schema for the creation side
-    if not properties:
-        if "additionalProperties" in schema_dict and schema_dict["additionalProperties"] is True:
-            # Dynamic schema - accepts any fields, no fixed properties
-            return create_model(
-                "RestoredDynamicSchema",
-                __base__=PluginSchema,
-                __config__=ConfigDict(extra="allow"),
-            )
-        # Empty properties WITHOUT additionalProperties=true is genuinely malformed
-        raise AuditIntegrityError(
-            "Resume failed: Schema has zero fields defined and additionalProperties is not true. "
-            "Cannot resume with empty fixed schema - this would silently discard all row data. "
-            "For dynamic schemas, additionalProperties must be true."
-        )
-
-    # "required" is optional in JSON Schema spec - empty list is valid default
-    required_fields = set(cast(list[str], schema_dict["required"])) if "required" in schema_dict else set()
-
-    # Resolve top-level fields recursively, preserving array item types and
-    # nested object property schemas.
-    return _create_schema_model(
-        model_name="RestoredSourceSchema",
-        properties=properties,
-        required_fields=required_fields,
-        schema_defs=cast(Mapping[str, object], schema_dict["$defs"]) if "$defs" in schema_dict else None,
-        create_model=create_model,
-        schema_base=PluginSchema,
-    )
-
-
-def _create_schema_model(
-    model_name: str,
-    properties: Mapping[str, object],
-    required_fields: set[str],
-    *,
-    schema_defs: Mapping[str, object] | None,
-    create_model: Any,
-    schema_base: Any,
-) -> type:
-    """Create a Pydantic model from JSON schema properties."""
-    field_definitions: dict[str, Any] = {}
-
-    for field_name, raw_field_info in properties.items():
-        field_info = cast(Mapping[str, object], raw_field_info)
-        field_type = _json_schema_to_python_type(
-            field_name,
-            field_info,
-            schema_defs=schema_defs,
-            create_model=create_model,
-            schema_base=schema_base,
-        )
-        field_definitions[field_name] = (field_type, ... if field_name in required_fields else None)
-
-    return cast(type, create_model(model_name, __base__=schema_base, **field_definitions))
-
-
-def _model_name_for_field(field_name: str) -> str:
-    """Build a deterministic nested model name from a field name."""
-    tokens = re.findall(r"[A-Za-z0-9]+", field_name)
-    if not tokens:
-        return "RestoredNestedSchema"
-    title_cased = "".join(token[:1].upper() + token[1:] for token in tokens)
-    if title_cased[0].isdigit():
-        title_cased = f"Field{title_cased}"
-    return f"Restored{title_cased}Schema"
-
-
-def _json_schema_to_python_type(
-    field_name: str,
-    field_info: Mapping[str, object],
-    *,
-    schema_defs: Mapping[str, object] | None = None,
-    create_model: Any | None = None,
-    schema_base: Any | None = None,
-) -> Any:
-    """Map Pydantic JSON schema field to Python type.
-
-    Handles Pydantic's type mapping including special cases:
-    - datetime: {"type": "string", "format": "date-time"}
-    - date: {"type": "string", "format": "date"}
-    - time: {"type": "string", "format": "time"}
-    - timedelta: {"type": "string", "format": "duration"}
-    - UUID: {"type": "string", "format": "uuid"}
-    - Decimal: {"anyOf": [{"type": "number"}, {"type": "string"}]}
-    - Nullable: {"anyOf": [{"type": "T"}, {"type": "null"}]} -> T
-    - Nullable ref: {"anyOf": [{"$ref": "#/$defs/M"}, {"type": "null"}]} -> M
-    - list[T]: {"type": "array", "items": {...}}
-    - dict: {"type": "object"} without properties
-
-    Args:
-        field_name: Field name (for error messages)
-        field_info: JSON schema field definition
-
-    Returns:
-        Python type for Pydantic field
-
-    Raises:
-        AuditIntegrityError: If field type is not supported (prevents silent degradation)
-    """
-    from datetime import date, datetime, time, timedelta
-    from decimal import Decimal
-    from uuid import UUID
-
-    # Handle anyOf patterns FIRST (before checking for "type" key)
-    # anyOf is used for: Decimal, nullable types (T | None), nullable Decimal
-    if "anyOf" in field_info:
-        any_of_items = cast(list[Mapping[str, object]], field_info["anyOf"])
-        type_strs = {cast(str, item["type"]) for item in any_of_items if "type" in item}
-        has_null = "null" in type_strs
-        non_null_items = [item for item in any_of_items if "type" not in item or item["type"] != "null"]
-        non_null_types = {cast(str, item["type"]) for item in non_null_items if "type" in item}
-
-        # Pattern 1: Decimal or Optional[Decimal]
-        # Decimal: {"anyOf": [{"type": "number"}, {"type": "string"}]}
-        # Optional[Decimal]: {"anyOf": [{"type": "number"}, {"type": "string"}, {"type": "null"}]}
-        if {"number", "string"}.issubset(non_null_types) and len(non_null_items) == 2:
-            return Decimal | None if has_null else Decimal
-
-        # Pattern 2: Nullable - {"anyOf": [{"type": "T", ...}, {"type": "null"}]}
-        #   or with $ref:  {"anyOf": [{"$ref": "#/$defs/M"}, {"type": "null"}]}
-        # Extract the non-null type and recursively resolve it
-        if has_null and len(non_null_items) == 1:
-            # Recursively resolve the non-null type, then wrap as Optional.
-            # Returning T | None (not bare T) is critical: Pydantic model types
-            # reject None unless the type annotation explicitly includes it.
-            inner_type = _json_schema_to_python_type(
-                field_name,
-                non_null_items[0],
-                schema_defs=schema_defs,
-                create_model=create_model,
-                schema_base=schema_base,
-            )
-            return inner_type | None
-
-        # Unsupported anyOf pattern (e.g., Union[str, int] without null)
-        raise AuditIntegrityError(
-            f"Resume failed: Field '{field_name}' has unsupported anyOf pattern. "
-            f"Supported patterns: Decimal (number|string), nullable (T|null), nullable Decimal (number|string|null). "
-            f"Schema definition: {field_info}. "
-            f"This is a bug in schema reconstruction - please report this."
-        )
-
-    # Resolve local references in Pydantic schemas (e.g., "#/$defs/NestedModel")
-    if "$ref" in field_info:
-        ref = cast(str, field_info["$ref"])
-        ref_prefix = "#/$defs/"
-        if not ref.startswith(ref_prefix):
-            raise AuditIntegrityError(
-                f"Resume failed: Field '{field_name}' has unsupported $ref '{ref}'. Only local refs under '#/$defs/' are supported."
-            )
-        if schema_defs is None:
-            raise AuditIntegrityError(f"Resume failed: Field '{field_name}' references '{ref}' but schema has no $defs section.")
-        def_name = ref[len(ref_prefix) :]
-        if def_name not in schema_defs:
-            raise AuditIntegrityError(f"Resume failed: Field '{field_name}' references missing schema def '{def_name}'.")
-        return _json_schema_to_python_type(
-            field_name,
-            cast(Mapping[str, object], schema_defs[def_name]),
-            schema_defs=schema_defs,
-            create_model=create_model,
-            schema_base=schema_base,
-        )
-
-    # Get basic type - required for all non-anyOf fields
-    if "type" not in field_info:
-        raise AuditIntegrityError(
-            f"Resume failed: Field '{field_name}' has no 'type' in schema. "
-            f"Schema definition: {field_info}. "
-            f"Cannot determine Python type for field."
-        )
-    field_type_str = cast(str, field_info["type"])
-
-    # Handle string types with format specifiers
-    if field_type_str == "string":
-        fmt = None
-        if "format" in field_info:
-            fmt = field_info["format"]
-        if fmt == "date-time":
-            return datetime
-        if fmt == "date":
-            return date
-        if fmt == "time":
-            return time
-        if fmt == "duration":
-            return timedelta
-        if fmt == "uuid":
-            return UUID
-        # Plain string (no format or unknown format)
-        return str
-
-    # Handle array types
-    if field_type_str == "array":
-        # "items" is optional in JSON Schema arrays. When present, recursively
-        # restore item type fidelity (e.g., list[int], list[NestedSchema]).
-        if "items" in field_info:
-            item_info = cast(Mapping[str, object], field_info["items"])
-            item_type = _json_schema_to_python_type(
-                f"{field_name}_item",
-                item_info,
-                schema_defs=schema_defs,
-                create_model=create_model,
-                schema_base=schema_base,
-            )
-            return list.__class_getitem__(item_type)
-        return list
-
-    # Handle nested object types
-    if field_type_str == "object":
-        # Typed nested object: recursively create a nested schema model.
-        if "properties" in field_info:
-            properties = cast(Mapping[str, object], field_info["properties"])
-        else:
-            properties = None
-        if properties:
-            nested_required = set(cast(list[str], field_info["required"])) if "required" in field_info else set()
-            nested_name = _model_name_for_field(field_name)
-            return _create_schema_model(
-                model_name=nested_name,
-                properties=properties,
-                required_fields=nested_required,
-                schema_defs=schema_defs,
-                create_model=create_model,
-                schema_base=schema_base,
-            )
-
-        # Map additionalProperties schemas when present (e.g., dict[str, int]).
-        if "additionalProperties" in field_info:
-            additional = field_info["additionalProperties"]
-            if additional is True:
-                return dict[str, Any]
-            if type(additional) is dict:
-                value_type = _json_schema_to_python_type(
-                    f"{field_name}_value",
-                    cast(Mapping[str, object], additional),
-                    schema_defs=schema_defs,
-                    create_model=create_model,
-                    schema_base=schema_base,
-                )
-                return dict.__class_getitem__((str, value_type))
-            if additional is False:
-                return dict
-            raise AuditIntegrityError(f"Resume failed: Field '{field_name}' has invalid additionalProperties value: {additional!r}.")
-
-        # Generic dict (no specific structure)
-        return dict
-
-    # Handle other primitive types
-    primitive_type_map = {
-        "integer": int,
-        "number": float,
-        "boolean": bool,
-    }
-
-    if field_type_str in primitive_type_map:
-        return primitive_type_map[field_type_str]
-
-    # Unknown type - CRASH instead of silent degradation
-    raise AuditIntegrityError(
-        f"Resume failed: Field '{field_name}' has unsupported type '{field_type_str}'. "
-        f"Supported types: string, integer, number, boolean, date-time, date, time, "
-        f"duration, uuid, Decimal, array, object. "
-        f"Schema definition: {field_info}. "
-        f"This is a bug in schema reconstruction - please report this."
-    )
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for rec in spool.iter_records():
+                    writer.writerow(rec)
+    finally:
+        for spool in spools.values():
+            spool.close()

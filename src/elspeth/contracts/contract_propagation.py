@@ -113,50 +113,51 @@ def narrow_contract_to_output(
         Contract containing fields from input that still exist + new fields
 
     """
-    output_field_names = set(output_row.keys())
-
-    # Keep fields from input contract that exist in output
-    kept_fields = [fc for fc in input_contract.fields if fc.normalized_name in output_field_names]
-
-    # Find NEW fields in output (not in input contract)
-    existing_names = {f.normalized_name for f in input_contract.fields}
-    new_fields: list[FieldContract] = []
-
     # Build target->source lookup for metadata preservation.
     # If multiple sources map to the same target, last mapping wins.
     source_by_target: dict[str, str] = {}
     if renamed_fields is not None:
         for source, target in renamed_fields.items():
             source_by_target[target] = source
-    original_to_normalized = {fc.original_name: fc.normalized_name for fc in input_contract.fields}
 
+    existing_fields = {f.normalized_name: f for f in input_contract.fields}
+
+    def renamed_field_from_source(name: str) -> FieldContract | None:
+        if name not in source_by_target:
+            return None
+        source_name = source_by_target[name]
+        normalized_source_name = input_contract.find_name(source_name)
+        if normalized_source_name is None:
+            raise ValueError(f"Renamed field target {name!r} refers to unknown source field {source_name!r}")
+        source_contract = input_contract.find_field(normalized_source_name)
+        if source_contract is None:
+            raise ValueError(f"Renamed field target {name!r} refers to unresolved source field {source_name!r}")
+        return FieldContract(
+            normalized_name=name,
+            original_name=source_contract.original_name,
+            python_type=source_contract.python_type,
+            required=source_contract.required,
+            source=source_contract.source,
+            nullable=source_contract.nullable,
+        )
+
+    output_fields: list[FieldContract] = []
     for name, value in output_row.items():
-        if name not in existing_names:
-            source_contract = None
-            if name in source_by_target:
-                source_name = source_by_target[name]
-                normalized_source_name = source_name
-                if source_name in original_to_normalized:
-                    normalized_source_name = original_to_normalized[source_name]
-                source_contract = input_contract.find_field(normalized_source_name)
-            if source_contract is not None:
-                new_fields.append(
-                    FieldContract(
-                        normalized_name=name,
-                        original_name=source_contract.original_name,
-                        python_type=source_contract.python_type,
-                        required=source_contract.required,
-                        source=source_contract.source,
-                        nullable=source_contract.nullable,
-                    )
-                )
-                continue
+        renamed_field = renamed_field_from_source(name)
+        if renamed_field is not None:
+            output_fields.append(renamed_field)
+            continue
 
-            new_fields.append(_infer_new_field_contract(name, value))
+        existing_field = existing_fields.get(name)
+        if existing_field is not None:
+            output_fields.append(existing_field)
+            continue
+
+        output_fields.append(_infer_new_field_contract(name, value))
 
     return SchemaContract(
         mode=input_contract.mode,
-        fields=tuple(kept_fields + new_fields),
+        fields=tuple(output_fields),
         locked=True,
     )
 

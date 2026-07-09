@@ -24,7 +24,6 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from hypothesis import given, settings
@@ -32,6 +31,28 @@ from hypothesis import strategies as st
 
 from elspeth.core.rate_limit import NoOpLimiter, RateLimiter, RateLimitRegistry
 from elspeth.engine.clock import MockClock
+
+
+class _ServiceRateLimitConfigDouble:
+    def __init__(self, requests_per_minute: int = 100) -> None:
+        self.requests_per_minute = requests_per_minute
+
+
+class _RateLimitSettingsDouble:
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        persistence_path: str | None = None,
+        service_config: _ServiceRateLimitConfigDouble | None = None,
+    ) -> None:
+        self.enabled = enabled
+        self.persistence_path = persistence_path
+        self._service_config = service_config or _ServiceRateLimitConfigDouble()
+
+    def get_service_config(self, _service_name: str) -> _ServiceRateLimitConfigDouble:
+        return self._service_config
+
 
 # =============================================================================
 # Strategies for generating rate limiter configurations
@@ -288,15 +309,9 @@ class TestRateLimitRegistryProperties:
     @settings(max_examples=30)
     def test_same_service_returns_same_limiter(self, service_name: str) -> None:
         """Property: get_limiter() returns same instance for same service."""
-        # Create mock settings
-        mock_settings = MagicMock()
-        mock_settings.enabled = True
-        mock_settings.persistence_path = None
-        service_config = MagicMock()
-        service_config.requests_per_minute = 100
-        mock_settings.get_service_config.return_value = service_config
+        settings = _RateLimitSettingsDouble()
 
-        registry = RateLimitRegistry(mock_settings)
+        registry = RateLimitRegistry(settings)
         try:
             limiter1 = registry.get_limiter(service_name)
             limiter2 = registry.get_limiter(service_name)
@@ -309,14 +324,9 @@ class TestRateLimitRegistryProperties:
     @settings(max_examples=20)
     def test_different_services_different_limiters(self, services: list[str]) -> None:
         """Property: Different services get different limiter instances."""
-        mock_settings = MagicMock()
-        mock_settings.enabled = True
-        mock_settings.persistence_path = None
-        service_config = MagicMock()
-        service_config.requests_per_minute = 100
-        mock_settings.get_service_config.return_value = service_config
+        settings = _RateLimitSettingsDouble()
 
-        registry = RateLimitRegistry(mock_settings)
+        registry = RateLimitRegistry(settings)
         try:
             limiters = [registry.get_limiter(svc) for svc in services]
 
@@ -329,24 +339,18 @@ class TestRateLimitRegistryProperties:
     @settings(max_examples=20)
     def test_disabled_returns_noop(self, service_name: str) -> None:
         """Property: Disabled registry returns NoOpLimiter."""
-        mock_settings = MagicMock()
-        mock_settings.enabled = False
+        settings = _RateLimitSettingsDouble(enabled=False)
 
-        registry = RateLimitRegistry(mock_settings)
+        registry = RateLimitRegistry(settings)
         limiter = registry.get_limiter(service_name)
 
         assert isinstance(limiter, NoOpLimiter)
 
     def test_close_clears_all_limiters(self) -> None:
         """Property: close() clears all cached limiters."""
-        mock_settings = MagicMock()
-        mock_settings.enabled = True
-        mock_settings.persistence_path = None
-        service_config = MagicMock()
-        service_config.requests_per_minute = 100
-        mock_settings.get_service_config.return_value = service_config
+        settings = _RateLimitSettingsDouble()
 
-        registry = RateLimitRegistry(mock_settings)
+        registry = RateLimitRegistry(settings)
         try:
             # Get some limiters
             limiter1 = registry.get_limiter("service_a")
@@ -399,14 +403,9 @@ class TestRateLimiterThreadSafetyProperties:
     @settings(max_examples=10)
     def test_registry_concurrent_get_limiter(self, services: list[str]) -> None:
         """Property: Concurrent get_limiter() calls are thread-safe."""
-        mock_settings = MagicMock()
-        mock_settings.enabled = True
-        mock_settings.persistence_path = None
-        service_config = MagicMock()
-        service_config.requests_per_minute = 100
-        mock_settings.get_service_config.return_value = service_config
+        settings = _RateLimitSettingsDouble()
 
-        registry = RateLimitRegistry(mock_settings)
+        registry = RateLimitRegistry(settings)
         results: dict[str, list[object]] = {svc: [] for svc in services}
         lock = threading.Lock()
 

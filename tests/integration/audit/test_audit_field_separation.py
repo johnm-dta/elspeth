@@ -21,8 +21,9 @@ import json
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from sqlalchemy import select
 
@@ -44,6 +45,33 @@ from tests.fixtures.plugins import ListSource
 
 # Dynamic schema for tests
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, side_effect: Any = None) -> None:
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return None
+
+
+class _AzureOpenAIClientDouble:
+    def __init__(self, create_response: Any) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CallRecorder(create_response)))
+        self.close = _CallRecorder()
 
 
 def _write_input_csv(path: Path, data: list[dict[str, str]]) -> None:
@@ -129,44 +157,37 @@ def _make_multi_query_config() -> dict[str, Any]:
 
 
 @contextmanager
-def mock_azure_openai(responses: Sequence[dict[str, Any] | str]) -> Generator[Mock, None, None]:
+def mock_azure_openai(responses: Sequence[dict[str, Any] | str]) -> Generator[_AzureOpenAIClientDouble, None, None]:
     """Patch AzureOpenAI to return predictable responses."""
     import itertools
 
     response_cycle = itertools.cycle(responses)
 
-    def make_response(**kwargs: Any) -> Mock:
+    def make_response(**kwargs: Any) -> SimpleNamespace:
         payload = next(response_cycle)
         content = payload if isinstance(payload, str) else json.dumps(payload)
-
-        mock_message = Mock()
-        mock_message.content = content
-
-        mock_choice = Mock()
-        mock_choice.message = mock_message
-
-        mock_usage = Mock()
-        mock_usage.prompt_tokens = 50
-        mock_usage.completion_tokens = 30
-
-        mock_response = Mock()
-        mock_response.choices = [mock_choice]
-        mock_response.model = kwargs.get("model", "gpt-4o")
-        mock_response.usage = mock_usage
-        mock_response.model_dump = Mock(
-            return_value={
-                "id": "chatcmpl-test",
-                "object": "chat.completion",
-                "model": mock_response.model,
-                "choices": [{"message": {"content": content}}],
-                "usage": {"prompt_tokens": 50, "completion_tokens": 30},
-            }
+        model = kwargs.get("model", "gpt-4o")
+        raw_response = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 30},
+        }
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content),
+                    finish_reason="stop",
+                )
+            ],
+            model=model,
+            usage=SimpleNamespace(prompt_tokens=50, completion_tokens=30),
+            model_dump=lambda *_args, **_kwargs: raw_response,
         )
-        return mock_response
 
     with patch("openai.AzureOpenAI") as mock_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = make_response
+        mock_client = _AzureOpenAIClientDouble(make_response)
         mock_class.return_value = mock_client
         yield mock_client
 

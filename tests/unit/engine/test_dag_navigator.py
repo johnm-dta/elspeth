@@ -20,8 +20,9 @@ from elspeth.contracts import TransformProtocol
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.config import GateSettings
-from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
+from elspeth.engine.dag_navigator import DAGNavigator
 from elspeth.engine.processor import DAGTraversalContext
+from elspeth.engine.work_items import WorkItem, WorkItemFactory
 from elspeth.testing import make_token_info
 
 # =============================================================================
@@ -278,7 +279,7 @@ class TestResolveJumpTargetSink:
 
 
 # =============================================================================
-# create_work_item
+# WorkItemFactory.create
 # =============================================================================
 
 
@@ -289,7 +290,7 @@ class TestCreateWorkItem:
         """Creates work item with token and node."""
         token = make_token_info(data={"v": 1})
         nav = _make_nav()
-        item = nav.create_work_item(token=token, current_node_id=NodeID("t-1"))
+        item = WorkItemFactory(nav).create(token=token, current_node_id=NodeID("t-1"))
         assert item.token is token
         assert item.current_node_id == NodeID("t-1")
         assert item.coalesce_node_id is None
@@ -300,7 +301,7 @@ class TestCreateWorkItem:
         nav = _make_nav(
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
         )
-        item = nav.create_work_item(
+        item = WorkItemFactory(nav).create(
             token=token,
             current_node_id=NodeID("coalesce::merge"),
             coalesce_name=CoalesceName("merge"),
@@ -312,7 +313,7 @@ class TestCreateWorkItem:
         """on_success_sink is preserved on the work item."""
         token = make_token_info(data={"v": 1})
         nav = _make_nav()
-        item = nav.create_work_item(
+        item = WorkItemFactory(nav).create(
             token=token,
             current_node_id=None,
             on_success_sink="branch_sink",
@@ -321,7 +322,7 @@ class TestCreateWorkItem:
 
 
 # =============================================================================
-# create_continuation_work_item
+# WorkItemFactory.create_continuation
 # =============================================================================
 
 
@@ -334,7 +335,7 @@ class TestCreateContinuationWorkItem:
         nav = _make_nav(
             node_to_next={NodeID("t-1"): NodeID("t-2"), NodeID("t-2"): None},
         )
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=NodeID("t-1"),
         )
@@ -352,7 +353,7 @@ class TestCreateContinuationWorkItem:
             node_to_next={gate_node: None, coalesce_node: None},
             branch_first_node={"path_a": coalesce_node},
         )
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=gate_node,
             coalesce_name=CoalesceName("merge"),
@@ -366,7 +367,7 @@ class TestCreateContinuationWorkItem:
         nav = _make_nav(
             node_to_next={NodeID("t-1"): NodeID("t-2"), NodeID("t-2"): None},
         )
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=NodeID("t-1"),
             on_success_sink="branch_sink",
@@ -422,6 +423,56 @@ class TestFromTraversalContext:
         # Verify the walk can resolve through coalesce
         assert nav.resolve_jump_target_sink(coalesce_node) == "output_sink"
 
+    def test_unmapped_plugin_node_fails_closed(self) -> None:
+        """A traversal node with no plugin and no structural role raises, not skips.
+
+        Regression for elspeth-c522931bd1: the complement derivation classified
+        every plugin-less node_to_next entry as structural, so a transform
+        missing from node_to_plugin was silently skipped (fail-open).
+        """
+        transform = _make_mock_transform()
+        traversal = DAGTraversalContext(
+            node_step_map={NodeID("transform-1"): 1, NodeID("transform-2"): 2},
+            node_to_plugin={NodeID("transform-1"): transform},
+            node_to_next={
+                NodeID("transform-1"): NodeID("transform-2"),
+                NodeID("transform-2"): None,
+            },
+            coalesce_node_map={},
+        )
+
+        nav = DAGNavigator.from_traversal_context(traversal)
+
+        with pytest.raises(OrchestrationInvariantError, match="transform-2"):
+            nav.resolve_plugin_for_node(NodeID("transform-2"))
+
+    def test_explicit_structural_node_ids_are_honored(self) -> None:
+        """Nodes in the context's explicit structural set resolve to None (skip)."""
+        traversal = DAGTraversalContext(
+            node_step_map={},
+            node_to_plugin={},
+            node_to_next={NodeID("queue-1"): None},
+            coalesce_node_map={},
+            structural_node_ids=frozenset({NodeID("queue-1")}),
+        )
+
+        nav = DAGNavigator.from_traversal_context(traversal)
+
+        assert nav.resolve_plugin_for_node(NodeID("queue-1")) is None
+
+    def test_coalesce_nodes_are_always_structural(self) -> None:
+        """Coalesce map entries are unioned into the structural set by the context."""
+        coalesce_node = NodeID("coalesce::merge")
+        traversal = DAGTraversalContext(
+            node_step_map={},
+            node_to_plugin={},
+            node_to_next={coalesce_node: None},
+            coalesce_node_map={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset(),
+        )
+
+        assert coalesce_node in traversal.structural_node_ids
+
     def test_passes_through_supplementary_params(self) -> None:
         """Supplementary params (sink_names, coalesce_on_success_map) are passed through."""
         traversal = DAGTraversalContext(
@@ -445,7 +496,7 @@ class TestFromTraversalContext:
 
 
 class TestBranchTransformRouting:
-    """Tests for per-branch transform routing in create_continuation_work_item.
+    """Tests for per-branch transform routing in WorkItemFactory.create_continuation.
 
     ARCH-15 introduces per-branch transforms: fork children can now be routed
     to the first transform in their branch chain instead of directly to the
@@ -477,7 +528,7 @@ class TestBranchTransformRouting:
         )
 
         token = make_token_info(data={"v": 1}, branch_name="path_a")
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=gate_node,
             coalesce_name=CoalesceName("merge"),
@@ -510,7 +561,7 @@ class TestBranchTransformRouting:
         )
 
         token = make_token_info(data={"v": 1}, branch_name="path_a")
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=gate_node,
             coalesce_name=CoalesceName("merge"),
@@ -549,7 +600,7 @@ class TestBranchTransformRouting:
         token = make_token_info(data={"v": 1}, branch_name="path_a")
 
         # First: fork creates work item at branch start
-        item1 = nav.create_continuation_work_item(
+        item1 = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=gate_node,
             coalesce_name=CoalesceName("merge"),
@@ -560,7 +611,7 @@ class TestBranchTransformRouting:
 
         # Second: processor continues from branch-t1 to branch-t2
         # This uses normal continuation (no coalesce_name — it's mid-chain)
-        item2 = nav.create_continuation_work_item(
+        item2 = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=branch_t1,
         )
@@ -575,7 +626,7 @@ class TestBranchTransformRouting:
 class TestContinuationCoalesceNonForkRegression:
     """Regression tests for P1-2026-02-14.
 
-    Bug: create_continuation_work_item() treated ANY token with coalesce_name
+    Bug: continuation work-item creation treated ANY token with coalesce_name
     as a fresh fork child and routed it to branch_first_node. This caused
     backward jumps for non-fork continuations (deaggregation, aggregation flush)
     that are already mid-branch.
@@ -617,7 +668,7 @@ class TestContinuationCoalesceNonForkRegression:
         child_token = make_token_info(data={"v": 1}, branch_name="path_a")
 
         # Deaggregation continuation: current_node_id is the deagg transform (NOT the gate)
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=child_token,
             current_node_id=branch_t1,
             coalesce_name=CoalesceName("merge"),
@@ -660,7 +711,7 @@ class TestContinuationCoalesceNonForkRegression:
         flush_token = make_token_info(data={"v": 1}, branch_name="path_a")
 
         # Aggregation flush continuation: current_node_id is the agg transform
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=flush_token,
             current_node_id=branch_t1,
             coalesce_name=CoalesceName("merge"),
@@ -696,7 +747,7 @@ class TestContinuationCoalesceNonForkRegression:
         )
 
         fork_child = make_token_info(data={"v": 1}, branch_name="path_a")
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=fork_child,
             current_node_id=gate_node,
             coalesce_name=CoalesceName("merge"),
@@ -705,6 +756,40 @@ class TestContinuationCoalesceNonForkRegression:
         # Fork gate origin: must route to branch_first_node
         assert item.current_node_id == NodeID("branch-t1")
         assert item.coalesce_name == CoalesceName("merge")
+
+    def test_structural_node_with_coalesce_name_fails_closed(self) -> None:
+        """Coalesce-aware continuations must originate from plugin topology."""
+        coalesce_node = NodeID("coalesce::merge")
+        nav = _make_nav(
+            node_to_plugin={},
+            node_to_next={coalesce_node: None},
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="structural"):
+            WorkItemFactory(nav).create_continuation(
+                token=make_token_info(data={"v": 1}, branch_name="path_a"),
+                current_node_id=coalesce_node,
+                coalesce_name=CoalesceName("merge"),
+            )
+
+    def test_unknown_node_with_coalesce_name_fails_closed(self) -> None:
+        """Missing topology cannot be silently treated as a non-fork path."""
+        coalesce_node = NodeID("coalesce::merge")
+        nav = _make_nav(
+            node_to_plugin={},
+            node_to_next={NodeID("ghost"): coalesce_node, coalesce_node: None},
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="ghost"):
+            WorkItemFactory(nav).create_continuation(
+                token=make_token_info(data={"v": 1}, branch_name="path_a"),
+                current_node_id=NodeID("ghost"),
+                coalesce_name=CoalesceName("merge"),
+            )
 
     def test_non_fork_continuation_preserves_on_success_sink(self) -> None:
         """Non-fork continuation with coalesce_name must preserve on_success_sink.
@@ -731,7 +816,7 @@ class TestContinuationCoalesceNonForkRegression:
         )
 
         child_token = make_token_info(data={"v": 1}, branch_name="path_a")
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=child_token,
             current_node_id=branch_t1,
             coalesce_name=CoalesceName("merge"),
@@ -751,7 +836,7 @@ class TestContinuationCoalesceNonForkRegression:
         )
 
         token = make_token_info(data={"v": 1})
-        item = nav.create_continuation_work_item(
+        item = WorkItemFactory(nav).create_continuation(
             token=token,
             current_node_id=NodeID("t-1"),
         )
@@ -819,12 +904,12 @@ class TestResolveJumpTargetSinkInvalidSinkGuard:
 
 
 # =============================================================================
-# create_continuation_work_item: fork child with None branch_name guard
+# WorkItemFactory.create_continuation: fork child with None branch_name guard
 # =============================================================================
 
 
 class TestContinuationNullBranchNameGuard:
-    """Tests for the branch_name=None guard in create_continuation_work_item."""
+    """Tests for the branch_name=None guard in WorkItemFactory.create_continuation."""
 
     def test_fork_child_without_branch_name_raises(self) -> None:
         """Fork child token with branch_name=None raises invariant error."""
@@ -850,7 +935,7 @@ class TestContinuationNullBranchNameGuard:
         assert token.branch_name is None  # precondition
 
         with pytest.raises(OrchestrationInvariantError, match="branch_name is None"):
-            nav.create_continuation_work_item(
+            WorkItemFactory(nav).create_continuation(
                 token=token,
                 current_node_id=gate_node,
                 coalesce_name=CoalesceName("merge"),

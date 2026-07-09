@@ -3,15 +3,13 @@
 These are extracted from recorder.py to be shared across landscape modules.
 """
 
-import uuid
 from datetime import UTC, datetime
+
+from elspeth.core.ids import generate_id
+
+__all__ = ["generate_id", "now"]
 
 
 def now() -> datetime:
     """Get current UTC timestamp."""
     return datetime.now(UTC)
-
-
-def generate_id() -> str:
-    """Generate a unique ID (UUID4 hex)."""
-    return uuid.uuid4().hex

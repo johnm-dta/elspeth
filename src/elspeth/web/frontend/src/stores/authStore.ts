@@ -11,7 +11,7 @@ interface AuthState {
   loginError: string | null;
   isLoading: boolean;
 
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<boolean>;
   loginWithToken: (token: string) => Promise<void>;
   logout: () => Promise<void>;
   loadFromStorage: () => Promise<void>;
@@ -24,7 +24,17 @@ export const useAuthStore = create<AuthState>((set) => ({
   isLoading: true, // starts true; loadFromStorage resolves it
 
   async login(username: string, password: string) {
-    set({ loginError: null, isLoading: true });
+    // Deliberately does NOT touch isLoading: that flag drives AuthGuard's
+    // "Checking authentication" spinner, which REPLACES the LoginPage in
+    // the tree. Flipping it during an interactive attempt unmounted the
+    // form, so a failed login remounted a blank LoginPage and wiped the
+    // username the user had just typed (WCAG 3.3.7 Redundant Entry,
+    // elspeth-d49f8ad511). In-flight progress is the form's own concern
+    // (its submit button shows "Signing in…").
+    //
+    // Returns true on success so the form can clear only the password
+    // (never the username) after a failed attempt.
+    set({ loginError: null });
     try {
       const { access_token } = await api.login(username, password);
       localStorage.setItem(TOKEN_KEY, access_token);
@@ -32,6 +42,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
       const user = await api.fetchCurrentUser();
       set({ user, isLoading: false });
+      return true;
     } catch (err) {
       const apiErr = err as ApiError;
       const message =
@@ -40,6 +51,7 @@ export const useAuthStore = create<AuthState>((set) => ({
           : apiErr.detail ?? "Login failed. Please try again.";
       set({ token: null, user: null, loginError: message, isLoading: false });
       localStorage.removeItem(TOKEN_KEY);
+      return false;
     }
   },
 
@@ -68,16 +80,19 @@ export const useAuthStore = create<AuthState>((set) => ({
       { useExecutionStore },
       { useBlobStore },
       { useSecretsStore },
+      { useShareableReviewStore },
     ] = await Promise.all([
       import("./sessionStore"),
       import("./executionStore"),
       import("./blobStore"),
       import("./secretsStore"),
+      import("./shareableReviewStore"),
     ]);
     useSessionStore.getState().reset?.();
     useExecutionStore.getState().reset?.();
     useBlobStore.getState().reset();
     useSecretsStore.getState().reset();
+    useShareableReviewStore.getState().reset();
     usePreferencesStore.getState().reset();
   },
 

@@ -31,11 +31,11 @@ sinks:
 
 # Landscape: SQLite database for audit trail
 landscape:
-  url: ${DATABASE_URL:-sqlite:////app/state/landscape.db}
+  url: ${DATABASE_URL:-sqlite:////app/data/audit.db}
 
 # Payload store: filesystem storage
 payload_store:
-  base_path: /app/state/payloads
+  base_path: /app/data/payloads
 
 # Concurrency: single worker for smoke test
 concurrency:

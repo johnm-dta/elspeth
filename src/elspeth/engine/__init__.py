@@ -2,10 +2,8 @@
 
 This module provides the execution engine for ELSPETH pipelines:
 - Orchestrator: Full run lifecycle management
-- RowProcessor: Row-by-row processing through transforms
-- TokenManager: Token identity through forks/joins
-- SpanFactory: OpenTelemetry integration
-- RetryManager: Retry logic with tenacity
+- PipelineConfig: Runtime pipeline wiring passed to the orchestrator
+- RunResult: Terminal run status and accounting returned by the orchestrator
 
 Example:
     from elspeth.core.dag.graph import ExecutionGraph
@@ -33,60 +31,49 @@ Example:
     result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 """
 
-from elspeth.contracts import RowResult, TokenInfo
-from elspeth.contracts.config import RuntimeRetryConfig
-from elspeth.contracts.errors import MaxRetriesExceeded
-from elspeth.core.expression_parser import (
-    ExpressionParser,
-    ExpressionSecurityError,
-    ExpressionSyntaxError,
-)
-from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
-from elspeth.engine.executors import (
-    AggregationExecutor,
-    GateExecutor,
-    MissingEdgeError,
-    SinkExecutor,
-    TransformExecutor,
-)
-from elspeth.engine.orchestrator import (
-    AggregationFlushResult,
-    ExecutionCounters,
-    Orchestrator,
-    PipelineConfig,
-    RouteValidationError,
-    RowPlugin,
-    RunResult,
-)
-from elspeth.engine.processor import RowProcessor
-from elspeth.engine.retry import RetryManager
-from elspeth.engine.spans import SpanFactory
-from elspeth.engine.tokens import TokenManager
+from __future__ import annotations
 
-__all__ = [
-    "AggregationExecutor",
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+from elspeth.contracts.errors import MaxRetriesExceeded
+
+if TYPE_CHECKING:
+    from elspeth.engine.orchestrator import (
+        AggregationFlushResult,
+        ExecutionCounters,
+        Orchestrator,
+        PipelineConfig,
+        RouteValidationError,
+        RowPlugin,
+        RunResult,
+    )
+
+_ORCHESTRATOR_EXPORTS = {
     "AggregationFlushResult",
-    "CoalesceExecutor",
-    "CoalesceOutcome",
     "ExecutionCounters",
-    "ExpressionParser",
-    "ExpressionSecurityError",
-    "ExpressionSyntaxError",
-    "GateExecutor",
-    "MaxRetriesExceeded",
-    "MissingEdgeError",
     "Orchestrator",
     "PipelineConfig",
-    "RetryManager",
     "RouteValidationError",
     "RowPlugin",
-    "RowProcessor",
-    "RowResult",
     "RunResult",
-    "RuntimeRetryConfig",
-    "SinkExecutor",
-    "SpanFactory",
-    "TokenInfo",
-    "TokenManager",
-    "TransformExecutor",
+}
+
+__all__ = [
+    "AggregationFlushResult",
+    "ExecutionCounters",
+    "MaxRetriesExceeded",
+    "Orchestrator",
+    "PipelineConfig",
+    "RouteValidationError",
+    "RowPlugin",
+    "RunResult",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in _ORCHESTRATOR_EXPORTS:
+        value = getattr(import_module("elspeth.engine.orchestrator"), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -78,6 +78,17 @@ export function RecoveryPanel({
         className="recovery-panel"
         tabIndex={-1}
         onKeyDown={(event) => {
+          // Escape dismisses via Discard — the app-wide dismissal model
+          // (every other dialog/drawer is focus-trapped + Escape); this
+          // panel was the outlier (elspeth-83eb51334f). Discard is the
+          // panel's safe exit: it drops the recovery OFFER, not composed
+          // state. Focus is trapped inside the dialog, so a dialog-level
+          // handler sees every Escape press.
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onDiscard();
+            return;
+          }
           if (event.key === "Enter" && event.target === event.currentTarget) {
             event.preventDefault();
           }
@@ -88,10 +99,11 @@ export function RecoveryPanel({
             <h2 id="recovery-panel-title">Recover partial composer draft</h2>
             <p>{recoveryError.detail}</p>
           </div>
-          <span
-            className="recovery-panel-reason"
-            aria-label={`Recovery reason: ${reason.toLowerCase()}`}
-          >
+          {/* The "Recovery reason:" context is a visually-hidden prefix —
+              the previous aria-label sat on a role-less span, which AT
+              ignores (WCAG 1.3.1, elspeth-37293a3b7c). */}
+          <span className="recovery-panel-reason">
+            <span className="sr-only">Recovery reason: </span>
             {reason}
           </span>
         </header>

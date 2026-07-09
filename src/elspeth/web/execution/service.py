@@ -42,7 +42,7 @@ from elspeth.core.blobs_inline import (
     _fetch_blob_contents,
     _substitute_blob_content_refs,
 )
-from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_config_dict, load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
@@ -99,6 +99,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
+from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -551,7 +552,7 @@ class ExecutionServiceImpl:
         if composition_state.outputs:
             from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
 
-            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir), session_id=str(session_id))
             for output in composition_state.outputs:
                 for key in SINK_LOCAL_PATH_OPTION_KEYS:
                     value = output.options.get(key)
@@ -573,7 +574,7 @@ class ExecutionServiceImpl:
                 resolve_data_path,
             )
 
-            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir), session_id=str(session_id))
             for node in composition_state.nodes:
                 if node.node_type != "transform":
                     continue
@@ -590,6 +591,66 @@ class ExecutionServiceImpl:
                             raise PathAllowlistViolationError(
                                 f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
                             )
+
+        if composition_state.nodes:
+            for node in composition_state.nodes:
+                if node.node_type != "transform":
+                    continue
+                provider_policy_error = web_rag_provider_config_policy_error(node.options)
+                if provider_policy_error is not None:
+                    raise PipelineValidationError(
+                        errors=(
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=provider_policy_error,
+                                suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                                error_code=None,
+                            ),
+                        ),
+                        readiness=ValidationReadiness(
+                            authoring_valid=False,
+                            execution_ready=False,
+                            completion_ready=False,
+                            blockers=[
+                                ValidationReadinessBlocker(
+                                    code="managed_identity_policy",
+                                    component_id=node.id,
+                                    component_type="transform",
+                                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                                )
+                            ],
+                        ),
+                    )
+                llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+                if llm_retry_policy_error is not None:
+                    raise PipelineValidationError(
+                        errors=(
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=llm_retry_policy_error,
+                                suggestion=(
+                                    "Set max_capacity_retry_seconds to a small positive value "
+                                    "or configure pool_size > 1 for pooled retry handling."
+                                ),
+                                error_code=None,
+                            ),
+                        ),
+                        readiness=ValidationReadiness(
+                            authoring_valid=False,
+                            execution_ready=False,
+                            completion_ready=False,
+                            blockers=[
+                                ValidationReadinessBlocker(
+                                    code="llm_retry_budget_policy",
+                                    component_id=node.id,
+                                    component_type="transform",
+                                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                                )
+                            ],
+                        ),
+                    )
 
         # Fail-closed pre-run validation gate (notes/composer-advisor-surface-map-2026-06-08.md).
         # Previously execute() created a run and let an invalid pipeline fail OPAQUELY
@@ -609,6 +670,7 @@ class ExecutionServiceImpl:
             self._yaml_generator,
             secret_service=self._secret_service,
             user_id=user_id,
+            session_id=str(session_id),
         )
         if not preflight_result.is_valid:
             raise PipelineValidationError(
@@ -898,6 +960,7 @@ class ExecutionServiceImpl:
                     secret_service=self._secret_service,
                     user_id=user_id,
                     blob_get_metadata=_blob_get_metadata,
+                    session_id=str(session_id) if session_id is not None else None,
                 ),
             ),
         )
@@ -1043,15 +1106,12 @@ class ExecutionServiceImpl:
             # Resolve secret refs before writing YAML to temp file.
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
-            resolved_yaml = pipeline_yaml
             resolved_dict: dict[str, Any] | None = None
             secret_resolution_inputs: list[SecretResolutionInput] = []
             inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
             needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
             if needs_config_tree:
-                import yaml as _yaml
-
-                config_dict = _yaml.safe_load(pipeline_yaml)
+                config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
                 if type(config_dict) is not dict:
                     raise TypeError(
                         f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
@@ -1176,7 +1236,7 @@ class ExecutionServiceImpl:
                             blob_metadata=blob_metadata,
                         )
                     except BlobIntegrityError:
-                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1, {"run_id": run_id})
+                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1)
                         raise
                     self._call_async(
                         self._session_service.record_blob_inline_resolutions(
@@ -1186,18 +1246,18 @@ class ExecutionServiceImpl:
                         )
                     )
 
-                if secret_resolution_inputs or inline_refs:
-                    resolved_yaml = _yaml.dump(resolved_dict, default_flow_style=False)
-
-            # Load settings from YAML string — never write resolved secrets
-            # to disk.  load_settings_from_yaml_string() parses in-process,
-            # bypassing Dynaconf file I/O. Web-authored pipeline YAML must
-            # never expand host ${VAR} placeholders: known secret inventory
-            # names are resolved above via the audited resolve_secret_refs
-            # path, and any remaining ${VAR} is user-authored data, not a
-            # licence to read the host environment. (Operator ${VAR} expansion
-            # remains available on the CLI loader, load_settings().)
-            settings = load_settings_from_yaml_string(resolved_yaml, expand_env_vars=False)
+            # Load settings in-process — never write resolved secrets or inline
+            # blob contents to disk, and never serialize them back through YAML.
+            # Web-authored pipeline YAML must not expand host ${VAR}
+            # placeholders: known secret inventory names are resolved above via
+            # the audited resolve_secret_refs path, and any remaining ${VAR} is
+            # user-authored data, not a licence to read the host environment.
+            # Operator ${VAR} expansion remains available on the CLI loader,
+            # load_settings().
+            if resolved_dict is None:
+                settings = load_settings_from_yaml_string(pipeline_yaml, expand_env_vars=False)
+            else:
+                settings = load_settings_from_config_dict(resolved_dict, expand_env_vars=False)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph
@@ -1244,7 +1304,7 @@ class ExecutionServiceImpl:
             from elspeth.core.rate_limit import RateLimitRegistry
             from elspeth.telemetry import create_telemetry_manager
 
-            rate_limit_config = RuntimeRateLimitConfig.from_settings(settings.rate_limit)
+            rate_limit_config = RuntimeRateLimitConfig.from_settings(settings.rate_limit, state_dir=self._settings.data_dir)
             concurrency_config = RuntimeConcurrencyConfig.from_settings(settings.concurrency)
             checkpoint_config = RuntimeCheckpointConfig.from_settings(settings.checkpoint)
             telemetry_config = RuntimeTelemetryConfig.from_settings(settings.telemetry)
@@ -1806,7 +1866,7 @@ class ExecutionServiceImpl:
 
     def _persist_and_broadcast_run_event(self, run_id: str, run_event: RunEvent) -> BroadcastResult:
         try:
-            self._call_async(
+            record = self._call_async(
                 self._session_service.append_run_event(
                     run_id=UUID(run_id),
                     timestamp=run_event.timestamp,
@@ -1814,7 +1874,15 @@ class ExecutionServiceImpl:
                     data=run_event.data.model_dump(mode="json"),
                 )
             )
+            run_event = run_event.with_event_sequence(record.sequence)
         except (OSError, SQLAlchemyError) as exc:
+            # Transport/IO fault on the run_events write only. run_events is a
+            # secondary websocket-replay/inspection stream — authoritative run
+            # lifecycle state persists on the separate must-succeed
+            # update_run_status path — so a transient disk/DB fault degrades to
+            # broadcast-without-sequence rather than aborting live progress.
+            # Tier-1 breaches (AuditIntegrityError, ValueError "Run not found")
+            # are NOT in this tuple and propagate.
             slog.error(
                 "run_event_persist_failed",
                 run_id=run_id,

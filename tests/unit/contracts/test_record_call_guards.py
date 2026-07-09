@@ -8,16 +8,86 @@ These test the offensive programming guards that detect framework bugs:
 - Token mismatch between ctx.token and authoritative node_state
 """
 
-from unittest.mock import Mock
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
-from elspeth.contracts import FrameworkBugError
+from elspeth.contracts import FrameworkBugError, NodeStateStatus
+from elspeth.contracts.audit import Call, NodeStateCompleted
+from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.factories import make_token_info
+
+
+def _completed_node_state(*, token_id: str) -> NodeStateCompleted:
+    return NodeStateCompleted(
+        state_id="state-1",
+        token_id=token_id,
+        node_id="transform-1",
+        step_index=0,
+        attempt=0,
+        status=NodeStateStatus.COMPLETED,
+        input_hash="input-hash",
+        output_hash="output-hash",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        duration_ms=1.0,
+    )
+
+
+class _StatePathAuditWriter:
+    def __init__(self, *, node_state: NodeStateCompleted | None) -> None:
+        self.node_state = node_state
+        self.allocated_state_ids: list[str] = []
+        self.recorded_calls: list[dict[str, Any]] = []
+        self.node_state_lookups: list[str] = []
+
+    def allocate_call_index(self, state_id: str) -> int:
+        self.allocated_state_ids.append(state_id)
+        return len(self.allocated_state_ids) - 1
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: RawCallPayload,
+        response_data: RawCallPayload | None = None,
+        error: RawCallPayload | None = None,
+        latency_ms: float | None = None,
+    ) -> Call:
+        self.recorded_calls.append(
+            {
+                "state_id": state_id,
+                "call_index": call_index,
+                "call_type": call_type,
+                "status": status,
+                "request_data": request_data,
+                "response_data": response_data,
+                "error": error,
+                "latency_ms": latency_ms,
+            }
+        )
+        return Call(
+            call_id=f"call-{call_index}",
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_hash="request-hash",
+            response_hash="response-hash" if response_data is not None else None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            state_id=state_id,
+            latency_ms=latency_ms,
+        )
+
+    def get_node_state(self, state_id: str) -> NodeStateCompleted | None:
+        self.node_state_lookups.append(state_id)
+        return self.node_state
 
 
 class TestRecordCallNoLandscapeGuard:
@@ -81,15 +151,12 @@ class TestRecordCallNodeStateLookupGuard:
 
     def test_raises_when_get_node_state_returns_none(self) -> None:
         """state_id exists but no matching node_state in DB = framework bug."""
-        mock_landscape = Mock()
-        mock_landscape.allocate_call_index = Mock(return_value=0)
-        mock_landscape.record_call = Mock(return_value=Mock())
-        mock_landscape.get_node_state = Mock(return_value=None)
+        landscape = _StatePathAuditWriter(node_state=None)
 
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-orphan",
             token=make_token_info(token_id="token-1"),
         )
@@ -108,19 +175,14 @@ class TestRecordCallTokenMismatchGuard:
     def test_raises_on_token_id_mismatch(self) -> None:
         """ctx.token.token_id != node_state.token_id = framework bug (ctx out of sync)."""
         # Authoritative node_state says token-AUTHORITATIVE
-        mock_node_state = Mock()
-        mock_node_state.token_id = "token-AUTHORITATIVE"
-
-        mock_landscape = Mock()
-        mock_landscape.allocate_call_index = Mock(return_value=0)
-        mock_landscape.record_call = Mock(return_value=Mock())
-        mock_landscape.get_node_state = Mock(return_value=mock_node_state)
+        node_state = _completed_node_state(token_id="token-AUTHORITATIVE")
+        landscape = _StatePathAuditWriter(node_state=node_state)
 
         # But ctx.token says token-STALE
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-1",
             token=make_token_info(token_id="token-STALE"),
         )
@@ -134,18 +196,13 @@ class TestRecordCallTokenMismatchGuard:
 
     def test_no_error_when_tokens_match(self) -> None:
         """When ctx.token.token_id matches node_state.token_id, no error."""
-        mock_node_state = Mock()
-        mock_node_state.token_id = "token-row-1"
-
-        mock_landscape = Mock()
-        mock_landscape.allocate_call_index = Mock(return_value=0)
-        mock_landscape.record_call = Mock(return_value=Mock())
-        mock_landscape.get_node_state = Mock(return_value=mock_node_state)
+        node_state = _completed_node_state(token_id="token-row-1")
+        landscape = _StatePathAuditWriter(node_state=node_state)
 
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-1",
             token=make_token_info(token_id="token-row-1"),
         )
@@ -159,18 +216,13 @@ class TestRecordCallTokenMismatchGuard:
 
     def test_no_error_when_ctx_token_is_none(self) -> None:
         """When ctx.token is None, skip the mismatch check (operation calls)."""
-        mock_node_state = Mock()
-        mock_node_state.token_id = "token-1"
-
-        mock_landscape = Mock()
-        mock_landscape.allocate_call_index = Mock(return_value=0)
-        mock_landscape.record_call = Mock(return_value=Mock())
-        mock_landscape.get_node_state = Mock(return_value=mock_node_state)
+        node_state = _completed_node_state(token_id="token-1")
+        landscape = _StatePathAuditWriter(node_state=node_state)
 
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=mock_landscape,
+            landscape=landscape,
             state_id="state-1",
             token=None,
         )

@@ -15,6 +15,19 @@ vi.mock("@/components/inspector/GraphView", () => ({
   GraphView: () => createElement("div", { "data-testid": "graph-view-stub" }),
 }));
 
+/** Minimal composition with content (one source) — export is meaningful. */
+function nonEmptyCompositionState() {
+  return {
+    id: "state-1",
+    version: 1,
+    sources: { source: { plugin: "csv", options: {} } },
+    nodes: [],
+    edges: [],
+    outputs: [],
+    metadata: { name: null, description: null },
+  };
+}
+
 describe("useHashRouter Phase 3B fragment migration", () => {
   beforeEach(() => {
     resetStore(useSessionStore);
@@ -55,16 +68,70 @@ describe("useHashRouter Phase 3B fragment migration", () => {
     window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
   });
 
-  it("opens the yaml modal event and rewrites #/{id}/yaml", async () => {
+  it("opens the yaml modal event and rewrites #/{id}/yaml when the pipeline has content", async () => {
     const handler = vi.fn();
     window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
     window.history.replaceState(null, "", "#/sess-1/yaml");
+    // Session already active with a KNOWN, non-empty composition — the
+    // yaml verb is content-gated (elspeth-bff8043d33 residual).
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionStateLoaded: true,
+      compositionState: nonEmptyCompositionState(),
+    } as never);
 
     renderHook(() => useHashRouter());
     await act(async () => {});
 
     expect(handler).toHaveBeenCalled();
     expect(window.location.hash).toBe("#/sess-1");
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
+  });
+
+  it("does NOT open the yaml modal for #/{id}/yaml on an empty pipeline", async () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
+    window.history.replaceState(null, "", "#/sess-1/yaml");
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionStateLoaded: true,
+      compositionState: null,
+    } as never);
+
+    renderHook(() => useHashRouter());
+    await act(async () => {});
+
+    expect(handler).not.toHaveBeenCalled();
+    // The hash is still canonicalised — only the modal open is withheld.
+    expect(window.location.hash).toBe("#/sess-1");
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
+  });
+
+  it("defers the yaml modal until the composition state loads, then gates on content", async () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
+    window.history.replaceState(null, "", "#/sess-1/yaml");
+    // Fresh deep-link arrival: selectSession's fetch is still in flight, so
+    // the composition is not yet known.
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionStateLoaded: false,
+      compositionState: null,
+    } as never);
+
+    renderHook(() => useHashRouter());
+    await act(async () => {});
+    expect(handler).not.toHaveBeenCalled();
+
+    // The fetch settles with content — the deferred dispatch fires.
+    await act(async () => {
+      useSessionStore.setState({
+        compositionStateLoaded: true,
+        compositionState: nonEmptyCompositionState(),
+      } as never);
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
     window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
   });
 
@@ -388,6 +455,13 @@ describe("useHashRouter — Batch 2 fixes", () => {
 
   it("two rapid hashchanges both fire their respective modal events in order", async () => {
     window.history.replaceState(null, "", "#/sess-1");
+    // The yaml verb is content-gated: give the active session a KNOWN,
+    // non-empty composition so its dispatch fires (elspeth-bff8043d33).
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionStateLoaded: true,
+      compositionState: nonEmptyCompositionState(),
+    } as never);
     renderHook(() => useHashRouter());
 
     const graphHandler = vi.fn();

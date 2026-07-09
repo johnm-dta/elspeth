@@ -214,6 +214,14 @@ def _is_dict_str_any(annotation: ast.expr | None) -> bool:
     if annotation is None:
         return False
 
+    def is_str_annotation(expr: ast.expr) -> bool:
+        return isinstance(expr, ast.Name) and expr.id == "str"
+
+    def is_any_annotation(expr: ast.expr) -> bool:
+        if isinstance(expr, ast.Name) and expr.id == "Any":
+            return True
+        return isinstance(expr, ast.Attribute) and expr.attr == "Any" and isinstance(expr.value, ast.Name) and expr.value.id == "typing"
+
     # dict[str, Any] - modern syntax
     if (
         isinstance(annotation, ast.Subscript)
@@ -223,7 +231,7 @@ def _is_dict_str_any(annotation: ast.expr | None) -> bool:
         and len(annotation.slice.elts) == 2
     ):
         key_type, value_type = annotation.slice.elts
-        if isinstance(key_type, ast.Name) and key_type.id == "str" and isinstance(value_type, ast.Name) and value_type.id == "Any":
+        if is_str_annotation(key_type) and is_any_annotation(value_type):
             return True
     return False
 
@@ -486,6 +494,10 @@ class ImportIndex:
                 if isinstance(node, ast.ImportFrom) and node.module:
                     for alias in node.names:
                         index._record_import(node.module, alias.name, py_file)
+                        if alias.name == "*":
+                            continue
+                        local_name = alias.asname or alias.name
+                        import_aliases[local_name] = f"{node.module}.{alias.name}"
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.asname:

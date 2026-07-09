@@ -12,13 +12,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, insert, select
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import redact_source_storage_path
@@ -44,28 +44,50 @@ from elspeth.web.sessions.schema import initialize_session_schema
 EXPECTED_REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 
 
+class _CatalogDouble:
+    def list_sources(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+            PluginSummary(name="json", description="JSON source", plugin_type="source", config_fields=[]),
+            PluginSummary(name="text", description="Text source", plugin_type="source", config_fields=[]),
+        ]
+
+    def list_transforms(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(name="passthrough", description="Passthrough transform", plugin_type="transform", config_fields=[]),
+        ]
+
+    def list_sinks(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
+        ]
+
+    def get_schema(self, plugin_type: PluginKind, name: str) -> PluginSchemaInfo:
+        return PluginSchemaInfo(
+            name=name,
+            plugin_type=plugin_type,
+            description=f"{name} {plugin_type}",
+            json_schema={"title": f"{name.title()}Config", "properties": {"path": {"type": "string"}}},
+            knob_schema={"fields": []},
+        )
+
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Any,
+    ) -> tuple[str, ...]:
+        return ()
+
+
 def _empty_state() -> CompositionState:
     return CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
 
 
-def _mock_catalog() -> MagicMock:
-    catalog = MagicMock()
-    catalog.list_sources.return_value = [
-        PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
-        PluginSummary(name="json", description="JSON source", plugin_type="source", config_fields=[]),
-        PluginSummary(name="text", description="Text source", plugin_type="source", config_fields=[]),
-    ]
-    catalog.list_sinks.return_value = [
-        PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="csv",
-        plugin_type="source",
-        description="CSV source",
-        json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
-        knob_schema={"fields": []},
-    )
-    return catalog
+def _mock_catalog() -> CatalogService:
+    return _CatalogDouble()
 
 
 def _insert_user_message(engine: Any, session_id: str, content: str) -> str:

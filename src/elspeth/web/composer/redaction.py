@@ -16,9 +16,10 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from types import MappingProxyType, UnionType
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
@@ -28,6 +29,7 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
+_REDACTED_OPTION_VALUE = "<redacted-option-value>"
 
 # Fixed sentinel for response keys that appear in the input but are not
 # declared in the manifest entry's known_response_keys or
@@ -35,6 +37,15 @@ REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 # MUST compare by ==, not by prefix or regex.  No length disclosure
 # (closes W6 / spec §8.1 RSK-03 weak echo).
 REDACTED_UNKNOWN_RESPONSE_KEY = "<redacted-unknown-response-key>"
+
+# Fixed sentinel for arguments that appear in the input but are not declared in
+# a manifest entry's optional known_argument_keys allowlist. Unknown key names
+# are removed too; they are LLM-controlled text and may themselves carry
+# sensitive payload. Most declarative tools still preserve historical
+# passthrough behavior; tools that persist untyped, LLM-supplied argument dicts
+# can opt into this fail-closed mode with redact_unknown_argument_keys=True.
+REDACTED_UNKNOWN_ARGUMENT_KEY = "<redacted-unknown-argument-key>"
+REDACTED_UNKNOWN_ARGUMENTS_FIELD = "_unknown_arguments"
 
 # Sentinel applied to Sensitive[T] fields whose _SensitiveMarker carries no
 # summarizer callable.  A field declared ``Annotated[T, Sensitive()]`` (with
@@ -631,7 +642,7 @@ class ToolRedactionPolicy:
     ``argument_model`` set) is preferred for any tool that has, or would
     benefit from, a redaction-bearing Pydantic argument model.
 
-    Four invariants are enforced at construction time:
+    Five invariants are enforced at construction time:
 
     1. **No orphan summarizers** — every key in ``argument_summarizers`` must
        also appear in ``sensitive_argument_keys``. A summarizer for a key that
@@ -649,6 +660,12 @@ class ToolRedactionPolicy:
     4. **``handles_no_sensitive_data=False`` requires ``known_response_keys``**
        — the allowlist defends against response-shape drift; unknown keys at
        persistence time are fail-closed redacted with a fixed sentinel.
+
+    5. **``known_argument_keys`` covers ``sensitive_argument_keys`` when set or
+       when ``redact_unknown_argument_keys`` is enabled** — the argument
+       allowlist is opt-in for legacy compatibility, but once a policy uses it
+       to fail-close unknown arguments, every sensitive argument key must also
+       be known.
 
     **Response-walker fail-closed behavior for declarative entries:**
 
@@ -685,10 +702,12 @@ class ToolRedactionPolicy:
 
     sensitive_argument_keys: tuple[str, ...] = ()
     sensitive_response_keys: tuple[str, ...] = ()
+    known_argument_keys: tuple[str, ...] = ()
     known_response_keys: tuple[str, ...] = ()
     argument_summarizers: Mapping[str, Callable[[Any], str]] = field(default_factory=dict)
     handles_no_sensitive_data: bool = False
     handles_no_sensitive_data_reason_struct: HandlesNoSensitiveDataReason | None = None
+    redact_unknown_argument_keys: bool = False
 
     def __post_init__(self) -> None:
         # Validators run BEFORE freeze_fields so they read mutable state.
@@ -700,6 +719,13 @@ class ToolRedactionPolicy:
             raise ValueError(
                 f"argument_summarizers keys {sorted(orphan_summarizers)} are not declared in "
                 f"sensitive_argument_keys; orphan summarizers indicate a policy bug."
+            )
+
+        orphan_sensitive_arguments = set(self.sensitive_argument_keys) - set(self.known_argument_keys)
+        if (self.known_argument_keys or self.redact_unknown_argument_keys) and orphan_sensitive_arguments:
+            raise ValueError(
+                f"sensitive_argument_keys {sorted(orphan_sensitive_arguments)} are not declared in "
+                "known_argument_keys; the opt-in argument allowlist must cover every sensitive argument key."
             )
 
         if self.handles_no_sensitive_data and self.handles_no_sensitive_data_reason_struct is None:
@@ -724,6 +750,7 @@ class ToolRedactionPolicy:
             self,
             "sensitive_argument_keys",
             "sensitive_response_keys",
+            "known_argument_keys",
             "known_response_keys",
             "argument_summarizers",
         )
@@ -780,28 +807,38 @@ class ToolRedaction:
             )
 
 
-def _summarize_set_source_options(options: dict[str, Any]) -> str:
+def _summarize_option_shape(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _summarize_option_shape(child) for key, child in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_summarize_option_shape(item) for item in value]
+    if isinstance(value, AbstractSet):
+        return sorted((_summarize_option_shape(item) for item in value), key=repr)
+    return _REDACTED_OPTION_VALUE
+
+
+def _summarize_set_source_options(options: object) -> str:
     """Summarizer for ``set_source.options`` (spec §4.2.6).
 
-    Wraps the existing :func:`redact_source_storage_path` helper so the
-    redacted view of options is computed via the same path-blob-ref logic
-    used by the legacy state-serialization redactor.  The output is the
-    canonical JSON form of the redacted options dict so it is reusable as
-    a hashable / loggable scalar in audit records.
+    Produces canonical JSON for the option payload's shape: mapping keys,
+    nested mappings, and sequence lengths are preserved, but every scalar
+    value is replaced before serialization. Plugin options are an open,
+    plugin-defined surface and routinely carry filesystem paths, source
+    object locators, prompt text, and credential material such as connection
+    strings, SAS tokens, API keys, and client secrets. Therefore the summary
+    must not rely on per-plugin sensitive-key knowledge or on the blob_ref
+    path-only redactor.
 
     Contract (spec §4.2.6, §9 RSK-03):
       * MUST NOT raise on any reachable input value.
       * MUST return ``str``.
 
-    ``default=str`` on :func:`json.dumps` ensures RSK-03 holds for values
-    that survive Pydantic coercion but are not natively JSON-serialisable
-    (``datetime``, ``bytes``, ``UUID``) — a future schema that admits
-    those types via :class:`typing.Any` would otherwise raise
-    :class:`TypeError` at the summarizer boundary.
+    ``default=str`` on :func:`json.dumps` is retained as a final defensive
+    guard for unusual mapping keys or container shapes; reachable scalar
+    values are substituted before dumps sees them.
     """
-    redacted = redact_source_storage_path({"source": {"options": options}})
     return json.dumps(
-        redacted["source"]["options"],
+        _summarize_option_shape(options) if isinstance(options, Mapping) else "<invalid-options>",
         sort_keys=True,
         separators=(",", ":"),
         default=str,
@@ -985,16 +1022,10 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
     ``arguments.get("options", {})``.  We mirror that absent-equals-empty
     semantics with ``Field(default_factory=dict)`` rather than declaring
     ``options: dict | None = None``.  Reason: the summarizer needs to
-    handle a real ``dict`` value (the existing
-    :func:`_summarize_set_source_options` does
-    ``redact_source_storage_path({"source": {"options": options}})``,
-    which expects ``options`` to be a dict-or-None and treats absence as
-    "no redaction needed").  A ``None`` value reaches the summarizer and
-    produces ``"null"`` in the redacted view — a meaningless audit signal
-    that does not match the runtime semantics (the handler treats an
-    absent slot as ``{}``).  Defaulting to ``{}`` preserves "absent = no
-    options" at the argument boundary AND records it accurately on the
-    audit side as an empty-options dict.
+    handle a real mapping value and should record an absent slot as an
+    empty option shape, not as a separate ``None`` shape.  Defaulting to
+    ``{}`` preserves "absent = no options" at the argument boundary AND
+    records it accurately on the audit side as an empty-options dict.
 
     ``plugin`` and ``on_validation_failure`` keep ``str | None = None``
     because the handler distinguishes their absent semantics: ``plugin``
@@ -1126,24 +1157,25 @@ class CreateBlobArgumentsModel(BaseModel):
 #     summarizer :func:`_summarize_inline_blob_content` already used by
 #     ``create_blob`` / ``update_blob`` (uniformity-across-blob-payload-tools
 #     contract).
-#   * ``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``, and
-#     ``outputs[*].options`` ARE ``Sensitive[dict]`` with
+#   * ``nodes[*].options`` and ``outputs[*].options`` ARE ``Sensitive[dict]`` with
 #     :func:`_summarize_set_source_options` — the adequacy guard (§4.4.2)
 #     fails closed on inspection-resistant ``dict[str, Any]`` field types
 #     without Sensitive marking, and the LLM-supplied dicts routinely
-#     carry secret-ref markers, filesystem paths, and prompt-template
-#     payloads.  Reusing the source-side summarizer is structurally safe
-#     because :func:`redact_source_storage_path` is content-agnostic (it
-#     applies path-blob_ref redaction when present and leaves every other
-#     key verbatim); a future node-shape-aware summarizer may also redact
-#     the LLM template field.
+#     carry secret-ref markers, filesystem paths, credential material, and
+#     prompt-template payloads.  Reusing the source-side summarizer is
+#     structurally safe because it records option shape while replacing all
+#     scalar values before persistence; future tool-specific summarizers may
+#     preserve more non-sensitive structure.
+#   * ``nodes[*].routes`` and ``nodes[*].trigger`` are structurally typed
+#     models/dicts with closed scalar leaf types, so they are validated and
+#     walked directly rather than collapsed by the option summarizer.
 #
 # Walker coverage at the persistence boundary:
 # ``walk_model_schema`` descends into ``list[NestedModel]`` so the Sensitive markers on the nested option
 # dicts are discoverable from the outer :class:`SetPipelineArgumentsModel`.
-# This produces five Sensitive paths in the model walk:
+# This produces four Sensitive paths in the model walk:
 # ``source.options``, ``source.inline_blob.content``, ``nodes[*].options``,
-# ``nodes[*].routes``, ``nodes[*].trigger``, ``outputs[*].options``.
+# ``outputs[*].options``.
 # ---------------------------------------------------------------------------
 
 
@@ -1296,19 +1328,17 @@ class _PipelineNodeModel(BaseModel):
     Without a Sensitive annotation the adequacy guard (§4.4.2) fails
     closed on the inspection-resistant ``dict[str, Any]`` field type;
     with the annotation the persistence boundary collapses the field to
-    the path-redacting canonical-JSON summary that
+    the canonical-JSON shape summary that
     :func:`_summarize_set_source_options` already supplies for source-
     side options.
 
-    The summarizer is reused (NOT a new node-specific one) because
-    :func:`redact_source_storage_path` is content-agnostic: it walks the
-    incoming dict, replaces ``path`` values when an adjacent ``blob_ref``
-    is present, and leaves every other key verbatim.  That behaviour is
-    correct for ``nodes[*].options`` too — if a node's options happen to
-    carry a ``path`` + ``blob_ref`` pair (e.g., a future blob-aware
-    transform), the redaction applies. Future work may
-    introduce a node-shape-aware summarizer that also redacts the LLM
-    prompt template field.
+    The summarizer is reused (NOT a new node-specific one) because it is
+    option-surface agnostic: it preserves mapping keys and nested container
+    shape while replacing every scalar value. That behaviour is correct for
+    ``nodes[*].options`` too because plugin options may carry credentials,
+    paths, prompts, or future plugin-defined sensitive fields. Future work
+    may introduce a node-shape-aware summarizer that preserves more
+    non-sensitive structure.
 
     ``routes`` and ``trigger`` typing
     ---------------------------------
@@ -1325,12 +1355,12 @@ class _PipelineNodeModel(BaseModel):
     away.
 
     These two fields previously carried a Sensitive marker that satisfied
-    the adequacy guard MECHANICALLY but did no actual redaction (the shared
-    content-agnostic summarizer passes them through verbatim).  Replacing
-    the ``dict[str, Any]`` types with structural typings drops the markers
-    and strengthens boundary validation (e.g., ``routes: {"true": 42}`` is
-    now rejected at Pydantic validation instead of silently passing through
-    to become an audit fact).  See F3 in
+    the adequacy guard MECHANICALLY while losing useful route/trigger
+    structure behind a generic option summary. Replacing the
+    ``dict[str, Any]`` types with structural typings drops the markers and
+    strengthens boundary validation (e.g., ``routes: {"true": 42}`` is now
+    rejected at Pydantic validation instead of silently passing through to
+    become an audit fact).  See F3 in
     ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``.
     """
 
@@ -1441,13 +1471,12 @@ class ApplyPipelineRecipeArgumentsModel(BaseModel):
 
     Marking ``slots`` :class:`Sensitive` with
     :func:`_summarize_set_source_options` collapses the dict to the
-    canonical-JSON form with path-blob_ref redaction applied.  The
-    summarizer is reused (NOT a recipe-specific one) for the same
-    structural reasons as :class:`_PipelineNodeModel.options` —
-    :func:`redact_source_storage_path` is content-agnostic and applies
-    when the relevant keys are present, leaving everything else verbatim.
-    A future recipe-shape-aware summarizer may
-    also redacts the template-string slot.
+    canonical-JSON shape summary. The summarizer is reused (NOT a
+    recipe-specific one) for the same structural reasons as
+    :class:`_PipelineNodeModel.options`: recipe slots may carry paths,
+    secret names, blob ids, or prompt templates, so scalar values are not
+    persisted. A future recipe-shape-aware summarizer may preserve more
+    non-sensitive structure.
 
     Empty-string semantic check on ``recipe_name``
     ----------------------------------------------
@@ -1497,18 +1526,17 @@ class SetPipelineArgumentsModel(BaseModel):
 
     Sensitive marker surface
     ------------------------
-    Six paths carry :class:`Sensitive` markers (see module-level note above):
+    Four paths carry :class:`Sensitive` markers (see module-level note above):
       * ``source.options`` — :func:`_summarize_set_source_options`.
       * ``source.inline_blob.content`` — :func:`_summarize_inline_blob_content`.
       * ``nodes[*].options`` — :func:`_summarize_set_source_options`.
-      * ``nodes[*].routes`` — :func:`_summarize_set_source_options`.
-      * ``nodes[*].trigger`` — :func:`_summarize_set_source_options`.
       * ``outputs[*].options`` — :func:`_summarize_set_source_options`.
 
     The adequacy guard (§4.4.2) fails closed on any ``dict[str, Any]`` or
     ``Any``-typed field without a Sensitive marker, which mechanically
-    enforces that every LLM-supplied options/routes/trigger surface is
-    redacted at the persistence boundary.
+    enforces that every LLM-supplied open option surface is redacted at the
+    persistence boundary. Routes and triggers use structural closed-leaf
+    types instead.
 
     ``extra="forbid"`` is required (rev-2 M.1) at every level — the
     outer model AND every nested sub-model.  Misrouted argument shapes
@@ -1543,10 +1571,9 @@ class SetPipelineArgumentsModel(BaseModel):
 # inspection-resistant — the guard fails closed on that shape.  Wrapping
 # ``patch`` with :class:`Sensitive` and :func:`_summarize_set_source_options`
 # is mandatory, and reusing the source-side summarizer is structurally sound
-# because :func:`redact_source_storage_path` is content-agnostic (it applies
-# path-blob_ref redaction when the relevant keys are present; all other keys
-# pass through verbatim).  Uniformity with the Waves 2-3 source/node/output
-# options surfaces is an explicit design goal.
+# because it records option shape while replacing scalar values. Uniformity
+# with the Waves 2-3 source/node/output options surfaces is an explicit
+# design goal.
 #
 # ``patch_node_options`` adds a ``node_id: str`` selector; the routing-key
 # guard (_node_routing_option_patch_error) is a SEMANTIC check on patch
@@ -1751,10 +1778,13 @@ def _redact_via_policy(
         is registered → REDACTED_SENSITIVE_NO_SUMMARIZER substitutes the value
         (spec §4.3 line 1073: "Plain sensitive key → value replaced by literal
         string '<redacted>'.").
-      * Argument key NOT in sensitive_argument_keys → passthrough (the
-        declarative argument walker, unlike the response walker, does not
-        sentinelise unknown keys; the manifest enumerates the sensitive
-        surface explicitly).
+      * Argument key NOT in sensitive_argument_keys → passthrough by default
+        for legacy declarative entries. If ``policy.known_argument_keys`` is
+        declared or ``policy.redact_unknown_argument_keys`` is enabled, keys
+        outside the allowlist are removed and replaced with a generic
+        REDACTED_UNKNOWN_ARGUMENT_KEY marker under
+        REDACTED_UNKNOWN_ARGUMENTS_FIELD. The boolean allows a closed empty
+        argument surface for no-argument tools.
 
     Walker atomicity (rev-3 W8b / rev-4 W8b): the output dict is built in a
     local variable and only returned on success.  A mid-walk raise leaves no
@@ -1763,9 +1793,17 @@ def _redact_via_policy(
     # Build the output dict by shallow-copying the input, then substituting
     # values for every sensitive key present.  Atomicity comes from the fact
     # that any raise during summarization aborts before we hand the dict back.
-    # Non-sensitive keys are passthrough (the argument walker does not
-    # sentinelise unknown keys — see the docstring).
+    # Non-sensitive keys are passthrough unless the policy opts into a closed
+    # argument allowlist.
     redacted: dict[str, Any] = dict(arguments)
+    if policy.known_argument_keys or policy.redact_unknown_argument_keys:
+        known_argument_keys = set(policy.known_argument_keys)
+        unknown_keys = [key for key in arguments if key not in known_argument_keys]
+        for key in unknown_keys:
+            redacted.pop(key, None)
+        if unknown_keys:
+            redacted[REDACTED_UNKNOWN_ARGUMENTS_FIELD] = REDACTED_UNKNOWN_ARGUMENT_KEY
+
     summarizers = policy.argument_summarizers
     for key in policy.sensitive_argument_keys:
         if key not in arguments:
@@ -1828,7 +1866,11 @@ def redact_tool_call_arguments(
       ``policy.sensitive_argument_keys``.  Missing keys are no-ops; present
       keys are summarized (via ``policy.argument_summarizers[key]``) or
       sentinel-substituted (``REDACTED_SENSITIVE_NO_SUMMARIZER``).  Keys
-      not in ``sensitive_argument_keys`` are passthrough.
+      not in ``sensitive_argument_keys`` are passthrough unless the policy
+      declares ``known_argument_keys`` or enables
+      ``redact_unknown_argument_keys``; in that case unknown argument key names
+      are removed and replaced with a generic ``REDACTED_UNKNOWN_ARGUMENT_KEY``
+      marker under ``REDACTED_UNKNOWN_ARGUMENTS_FIELD``.
 
     **Failure modes (all raise AuditIntegrityError):**
       - Manifest entry missing for ``tool_name`` (registry-consistency
@@ -2073,9 +2115,15 @@ _PREVIEW_PIPELINE_REASON = HandlesNoSensitiveDataReason(
         "value on this surface; the handler reads the current composer state directly."
     ),
     why_responses_safe=(
-        "Response is the validation summary plus structural source/node/output overview; "
-        "validator entries name fields by path without quoting LLM-supplied option values, "
-        "and the preview does NOT execute the pipeline so no row payload is materialised."
+        "Response is the validation summary plus structural source/node/output overview "
+        "and proof diagnostics. The proof step DOES read and parse the bound source blob's "
+        "bytes and evaluate sampled rows (it does not run the full pipeline), but every "
+        "diagnostic that derives from those bytes redacts the observed headers/columns to "
+        "counts and withholds the raw resolver/evaluation error text — mirroring the "
+        "deliberate header redaction in compute_proof_diagnostics — so no raw row payload "
+        "or observed-value PII crosses this surface. Validator entries carry component, "
+        "severity, and a human-readable message in the same class as every other composer "
+        "tool's validation surface (the message may name a declared field or path)."
     ),
 )
 
@@ -2111,30 +2159,34 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 # tuple.
 #
 # Reuse of :func:`_summarize_set_source_options` is structurally sound: the
-# helper is content-agnostic — it applies path-blob_ref redaction when the
-# relevant keys are present and leaves everything else verbatim — so it
-# applies to upsert_node options, set_output options, and the trigger/routes
-# slots without modification.  The same reuse rationale is documented in
-# detail on :class:`_PipelineNodeModel.options` and :class:`_PipelineOutputModel.options`.
+# helper is content-agnostic over option-like dicts because it preserves
+# shape while replacing scalar values, so it applies to upsert_node options,
+# set_output options, and trigger/routes slots without modification.  The
+# same reuse rationale is documented in detail on
+# :class:`_PipelineNodeModel.options` and :class:`_PipelineOutputModel.options`.
 # ---------------------------------------------------------------------------
 
 
-def _summarize_set_metadata_patch(patch: dict[str, Any]) -> str:
+def _summarize_set_metadata_patch(patch: object) -> str:
     """Summarizer for ``set_metadata.patch``.
 
-    The patch carries only ``name`` and ``description`` fields per the JSON
-    schema at tools.py:826-838 — both operator-facing labels with no plugin
-    options, no path references, and no credential markers.  The summarizer
-    returns a canonical-JSON encoding of the keys present so the audit trail
-    records which metadata fields the LLM mutated without preserving the raw
-    free-text values verbatim (a follow-up plugin may decide they ARE policy-
-    sensitive even though the current schema treats them as labels).
+    The patch accepts only ``name`` and ``description`` fields per the tool
+    schema — both operator-facing labels with no plugin options, no path
+    references, and no credential markers.  The summarizer records only that
+    allowlisted field names were present. Unknown patch keys are collapsed to
+    a generic marker because key names are LLM-controlled text and may
+    themselves carry secrets.
 
     Contract (spec §4.2.6, §9 RSK-03):
       * MUST NOT raise on any reachable input value.
       * MUST return ``str``.
     """
-    keys = sorted(patch.keys())
+    if not isinstance(patch, Mapping):
+        return "<metadata-patch:invalid>"
+    allowed_keys = {"description", "name"}
+    keys = sorted(key for key in patch if isinstance(key, str) and key in allowed_keys)
+    if any(key not in allowed_keys for key in patch):
+        keys.append("unknown")
     return f"<metadata-patch:{','.join(keys)}>" if keys else "<metadata-patch:empty>"
 
 
@@ -2142,8 +2194,9 @@ _UPSERT_EDGE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — edge id, endpoints, kind, label — none are payload-bearing",),
     why_arguments_safe=(
         "upsert_edge accepts only graph-topology scalars (id, from_node, to_node, edge_type, "
-        "optional label); none are LLM-supplied option payload and the JSON schema enforces "
-        "edge_type via an enum so the dispatch surface cannot carry sensitive material."
+        "optional label); the manifest argument allowlist preserves those structural fields "
+        "and replaces unexpected LLM-supplied argument keys with the fixed unknown-argument "
+        "sentinel before audit persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary plus the edge id list "
@@ -2157,8 +2210,9 @@ _REMOVE_NODE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — single node id selector identifying the deletion target",),
     why_arguments_safe=(
         "remove_node accepts only a single scalar id string naming the node to delete; "
-        "the JSON schema at tools.py:803-808 has no other properties, so the LLM cannot "
-        "place any payload on this surface; the handler indexes by id only."
+        "the manifest argument allowlist preserves that selector and replaces unexpected "
+        "LLM-supplied argument keys with the fixed unknown-argument sentinel before audit "
+        "persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary for the post-removal "
@@ -2172,8 +2226,9 @@ _REMOVE_EDGE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — single edge id selector identifying the deletion target",),
     why_arguments_safe=(
         "remove_edge accepts only a single scalar id string naming the edge to delete; "
-        "the JSON schema at tools.py:814-819 has no other properties, so the LLM cannot "
-        "place any payload on this surface; the handler indexes by edge id only."
+        "the manifest argument allowlist preserves that selector and replaces unexpected "
+        "LLM-supplied argument keys with the fixed unknown-argument sentinel before audit "
+        "persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary for the post-removal "
@@ -2187,8 +2242,9 @@ _REMOVE_OUTPUT_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — single sink_name selector identifying the output to remove",),
     why_arguments_safe=(
         "remove_output accepts only a single scalar sink_name string naming the output "
-        "to delete; the JSON schema at tools.py:877-882 has no other properties, so the "
-        "LLM cannot place any payload on this surface; the handler indexes by name only."
+        "to delete; the manifest argument allowlist preserves that selector and replaces "
+        "unexpected LLM-supplied argument keys with the fixed unknown-argument sentinel "
+        "before audit persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary for the post-removal "
@@ -2203,7 +2259,8 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
     why_arguments_safe=(
         "clear_source accepts only an optional source_name selector. Source names are "
         "structural composer identifiers, not plugin options, file paths, source content, "
-        "or credentials."
+        "or credentials; the manifest argument allowlist replaces unexpected LLM-supplied "
+        "argument keys with the fixed unknown-argument sentinel before audit persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary describing the "
@@ -2231,9 +2288,9 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
 _LIST_BLOBS_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("session blob inventory — id/filename/mime_type/size_bytes per blob, no raw content",),
     why_arguments_safe=(
-        "list_blobs accepts no arguments — the JSON schema at tools.py:1329 declares an "
-        "empty properties object with empty required, so the LLM cannot place any value "
-        "on this surface; the handler enumerates the session's blob inventory directly."
+        "list_blobs accepts no arguments — the JSON schema declares an empty properties "
+        "object with additionalProperties=false, and redaction strips any unknown keys "
+        "before persistence; the handler enumerates the session inventory directly."
     ),
     why_responses_safe=(
         "Response is the blob-inventory list — operator-uploaded filenames, mime_types, "
@@ -2247,9 +2304,9 @@ _LIST_COMPOSER_BLOBS_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("session blob inventory — id/filename/mime_type/size_bytes/content_hash per ready blob, no raw content",),
     why_arguments_safe=(
         "list_composer_blobs accepts no arguments — its JSON schema declares an "
-        "empty properties object with empty required, so the LLM cannot place any "
-        "payload on this surface; the handler enumerates ready blobs from the "
-        "session-scoped inventory."
+        "empty properties object with additionalProperties=false, and redaction strips "
+        "any unknown keys before persistence; the handler enumerates ready blobs from "
+        "the session-scoped inventory."
     ),
     why_responses_safe=(
         "Response is the ADR-025 H4 visibility shape — blob_id, mime_type, "
@@ -2265,7 +2322,7 @@ _GET_BLOB_METADATA_REASON = HandlesNoSensitiveDataReason(
     why_arguments_safe=(
         "get_blob_metadata accepts a single blob_id scalar string selecting one inventory "
         "row; blob_ids are UUIDs assigned by the composer service and contain no operator "
-        "payload; the handler indexes a session-scoped lookup and rejects unknown ids."
+        "payload; the schema and redaction allowlist reject or strip any other argument keys."
     ),
     why_responses_safe=(
         "Response is the single-blob metadata row — id, filename, mime_type, size_bytes, "
@@ -2435,6 +2492,69 @@ class GetBlobContentValidationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _RequestInterpretationReviewPendingDataModel(BaseModel):
+    """Correlation-only response payload for a pending interpretation review."""
+
+    kind_marker: Literal["interpretation_review_pending", "interpretation_review_pending_idempotent"] = Field(alias="_kind")
+    event_id: str
+    affected_node_id: str
+    kind: InterpretationKind
+    interpretation_source: str
+    message: str
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+
+class _RequestInterpretationReviewPendingTextDataModel(BaseModel):
+    """Legacy/drift response payload that accidentally carries review text.
+
+    The live handler omits ``user_term`` and ``llm_draft`` entirely; this model
+    exists as a persistence-boundary backstop if a future response shape adds
+    them back. Because the raw fields are present, ``message`` is sensitive too:
+    past versions interpolated the term into that string.
+    """
+
+    kind_marker: Literal["interpretation_review_pending", "interpretation_review_pending_idempotent"] = Field(alias="_kind")
+    event_id: str
+    affected_node_id: str
+    kind: InterpretationKind
+    user_term: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+    llm_draft: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+    interpretation_source: str
+    message: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+
+class _RequestInterpretationReviewSuppressedDataModel(BaseModel):
+    """Correlation-only response payload for session opt-out suppression."""
+
+    kind_marker: Literal["interpretation_review_suppressed_by_opt_out"] = Field(alias="_kind")
+    event_id: str
+    kind: InterpretationKind
+    interpretation_source: str
+    interpretation_review_disabled: bool
+    message: str
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+
+class _RequestInterpretationReviewResponseModel(BaseModel):
+    """Redaction-bearing ``ToolResult`` envelope for interpretation reviews."""
+
+    success: bool
+    validation: GetBlobContentValidationModel
+    affected_nodes: list[str]
+    version: int
+    data: (
+        _RequestInterpretationReviewPendingDataModel
+        | _RequestInterpretationReviewPendingTextDataModel
+        | _RequestInterpretationReviewSuppressedDataModel
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class GetBlobContentArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``get_blob_content`` tool.
 
@@ -2505,7 +2625,7 @@ _INSPECT_SOURCE_REASON = HandlesNoSensitiveDataReason(
     why_arguments_safe=(
         "inspect_source accepts a single blob_id scalar string selecting one inventory "
         "row; the handler reads at most 8 KiB and parses at most 100 rows, returning only "
-        "structural facts; the JSON schema at tools.py:1505-1513 has no other properties."
+        "structural facts; the schema and redaction allowlist reject or strip any other keys."
     ),
     why_responses_safe=(
         "Response is the SourceInspectionFacts struct — observed headers, inferred scalar "
@@ -2691,6 +2811,28 @@ def _summarize_advisor_schema_excerpt(value: str) -> str:
     return f"<advisor-schema-excerpt:{len(value)}-chars>"
 
 
+_TOOL_RESULT_REQUIRED_RESPONSE_KEYS: tuple[str, ...] = (
+    "success",
+    "validation",
+    "affected_nodes",
+    "version",
+)
+_TOOL_RESULT_OPTIONAL_RESPONSE_KEYS: tuple[str, ...] = (
+    "runtime_preflight",
+    "validation_delta",
+    "post_call_hints",
+    "plugin_schemas",
+)
+
+
+def _tool_result_response_keys(*, data: bool) -> tuple[str, ...]:
+    """Return the shared top-level ``ToolResult.to_dict`` response envelope."""
+    keys = _TOOL_RESULT_REQUIRED_RESPONSE_KEYS
+    if data:
+        keys = (*keys, "data")
+    return (*keys, *_TOOL_RESULT_OPTIONAL_RESPONSE_KEYS)
+
+
 # Manifest entries are grouped by tool family. The binding is rebuilt as a
 # new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2793,112 +2935,141 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # _MUTATION_TOOLS remaining, 8 declarative entries.
         "upsert_node": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "id",
+                    "node_type",
+                    "input",
+                    "plugin",
+                    "on_success",
+                    "on_error",
+                    "options",
+                    "condition",
+                    "routes",
+                    "fork_to",
+                    "branches",
+                    "policy",
+                    "merge",
+                    "trigger",
+                    "output_mode",
+                    "expected_output_count",
+                ),
                 sensitive_argument_keys=("options", "routes", "trigger"),
                 argument_summarizers={
                     "options": _summarize_set_source_options,
                     "routes": _summarize_set_source_options,
                     "trigger": _summarize_set_source_options,
                 },
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
-                # and the failure branches reachable from _execute_upsert_node:
+                # Shared ToolResult.to_dict() envelope plus the data key emitted
+                # by failure branches reachable from _execute_upsert_node:
                 # _mutation_result → always emits success/validation/affected_nodes/version;
                 # _failure_result → adds data={"error": ...};
                 # _credential_wiring_contract_failure → adds data={error, credential_fields,
-                #   components, repair}.  runtime_preflight and validation_delta are not set
-                # by any reachable code path for this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                    "data",
-                ),
+                #   components, repair}.
+                known_response_keys=_tool_result_response_keys(data=True),
             )
         ),
         "upsert_edge": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "id",
+                    "from_node",
+                    "to_node",
+                    "edge_type",
+                    "label",
+                ),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_UPSERT_EDGE_REASON,
             )
         ),
         "remove_node": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_REMOVE_NODE_REASON,
             )
         ),
         "remove_edge": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_REMOVE_EDGE_REASON,
             )
         ),
         "remove_output": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("sink_name",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_REMOVE_OUTPUT_REASON,
             )
         ),
         "clear_source": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("source_name",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_CLEAR_SOURCE_REASON,
             )
         ),
         "set_metadata": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("patch",),
                 sensitive_argument_keys=("patch",),
                 argument_summarizers={"patch": _summarize_set_metadata_patch},
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428).
-                # _execute_set_metadata always calls _mutation_result with no data and no
-                # prior_validation, so the response always has exactly these four keys.
-                # runtime_preflight and validation_delta are unreachable from this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                ),
+                # Shared ToolResult.to_dict() envelope. _execute_set_metadata
+                # currently calls _mutation_result without data, so data remains
+                # excluded while optional ToolResult augmentation keys stay
+                # centrally covered.
+                known_response_keys=_tool_result_response_keys(data=False),
             )
         ),
         "set_output": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "sink_name",
+                    "plugin",
+                    "options",
+                    "on_write_failure",
+                ),
                 sensitive_argument_keys=("options",),
                 argument_summarizers={"options": _summarize_set_source_options},
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
-                # and the failure branches reachable from _execute_set_output:
+                # Shared ToolResult.to_dict() envelope plus the data key emitted
+                # by failure branches reachable from _execute_set_output:
                 # _mutation_result → success/validation/affected_nodes/version;
                 # _failure_result → adds data={"error": ...};
                 # _credential_wiring_contract_failure → adds data={error, credential_fields,
-                #   components, repair}.  runtime_preflight and validation_delta are not set
-                # by any reachable code path for this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                    "data",
-                ),
+                #   components, repair}.
+                known_response_keys=_tool_result_response_keys(data=True),
             )
         ),
         # _BLOB_DISCOVERY_TOOLS, 5 entries (4 declarative + 1 type-driven).
         "list_blobs": ToolRedaction(
             policy=ToolRedactionPolicy(
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_BLOBS_REASON,
             )
         ),
         "list_composer_blobs": ToolRedaction(
             policy=ToolRedactionPolicy(
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_COMPOSER_BLOBS_REASON,
             )
         ),
         "get_blob_metadata": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_GET_BLOB_METADATA_REASON,
             )
@@ -2909,6 +3080,8 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         ),
         "inspect_source": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_INSPECT_SOURCE_REASON,
             )
@@ -2916,12 +3089,16 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # _BLOB_MUTATION_TOOLS remaining, 2 entries.
         "delete_blob": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
             )
         ),
         "wire_blob_inline_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("field_path", "blob_id", "encoding"),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_BLOB_INLINE_REF_REASON,
             )
@@ -2931,12 +3108,16 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_SECRET_REFS_REASON,
+                known_argument_keys=(),
+                redact_unknown_argument_keys=True,
             )
         ),
         "validate_secret_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_VALIDATE_SECRET_REF_REASON,
+                known_argument_keys=("name",),
+                redact_unknown_argument_keys=True,
             )
         ),
         # _SECRET_MUTATION_TOOLS, 1 entry.
@@ -2944,16 +3125,30 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
+                known_argument_keys=("name", "target", "target_id", "option_key"),
+                redact_unknown_argument_keys=True,
             )
         ),
         # request_interpretation_review (session-aware async tool).
-        # Type-driven entry; both LLM-supplied content fields carry a 64-char
-        # truncation summariser so the persistence-boundary row in
-        # chat_messages.tool_calls cannot leak unbounded user/LLM text.
-        "request_interpretation_review": ToolRedaction(argument_model=_RequestInterpretationReviewRedactionModel),
+        # Type-driven entry; both argument and response-side review text fields
+        # carry a fixed-form summariser so chat_messages.tool_calls cannot leak
+        # unbounded user/LLM text. The live handler returns correlation-only
+        # response data, while the response_model keeps a redaction backstop for
+        # future drift that accidentally reintroduces user_term / llm_draft.
+        "request_interpretation_review": ToolRedaction(
+            argument_model=_RequestInterpretationReviewRedactionModel,
+            response_model=_RequestInterpretationReviewResponseModel,
+        ),
         # request_advisor_hint (intercepted at service.py:2103).
         "request_advisor_hint": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "trigger",
+                    "problem_summary",
+                    "recent_errors",
+                    "attempted_actions",
+                    "schema_excerpt",
+                ),
                 sensitive_argument_keys=(
                     "problem_summary",
                     "recent_errors",
@@ -3002,6 +3197,38 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
 )
 
 
+def _is_declarative_response_repair_arguments_path(path: tuple[str, ...]) -> bool:
+    if not path or path[-1] != "arguments":
+        return False
+    if path[0] == "validation" and "graph_repair_suggestions" in path and "tool_sequence" in path:
+        return True
+    return len(path) >= 3 and path[0] == "data" and path[1] == "repair"
+
+
+def _redact_declarative_known_response_value(value: Any, *, path: tuple[str, ...]) -> Any:
+    """Scrub nested repair-argument payloads inside declarative ToolResult keys.
+
+    Declarative response policies close only the top-level ToolResult envelope
+    (``success`` / ``validation`` / ``data`` / etc.). Some known envelopes carry
+    nested, open repair-tool-call argument mappings. Those are structurally
+    useful audit metadata, but the values can contain credential/config payload,
+    so they reuse the same structural ``<repair-args:...>`` summarizer as the
+    type-driven validation shadow model.
+    """
+    if _is_declarative_response_repair_arguments_path(path):
+        if isinstance(value, Mapping):
+            argument_keys: dict[str, object] = {str(key): child for key, child in value.items()}
+            return _summarize_repair_arguments(argument_keys)
+        return REDACTED_SENSITIVE_NO_SUMMARIZER
+    if isinstance(value, Mapping):
+        return {key: _redact_declarative_known_response_value(child, path=(*path, str(key))) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_declarative_known_response_value(item, path=(*path, "*")) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_declarative_known_response_value(item, path=(*path, "*")) for item in value)
+    return value
+
+
 def redact_tool_call_response(
     tool_name: str,
     response: dict[str, Any],
@@ -3027,7 +3254,8 @@ def redact_tool_call_response(
         - In ``policy.sensitive_response_keys`` → ``REDACTED_SENSITIVE_NO_SUMMARIZER``
           (declarative entries have no response_summarizers; the argument_summarizers
           mapping covers only argument keys).
-        - In ``policy.known_response_keys`` but not sensitive → passthrough.
+        - In ``policy.known_response_keys`` but not sensitive → passthrough after
+          bounded repair-guidance scrubbing.
         - In neither → ``REDACTED_UNKNOWN_RESPONSE_KEY`` (fail-closed; counter fires).
 
     **Failure modes (all raise AuditIntegrityError):**
@@ -3082,8 +3310,9 @@ def redact_tool_call_response(
             # the no-summarizer sentinel.
             redacted[key] = REDACTED_SENSITIVE_NO_SUMMARIZER
         elif key in policy.known_response_keys:
-            # Known, non-sensitive: passthrough.
-            redacted[key] = value
+            # Known, non-sensitive: preserve the declared ToolResult envelope
+            # while scrubbing nested repair-tool-call arguments.
+            redacted[key] = _redact_declarative_known_response_value(value, path=(key,))
         else:
             # Unknown key: fail-closed sentinel + telemetry counter (W6).
             redacted[key] = REDACTED_UNKNOWN_RESPONSE_KEY
@@ -3180,3 +3409,115 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     if sources_changed and redacted_sources is not None:
         redacted["sources"] = redacted_sources
     return redacted
+
+
+def redact_guided_snapshot_storage_paths(
+    sources: Mapping[str, Any] | None,
+    composer_meta: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Redact blob storage paths missed by :func:`redact_source_storage_path` for
+    guided-mode sources, using the persisted GuidedSession snapshot's ``blob_ref``
+    as a no-DB-lookup signal.
+
+    Why this exists: :func:`redact_source_storage_path` keys off ``blob_ref`` in a
+    source's options. The guided flow commits blob-backed sources through the
+    manual ``set_source`` path (``guided/steps.py``), which REJECTS/strips
+    ``blob_ref`` because it cannot prove ``path == storage_path``. So the committed
+    source carries the absolute ``storage_path`` with NO ``blob_ref`` and slips
+    past the source-keyed redaction. The co-located GuidedSession snapshot
+    persisted in ``composer_meta`` (``guided_session.step_1_result``) DID retain
+    ``blob_ref`` (the by-storage_path enrichment in ``guided/steps.py``), so a
+    ``blob_ref`` there is an authoritative, DB-lookup-free signal that the source
+    is blob-backed.
+
+    Closes the two HTTP-response (``_state_response``) egress channels of the same
+    storage_path that the source-keyed redaction misses for guided sources:
+      1. ``composition_state.composer_meta.guided_session.step_1_result.options.path``
+         — the snapshot itself (serialized unredacted), and
+      2. ``composition_state.sources.<name>.options.path`` — the committed source,
+         matched to the snapshot's blob-backed path so operator-typed (non-blob)
+         sources are left untouched.
+
+    Both ``"path"`` and ``"file"`` are treated as storage-path carriers (mirrors
+    :func:`redact_source_storage_path`). Returns shallow-redacted copies of
+    ``(sources, composer_meta)``; inputs are never mutated. When there is no
+    blob-backed guided snapshot (freeform state, operator-typed path, or no source
+    yet), the inputs are returned unchanged. Once ``guided_session`` or a
+    ``step_1_result`` snapshot is present, malformed nested state is Tier-1 drift
+    and fails loudly instead of degrading to freeform redaction.
+    """
+    sources_out = dict(sources) if sources is not None else None
+    meta_out = dict(composer_meta) if composer_meta is not None else None
+
+    if composer_meta is None or "guided_session" not in composer_meta:
+        return sources_out, meta_out
+    guided = composer_meta["guided_session"]
+    if type(guided) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: composer_meta.guided_session must be a dict")
+    snapshot = guided["step_1_result"]
+    if snapshot is None:
+        return sources_out, meta_out
+    if type(snapshot) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.step_1_result must be a dict or None")
+    snap_options = snapshot["options"]
+    # Only a blob_ref on the snapshot marks the source as blob-backed; without it
+    # the source path is operator-typed and must NOT be redacted.
+    if type(snap_options) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.step_1_result.options must be a dict")
+    if "blob_ref" not in snap_options:
+        return sources_out, meta_out
+
+    blob_backed_paths: set[str] = set()
+    for key in ("path", "file"):
+        if key not in snap_options:
+            continue
+        value = snap_options[key]
+        if type(value) is str:
+            blob_backed_paths.add(value)
+
+    # Channel 1 (the snapshot itself): shallow-copy the composer_meta chain down to
+    # the snapshot options and mask its storage-path carriers.
+    snap_options_redacted = dict(snap_options)
+    for key in ("path", "file"):
+        if key in snap_options_redacted:
+            snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+    snapshot_redacted = dict(snapshot)
+    snapshot_redacted["options"] = snap_options_redacted
+    guided_redacted = dict(guided)
+    guided_redacted["step_1_result"] = snapshot_redacted
+    meta_out = dict(composer_meta)
+    meta_out["guided_session"] = guided_redacted
+
+    # Channel 2: mask the committed source(s) whose storage-path carrier matches a
+    # blob-backed path. A source already redacted by redact_source_storage_path
+    # carries REDACTED_BLOB_SOURCE_PATH (not the real path), so it simply won't
+    # match — no double processing.
+    if sources is not None and blob_backed_paths:
+        rebuilt: dict[str, Any] = {}
+        for name, source in sources.items():
+            if type(source) is not dict:
+                raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
+            if "options" not in source:
+                rebuilt[name] = source
+                continue
+            options = source["options"]
+            if type(options) is not dict:
+                raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
+            source_uses_blob_path = False
+            for key in ("path", "file"):
+                if key in options and options[key] in blob_backed_paths:
+                    source_uses_blob_path = True
+                    break
+            if source_uses_blob_path:
+                options_redacted = dict(options)
+                for key in ("path", "file"):
+                    if key in options_redacted and options_redacted[key] in blob_backed_paths:
+                        options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+                source_redacted = dict(source)
+                source_redacted["options"] = options_redacted
+                rebuilt[name] = source_redacted
+            else:
+                rebuilt[name] = source
+        sources_out = rebuilt
+
+    return sources_out, meta_out

@@ -3,15 +3,37 @@
 
    This file did not exist in pre-split App.css — the Save-for-review dialog
    was shipped without a stylesheet, so its URL input rendered at browser
-   default size (~25 chars wide) and clipped the share URL. Adding minimal
-   rules here so the input flexes to fill its row. */
+   default size (~25 chars wide) and clipped the share URL. These rules give
+   the dialog a real modal overlay (backdrop + centered float) and let the URL
+   input flex to fill its row. */
+
+/* Real centered-overlay modal, consistent with .graph-modal / .confirm-dialog
+   (which it previously only impersonated via role="dialog"). The backdrop
+   dims the page and closes the dialog on click; the dialog floats above it on
+   the shared --z-dialog stack. The literal rgba black backdrop/shadow values
+   mirror those modals verbatim — there is no backdrop/shadow design token. */
+.save-for-review-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-dialog-backdrop);
+}
 
 .save-for-review-dialog {
-  margin-top: var(--space-lg);
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: var(--z-dialog);
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
   padding: var(--space-lg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-modal);
 }
 
 .save-for-review-dialog-content {

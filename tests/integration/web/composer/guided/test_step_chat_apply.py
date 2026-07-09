@@ -1,0 +1,446 @@
+"""p1 Task 4 — STEP_2/STEP_3 /guided/chat apply branches (in-place)."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from elspeth.web.sessions._guided_step_chat import _COMMIT_REJECTED_MESSAGE, _SYNTHETIC_UNAVAILABLE_MESSAGE
+
+# Reuse the verbatim drive helpers from the sibling e2e test.
+from tests.integration.web.composer.guided.test_step_3_e2e import (
+    _create_session,
+    _drive_to_step_3_propose_chain,
+    _fake_llm_response_for_passthrough,
+    _get_guided,
+    _outputs_path,
+    _respond,
+    _seed_blob,
+)
+from tests.integration.web.composer.guided.test_step_chat import _chat_turn_audit_bodies
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+
+@dataclass(frozen=True)
+class _AsyncCompletionFake:
+    response: object
+
+    async def __call__(self, *_args: object, **_kwargs: object) -> object:
+        return self.response
+
+
+def _post_chat(client: TestClient, session_id: str, *, message: str, step_index: str):
+    resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": message, "step_index": step_index},
+    )
+    return resp.status_code, resp.json()
+
+
+def _fake_resolve_sink_response(path: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="resolve_sink",
+                                arguments=json.dumps(
+                                    {
+                                        "resolution": "sink",
+                                        "outputs": [
+                                            {
+                                                "plugin": "json",
+                                                "options": {
+                                                    "path": path,
+                                                    "schema": {"mode": "observed"},
+                                                    "mode": "write",
+                                                    "collision_policy": "auto_increment",
+                                                },
+                                                "required_fields": [],
+                                                "schema_mode": "observed",
+                                            }
+                                        ],
+                                        "assistant_message": "Output set to JSON Lines.",
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def _fake_chain_response() -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": "passthrough",
+                                                    "options": {"schema": {"mode": "observed"}},
+                                                    "rationale": "no transform needed; pass rows through",
+                                                }
+                                            ],
+                                            "why": "the rows already match the sink",
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def _drive_to_step_2(client: TestClient, session_id: str) -> None:
+    _blob_id, storage_path = _seed_blob(client, session_id)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    _respond(
+        client,
+        session_id,
+        edited_values={
+            "plugin": "csv",
+            "options": {"path": storage_path, "schema": {"mode": "observed"}},
+            "observed_columns": ["text", "note"],
+            "sample_rows": [{"text": "Hello world", "note": "greeting"}],
+        },
+    )
+    body = _get_guided(client, session_id)
+    assert body["guided_session"]["step"] == "step_2_sink"
+
+
+def test_step_2_chat_applies_sink_in_place(composer_test_client: TestClient) -> None:
+    client = composer_test_client
+    session_id = _create_session(client)
+    _drive_to_step_2(client, session_id)
+    out = _outputs_path(client, "chat_out.jsonl")
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
+    ):
+        status, body = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
+    assert status == 200, body
+    # Apply-in-place: phase stays STEP_2, sink committed, form re-rendered.
+    assert body["guided_session"]["step"] == "step_2_sink"
+    assert body["next_turn"]["type"] == "schema_form"
+    assert body["next_turn"]["step_index"] == 1
+    outputs = body["composition_state"]["outputs"]
+    assert any(o["plugin"] == "json" for o in outputs)
+
+
+def test_step_2_chat_apply_then_get_render_the_same_step_2_turn(composer_test_client: TestClient) -> None:
+    """apply↔GET equality: the next_turn the STEP_2 apply emits is byte-identical
+    to the turn GET /guided rebuilds from the committed (rehydrated, frozen) sink.
+
+    The GET side rehydrates ``step_2_result`` from persisted composer_meta, whose
+    options are deep-frozen ``mappingproxy`` — so this test is the load-bearing
+    proof of the ``build_step_2_schema_form_turn_from_resolved`` deep_thaw fix:
+    without it, the rehydrated render raises on the nested frozen options.
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    _drive_to_step_2(client, session_id)
+    out = _outputs_path(client, "equality_out.jsonl")
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
+    ):
+        status, applied = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
+    assert status == 200, applied
+    apply_turn = applied["next_turn"]
+    assert apply_turn is not None
+    assert apply_turn["type"] == "schema_form"
+
+    # GET rehydrates from frozen composer_meta and rebuilds the SAME turn.
+    got = _get_guided(client, session_id)
+    get_turn = got["next_turn"]
+    assert get_turn is not None
+    assert get_turn == apply_turn
+
+
+def test_step_2_chat_prose_is_advisory_no_mutation(composer_test_client: TestClient) -> None:
+    client = composer_test_client
+    session_id = _create_session(client)
+    _drive_to_step_2(client, session_id)
+    before = _get_guided(client, session_id)
+    prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A sink writes rows out.", tool_calls=None))])
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(prose),
+    ):
+        status, body = _post_chat(client, session_id, message="what is a sink?", step_index="step_2_sink")
+    assert status == 200, body
+    # Advisory: no mutation, no next_turn, phase unchanged.
+    assert body["next_turn"] is None
+    assert body["guided_session"]["step"] == "step_2_sink"
+    # No outputs committed by an advisory message.
+    after = _get_guided(client, session_id)
+    assert before["composition_state"]["outputs"] == after["composition_state"]["outputs"]
+
+
+def test_step_2_chat_from_schema_form_stamps_prior_record_answered(composer_test_client: TestClient) -> None:
+    """A STEP_2 chat apply from the SCHEMA_FORM sub-state stamps the prior record
+    answered (response_hash non-None) — audit parity with STEP_1."""
+    client = composer_test_client
+    session_id = _create_session(client)
+    _drive_to_step_2(client, session_id)
+    # Advance to the STEP_2 SCHEMA_FORM sub-state by picking a sink plugin
+    # (SINGLE_SELECT -> SCHEMA_FORM), so the existing record is a SCHEMA_FORM turn.
+    _respond(client, session_id, chosen=["json"])
+    before = _get_guided(client, session_id)
+    assert before["next_turn"]["type"] == "schema_form"
+    out = _outputs_path(client, "answered_out.jsonl")
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
+    ):
+        status, body = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
+    assert status == 200, body
+    assert body["guided_session"]["step"] == "step_2_sink"
+    # The prior STEP_2 SCHEMA_FORM record is now answered (not response_hash=None).
+    step_2_schema_records = [r for r in body["guided_session"]["history"] if r["step"] == "step_2_sink" and r["turn_type"] == "schema_form"]
+    assert step_2_schema_records, body["guided_session"]["history"]
+    # The earliest STEP_2 schema_form record (the answered one) carries a hash;
+    # the freshly re-rendered one is the new unanswered turn.
+    assert any(r["response_hash"] is not None for r in step_2_schema_records)
+
+
+def test_step_2_chat_handler_rejection_falls_back_to_advisory_no_mutation(composer_test_client: TestClient) -> None:
+    """When the sink driver resolves a sink but handle_step_2_sink rejects it
+    (strict commit seam), the STEP_2 branch must fall back to advisory: honest
+    commit-rejection message, next_turn=None, NO mutation, phase unchanged.
+
+    This is the only STEP_2 consumer of the commit-rejection fallback.
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    _drive_to_step_2(client, session_id)
+    before = _get_guided(client, session_id)
+    out = _outputs_path(client, "rejected_out.jsonl")
+    # The branch reads only handler_result.tool_result.success on rejection, so a
+    # duck-typed result with success=False exercises the synthetic-advisory leg.
+    rejected = SimpleNamespace(tool_result=SimpleNamespace(success=False))
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=_AsyncCompletionFake(_fake_resolve_sink_response(out)),
+        ),
+        patch(
+            "elspeth.web.sessions.routes.composer.guided.handle_step_2_sink",
+            return_value=rejected,
+        ),
+    ):
+        status, body = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
+    assert status == 200, body
+    # Advisory fall-back: no next_turn, phase unchanged, no outputs committed.
+    assert body["next_turn"] is None
+    assert body["guided_session"]["step"] == "step_2_sink"
+    assert body["assistant_message"] == _COMMIT_REJECTED_MESSAGE
+    assert "unavailable" not in body["assistant_message"].lower()
+    assistant_turn = body["guided_session"]["chat_history"][-1]
+    assert assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert assistant_turn["synthetic_failure_reason"] is None
+    after = _get_guided(client, session_id)
+    assert before["composition_state"]["outputs"] == after["composition_state"]["outputs"]
+    persisted_assistant_turn = after["guided_session"]["chat_history"][-1]
+    assert persisted_assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert persisted_assistant_turn["synthetic_failure_reason"] is None
+
+
+def _fake_resolve_source_response(*, options: dict, assistant_message: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="resolve_source",
+                                arguments=json.dumps(
+                                    {
+                                        "resolution": "source",
+                                        "plugin": "json",
+                                        "filename": "urls.json",
+                                        "mime_type": "application/json",
+                                        "content": '[{"url": "https://example.test/a"}]',
+                                        "options": options,
+                                        "observed_columns": ["url"],
+                                        "sample_rows": [{"url": "https://example.test/a"}],
+                                        "assistant_message": assistant_message,
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def test_step_1_chat_resend_strips_server_owned_keys_and_recommits(composer_test_client: TestClient) -> None:
+    """Regression: a SECOND Send on step_1 (without accepting the decision) must
+    SUCCEED, not 400.
+
+    After the first build the committed source is stamped with server-owned
+    option keys (``blob_ref``; ``source_authoring`` for blob-backed sources). On
+    re-Send the resolver sees that source and parrots those keys back into
+    ``resolve_source``. ``set_source`` REJECTS caller-supplied
+    blob_ref/source_authoring, so the re-commit used to 400 "Step 1 source commit
+    failed". The Tier-3 parser now strips the class, so the second commit
+    succeeds end-to-end (real parser -> route's ``{schema, **options, path}``
+    spread -> real ``handle_step_1_source``).
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    # Persist state (so guided turns are recorded) and pick the json source so
+    # the chat-apply branch has an existing step_1 record to resolve against.
+    _seed_blob(client, session_id)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["json"])
+
+    # First Send: clean resolution -> real commit -> step_1_result enriched with
+    # the server-owned blob_ref by handle_step_1_source.
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(
+            _fake_resolve_source_response(
+                options={"schema": {"mode": "observed"}},
+                assistant_message="Built the URL source.",
+            )
+        ),
+    ):
+        status1, body1 = _post_chat(client, session_id, message="ten urls please", step_index="step_1_source")
+    assert status1 == 200, body1
+    assert body1["guided_session"]["step"] == "step_1_source"
+    assert body1["next_turn"]["type"] == "schema_form"
+
+    # Second Send: the model parrots the server-owned keys it now sees in the
+    # committed current_source. Pre-fix this 400'd; post-fix the parser strips them.
+    echoed = "Rebuilt the URL source."
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(
+            _fake_resolve_source_response(
+                options={
+                    "schema": {"mode": "observed"},
+                    "blob_ref": "deadbeefdeadbeefdeadbeefdeadbeef",
+                    "source_authoring": {"creation_modality": "verbatim", "content_hash": "0" * 64},
+                },
+                assistant_message=echoed,
+            )
+        ),
+    ):
+        status2, body2 = _post_chat(client, session_id, message="same again", step_index="step_1_source")
+
+    # The re-commit SUCCEEDS. Discriminator vs the advisory-degradation path —
+    # which ALSO returns 200: success re-renders the schema_form and echoes the
+    # resolver's message; degradation returns next_turn=None + the synthetic
+    # unavailable message. Asserting status==200 alone would NOT distinguish them.
+    assert status2 == 200, body2
+    assert body2["assistant_message"] != _SYNTHETIC_UNAVAILABLE_MESSAGE
+    assert body2["assistant_message"] == echoed
+    assert body2["next_turn"] is not None
+    assert body2["next_turn"]["type"] == "schema_form"
+    assert body2["guided_session"]["step"] == "step_1_source"
+
+
+def test_step_1_chat_handler_rejection_degrades_to_advisory_and_audits_classifier(
+    composer_test_client: TestClient,
+) -> None:
+    """When the source driver resolves a source but handle_step_1_source rejects it
+    (strict commit seam), the STEP_1 branch must DEGRADE to advisory — symmetric with
+    STEP_2: synthetic message, next_turn=None, NO mutation, phase unchanged — instead
+    of raising a fatal 400. The degrade records the redaction-safe classifier
+    error_class="StepHandlerRejected" on the chat-turn audit (the whole justification
+    for degrading rather than 400'ing). Status==200 alone does NOT distinguish this
+    from a successful apply, so the message + next_turn + audit are the discriminators.
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    _seed_blob(client, session_id)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["json"])
+    before = _get_guided(client, session_id)
+    # Duck-typed failure: the reject leg reads only tool_result.success.
+    rejected = SimpleNamespace(tool_result=SimpleNamespace(success=False))
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=_AsyncCompletionFake(
+                _fake_resolve_source_response(
+                    options={"schema": {"mode": "observed"}},
+                    assistant_message="Built the URL source.",
+                )
+            ),
+        ),
+        patch(
+            "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",
+            return_value=rejected,
+        ),
+    ):
+        status, body = _post_chat(client, session_id, message="ten urls please", step_index="step_1_source")
+    assert status == 200, body
+    # Advisory degradation — NOT a fatal 400, NOT a successful apply.
+    assert body["next_turn"] is None
+    assert body["assistant_message"] == _COMMIT_REJECTED_MESSAGE
+    assert "unavailable" not in body["assistant_message"].lower()
+    assert body["guided_session"]["step"] == "step_1_source"
+    assistant_turn = body["guided_session"]["chat_history"][-1]
+    assert assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert assistant_turn["synthetic_failure_reason"] is None
+    # No mutation: the rejected commit did not write a source.
+    after = _get_guided(client, session_id)
+    assert before["composition_state"].get("source") == after["composition_state"].get("source")
+    persisted_assistant_turn = after["guided_session"]["chat_history"][-1]
+    assert persisted_assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert persisted_assistant_turn["synthetic_failure_reason"] is None
+    # Diagnosability with zero egress: the rejection is recorded as a fixed classifier.
+    audit = _chat_turn_audit_bodies(client, session_id)
+    assert audit, "expected a chat_turn audit on the degrade path"
+    assert audit[-1]["error_class"] == "StepHandlerRejected"
+
+
+def test_step_3_chat_reproposes_in_place_without_committing(composer_test_client: TestClient) -> None:
+    client = composer_test_client
+    session_id = _create_session(client)
+    # Drive to STEP_3 under the HELPER's own chain-solver patch (which exits at
+    # the end of this block), so it does NOT nest with this test's patch below.
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(_fake_llm_response_for_passthrough()),
+    ):
+        _drive_to_step_3_propose_chain(client, session_id)
+    # Now a fresh, non-nested patch controls the STEP_3 chat re-solve.
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(_fake_chain_response()),
+    ):
+        status, body = _post_chat(client, session_id, message="actually just pass the rows through", step_index="step_3_transforms")
+    assert status == 200, body
+    # In-place: phase stays STEP_3, a fresh propose_chain turn is re-rendered,
+    # and the pipeline is NOT committed/advanced to wire.
+    assert body["guided_session"]["step"] == "step_3_transforms"
+    assert body["next_turn"]["type"] == "propose_chain"
+    assert body["terminal"] is None

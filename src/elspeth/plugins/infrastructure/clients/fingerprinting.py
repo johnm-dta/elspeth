@@ -63,6 +63,38 @@ SENSITIVE_HEADER_WORDS = frozenset(
 
 SENSITIVE_QUERY_PARAM_WORDS = SENSITIVE_HEADER_WORDS | frozenset({"sig", "signature", "pwd", "pass", "sid"})
 
+# Query redaction is an audit-safety boundary, not an unbounded parser. These
+# budgets prevent attacker-controlled URLs and redirect Location values from
+# forcing one expensive fingerprint per query field before the HTTP call is
+# recorded.
+MAX_AUDIT_QUERY_FIELDS = 256
+MAX_AUDIT_QUERY_CHARS = 4096
+MAX_AUDIT_QUERY_FINGERPRINTS = 64
+_QUERY_REDACTION_SENTINEL_KEY = "__elspeth_query_redacted"
+_QUERY_REDACTION_SENTINEL_VALUE = "too_many_fields"
+
+
+def _query_redaction_sentinel() -> dict[str, str | int | float]:
+    return {_QUERY_REDACTION_SENTINEL_KEY: _QUERY_REDACTION_SENTINEL_VALUE}
+
+
+def _query_redaction_sentinel_string() -> str:
+    return urlencode(_query_redaction_sentinel())
+
+
+def _too_many_sensitive_query_params(names: list[str]) -> bool:
+    sensitive_count = 0
+    for name in names:
+        if is_sensitive_query_param(name):
+            sensitive_count += 1
+            if sensitive_count > MAX_AUDIT_QUERY_FINGERPRINTS:
+                return True
+    return False
+
+
+def _param_payload_too_large(params: Mapping[str, str | int | float]) -> bool:
+    return any(len(key) + len(str(value)) > MAX_AUDIT_QUERY_CHARS for key, value in params.items())
+
 
 def is_sensitive_header(header_name: str) -> bool:
     """Check if a header name indicates sensitive content.
@@ -187,6 +219,10 @@ def fingerprint_params(
     """
     if params is None:
         return None
+    if len(params) > MAX_AUDIT_QUERY_FIELDS or _param_payload_too_large(params):
+        return _query_redaction_sentinel()
+    if _too_many_sensitive_query_params(list(params.keys())):
+        return _query_redaction_sentinel()
 
     from elspeth.core.security import get_fingerprint_key, secret_fingerprint
 
@@ -224,6 +260,15 @@ def fingerprint_url(url: str) -> str:
     parsed = urlsplit(url)
     if not parsed.query:
         return url
+    if len(parsed.query) > MAX_AUDIT_QUERY_CHARS:
+        return urlunsplit(parsed._replace(query=_query_redaction_sentinel_string()))
+
+    try:
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=MAX_AUDIT_QUERY_FIELDS)
+    except ValueError:
+        return urlunsplit(parsed._replace(query=_query_redaction_sentinel_string()))
+    if _too_many_sensitive_query_params([name for name, _value in query_pairs]):
+        return urlunsplit(parsed._replace(query=_query_redaction_sentinel_string()))
 
     from elspeth.core.security import get_fingerprint_key, secret_fingerprint
 
@@ -236,7 +281,7 @@ def fingerprint_url(url: str) -> str:
         have_key = False
 
     fingerprinted_query: list[tuple[str, str]] = []
-    for k, v in parse_qsl(parsed.query, keep_blank_values=True):
+    for k, v in query_pairs:
         if is_sensitive_query_param(k):
             if allow_raw:
                 continue

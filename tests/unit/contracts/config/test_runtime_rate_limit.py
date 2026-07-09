@@ -5,6 +5,7 @@ Rate-limit-specific tests only. Common tests (frozen, slots, protocol, orphan fi
 are in test_runtime_common.py.
 """
 
+from pathlib import Path
 from types import MappingProxyType
 
 import pytest
@@ -65,7 +66,7 @@ class TestRuntimeRateLimitFromSettings:
         settings = RateLimitSettings(
             enabled=False,
             default_requests_per_minute=500,
-            persistence_path="/tmp/rate_limits.db",
+            persistence_path="rate_limits.db",
             services=services,
         )
 
@@ -74,7 +75,7 @@ class TestRuntimeRateLimitFromSettings:
         # Verify all fields mapped correctly
         assert config.enabled is False, "enabled not mapped correctly"
         assert config.default_requests_per_minute == 500, "default_requests_per_minute not mapped correctly"
-        assert config.persistence_path == "/tmp/rate_limits.db", "persistence_path not mapped correctly"
+        assert config.persistence_path == str((Path("data") / "rate_limits.db").resolve()), "persistence_path not mapped correctly"
         expected_services = {"openai": RuntimeServiceRateLimit(requests_per_minute=100)}
         assert config.services == expected_services, "services not mapped correctly"
 

@@ -55,8 +55,9 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -110,6 +111,7 @@ from elspeth.engine.executors import (
     SinkExecutor,
     TransformExecutor,
 )
+from elspeth.engine.executors.state_guard import stamped_node_state_id
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
 from tests.fixtures.audit_hashing import assert_stable_hash
@@ -182,6 +184,67 @@ def _make_token(
 _JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 
 
+class _RecordedCall:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args_list: list[_RecordedCall] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args_list.append(_RecordedCall(args, dict(kwargs)))
+        if self.side_effect is None:
+            return self.return_value
+
+        effect = self.side_effect
+        if isinstance(effect, list):
+            effect = effect.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        if isinstance(effect, type) and issubclass(effect, BaseException):
+            raise effect()
+        if callable(effect):
+            return effect(*args, **kwargs)
+        return effect
+
+    @property
+    def called(self) -> bool:
+        return bool(self.call_args_list)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    @property
+    def call_args(self) -> _RecordedCall:
+        if not self.call_args_list:
+            raise AssertionError("Recorder was not called")
+        return self.call_args_list[-1]
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+    def assert_called_once_with(self, *args: Any, **kwargs: Any) -> None:
+        self.assert_called_once()
+        assert self.call_args.args == args
+        assert self.call_args.kwargs == kwargs
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+
 def _journal_payload(data: dict[str, Any], contract: SchemaContract | None = None) -> str:
     """Build a REAL journal row payload via the serializer mark_blocked rows carry.
 
@@ -234,20 +297,21 @@ def _blocked_item(
 def _make_factory() -> MagicMock:
     """Create a mock RecorderFactory with sensible defaults."""
     factory = MagicMock(spec=RecorderFactory)
-    state = Mock(state_id="state_001")
+    state = SimpleNamespace(state_id="state_001")
     factory.execution.begin_node_state.return_value = state
-    factory.execution.register_artifact.return_value = Mock(artifact_id="art_001")
-    factory.execution.begin_operation.return_value = Mock(operation_id="op_001")
+    factory.execution.register_artifact.return_value = SimpleNamespace(artifact_id="art_001")
+    factory.execution.begin_operation.return_value = SimpleNamespace(operation_id="op_001")
 
     batch_counter = 0
     batch_nodes: dict[str, str] = {}
-    batch_members: dict[str, list[Mock]] = {}
+    batch_members: dict[str, list[SimpleNamespace]] = {}
 
-    def create_batch_side_effect(*, run_id: str, aggregation_node_id: str) -> Mock:
+    def create_batch_side_effect(*, run_id: str, aggregation_node_id: str) -> SimpleNamespace:
         nonlocal batch_counter
+        del run_id
         batch_counter += 1
         batch_id = f"batch_{batch_counter:03d}"
-        batch = Mock(
+        batch = SimpleNamespace(
             batch_id=batch_id,
             aggregation_node_id=str(aggregation_node_id),
             status=BatchStatus.DRAFT,
@@ -257,18 +321,18 @@ def _make_factory() -> MagicMock:
         batch_members.setdefault(batch_id, [])
         return batch
 
-    def add_batch_member_side_effect(*, batch_id: str, token_id: str, ordinal: int) -> Mock:
-        member = Mock(batch_id=batch_id, token_id=token_id, ordinal=ordinal)
+    def add_batch_member_side_effect(*, batch_id: str, token_id: str, ordinal: int) -> SimpleNamespace:
+        member = SimpleNamespace(batch_id=batch_id, token_id=token_id, ordinal=ordinal)
         batch_members.setdefault(batch_id, []).append(member)
         return member
 
-    def get_batch_side_effect(batch_id: str) -> Mock | None:
+    def get_batch_side_effect(batch_id: str) -> SimpleNamespace | None:
         node_id = batch_nodes.get(batch_id)
         if node_id is None:
             return None
-        return Mock(batch_id=batch_id, aggregation_node_id=node_id)
+        return SimpleNamespace(batch_id=batch_id, aggregation_node_id=node_id)
 
-    def get_batch_members_side_effect(batch_id: str) -> list[Mock]:
+    def get_batch_members_side_effect(batch_id: str) -> list[SimpleNamespace]:
         return sorted(batch_members.get(batch_id, []), key=lambda member: member.ordinal)
 
     factory.execution.create_batch.side_effect = create_batch_side_effect
@@ -337,27 +401,64 @@ def _make_transform(
     return t
 
 
+class _SinkDouble:
+    def __init__(self, *, name: str, node_id: str | None) -> None:
+        self.name = name
+        self.node_id = node_id
+        self.input_schema = _PermissiveSchema
+        self.declared_guaranteed_fields = frozenset()
+        self.declared_required_fields = frozenset()
+        self._on_write_failure = "discard"
+        self._reset_diversion_log = _CallRecorder()
+        self.write = _CallRecorder(
+            return_value=SinkWriteResult(
+                artifact=ArtifactDescriptor(
+                    artifact_type="file",
+                    path_or_uri="file:///output/test.csv",
+                    content_hash="abc123",
+                    size_bytes=100,
+                )
+            )
+        )
+        self.flush = _CallRecorder()
+
+
 def _make_sink(
     name: str = "test_sink",
     node_id: str | None = "sink_1",
-) -> MagicMock:
-    """Create a mock sink."""
-    sink = MagicMock()
-    sink.name = name
-    sink.node_id = node_id
-    sink.declared_guaranteed_fields = frozenset()
-    sink.declared_required_fields = frozenset()
-    sink._on_write_failure = "discard"
-    sink._reset_diversion_log = MagicMock()
-    sink.write.return_value = SinkWriteResult(
-        artifact=ArtifactDescriptor(
-            artifact_type="file",
-            path_or_uri="file:///output/test.csv",
-            content_hash="abc123",
-            size_bytes=100,
-        )
-    )
-    return sink
+) -> _SinkDouble:
+    """Create an explicit sink test double."""
+    return _SinkDouble(name=name, node_id=node_id)
+
+
+class _AggregationTransformDouble:
+    def __init__(self, *, name: str = "agg_transform") -> None:
+        self.name = name
+        self.input_schema = _PermissiveSchema
+        self.output_schema = _PermissiveSchema
+        self.process = _CallRecorder()
+
+
+def _make_aggregation_transform(name: str = "agg_transform") -> _AggregationTransformDouble:
+    return _AggregationTransformDouble(name=name)
+
+
+class _BatchWaiterDouble:
+    def __init__(self, *, return_value: Any = None, side_effect: Any = None) -> None:
+        self.wait = _CallRecorder(return_value=return_value, side_effect=side_effect)
+
+
+class _BatchAdapterDouble:
+    def __init__(self, waiter: _BatchWaiterDouble) -> None:
+        self.register = _CallRecorder(return_value=waiter)
+
+
+def _install_batch_adapter(executor: TransformExecutor, adapter: _BatchAdapterDouble) -> None:
+    executor._get_batch_adapter = lambda _transform: adapter  # type: ignore[method-assign]
+
+
+def _make_token_manager(children: list[TokenInfo], fork_group_id: str) -> SimpleNamespace:
+    return SimpleNamespace(fork_token=_CallRecorder(return_value=(children, fork_group_id)))
 
 
 def _default_pending() -> PendingOutcome:
@@ -420,14 +521,16 @@ class TestGateOutcome:
         """FORK_TO_PATHS action with child_tokens is a valid routing outcome."""
         result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["path_a", "path_b"]))
         token = _make_token()
-        child = _make_token(token_id="child_1")
+        child_a = _make_token(token_id="child_1")
+        child_b = _make_token(token_id="child_2")
         outcome = GateOutcome(
             result=result,
             updated_token=token,
-            child_tokens=(child,),
+            child_tokens=(child_a, child_b),
         )
-        assert len(outcome.child_tokens) == 1
+        assert len(outcome.child_tokens) == 2
         assert outcome.child_tokens[0].token_id == "child_1"
+        assert outcome.child_tokens[1].token_id == "child_2"
         assert outcome.sink_name is None
 
     def test_frozen_rejects_field_reassignment(self) -> None:
@@ -442,11 +545,12 @@ class TestGateOutcome:
         """child_tokens is converted to tuple for deep immutability."""
         result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["a", "b"]))
         token = _make_token()
-        child = _make_token(token_id="child_1")
+        child_a = _make_token(token_id="child_1")
+        child_b = _make_token(token_id="child_2")
         outcome = GateOutcome(
             result=result,
             updated_token=token,
-            child_tokens=(child,),
+            child_tokens=(child_a, child_b),
         )
         assert isinstance(outcome.child_tokens, tuple)
 
@@ -479,6 +583,16 @@ class TestGateOutcome:
         result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["a", "b"]))
         with pytest.raises(ValueError, match="FORK_TO_PATHS action must have non-empty child_tokens"):
             GateOutcome(result=result, updated_token=_make_token())
+
+    def test_fork_requires_child_per_destination(self) -> None:
+        """FORK_TO_PATHS action must preserve action destination and child cardinality."""
+        result = GateResult(row={"a": 1}, action=RoutingAction.fork_to_paths(["a", "b"]))
+        with pytest.raises(ValueError, match="FORK_TO_PATHS action destinations"):
+            GateOutcome(
+                result=result,
+                updated_token=_make_token(),
+                child_tokens=(_make_token(token_id="child_1"),),
+            )
 
     def test_fork_rejects_sink_name(self) -> None:
         """FORK_TO_PATHS action cannot have sink_name."""
@@ -924,7 +1038,7 @@ class TestTransformExecutor:
         )
         token = _make_token()
         ctx = make_context()
-        ctx.record_transform_error = MagicMock()  # type: ignore[method-assign]
+        ctx.record_transform_error = _CallRecorder()  # type: ignore[method-assign]
 
         executor.execute_transform(transform, token, ctx)
 
@@ -966,6 +1080,61 @@ class TestTransformExecutor:
         with pytest.raises(OrchestrationInvariantError, match="DIVERT edge"):
             executor.execute_transform(transform, token, ctx)
 
+    def test_error_path_records_audit_before_terminal_completion(self) -> None:
+        """transform_error + DIVERT routing_event persist BEFORE the FAILED
+        node_state write (record-before-complete, elspeth-2d65e04912) —
+        matching the B1 doctrine already applied on the success path."""
+        factory = _make_factory()
+        edge_ids = {NodeID("node_1"): "divert_edge_1"}
+        executor = TransformExecutor(
+            factory.execution, _make_span_factory(), _make_step_resolver(), error_edge_ids=edge_ids, data_flow=factory.data_flow
+        )
+        transform = _make_transform(on_error="quarantine_sink")
+        transform.process.return_value = TransformResult.error(
+            reason={"reason": "test_error"},
+        )
+        token = _make_token()
+        ctx = make_context(landscape=factory.execution)
+
+        order: list[str] = []
+        ctx.record_transform_error = lambda **kwargs: order.append("transform_error")  # type: ignore[method-assign]
+        factory.execution.record_routing_event.side_effect = lambda **kwargs: order.append("routing_event")
+        factory.execution.complete_node_state.side_effect = lambda **kwargs: order.append("complete_node_state")
+
+        executor.execute_transform(transform, token, ctx)
+
+        assert order == ["transform_error", "routing_event", "complete_node_state"], (
+            f"audit side-effects must precede terminal completion, got: {order}"
+        )
+
+    def test_error_path_audit_write_failure_fails_closed_via_guard(self) -> None:
+        """A LandscapeRecordError from the error-audit write must land the
+        node_state FAILED via the guard's auto-fail path (terminality intact)
+        and still propagate — never completed-then-crashed."""
+        from elspeth.core.landscape.errors import LandscapeRecordError
+
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        transform = _make_transform(on_error="discard")
+        transform.process.return_value = TransformResult.error(
+            reason={"reason": "test_error"},
+        )
+        token = _make_token()
+        ctx = make_context()
+
+        def _boom(**kwargs: object) -> None:
+            raise LandscapeRecordError("transform_error write failed")
+
+        ctx.record_transform_error = _boom  # type: ignore[method-assign]
+
+        with pytest.raises(LandscapeRecordError):
+            executor.execute_transform(transform, token, ctx)
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].phase == "executor_post_process"
+
     # --- Exception path ---
 
     def test_exception_from_process_records_failed_and_reraises(self) -> None:
@@ -984,6 +1153,27 @@ class TestTransformExecutor:
         kwargs = factory.execution.complete_node_state.call_args[1]
         assert kwargs["status"] == NodeStateStatus.FAILED
         assert "plugin bug" in kwargs["error"].exception
+
+    def test_exception_from_process_scrubs_secret_message_in_failed_state(self) -> None:
+        """Secret-bearing plugin exception text must not be persisted in audit errors."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        transform = _make_transform()
+        secret = "sk-" + ("a" * 32)
+        transform.process.side_effect = RuntimeError(f"Authorization: Bearer {secret}")
+        token = _make_token()
+        ctx = make_context()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            executor.execute_transform(transform, token, ctx)
+
+        assert secret in str(exc_info.value)
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        error = kwargs["error"]
+        assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
 
     def test_exception_path_captures_duration(self) -> None:
         """Duration is captured even when exception is raised."""
@@ -1054,7 +1244,7 @@ class TestTransformExecutor:
         )
         token = _make_token()
         ctx = make_context()
-        ctx.record_transform_error = MagicMock()  # type: ignore[method-assign]
+        ctx.record_transform_error = _CallRecorder()  # type: ignore[method-assign]
 
         executor.execute_transform(transform, token, ctx)
 
@@ -1206,11 +1396,11 @@ class TestTransformExecutor:
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
 
-        captured_ctx = None
+        captured_contract = None
 
         def capture_ctx(row_data: Any, ctx: Any) -> TransformResult:
-            nonlocal captured_ctx
-            captured_ctx = ctx
+            nonlocal captured_contract
+            captured_contract = ctx.contract
             return TransformResult.success(
                 make_row({"value": "processed"}, contract=contract),
                 success_reason={"action": "test"},
@@ -1224,8 +1414,133 @@ class TestTransformExecutor:
 
         executor.execute_transform(transform, token, ctx)
 
-        assert captured_ctx is not None
-        assert captured_ctx.contract is contract
+        assert captured_contract is contract
+
+    def test_restores_ctx_execution_metadata_after_success(self) -> None:
+        """Per-token execution metadata must not leak after a successful transform."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        previous_contract = _make_output_contract()
+        previous_token = _make_token(data={"value": "previous"}, token_id="tok_previous", contract=previous_contract)
+        input_contract = _make_contract()
+        token = _make_token(contract=input_contract)
+        seen: dict[str, Any] = {}
+
+        def capture_ctx(row_data: Any, call_ctx: Any) -> TransformResult:
+            seen["state_id"] = call_ctx.state_id
+            seen["node_id"] = call_ctx.node_id
+            seen["contract"] = call_ctx.contract
+            seen["token"] = call_ctx.token
+            return TransformResult.success(
+                make_row({"value": "processed"}, contract=input_contract),
+                success_reason={"action": "test"},
+            )
+
+        transform = _make_transform()
+        transform.process = capture_ctx
+        ctx = make_context()
+        ctx.state_id = "previous_state"
+        ctx.node_id = "previous_node"
+        ctx.contract = previous_contract
+        ctx.token = previous_token
+
+        executor.execute_transform(transform, token, ctx)
+
+        assert seen["state_id"] == "state_001"
+        assert seen["node_id"] == "node_1"
+        assert seen["contract"] is input_contract
+        assert seen["token"] is token
+        assert ctx.state_id == "previous_state"
+        assert ctx.node_id == "previous_node"
+        assert ctx.contract is previous_contract
+        assert ctx.token is previous_token
+
+    def test_restores_ctx_execution_metadata_after_error_result(self) -> None:
+        """Per-token execution metadata must not leak after TransformResult.error."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        previous_contract = _make_output_contract()
+        previous_token = _make_token(data={"value": "previous"}, token_id="tok_previous", contract=previous_contract)
+        input_contract = _make_contract()
+        token = _make_token(contract=input_contract)
+        transform = _make_transform(on_error="discard")
+        transform.process.return_value = TransformResult.error(reason={"reason": "content_filtered"})
+        ctx = make_context(landscape=factory.execution)
+        ctx.state_id = "previous_state"
+        ctx.node_id = "previous_node"
+        ctx.contract = previous_contract
+        ctx.token = previous_token
+
+        executor.execute_transform(transform, token, ctx)
+
+        assert ctx.state_id == "previous_state"
+        assert ctx.node_id == "previous_node"
+        assert ctx.contract is previous_contract
+        assert ctx.token is previous_token
+
+    def test_restores_ctx_execution_metadata_after_exception(self) -> None:
+        """Per-token execution metadata must not leak when transform.process crashes."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        previous_contract = _make_output_contract()
+        previous_token = _make_token(data={"value": "previous"}, token_id="tok_previous", contract=previous_contract)
+        input_contract = _make_contract()
+        token = _make_token(contract=input_contract)
+
+        def crash(row_data: Any, call_ctx: Any) -> TransformResult:
+            assert call_ctx.state_id == "state_001"
+            assert call_ctx.node_id == "node_1"
+            assert call_ctx.contract is input_contract
+            assert call_ctx.token is token
+            raise RuntimeError("plugin crash")
+
+        transform = _make_transform()
+        transform.process = crash
+        ctx = make_context()
+        ctx.state_id = "previous_state"
+        ctx.node_id = "previous_node"
+        ctx.contract = previous_contract
+        ctx.token = previous_token
+
+        with pytest.raises(RuntimeError, match="plugin crash"):
+            executor.execute_transform(transform, token, ctx)
+
+        assert ctx.state_id == "previous_state"
+        assert ctx.node_id == "previous_node"
+        assert ctx.contract is previous_contract
+        assert ctx.token is previous_token
+
+    def test_exception_carries_failed_node_state_id(self) -> None:
+        """A transform crash must carry the failed node-state id on the exception.
+
+        ctx.state_id is scope-restored before the exception reaches the
+        processor's retryable-error conversion, so the exception itself is the
+        only channel that can attribute the DIVERT routing_event to the state
+        that actually failed.
+        """
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        token = _make_token(contract=_make_contract())
+
+        def crash(row_data: Any, call_ctx: Any) -> TransformResult:
+            raise ConnectionError("connection reset")
+
+        transform = _make_transform()
+        transform.process = crash
+        ctx = make_context()
+
+        with pytest.raises(ConnectionError) as exc_info:
+            executor.execute_transform(transform, token, ctx)
+
+        assert stamped_node_state_id(exc_info.value) == "state_001"
+
+    def test_stamped_node_state_id_does_not_invoke_dynamic_attribute(self) -> None:
+        class _ForgedStampedException(Exception):
+            @property
+            def _elspeth_node_state_id(self) -> str:
+                raise AssertionError("dynamic stamp property must not be invoked")
+
+        assert stamped_node_state_id(_ForgedStampedException("boom")) is None
 
     def test_creates_pipeline_row_from_result(self) -> None:
         """Updated token should have PipelineRow with output contract."""
@@ -1394,6 +1709,52 @@ class TestGateExecutor:
         assert outcome.sink_name is None
         assert outcome.next_node_id == NodeID("next_node")
 
+    def test_config_gate_reuses_condition_parser_per_gate(self) -> None:
+        """Repeated tokens for the same gate reuse one parsed condition."""
+
+        class _CountingParser:
+            constructed = 0
+            evaluated = 0
+
+            def __init__(self, condition: str) -> None:
+                type(self).constructed += 1
+                self.condition = condition
+
+            def evaluate(self, row: PipelineRow) -> bool:
+                type(self).evaluated += 1
+                assert row["value"] == "test"
+                return True
+
+        factory = _make_factory()
+        edge_map = {(NodeID("cg_1"), "true"): "edge_true"}
+        route_map = {(NodeID("cg_1"), "true"): RouteDestination.processing_node(NodeID("next_node"))}
+        executor = GateExecutor(
+            factory.execution,
+            _make_span_factory(),
+            _make_step_resolver(),
+            edge_map=edge_map,
+            route_resolution_map=route_map,
+        )
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="True",
+            routes={"true": "next_conn", "false": "error_sink"},
+        )
+        contract = _make_contract()
+        first_token = _make_token(contract=contract, token_id="tok_1")
+        second_token = _make_token(contract=contract, token_id="tok_2")
+        ctx = make_context()
+
+        with patch("elspeth.engine.executors.gate.ExpressionParser", _CountingParser):
+            first_outcome = executor.execute_config_gate(config, "cg_1", first_token, ctx)
+            second_outcome = executor.execute_config_gate(config, "cg_1", second_token, ctx)
+
+        assert first_outcome.next_node_id == NodeID("next_node")
+        assert second_outcome.next_node_id == NodeID("next_node")
+        assert _CountingParser.evaluated == 2
+        assert _CountingParser.constructed == 1
+
     def test_config_gate_boolean_false_routes_via_false_label(self) -> None:
         """Boolean False condition evaluates to 'false' label."""
         factory = _make_factory()
@@ -1547,6 +1908,34 @@ class TestGateExecutor:
 
         _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
+    def test_config_gate_unknown_route_label_error_redacts_row_derived_value(self) -> None:
+        """Unknown row-derived route labels must not leak raw values to audit text."""
+        from elspeth.contracts.errors import ExecutionError
+
+        secret_label = "sk-or-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + ("x" * 100)
+        factory = _make_factory()
+        executor = GateExecutor(factory.execution, _make_span_factory(), _make_step_resolver())
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="row['route_label']",
+            routes={"known": "next_conn"},
+        )
+        token = _make_token(data={"value": "test", "route_label": secret_label}, contract=_make_contract())
+        ctx = make_context()
+
+        with pytest.raises(ValueError) as exc_info:
+            executor.execute_config_gate(config, "cg_1", token, ctx)
+
+        assert secret_label not in str(exc_info.value)
+        assert "type=str" in str(exc_info.value)
+        assert "sha256=" in str(exc_info.value)
+
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        error_obj = failed_kwargs.get("error")
+        assert isinstance(error_obj, ExecutionError)
+        assert secret_label not in error_obj.exception
+
     def test_config_gate_fork_destination_creates_children(self) -> None:
         """Config gate with 'fork' destination creates child tokens."""
         factory = _make_factory()
@@ -1574,8 +1963,7 @@ class TestGateExecutor:
 
         child_a = _make_token(token_id="child_a")
         child_b = _make_token(token_id="child_b")
-        token_manager = MagicMock()
-        token_manager.fork_token.return_value = ([child_a, child_b], "fg_001")
+        token_manager = _make_token_manager([child_a, child_b], "fg_001")
 
         contract = _make_contract()
         token = _make_token(contract=contract)
@@ -1783,6 +2171,38 @@ class TestGateExecutor:
         with pytest.raises(TypeError, match="int"):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
+    def test_config_gate_type_error_redacts_untrusted_eval_result(self) -> None:
+        """Unsupported route values must be described with bounded metadata."""
+        from elspeth.contracts.errors import ExecutionError
+
+        secret_value = "sk-or-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" + ("y" * 100)
+        factory = _make_factory()
+        executor = GateExecutor(factory.execution, _make_span_factory(), _make_step_resolver())
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="row['route_payload']",
+            routes={"true": "next_conn", "false": "error_sink"},
+        )
+        token = _make_token(
+            data={"value": "test", "route_payload": {"secret": secret_value}},
+            contract=_make_contract(),
+        )
+        ctx = make_context()
+
+        with pytest.raises(TypeError) as exc_info:
+            executor.execute_config_gate(config, "cg_1", token, ctx)
+
+        message = str(exc_info.value)
+        assert secret_value not in message
+        assert "type=mappingproxy" in message
+        assert "sha256=" in message
+
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        error_obj = failed_kwargs.get("error")
+        assert isinstance(error_obj, ExecutionError)
+        assert secret_value not in error_obj.exception
+
     # --- context_after wiring ---
 
     def test_config_gate_records_context_after(self) -> None:
@@ -1884,60 +2304,25 @@ class TestDispatchResolvedDestinationPerVariant:
             route_resolution_map=route_map,
         )
 
-    def test_continue_produces_continue_action(self) -> None:
-        """CONTINUE destination with continue_as_route=False produces CONTINUE kind."""
+    def test_continue_destination_raises_invariant_error(self) -> None:
+        """Resolved CONTINUE destinations are no longer part of the gate route model."""
         executor = self._make_executor()
         token = _make_token()
         ctx = make_context()
 
-        outcome = executor._dispatch_resolved_destination(
-            state_id="state_001",
-            node_id="gate_1",
-            route_label="true",
-            destination=RouteDestination.continue_(),
-            token=token,
-            ctx=ctx,
-            token_manager=None,
-            reason=None,
-            mode=RoutingMode.MOVE,
-            fork_branches=None,
-            continue_as_route=False,
-        )
-
-        assert outcome.action.kind == RoutingKind.CONTINUE
-        assert outcome.action.kind != RoutingKind.ROUTE  # type: ignore[comparison-overlap]
-        assert outcome.action.kind != RoutingKind.FORK_TO_PATHS  # type: ignore[comparison-overlap]
-        assert outcome.sink_name is None
-        assert outcome.next_node_id is None
-        assert outcome.child_tokens == ()
-
-    def test_continue_as_route_produces_route_action(self) -> None:
-        """CONTINUE destination with continue_as_route=True produces ROUTE kind."""
-        edge_map = {(NodeID("gate_1"), "continue"): "edge_cont"}
-        executor = self._make_executor(edge_map=edge_map)
-        token = _make_token()
-        ctx = make_context()
-
-        outcome = executor._dispatch_resolved_destination(
-            state_id="state_001",
-            node_id="gate_1",
-            route_label="true",
-            destination=RouteDestination.continue_(),
-            token=token,
-            ctx=ctx,
-            token_manager=None,
-            reason=None,
-            mode=RoutingMode.MOVE,
-            fork_branches=None,
-            continue_as_route=True,
-        )
-
-        assert outcome.action.kind == RoutingKind.ROUTE
-        assert outcome.action.kind != RoutingKind.CONTINUE  # type: ignore[comparison-overlap]
-        assert outcome.action.destinations == ("continue",)
-        assert outcome.sink_name is None
-        assert outcome.next_node_id is None
-        assert outcome.child_tokens == ()
+        with pytest.raises(OrchestrationInvariantError, match="Unsupported route destination kind"):
+            executor._dispatch_resolved_destination(
+                state_id="state_001",
+                node_id="gate_1",
+                route_label="true",
+                destination=RouteDestination.continue_(),
+                token=token,
+                ctx=ctx,
+                token_manager=None,
+                reason=None,
+                mode=RoutingMode.MOVE,
+                fork_branches=None,
+            )
 
     def test_fork_produces_fork_action_with_children(self) -> None:
         """FORK destination produces FORK_TO_PATHS kind with child tokens."""
@@ -1951,8 +2336,7 @@ class TestDispatchResolvedDestinationPerVariant:
 
         child_a = _make_token(token_id="child_a")
         child_b = _make_token(token_id="child_b")
-        token_manager = MagicMock()
-        token_manager.fork_token.return_value = ([child_a, child_b], "fg_001")
+        token_manager = _make_token_manager([child_a, child_b], "fg_001")
 
         outcome = executor._dispatch_resolved_destination(
             state_id="state_001",
@@ -1965,7 +2349,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.COPY,
             fork_branches=["path_a", "path_b"],
-            continue_as_route=False,
         )
 
         assert outcome.action.kind == RoutingKind.FORK_TO_PATHS
@@ -1989,11 +2372,10 @@ class TestDispatchResolvedDestinationPerVariant:
                 destination=RouteDestination.fork(),
                 token=token,
                 ctx=ctx,
-                token_manager=MagicMock(),
+                token_manager=_make_token_manager([], "fg_unused"),
                 reason=None,
                 mode=RoutingMode.COPY,
                 fork_branches=None,
-                continue_as_route=False,
             )
 
     def test_fork_without_token_manager_raises_invariant_error(self) -> None:
@@ -2014,7 +2396,6 @@ class TestDispatchResolvedDestinationPerVariant:
                 reason=None,
                 mode=RoutingMode.COPY,
                 fork_branches=["path_a", "path_b"],
-                continue_as_route=False,
             )
 
     def test_sink_produces_sink_outcome(self) -> None:
@@ -2035,7 +2416,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         assert outcome.action.kind == RoutingKind.ROUTE
@@ -2061,7 +2441,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         assert outcome.action.kind == RoutingKind.ROUTE
@@ -2095,7 +2474,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         node_outcome = executor._dispatch_resolved_destination(
@@ -2109,7 +2487,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.MOVE,
             fork_branches=None,
-            continue_as_route=False,
         )
 
         # SINK must have sink_name, not next_node_id
@@ -2119,36 +2496,6 @@ class TestDispatchResolvedDestinationPerVariant:
         # PROCESSING_NODE must have next_node_id, not sink_name
         assert node_outcome.next_node_id == NodeID("next_node")
         assert node_outcome.sink_name is None
-
-    def test_continue_does_not_match_other_kinds(self) -> None:
-        """CONTINUE must not fall through to FORK, SINK, or PROCESSING_NODE branches.
-
-        Kills ``== CONTINUE`` → ``>= CONTINUE`` mutants where StrEnum ordering
-        might cause CONTINUE to match later branches.
-        """
-        executor = self._make_executor()
-        token = _make_token()
-        ctx = make_context()
-
-        outcome = executor._dispatch_resolved_destination(
-            state_id="state_001",
-            node_id="gate_1",
-            route_label="true",
-            destination=RouteDestination.continue_(),
-            token=token,
-            ctx=ctx,
-            token_manager=None,
-            reason=None,
-            mode=RoutingMode.MOVE,
-            fork_branches=None,
-            continue_as_route=False,
-        )
-
-        # Must be CONTINUE, not accidentally matching FORK/SINK/PROCESSING_NODE
-        assert outcome.action.kind == RoutingKind.CONTINUE
-        assert outcome.child_tokens == ()
-        assert outcome.sink_name is None
-        assert outcome.next_node_id is None
 
     def test_fork_does_not_match_continue(self) -> None:
         """FORK must not fall into the CONTINUE branch.
@@ -2166,8 +2513,7 @@ class TestDispatchResolvedDestinationPerVariant:
 
         child_x = _make_token(token_id="child_x")
         child_y = _make_token(token_id="child_y")
-        tm = MagicMock()
-        tm.fork_token.return_value = ([child_x, child_y], "fg_002")
+        tm = _make_token_manager([child_x, child_y], "fg_002")
 
         outcome = executor._dispatch_resolved_destination(
             state_id="state_001",
@@ -2180,7 +2526,6 @@ class TestDispatchResolvedDestinationPerVariant:
             reason=None,
             mode=RoutingMode.COPY,
             fork_branches=["branch_x", "branch_y"],
-            continue_as_route=False,
         )
 
         # Must be FORK_TO_PATHS, definitely not CONTINUE
@@ -2189,40 +2534,6 @@ class TestDispatchResolvedDestinationPerVariant:
         assert len(outcome.child_tokens) == 2
         # fork_token must have been called (not skipped by hitting CONTINUE branch)
         tm.fork_token.assert_called_once()
-
-    def test_continue_as_route_inversion_changes_action_kind(self) -> None:
-        """continue_as_route=True vs False must produce different action kinds.
-
-        Kills the ``continue_as_route`` boolean inversion mutant.
-        """
-        edge_map = {(NodeID("gate_1"), "continue"): "edge_cont"}
-        executor = self._make_executor(edge_map=edge_map)
-        token = _make_token()
-        ctx = make_context()
-
-        base_kwargs: dict[str, Any] = {
-            "state_id": "state_001",
-            "node_id": "gate_1",
-            "route_label": "true",
-            "destination": RouteDestination.continue_(),
-            "token": token,
-            "ctx": ctx,
-            "token_manager": None,
-            "reason": None,
-            "mode": RoutingMode.MOVE,
-            "fork_branches": None,
-        }
-
-        outcome_normal = executor._dispatch_resolved_destination(**base_kwargs, continue_as_route=False)
-        outcome_as_route = executor._dispatch_resolved_destination(**base_kwargs, continue_as_route=True)
-
-        # Normal continue: CONTINUE kind
-        assert outcome_normal.action.kind == RoutingKind.CONTINUE
-        # As route: ROUTE kind with "continue" destination
-        assert outcome_as_route.action.kind == RoutingKind.ROUTE
-        assert outcome_as_route.action.destinations == ("continue",)
-        # They must differ
-        assert outcome_normal.action.kind != outcome_as_route.action.kind  # type: ignore[comparison-overlap]
 
 
 # =============================================================================
@@ -2402,7 +2713,7 @@ class TestAggregationExecutor:
     def test_execute_flush_no_batch_raises_orchestration_invariant_error(self) -> None:
         """Flushing without a batch raises OrchestrationInvariantError."""
         executor, _, nid = self._make_agg_executor()
-        transform = MagicMock()
+        transform = _make_aggregation_transform()
         ctx = make_context()
 
         with pytest.raises(OrchestrationInvariantError, match="No batch exists"):
@@ -2431,8 +2742,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
         # Mock batch transform
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -2466,8 +2776,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
         # Mock batch transform
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -2493,6 +2802,62 @@ class TestAggregationExecutor:
         assert context_after.row_end == 2
         assert context_after.is_end_of_source is False
 
+    def test_execute_flush_validates_buffered_rows_before_process(self) -> None:
+        """Schema-invalid buffered rows must not reach batch transform execution."""
+        from elspeth.contracts import PluginSchema
+
+        class StrictInputSchema(PluginSchema):
+            count: int
+
+        executor, factory, nid = self._make_agg_executor(count=1)
+        contract = _make_contract()
+        executor.buffer_row(nid, _make_token(data={"count": "42"}, token_id="t1", contract=contract))
+
+        transform = _make_aggregation_transform("agg_transform")
+        transform.input_schema = StrictInputSchema
+        transform.process.return_value = TransformResult.success(
+            make_row({"value": "unused"}, contract=contract),
+            success_reason={"action": "unused"},
+        )
+        ctx = make_context()
+
+        with pytest.raises(PluginContractViolation, match="input validation failed"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        transform.process.assert_not_called()
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["error"].exception_type == "PluginContractViolation"
+        failed_batches = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
+        assert len(failed_batches) == 1
+
+    def test_execute_flush_validates_success_output_before_completed_state(self) -> None:
+        """Schema-invalid batch output must fail before node state is completed."""
+        from elspeth.contracts import PluginSchema
+
+        class StrictOutputSchema(PluginSchema):
+            count: int
+
+        executor, factory, nid = self._make_agg_executor(count=1)
+        contract = _make_contract()
+        executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
+
+        transform = _make_aggregation_transform("agg_transform")
+        transform.output_schema = StrictOutputSchema
+        transform.process.return_value = TransformResult.success(
+            make_row({"count": "42"}, contract=contract),
+            success_reason={"action": "aggregated"},
+        )
+        ctx = make_context()
+
+        with pytest.raises(PluginContractViolation, match="output validation failed"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["error"].exception_type == "PluginContractViolation"
+        assert all(c[1].get("status") != NodeStateStatus.COMPLETED for c in factory.execution.complete_node_state.call_args_list)
+        failed_batches = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
+        assert len(failed_batches) == 1
+
     def test_execute_flush_error_result_marks_batch_failed(self) -> None:
         """Error result from transform marks batch as FAILED."""
         executor, factory, nid = self._make_agg_executor(count=2)
@@ -2501,8 +2866,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.error(
             reason={"reason": "test_error"},
         )
@@ -2529,8 +2893,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.side_effect = RuntimeError("transform crash")
         ctx = make_context()
 
@@ -2540,6 +2903,27 @@ class TestAggregationExecutor:
         # Verify batch marked failed
         failed_calls = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
         assert len(failed_calls) == 1
+
+    def test_execute_flush_scrubs_plugin_exception_message_in_failed_state(self) -> None:
+        """Secret-bearing plugin exception text must not be persisted in audit errors."""
+        executor, factory, nid = self._make_agg_executor(count=1)
+        contract = _make_contract()
+        secret = "sk-" + ("a" * 32)
+
+        executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
+
+        transform = _make_aggregation_transform("agg_transform")
+        transform.process.side_effect = RuntimeError(f"Authorization: Bearer {secret}")
+        ctx = make_context()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        assert secret in str(exc_info.value)
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        error = failed_kwargs["error"]
+        assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
 
     def test_execute_flush_exception_clears_batch_token_ids(self) -> None:
         """Exception path clears ctx.batch_token_ids to prevent stale leakage.
@@ -2555,8 +2939,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg"
+        transform = _make_aggregation_transform("agg")
         transform.process.side_effect = RuntimeError("boom")
         ctx = make_context()
 
@@ -2587,6 +2970,8 @@ class TestAggregationExecutor:
             """Tiny batch-aware transform that snapshots ctx.aggregation_batch."""
 
             name = "capturing_agg"
+            input_schema = _PermissiveSchema
+            output_schema = _PermissiveSchema
 
             def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
                 # ctx.aggregation_batch must be set by AggregationExecutor before process()
@@ -2650,8 +3035,7 @@ class TestAggregationExecutor:
         executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg"
+        transform = _make_aggregation_transform("agg")
         transform.process.side_effect = RuntimeError("boom")
         ctx = make_context()
 
@@ -2687,8 +3071,7 @@ class TestAggregationExecutor:
         for i, label in enumerate(("a", "b", "c"), start=1):
             executor_a.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
 
-        transform_a = MagicMock()
-        transform_a.name = "agg"
+        transform_a = _make_aggregation_transform("agg")
         transform_a.process.return_value = TransformResult.success(
             make_row({"v": "agg1"}, contract=contract),
             success_reason={"action": "agg"},
@@ -2730,6 +3113,8 @@ class TestAggregationExecutor:
 
         class _CapturingBatchTransform:
             name = "capturing_agg"
+            input_schema = _PermissiveSchema
+            output_schema = _PermissiveSchema
 
             def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
                 if ctx.aggregation_batch is None:
@@ -2761,8 +3146,7 @@ class TestAggregationExecutor:
 
         executor.buffer_row(nid, _make_token(token_id="t1", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg"
+        transform = _make_aggregation_transform("agg")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "agg"}, contract=contract),
             success_reason={"action": "agg"},
@@ -2959,7 +3343,7 @@ class TestAggregationExecutor:
         assert node.accepted_count_total == 5
         assert node.batch_id is None
         assert node.tokens == []
-        assert node.buffers == []
+        assert executor.get_buffered_rows(nid) == []
         assert node.member_count == 0
         assert node.trigger.get_age_seconds() == 0.0
 
@@ -3456,17 +3840,17 @@ class TestSinkExecutor:
 
         factory = _make_factory()
 
-        def _begin_node_state(**kwargs: Any) -> Mock:
-            return Mock(state_id=f"state_{kwargs['token_id']}")
+        def _begin_node_state(**kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(state_id=f"state_{kwargs['token_id']}")
 
         completed_state_ids: set[str] = set()
 
-        def _complete_node_state(**kwargs: Any) -> Mock:
+        def _complete_node_state(**kwargs: Any) -> SimpleNamespace:
             state_id = kwargs["state_id"]
             if state_id in completed_state_ids:
                 raise LandscapeRecordError(f"Cannot complete node state {state_id}: current status 'FAILED' is already terminal.")
             completed_state_ids.add(state_id)
-            return Mock(state_id=state_id, status=kwargs["status"])
+            return SimpleNamespace(state_id=state_id, status=kwargs["status"])
 
         factory.execution.begin_node_state.side_effect = _begin_node_state
         factory.execution.complete_node_state.side_effect = _complete_node_state
@@ -3928,7 +4312,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         ctx = make_context()
         pending = _default_pending()
-        callback = MagicMock()
+        callback = _CallRecorder()
 
         executor.write(
             sink,
@@ -3959,7 +4343,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         ctx = make_context()
         pending = _default_pending()
-        callback = MagicMock(side_effect=RuntimeError("checkpoint failed"))
+        callback = _CallRecorder(side_effect=RuntimeError("checkpoint failed"))
 
         with pytest.raises(AuditIntegrityError, match="checkpoint") as exc_info:
             executor.write(
@@ -4008,7 +4392,7 @@ class TestSinkExecutor:
         """Artifact is registered linked to the first token's state."""
         factory = _make_factory()
         # Make begin_node_state return different state_ids per call
-        states = [Mock(state_id="state_001"), Mock(state_id="state_002")]
+        states = [SimpleNamespace(state_id="state_001"), SimpleNamespace(state_id="state_002")]
         factory.execution.begin_node_state.side_effect = states
 
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
@@ -4233,8 +4617,8 @@ class TestSinkExecutor:
         assert len(rows) == 1
         assert rows[0] == {"value": "test", "extra_field": "extra_value", "another": 123}
 
-    def test_sink_updates_ctx_contract_from_tokens(self) -> None:
-        """SinkExecutor should synchronize ctx.contract to sink token contracts."""
+    def test_sink_passes_scoped_contract_without_mutating_caller_context(self) -> None:
+        """SinkExecutor should pass sink token contracts on a scoped context."""
         factory = _make_factory()
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
 
@@ -4285,7 +4669,7 @@ class TestSinkExecutor:
         )
 
         assert captured_contract is sink_contract
-        assert ctx.contract is sink_contract
+        assert ctx.contract is stale_contract
 
     def test_sink_merges_mixed_token_contracts_for_context(self) -> None:
         """SinkExecutor should merge mixed token contracts before sink.write()."""
@@ -4350,7 +4734,8 @@ class TestSinkExecutor:
         sink.write.side_effect = capture_write
 
         ctx = make_context()
-        ctx.contract = _make_contract()
+        stale_contract = _make_contract()
+        ctx.contract = stale_contract
         pending = _default_pending()
 
         executor.write(
@@ -4365,7 +4750,7 @@ class TestSinkExecutor:
         assert captured_contract is not None
         assert captured_contract == expected_merged
         assert captured_contract.get_field("extra") is not None
-        assert ctx.contract == expected_merged
+        assert ctx.contract is stale_contract
 
 
 # =============================================================================
@@ -4441,6 +4826,85 @@ class TestNodeStateGuard:
         assert kwargs["error"].phase == "executor_post_process"
         assert kwargs["duration_ms"] >= 0
 
+    def test_empty_exception_message_still_records_failed(self) -> None:
+        """A bare `raise ValueError()` must not abort terminal persistence.
+
+        Regression (elspeth-d67453c22f): ExecutionError rejects empty
+        exception strings, and the auto-fail path constructed it from raw
+        str(exc_val) BEFORE the complete_node_state write — a messageless
+        exception left the node state permanently OPEN.
+        """
+        from elspeth.engine.executors import NodeStateGuard
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+        with pytest.raises(ValueError), guard:
+            raise ValueError()
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception == "ValueError"
+        assert kwargs["error"].exception_type == "ValueError"
+
+    def test_whitespace_only_exception_message_still_records_failed(self) -> None:
+        """Whitespace-only messages fall back to the exception type name."""
+        from elspeth.engine.executors import NodeStateGuard
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+        with pytest.raises(RuntimeError), guard:
+            raise RuntimeError("   ")
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception == "RuntimeError"
+
+    def test_raising_dunder_str_still_records_failed(self) -> None:
+        """An exception whose __str__ raises must not break audit terminality.
+
+        The original exception re-raises; the audit record falls back to the
+        exception type name for its message.
+        """
+        from elspeth.engine.executors import NodeStateGuard
+
+        class _HostileStr(RuntimeError):
+            def __str__(self) -> str:
+                raise RuntimeError("__str__ exploded")
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+        with pytest.raises(_HostileStr), guard:
+            raise _HostileStr("unrenderable")
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception == "_HostileStr"
+        assert kwargs["error"].exception_type == "_HostileStr"
+
     def test_incomplete_audit_evidence_instantiation_inside_guard_records_failed(self) -> None:
         """Construction-time abstract failures still preserve the guard's terminal-state invariant."""
         from elspeth.contracts.audit_evidence import AuditEvidenceBase
@@ -4492,6 +4956,30 @@ class TestNodeStateGuard:
         factory.execution.complete_node_state.assert_called_once()
         kwargs = factory.execution.complete_node_state.call_args[1]
         assert kwargs["status"] == NodeStateStatus.COMPLETED
+
+    def test_complete_rejects_pending_without_standing_guard_down(self) -> None:
+        """PENDING is not terminal and cannot satisfy the guard invariant."""
+        from elspeth.engine.executors import NodeStateGuard
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="terminal"), guard:
+            guard.complete(NodeStateStatus.PENDING, duration_ms=10.0)
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception_type == "OrchestrationInvariantError"
+        assert "PENDING" in kwargs["error"].exception
+        assert guard.completed is False
 
     def test_state_id_accessible_inside_block(self) -> None:
         """guard.state_id is available after __enter__."""
@@ -4914,6 +5402,131 @@ class TestNodeStateGuard:
 # =============================================================================
 
 
+class TestRecordTransformErrorWithRouting:
+    """Shared transform-error audit helper (elspeth-aeb0a8f756).
+
+    Both the executor's error-result branch and the processor's
+    retryable-exception conversion route through this one helper, so audit
+    drift between the two paths can only come from their arguments. The one
+    argument divergence — the executor passes a plain dict row, the
+    processor a PipelineRow — is pinned canonically identical here.
+    """
+
+    def _call(
+        self,
+        *,
+        on_error: str,
+        state_id: str | None = "state-1",
+        row: object | None = None,
+    ) -> tuple[list[dict[str, object]], MagicMock]:
+        from elspeth.engine.executors.transform import record_transform_error_with_routing
+
+        factory = _make_factory()
+        transform = _make_transform(on_error=on_error)
+        token = _make_token()
+        ctx = make_context()
+        recorded: list[dict[str, object]] = []
+        ctx.record_transform_error = lambda **kwargs: recorded.append(kwargs)  # type: ignore[method-assign]
+
+        record_transform_error_with_routing(
+            ctx=ctx,
+            execution=factory.execution,
+            error_edge_ids={NodeID("node_1"): "edge-err-1"},
+            state_id=state_id,
+            token=token,
+            transform=transform,
+            row=row if row is not None else {"field": "value"},
+            error_details={"reason": "network_error", "error": "boom"},
+            on_error=on_error,
+        )
+        return recorded, factory.execution
+
+    def test_dict_and_pipeline_row_rows_canonicalize_identically(self) -> None:
+        """The executor passes a dict, the processor a PipelineRow — the
+        persisted row_hash must be identical (canonicalization normalizes
+        PipelineRow via .to_dict())."""
+        from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+        from elspeth.core.canonical import stable_hash
+
+        data = {"field": "value", "n": 42}
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        assert stable_hash(data) == stable_hash(PipelineRow(dict(data), contract))
+
+    def test_discard_records_error_but_skips_routing_event(self) -> None:
+        recorded, execution = self._call(on_error="discard", state_id=None)
+
+        assert len(recorded) == 1
+        assert recorded[0]["destination"] == "discard"
+        execution.record_routing_event.assert_not_called()
+
+    def test_divert_records_routing_event_with_same_error_details(self) -> None:
+        recorded, execution = self._call(on_error="error_sink")
+
+        assert len(recorded) == 1
+        execution.record_routing_event.assert_called_once()
+        kwargs = execution.record_routing_event.call_args[1]
+        assert kwargs["state_id"] == "state-1"
+        assert kwargs["edge_id"] == "edge-err-1"
+        assert kwargs["mode"] == RoutingMode.DIVERT
+        assert kwargs["reason"] == recorded[0]["error_details"]
+
+    def test_scrubs_freeform_error_payload_before_transform_error_and_divert_audit(self) -> None:
+        from elspeth.engine.executors.transform import record_transform_error_with_routing
+
+        factory = _make_factory()
+        transform = _make_transform(on_error="error_sink")
+        token = _make_token()
+        ctx = make_context()
+        recorded: list[dict[str, object]] = []
+        ctx.record_transform_error = lambda **kwargs: recorded.append(kwargs)  # type: ignore[method-assign]
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        api_key = "FAKE_TOKEN_PLACEHOLDER"
+
+        record_transform_error_with_routing(
+            ctx=ctx,
+            execution=factory.execution,
+            error_edge_ids={NodeID("node_1"): "edge-err-1"},
+            state_id="state-1",
+            token=token,
+            transform=transform,
+            row={"field": "value"},
+            error_details={
+                "reason": "api_error",
+                "error": f"provider failed: {raw_secret}",
+                "message": f"request failed for {raw_secret}",
+                "provider": "azure",
+                "response": {
+                    "headers": {"authorization": f"Bearer {api_key}"},
+                    "events": [{"message": f"attempt used {raw_secret}"}],
+                },
+            },
+            on_error="error_sink",
+        )
+
+        assert len(recorded) == 1
+        transform_error_details = recorded[0]["error_details"]
+        routing_reason = factory.execution.record_routing_event.call_args.kwargs["reason"]
+        assert transform_error_details == {
+            "reason": "api_error",
+            "error": "<redacted-secret>",
+            "message": "<redacted-secret>",
+            "provider": "azure",
+            "response": {
+                "headers": {"authorization": "<redacted-secret>"},
+                "events": [{"message": "<redacted-secret>"}],
+            },
+        }
+        assert routing_reason == transform_error_details
+        assert raw_secret not in repr(transform_error_details)
+        assert raw_secret not in repr(routing_reason)
+        assert api_key not in repr(transform_error_details)
+        assert api_key not in repr(routing_reason)
+
+    def test_divert_without_state_id_raises_invariant(self) -> None:
+        with pytest.raises(OrchestrationInvariantError, match="state_id is required"):
+            self._call(on_error="error_sink", state_id=None)
+
+
 class TestTransformExecutorTerminality:
     """Regression tests for B1: TransformExecutor post-processing failures.
 
@@ -5091,8 +5704,7 @@ class TestAggregationExecutorTerminality:
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
         executor.buffer_row(nid, _make_token(data={"value": "b"}, token_id="t2", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -5146,8 +5758,7 @@ class TestAggregationExecutorTerminality:
 
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         # Transform crashes — inner except completes guard, then outer except tries cleanup
         transform.process.side_effect = RuntimeError("plugin crash")
         ctx = make_context()
@@ -5165,8 +5776,7 @@ class TestAggregationExecutorTerminality:
 
         executor.buffer_row(nid, _make_token(data={"value": "a"}, token_id="t1", contract=contract))
 
-        transform = MagicMock()
-        transform.name = "agg_transform"
+        transform = _make_aggregation_transform("agg_transform")
         transform.process.return_value = TransformResult.success(
             make_row({"value": "aggregated"}, contract=contract),
             success_reason={"action": "aggregated"},
@@ -5206,7 +5816,7 @@ class TestSinkExecutorTerminality:
         factory = _make_factory()
 
         # First call succeeds, second raises
-        state_1 = Mock(state_id="state_001")
+        state_1 = SimpleNamespace(state_id="state_001")
         factory.execution.begin_node_state.side_effect = [state_1, RuntimeError("DB connection lost")]
 
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
@@ -5274,8 +5884,8 @@ class TestSinkExecutorTerminality:
         """
         factory = _make_factory()
 
-        state_1 = Mock(state_id="state_001")
-        state_2 = Mock(state_id="state_002")
+        state_1 = SimpleNamespace(state_id="state_001")
+        state_2 = SimpleNamespace(state_id="state_002")
         factory.execution.begin_node_state.side_effect = [state_1, state_2, RuntimeError("out of IDs")]
 
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
@@ -5314,7 +5924,7 @@ class TestSinkExecutorTerminality:
         """
         factory = _make_factory()
 
-        state_1 = Mock(state_id="state_001")
+        state_1 = SimpleNamespace(state_id="state_001")
         factory.execution.begin_node_state.side_effect = [state_1, RuntimeError("DB down")]
         # Make cleanup also fail
         factory.execution.complete_node_state.side_effect = RuntimeError("cleanup also broken")
@@ -5472,7 +6082,11 @@ class TestReRaiseGuardPattern:
     # sink.py has best-effort cleanup of OPEN node_states before re-raise —
     # without this, a system error leaves states permanently OPEN (a Tier 1
     # violation worse than the original error). See _best_effort_cleanup().
-    _HANDLER_ALLOWLIST = frozenset({"cli.py", "sink.py"})
+    # heartbeat.py latches Tier-1 errors instead of raising on the beat
+    # thread's own stack (raising there would silently kill the daemon
+    # thread, NOT fail closed); check_and_raise() re-raises the latched
+    # exception verbatim at the next drain boundary (elspeth-d0ce4e12af).
+    _HANDLER_ALLOWLIST = frozenset({"cli.py", "sink.py", "heartbeat.py"})
 
     def test_all_reraise_guards_have_bare_raise(self) -> None:
         """Every except (FrameworkBugError, AuditIntegrityError) must contain only 'raise'.
@@ -5635,10 +6249,10 @@ class TestTransformExecutorBatchPath:
                 self.passes_through_input = False
                 self.can_drop_rows = False
                 self._output_schema_config = None
-                self.accept = MagicMock()
-                self.connect_output = MagicMock()
-                self.evict_submission = MagicMock(return_value=True)
-                self.effective_static_contract = MagicMock(return_value=frozenset())
+                self.accept = _CallRecorder()
+                self.connect_output = _CallRecorder()
+                self.evict_submission = _CallRecorder(return_value=True)
+                self.effective_static_contract = _CallRecorder(return_value=frozenset())
 
         t = _FakeBatchTransform()
         return t
@@ -5647,8 +6261,6 @@ class TestTransformExecutorBatchPath:
 
     def test_batch_path_invoked_for_mixin_transform(self) -> None:
         """When transform implements batch runtime protocol, accept() is called instead of process()."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -5661,11 +6273,9 @@ class TestTransformExecutorBatchPath:
         )
 
         # Mock _get_batch_adapter to return a controlled adapter
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = success_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=success_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -5780,8 +6390,6 @@ class TestTransformExecutorBatchPath:
 
     def test_register_called_before_accept(self) -> None:
         """register() is called before accept() for correct waiter ordering."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -5791,11 +6399,9 @@ class TestTransformExecutorBatchPath:
             make_row({"value": "out"}, contract=contract),
             success_reason={"action": "test"},
         )
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = success_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=success_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -5815,18 +6421,14 @@ class TestTransformExecutorBatchPath:
 
     def test_timeout_triggers_evict_submission(self) -> None:
         """TimeoutError from waiter.wait() calls evict_submission() on the batch runtime."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.side_effect = TimeoutError("timed out")
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(side_effect=TimeoutError("timed out"))
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -5844,18 +6446,14 @@ class TestTransformExecutorBatchPath:
 
     def test_eviction_failure_wraps_in_runtime_error(self) -> None:
         """If evict_submission() fails, the error is wrapped in RuntimeError."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.side_effect = TimeoutError("timed out")
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(side_effect=TimeoutError("timed out"))
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         # Make evict_submission raise
         transform.evict_submission.side_effect = KeyError("buffer gone")
@@ -5868,18 +6466,14 @@ class TestTransformExecutorBatchPath:
 
     def test_non_timeout_exception_does_not_evict(self) -> None:
         """Non-TimeoutError exceptions do NOT trigger eviction."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.side_effect = ValueError("not a timeout")
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(side_effect=ValueError("not a timeout"))
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()
@@ -5893,19 +6487,15 @@ class TestTransformExecutorBatchPath:
 
     def test_batch_error_result_routes_to_error_sink(self) -> None:
         """Batch transform returning TransformResult.error() routes via on_error."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         transform = self._make_batch_transform(on_error="discard")
 
         error_result = TransformResult.error(reason={"reason": "batch_failed"})
 
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = error_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=error_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token()
         ctx = make_context(landscape=factory.execution)
@@ -5918,8 +6508,6 @@ class TestTransformExecutorBatchPath:
 
     def test_batch_result_hashes_bind_to_input_and_output_payloads(self) -> None:
         """Batch transform hashes bind to the exact input batch and output payload."""
-        from elspeth.engine.batch_adapter import SharedBatchAdapter
-
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -5930,11 +6518,9 @@ class TestTransformExecutorBatchPath:
             output_row,
             success_reason={"action": "batched"},
         )
-        mock_adapter = MagicMock(spec=SharedBatchAdapter)
-        mock_waiter = MagicMock()
-        mock_waiter.wait.return_value = success_result
-        mock_adapter.register.return_value = mock_waiter
-        executor._get_batch_adapter = MagicMock(return_value=mock_adapter)  # type: ignore[method-assign]
+        mock_waiter = _BatchWaiterDouble(return_value=success_result)
+        mock_adapter = _BatchAdapterDouble(mock_waiter)
+        _install_batch_adapter(executor, mock_adapter)
 
         token = _make_token(contract=contract)
         ctx = make_context()

@@ -395,6 +395,87 @@ class TestTriggerFirstToFireWins:
         )
 
 
+class TestConditionFireTimeSampling:
+    """Time-based condition fire times are sampled-at-evaluation (elspeth-06df383e4a).
+
+    A poll-driven engine only KNOWS condition truth at observation time. The
+    old code backdated a newly-true condition to the previous (known-false)
+    check time — or first accept — letting a condition beat a timeout whose
+    real fire instant came first, corrupting the TriggerType audit value and
+    the persisted condition_fire_offset.
+    """
+
+    def test_backdated_condition_cannot_steal_timeout_win(self) -> None:
+        """Panel scenario: timeout=10, condition age>=15, false check at t=5,
+        next check at t=20. Timeout (t=10) must win, not a condition
+        backdated to the known-false t=5."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=0.0)
+        config = TriggerConfig(
+            timeout_seconds=10.0,
+            condition="row['batch_age_seconds'] >= 15",
+        )
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        clock.advance(5.0)  # t=5: neither trigger ready
+        assert evaluator.should_trigger() is False
+
+        clock.advance(15.0)  # t=20: timeout fired at t=10, condition observed true now
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "timeout", (
+            "Timeout fired at t=10; condition was first OBSERVED true at t=20. "
+            "Backdating the condition to the known-false t=5 check must not steal the win."
+        )
+
+    def test_condition_fire_offset_reflects_observation_time(self) -> None:
+        """The persisted checkpoint offset is the observation instant, never a
+        backdated known-false check time."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=0.0)
+        config = TriggerConfig(condition="row['batch_age_seconds'] >= 15")
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        clock.advance(5.0)  # t=5: condition false, records a check
+        assert evaluator.should_trigger() is False
+
+        clock.advance(15.0)  # t=20: condition first observed true
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "condition"
+        assert evaluator.get_condition_fire_offset() == 20.0
+
+    def test_condition_true_on_first_evaluation_uses_observation_time(self) -> None:
+        """With no prior false check, the fire time is still the observation
+        instant — not first_accept_time."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=0.0)
+        config = TriggerConfig(
+            timeout_seconds=10.0,
+            condition="row['batch_age_seconds'] >= 15",
+        )
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        clock.advance(20.0)  # t=20: first evaluation ever; both fired
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "timeout", (
+            "Condition first observed true at t=20 must not be backdated to first accept (t=0)."
+        )
+
+
 class TestTriggerConditionLatching:
     """Tests for P1-2026-02-05: Condition trigger must latch once fired.
 
@@ -1291,3 +1372,130 @@ class TestConditionTriggerCorrectAge:
         clock.advance(6.0)  # Now at t=1011.0
         assert evaluator.should_trigger() is True, "With 11s elapsed, batch_age_seconds should be 11.0. Condition 11.0 > 10 is True."
         assert evaluator.which_triggered() == "condition"
+
+
+class TestAnchorRewindRecompute:
+    """Backdated out-of-order adoption must not corrupt latched fire instants.
+
+    ADR-030 §E.2 intake adopts rows ordered by (barrier_key, ingest_sequence,
+    work_item_id) — NOT barrier_blocked_at — so a later record_accept can
+    carry an EARLIER durable arrival than already-adopted members. The count
+    and condition latches (and therefore the persisted checkpoint offsets)
+    must be pure functions of the durable member set, invariant under
+    adoption order (filigree elspeth-eed319ed3d). Timeout already anchors at
+    the min durable arrival; these tests pin count/condition parity.
+    """
+
+    def test_count_latch_is_adoption_order_invariant(self) -> None:
+        """count=2 over arrivals {5, 10, 12}: the durable count-fire instant
+        is 10.0 (the 2nd-smallest arrival) regardless of adoption order."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        config = TriggerConfig(count=2)
+
+        in_order = TriggerEvaluator(config, clock=MockClock(start=1000.0))
+        for arrival in (5.0, 10.0, 12.0):
+            in_order.record_accept(accept_time=arrival)
+
+        backdated_last = TriggerEvaluator(config, clock=MockClock(start=1000.0))
+        for arrival in (10.0, 12.0, 5.0):  # 5.0 rewinds the anchor AFTER count latched at 12.0
+            backdated_last.record_accept(accept_time=arrival)
+
+        assert in_order.get_count_fire_offset() == 5.0  # fire 10.0 - anchor 5.0
+        assert backdated_last.get_count_fire_offset() == 5.0, (
+            "The count latch must recompute as the N-th smallest durable arrival when a "
+            "backdated adoption rewinds the anchor — not stay latched at the adoption-order instant."
+        )
+
+    def test_condition_latch_is_adoption_order_invariant(self) -> None:
+        """A batch_count condition replays over durable order: first true at
+        the 2nd-smallest arrival regardless of adoption order."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        config = TriggerConfig(condition="row['batch_count'] >= 2")
+
+        in_order = TriggerEvaluator(config, clock=MockClock(start=1000.0))
+        for arrival in (5.0, 10.0, 12.0):
+            in_order.record_accept(accept_time=arrival)
+
+        backdated_last = TriggerEvaluator(config, clock=MockClock(start=1000.0))
+        for arrival in (10.0, 12.0, 5.0):
+            backdated_last.record_accept(accept_time=arrival)
+
+        assert in_order.get_condition_fire_offset() == 5.0
+        assert backdated_last.get_condition_fire_offset() == 5.0, (
+            "The condition latch must replay over the durable member order when a backdated adoption changes the prefix contexts."
+        )
+
+    def test_backdated_oldest_member_rewinds_anchor_and_grows_offsets(self) -> None:
+        """The rewinding accept becomes the new oldest member: the timeout
+        anchor moves to it and already-latched offsets grow accordingly
+        (fire instants stay durable-absolute)."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        config = TriggerConfig(count=2, timeout_seconds=60.0)
+        evaluator = TriggerEvaluator(config, clock=MockClock(start=1000.0))
+        evaluator.record_accept(accept_time=10.0)
+        evaluator.record_accept(accept_time=12.0)  # count latches at 12.0
+        assert evaluator.get_count_fire_offset() == 2.0
+
+        evaluator.record_accept(accept_time=5.0)  # new oldest member
+        assert evaluator.batch_count == 3
+        # Anchor rewound to 5.0; count fire recomputes to the 2nd-smallest (10.0).
+        assert evaluator.get_count_fire_offset() == 5.0
+
+    def test_restored_batch_keeps_restored_latches_on_backdated_accept(self) -> None:
+        """Checkpoint-restored batches carry no member times; a subsequent
+        backdated accept must not recompute (and corrupt) restored latches."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        config = TriggerConfig(count=2)
+        clock = MockClock(start=1000.0)
+        evaluator = TriggerEvaluator(config, clock=clock)
+        evaluator.restore_from_checkpoint(
+            batch_count=3,
+            elapsed_age_seconds=100.0,
+            count_fire_offset=1.5,
+            condition_fire_offset=None,
+        )
+        restored_offset = evaluator.get_count_fire_offset()
+        assert restored_offset == 1.5
+
+        evaluator.record_accept(accept_time=850.0)  # backdated relative to the restored anchor (900.0)
+
+        assert evaluator.batch_count == 4
+        # The restored latch is preserved as an absolute instant; the anchor
+        # rewind grows the offset, exactly as it did pre-recompute (the member
+        # list is incomplete, so no recompute may run).
+        count_fire_time = evaluator._count_fire_time
+        assert count_fire_time == 901.5  # 900.0 restored anchor + 1.5 offset, unchanged
+
+    def test_observation_latched_condition_survives_backdated_accept(self) -> None:
+        """A condition latched at OBSERVATION time by should_trigger()
+        (sampled-at-evaluation, elspeth-06df383e4a) is not owned by
+        record_accept; a later backdated adoption must not rewrite it."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=100.0)
+        config = TriggerConfig(condition="row['batch_age_seconds'] >= 10")
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept(accept_time=100.0)
+        clock.advance(15.0)  # t=115: condition first observed true
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "condition"
+        assert evaluator.get_condition_fire_offset() == 15.0
+
+        evaluator.record_accept(accept_time=90.0)  # backdated adoption; anchor rewinds to 90.0
+        # The observed latch instant (115.0) is untouched; only the anchor moved.
+        assert evaluator.get_condition_fire_offset() == 25.0

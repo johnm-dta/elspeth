@@ -44,7 +44,21 @@ def _patch_auto_commit_preferences(monkeypatch: pytest.MonkeyPatch, sessions_ser
     monkeypatch.setattr(sessions_service, "get_composer_preferences", _get_composer_preferences)
 
 
-def _advisor_tool_call_response(call_id: str) -> Any:
+def _advisor_tool_call_response(call_id: str, *, extra_args: dict[str, Any] | None = None) -> Any:
+    arguments = {
+        "trigger": "proactive_security_safety",
+        "problem_summary": "stuck on llm config with private schema",
+        "recent_errors": [
+            "validator rejected the private column",
+            "validator rejected the private column",
+        ],
+        "attempted_actions": [
+            "set_pipeline with sensitive options",
+            "checked the relevant schema",
+        ],
+    }
+    if extra_args is not None:
+        arguments.update(extra_args)
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -55,20 +69,7 @@ def _advisor_tool_call_response(call_id: str) -> Any:
                             id=call_id,
                             function=SimpleNamespace(
                                 name="request_advisor_hint",
-                                arguments=json.dumps(
-                                    {
-                                        "trigger": "proactive_security_safety",
-                                        "problem_summary": "stuck on llm config with private schema",
-                                        "recent_errors": [
-                                            "validator rejected the private column",
-                                            "validator rejected the private column",
-                                        ],
-                                        "attempted_actions": [
-                                            "set_pipeline with sensitive options",
-                                            "checked the relevant schema",
-                                        ],
-                                    }
-                                ),
+                                arguments=json.dumps(arguments),
                             ),
                         )
                     ],
@@ -177,6 +178,8 @@ async def test_step1_plugin_bug_captures_crash_breaks_loop(
     assert len(outcomes) == 2
     assert outcomes[0].error_class is None
     assert outcomes[1].error_class == "RuntimeError"
+    assert outcomes[1].error_message == "RuntimeError"
+    assert "phase3 synthetic runtime error" not in (outcomes[1].error_message or "")
 
 
 @pytest.mark.asyncio
@@ -294,6 +297,54 @@ async def test_step2_persists_intercepted_advisor_tool_call_rows(
     assert persisted_rows[0]["tool_calls"][0]["function"]["name"] == "request_advisor_hint"
     assert persisted_rows[1]["tool_call_id"] == "call_advisor_phase3"
     assert json.loads(persisted_rows[1]["content"])["guidance"] == "<redacted>"
+
+
+@pytest.mark.asyncio
+async def test_step2_redacts_intercepted_advisor_unknown_arguments_before_persist(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    result_session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advisor ARG_ERROR rows must not mirror unknown LLM argument values."""
+
+    service = composer_service_with_real_sessions
+    raw_extra_context = "RAW_EXTRA_CONTEXT: private traceback and source excerpt"
+    responses = [
+        _advisor_tool_call_response(
+            "call_advisor_extra_arg",
+            extra_args={"full_context": raw_extra_context},
+        ),
+        _text_response("Done."),
+    ]
+
+    async def _fake_llm(_messages: Any, _tools: Any) -> Any:
+        return responses.pop(0)
+
+    async def _fake_advisor(**_kwargs: Any) -> Any:
+        return _advisor_model_response()
+
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", _fake_advisor)
+
+    result = await _run_one_turn(
+        service,
+        llm=_fake_llm,
+        session_id=result_session_id,
+    )
+
+    assert len(result.persisted_assistant_tool_calls) == 1
+    persisted_call = result.persisted_assistant_tool_calls[0]
+    persisted_args = json.loads(persisted_call["function"]["arguments"])
+    assert "full_context" not in persisted_args
+    assert persisted_args["_unknown_arguments"] == "<redacted-unknown-argument-key>"
+    persisted_blob = json.dumps(
+        {
+            "assistant_tool_calls": result.persisted_assistant_tool_calls,
+            "tool_rows": result.persisted_tool_row_content,
+        },
+        sort_keys=True,
+    )
+    assert "full_context" not in persisted_blob
+    assert raw_extra_context not in persisted_blob
 
 
 @pytest.mark.asyncio

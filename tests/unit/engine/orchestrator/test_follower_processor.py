@@ -24,11 +24,15 @@ via the stub coordination repo and stub factory.
 Disposition arm note
 --------------------
 The per-disposition-arm logic (barrier→mark_blocked, sink→mark_pending_sink,
-lossy-coalesce→branch-loss) lives inside RowProcessor._drain_scheduler_claims
-and is already tested in tests/unit/engine/ drain tests.  Here we verify only
-that FollowerProcessor correctly:
+lossy-coalesce→branch-loss) lives inside the RowProcessor drain (behind the
+public ``drain_follower_ready_work`` follower surface) and is already tested
+in tests/unit/engine/ drain tests.  Here we verify only that
+FollowerProcessor correctly:
 
-- passes ``recover_pending_sinks=False`` to _drain_scheduler_claims
+- drives ONLY the public ``drain_follower_ready_work`` surface, threading its
+  leader-liveness probe as ``before_claim`` (the claim_ready-only /
+  no-pending-sink-recovery contract is the processor's FOLLOWER mode and is
+  pinned in tests/unit/engine/test_processor_mode.py)
 - calls wait_fn when drained is empty
 - loops immediately when drained is non-empty
 - exits on terminal/dead-seat/evict/SIGINT
@@ -36,9 +40,11 @@ that FollowerProcessor correctly:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -46,6 +52,7 @@ from elspeth.contracts.coordination import (
     CoordinationToken,
     LeaderInfo,
 )
+from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FollowerSeatDeadError, RunWorkerEvictedError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.orchestrator.follower import FollowerProcessor, _SeatDeadError
@@ -63,6 +70,104 @@ LIVENESS_WINDOW = 80.0
 # ---------------------------------------------------------------------------
 # Stubs
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _RunStatusRecord:
+    status: RunStatus
+
+
+@dataclass(frozen=True, slots=True)
+class _FollowerDrainResult:
+    label: str = "work-found"
+
+
+class _UnusedScheduler:
+    """Scheduler surface required for RowProcessor construction in focused tests."""
+
+    @staticmethod
+    def serialize_row_payload(row: Any) -> str:
+        from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+        return TokenSchedulerRepository.serialize_row_payload(row)
+
+    @staticmethod
+    def deserialize_row_payload(row_payload_json: str) -> Any:
+        from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+        return TokenSchedulerRepository.deserialize_row_payload(row_payload_json)
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"scheduler method {name!r} should not be used in this focused processor test")
+
+
+class _UncalledBatchTransform:
+    """Concrete TransformProtocol-compatible fake that must not be executed."""
+
+    def __init__(self, *, node_id: str) -> None:
+        self.name = "batch-agg-transform"
+        self.input_schema = object
+        self.output_schema = object
+        self.node_id = node_id
+        self.config: dict[str, Any] = {}
+        self.determinism = None
+        self.plugin_version = "1.0"
+        self.source_file_hash = None
+        self.usage_when_to_use = None
+        self.usage_when_not_to_use = None
+        self.example_use = None
+        self.capability_tags: tuple[str, ...] = ()
+        self.audit_characteristics = frozenset()
+        self.discovery_secret_requirements = MappingProxyType({})
+        self._on_start_called = True
+        self._on_complete_called = False
+        self.is_batch_aware = True
+        self.supports_row_mode_when_batch_aware = False
+        self.creates_tokens = False
+        self.passes_through_input = False
+        self.can_drop_rows = False
+        self.declared_output_fields = frozenset()
+        self.declared_input_fields = frozenset()
+        self.requires_runtime_preflight = False
+        self._output_schema_config = None
+        self.on_error = "discard"
+        self.on_success = None
+        self.process_called = False
+
+    def effective_static_contract(self) -> frozenset[str]:
+        return self.declared_output_fields
+
+    def process(self, row: Any, ctx: Any) -> Any:
+        self.process_called = True
+        raise AssertionError("follower barrier test must not execute the batch transform")
+
+    def close(self) -> None:
+        raise AssertionError("follower barrier test must not close the transform")
+
+    def on_start(self, ctx: Any) -> None:
+        raise AssertionError("follower barrier test must not start the transform")
+
+    def on_complete(self, ctx: Any) -> None:
+        raise AssertionError("follower barrier test must not complete the transform")
+
+    def runtime_preflight(self, ctx: Any) -> None:
+        raise AssertionError("follower barrier test must not preflight the transform")
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> None:
+        return None
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        return {}
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> None:
+        return None
+
+    @classmethod
+    def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+        return ()
 
 
 class _StubHeartbeat:
@@ -155,14 +260,12 @@ class _StubRunLifecycle:
         self.get_run_results: list[Any] = []
 
     def get_run(self, run_id: str) -> Any:
-        from elspeth.contracts.enums import RunStatus
-
         if self.get_run_results:
             return self.get_run_results.pop(0)
 
-        result = MagicMock()
-        result.status = RunStatus.RUNNING if self._running else RunStatus.COMPLETED
-        return result
+        return _RunStatusRecord(
+            status=RunStatus.RUNNING if self._running else RunStatus.COMPLETED,
+        )
 
 
 class _StubFactory:
@@ -173,31 +276,26 @@ class _StubFactory:
 
 
 class _CountingDrainProcessor:
-    """Stub RowProcessor with configurable _drain_scheduler_claims return values.
+    """Stub FollowerWorkSource with configurable drain_follower_ready_work returns.
 
     Returns a pre-configured sequence of drain results (list of RowResult-like
     objects).  Use [] for idle (no work found), [mock_result] for work found.
-    Tracks arguments passed to _drain_scheduler_claims for assertion.
+    Tracks arguments passed to drain_follower_ready_work for assertion.
     """
 
     def __init__(self) -> None:
         self.drain_results: list[list[Any]] = []
         self.drain_calls: list[dict[str, Any]] = []
 
-    def _drain_scheduler_claims(
+    def drain_follower_ready_work(
         self,
-        *,
         ctx: Any,
-        pending_items: dict[str, Any],
-        recover_pending_sinks: bool,
-        preclaimed_items: list[Any] | None = None,
+        *,
         before_claim: Any = None,
     ) -> list[Any]:
         self.drain_calls.append(
             {
                 "ctx": ctx,
-                "pending_items": pending_items,
-                "recover_pending_sinks": recover_pending_sinks,
                 "before_claim": before_claim,
             }
         )
@@ -240,7 +338,7 @@ def _make_follower(
     token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
 
     follower = FollowerProcessor(
-        processor=processor,  # type: ignore[arg-type]
+        processor=processor,
         token=token,
         run_coordination=coord_repo,  # type: ignore[arg-type]
         factory=factory,  # type: ignore[arg-type]
@@ -304,7 +402,7 @@ class TestFollowerTerminalRun:
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         heartbeat = _StubHeartbeat()
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -315,10 +413,10 @@ class TestFollowerTerminalRun:
         with patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat):
             follower.run(ctx=_ctx())
 
-        # One drain call (idle — returned [])
+        # One drain call (idle — returned []) via the public follower surface,
+        # threading the leader-liveness probe.
         assert len(processor.drain_calls) == 1
-        # drain was called with recover_pending_sinks=False
-        assert processor.drain_calls[0]["recover_pending_sinks"] is False
+        assert callable(processor.drain_calls[0]["before_claim"])
 
         # One idle wait
         assert len(waits) == 1
@@ -349,7 +447,7 @@ class TestFollowerSeatDead:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -378,7 +476,7 @@ class TestFollowerSeatDead:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -403,7 +501,7 @@ class TestFollowerSeatDead:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -420,35 +518,30 @@ class TestFollowerSeatDead:
         # No drain calls — seat was dead before any claim attempt
         assert processor.drain_calls == []
 
-    def test_before_claim_liveness_check_is_throttled_within_interval(self) -> None:
-        """Follower does not re-read leader liveness for every claim in a hot drain."""
+    def test_before_claim_liveness_check_is_fresh_for_every_claim(self) -> None:
+        """Follower re-reads leader liveness before every claim in a hot drain."""
 
         class _ManyClaimDrainProcessor(_CountingDrainProcessor):
             claim_checks = 0
 
-            def _drain_scheduler_claims(self, **kwargs: Any) -> list[Any]:
-                before_claim = kwargs.get("before_claim")
+            def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
                 if before_claim is None:
                     raise AssertionError("follower drain must pass a before_claim liveness callback")
                 for _ in range(3):
                     before_claim()
                     self.claim_checks += 1
-                return [MagicMock()]
-
-        from elspeth.contracts.enums import RunStatus
+                return [_FollowerDrainResult()]
 
         processor = _ManyClaimDrainProcessor()
         coord_repo = _StubRunCoordRepo()
         factory = _StubFactory(running=True)
-        run_result_running = MagicMock()
-        run_result_running.status = RunStatus.RUNNING
-        run_result_completed = MagicMock()
-        run_result_completed.status = RunStatus.COMPLETED
+        run_result_running = _RunStatusRecord(status=RunStatus.RUNNING)
+        run_result_completed = _RunStatusRecord(status=RunStatus.COMPLETED)
         factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
         heartbeat = _StubHeartbeat()
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -463,7 +556,67 @@ class TestFollowerSeatDead:
             follower.run(ctx=_ctx())
 
         assert processor.claim_checks == 3
-        assert len(coord_repo.live_leader_calls) == 1
+        assert len(coord_repo.live_leader_calls) == 4
+        assert len(coord_repo.depart_calls) == 1
+
+    def test_seat_dead_between_hot_claims_stops_follower_drain_inside_throttle_interval(self) -> None:
+        """Follower refuses the next claim even when the old throttle interval has not elapsed."""
+
+        class _CallbackDrainProcessor(_CountingDrainProcessor):
+            claim_checks = 0
+
+            def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
+                if before_claim is None:
+                    raise AssertionError("follower drain must pass a before_claim liveness callback")
+                before_claim()
+                self.claim_checks += 1
+                before_claim()
+                self.claim_checks += 1
+                return [_FollowerDrainResult()]
+
+        processor = _CallbackDrainProcessor()
+        coord_repo = _StubRunCoordRepo()
+        coord_repo.live_leader_results = [
+            LeaderInfo(
+                run_id=RUN_ID,
+                leader_worker_id=f"worker:{RUN_ID}:leader",
+                leader_epoch=1,
+                leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
+                seat_live=True,
+            ),
+            LeaderInfo(
+                run_id=RUN_ID,
+                leader_worker_id=f"worker:{RUN_ID}:leader",
+                leader_epoch=1,
+                leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
+                seat_live=True,
+            ),
+            None,
+        ]
+        factory = _StubFactory(running=True)
+        run_result_running = _RunStatusRecord(status=RunStatus.RUNNING)
+        run_result_completed = _RunStatusRecord(status=RunStatus.COMPLETED)
+        factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
+        heartbeat = _StubHeartbeat()
+        token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
+        follower = FollowerProcessor(
+            processor=processor,
+            token=token,
+            run_coordination=coord_repo,  # type: ignore[arg-type]
+            factory=factory,  # type: ignore[arg-type]
+            now_fn=lambda: NOW,
+            wait_fn=lambda _: None,
+        )
+
+        with (
+            patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat),
+            patch("elspeth.engine.orchestrator.follower.time.monotonic", side_effect=[0.0, 0.1, 0.2]),
+            pytest.raises(FollowerSeatDeadError),
+        ):
+            follower.run(ctx=_ctx())
+
+        assert processor.claim_checks == 1
+        assert len(coord_repo.live_leader_calls) == 3
         assert len(coord_repo.depart_calls) == 1
 
     def test_seat_dead_between_claims_stops_follower_drain(self) -> None:
@@ -472,19 +625,25 @@ class TestFollowerSeatDead:
         class _CallbackDrainProcessor(_CountingDrainProcessor):
             claim_checks = 0
 
-            def _drain_scheduler_claims(self, **kwargs: Any) -> list[Any]:
-                before_claim = kwargs.get("before_claim")
+            def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
                 if before_claim is None:
                     raise AssertionError("follower drain must pass a before_claim liveness callback")
                 before_claim()
                 self.claim_checks += 1
                 before_claim()
                 self.claim_checks += 1
-                return [MagicMock()]
+                return [_FollowerDrainResult()]
 
         processor = _CallbackDrainProcessor()
         coord_repo = _StubRunCoordRepo()
         coord_repo.live_leader_results = [
+            LeaderInfo(
+                run_id=RUN_ID,
+                leader_worker_id=f"worker:{RUN_ID}:leader",
+                leader_epoch=1,
+                leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
+                seat_live=True,
+            ),
             LeaderInfo(
                 run_id=RUN_ID,
                 leader_worker_id=f"worker:{RUN_ID}:leader",
@@ -498,7 +657,7 @@ class TestFollowerSeatDead:
         heartbeat = _StubHeartbeat()
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -514,7 +673,7 @@ class TestFollowerSeatDead:
             follower.run(ctx=_ctx())
 
         assert processor.claim_checks == 1
-        assert len(coord_repo.live_leader_calls) == 2
+        assert len(coord_repo.live_leader_calls) == 3
         assert len(coord_repo.depart_calls) == 1
 
 
@@ -535,7 +694,7 @@ class TestFollowerEvicted:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -567,7 +726,7 @@ class TestFollowerEvicted:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -591,7 +750,7 @@ class TestFollowerEvicted:
 
 class TestFollowerEvictionFinalizeDepartureRace:
     """When RunWorkerEvictedError is raised mid-drain (fence fires inside
-    _drain_scheduler_claims), the follower must distinguish:
+    drain_follower_ready_work), the follower must distinguish:
 
     (a) finalize-departure: complete_run stamped the run terminal AND departed
         our row in ONE txn — so the fence fires but the run is COMPLETED.
@@ -606,7 +765,7 @@ class TestFollowerEvictionFinalizeDepartureRace:
     """
 
     def test_mid_drain_eviction_with_terminal_run_returns_cleanly(self) -> None:
-        """RunWorkerEvictedError from _drain_scheduler_claims + run COMPLETED
+        """RunWorkerEvictedError from drain_follower_ready_work + run COMPLETED
         → run() returns (no raise), depart called once.
 
         This is the finalize-departure race: complete_run departed the row AND
@@ -616,13 +775,13 @@ class TestFollowerEvictionFinalizeDepartureRace:
         """
 
         class _MidDrainEvictingProcessor:
-            """Raises RunWorkerEvictedError on the first _drain_scheduler_claims call."""
+            """Raises RunWorkerEvictedError on the first drain_follower_ready_work call."""
 
             def __init__(self) -> None:
-                self.drain_calls: list[dict] = []
+                self.drain_calls: list[dict[str, Any]] = []
 
-            def _drain_scheduler_claims(self, *, ctx: Any, pending_items: Any, recover_pending_sinks: bool, **_kwargs: Any) -> list[Any]:
-                self.drain_calls.append({"recover_pending_sinks": recover_pending_sinks})
+            def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
+                self.drain_calls.append({"ctx": ctx})
                 raise RunWorkerEvictedError(worker_id=WORKER_ID, run_id=RUN_ID)
 
         processor = _MidDrainEvictingProcessor()
@@ -632,20 +791,14 @@ class TestFollowerEvictionFinalizeDepartureRace:
 
         # get_run sequence: first call (top-of-loop check, returns RUNNING so loop continues),
         # second call (in the except arm recheck, returns COMPLETED → clean exit).
-        from unittest.mock import MagicMock
-
-        from elspeth.contracts.enums import RunStatus
-
         factory = _StubFactory(running=True)
-        run_result_running = MagicMock()
-        run_result_running.status = RunStatus.RUNNING
-        run_result_completed = MagicMock()
-        run_result_completed.status = RunStatus.COMPLETED
+        run_result_running = _RunStatusRecord(status=RunStatus.RUNNING)
+        run_result_completed = _RunStatusRecord(status=RunStatus.COMPLETED)
         factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -666,7 +819,7 @@ class TestFollowerEvictionFinalizeDepartureRace:
         assert heartbeat.stop_called
 
     def test_mid_drain_true_eviction_still_raises(self) -> None:
-        """RunWorkerEvictedError from _drain_scheduler_claims + run still RUNNING
+        """RunWorkerEvictedError from drain_follower_ready_work + run still RUNNING
         → RunWorkerEvictedError propagates (true eviction, not finalize-departure).
 
         This is the negative/anti-regression test: we must NOT suppress true
@@ -675,10 +828,10 @@ class TestFollowerEvictionFinalizeDepartureRace:
 
         class _MidDrainEvictingProcessor:
             def __init__(self) -> None:
-                self.drain_calls: list[dict] = []
+                self.drain_calls: list[dict[str, Any]] = []
 
-            def _drain_scheduler_claims(self, *, ctx: Any, pending_items: Any, recover_pending_sinks: bool, **_kwargs: Any) -> list[Any]:
-                self.drain_calls.append({"recover_pending_sinks": recover_pending_sinks})
+            def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
+                self.drain_calls.append({"ctx": ctx})
                 raise RunWorkerEvictedError(worker_id=WORKER_ID, run_id=RUN_ID)
 
         processor = _MidDrainEvictingProcessor()
@@ -690,7 +843,7 @@ class TestFollowerEvictionFinalizeDepartureRace:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -732,7 +885,7 @@ class TestFollowerSIGINT:
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         heartbeat = _StubHeartbeat()
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -751,10 +904,10 @@ class TestFollowerSIGINT:
         assert heartbeat.stop_called
 
     def test_keyboard_interrupt_from_drain_propagates(self) -> None:
-        """KeyboardInterrupt raised inside _drain_scheduler_claims propagates."""
+        """KeyboardInterrupt raised inside drain_follower_ready_work propagates."""
 
         class _RaisingProcessor:
-            def _drain_scheduler_claims(self, **_kwargs: Any) -> list[Any]:
+            def drain_follower_ready_work(self, ctx: Any, *, before_claim: Any = None) -> list[Any]:
                 raise KeyboardInterrupt
 
         processor = _RaisingProcessor()
@@ -764,7 +917,7 @@ class TestFollowerSIGINT:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -804,7 +957,7 @@ class TestFollowerIdleBehavior:
         heartbeat = _StubHeartbeat()
         idle_seconds = 3.5
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -818,8 +971,16 @@ class TestFollowerIdleBehavior:
 
         assert waits == [idle_seconds]
 
-    def test_idle_passes_recover_pending_sinks_false(self) -> None:
-        """Follower always calls _drain_scheduler_claims with recover_pending_sinks=False."""
+    def test_drain_uses_only_public_surface_with_liveness_probe(self) -> None:
+        """Follower drives ONLY drain_follower_ready_work, threading before_claim.
+
+        The claim_ready-only / no-pending-sink-recovery contract moved from
+        caller flag wiring into the processor's ProcessorMode.FOLLOWER
+        (elspeth-577179bba1); it is pinned against a real RowProcessor in
+        tests/unit/engine/test_processor_mode.py. Here we pin that the loop
+        never reaches for the private drain and always passes its
+        leader-liveness probe.
+        """
         processor = _CountingDrainProcessor()
         coord_repo = _StubRunCoordRepo()
         factory = _StubFactory(running=True)
@@ -835,7 +996,7 @@ class TestFollowerIdleBehavior:
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         heartbeat = _StubHeartbeat()
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -846,10 +1007,9 @@ class TestFollowerIdleBehavior:
         with patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat):
             follower.run(ctx=_ctx())
 
+        assert processor.drain_calls, "expected at least one drain pass"
         for call in processor.drain_calls:
-            assert call["recover_pending_sinks"] is False, (
-                "Follower must never call _drain_scheduler_claims with recover_pending_sinks=True"
-            )
+            assert callable(call["before_claim"]), "Follower must thread its leader-liveness probe as before_claim"
 
 
 # ---------------------------------------------------------------------------
@@ -858,7 +1018,7 @@ class TestFollowerIdleBehavior:
 
 
 class TestFollowerDrainedBehavior:
-    """Follower loops immediately when _drain_scheduler_claims returns non-empty."""
+    """Follower loops immediately when drain_follower_ready_work returns non-empty."""
 
     def test_drained_result_loops_without_sleeping(self) -> None:
         """Non-empty drain result: no wait_fn call, loop immediately."""
@@ -869,7 +1029,7 @@ class TestFollowerDrainedBehavior:
 
         # First drain: returns work.  Second drain: idle → triggers terminal.
         processor.drain_results = [
-            [MagicMock()],  # iteration 1: work found
+            [_FollowerDrainResult()],  # iteration 1: work found
             [],  # iteration 2: idle
         ]
 
@@ -880,7 +1040,7 @@ class TestFollowerDrainedBehavior:
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         heartbeat = _StubHeartbeat()
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -904,9 +1064,9 @@ class TestFollowerDrainedBehavior:
         waits: list[float] = []
 
         processor.drain_results = [
-            [MagicMock()],  # work
-            [MagicMock()],  # work
-            [MagicMock()],  # work
+            [_FollowerDrainResult()],  # work
+            [_FollowerDrainResult()],  # work
+            [_FollowerDrainResult()],  # work
             [],  # idle
         ]
 
@@ -917,7 +1077,7 @@ class TestFollowerDrainedBehavior:
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         heartbeat = _StubHeartbeat()
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -963,7 +1123,7 @@ class TestFollowerDepartHygiene:
         heartbeat = _StubHeartbeat(evicted=True)
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -990,7 +1150,7 @@ class TestFollowerDepartHygiene:
             raise KeyboardInterrupt
 
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1019,7 +1179,7 @@ class TestFollowerDepartHygiene:
         heartbeat = _StubHeartbeat()
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1054,7 +1214,7 @@ class TestFollowerHeartbeatLifecycle:
         heartbeat = _StubHeartbeat(evicted=True)
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1079,7 +1239,7 @@ class TestFollowerHeartbeatLifecycle:
             raise KeyboardInterrupt
 
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1125,7 +1285,7 @@ class TestFollowerFinalizeFlipCleanExit:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1151,7 +1311,7 @@ class TestFollowerFinalizeFlipCleanExit:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1179,7 +1339,7 @@ class TestFollowerFinalizeFlipCleanExit:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1203,7 +1363,7 @@ class TestFollowerFinalizeFlipCleanExit:
 
         token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=processor,  # type: ignore[arg-type]
+            processor=processor,
             token=token,
             run_coordination=coord_repo,  # type: ignore[arg-type]
             factory=factory,  # type: ignore[arg-type]
@@ -1254,9 +1414,6 @@ class TestFollowerBarrierNodeIds:
 
         Returns (processor, agg_node_id, transform, token).
         """
-        from unittest.mock import MagicMock, Mock
-
-        from elspeth.contracts import TransformProtocol
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.contracts.types import NodeID
         from elspeth.engine.processor import DAGTraversalContext, RowProcessor
@@ -1290,15 +1447,7 @@ class TestFollowerBarrierNodeIds:
         )
 
         # A batch-aware transform that must NOT be called on a follower.
-        transform = Mock(spec=TransformProtocol)
-        transform.node_id = str(agg_node_id)
-        transform.is_batch_aware = True
-        transform.name = "batch-agg-transform"
-        transform.on_error = "discard"
-        transform.on_success = None
-        transform.creates_tokens = False
-        transform.declared_output_fields = frozenset()
-        transform.declared_input_fields = frozenset()
+        transform = _UncalledBatchTransform(node_id=str(agg_node_id))
 
         traversal = DAGTraversalContext(
             node_step_map={source_node_id: 0, agg_node_id: 1},
@@ -1310,7 +1459,7 @@ class TestFollowerBarrierNodeIds:
         # Stub scheduler — mark_blocked / claim_ready are not called by
         # _process_single_token directly; we only call the method and inspect
         # the return value.
-        stub_scheduler = MagicMock()
+        stub_scheduler = _UnusedScheduler()
 
         from tests.fixtures.landscape import leader_coordination_token
 
@@ -1364,7 +1513,7 @@ class TestFollowerBarrierNodeIds:
         assert child_items == [], f"Expected no child items, got {child_items!r}"
 
         # The transform must NOT have been called (process() is the TransformProtocol method).
-        transform.process.assert_not_called()
+        assert not transform.process_called
 
     def test_non_batch_aware_transform_not_intercepted_by_follower_barrier(self) -> None:
         """A non-batch-aware transform is NEVER intercepted by follower_barrier_node_ids,
@@ -1390,7 +1539,7 @@ class TestFollowerBarrierNodeIds:
         processor._aggregation_settings = {}
         processor._follower_barrier_node_ids = frozenset({agg_node})
 
-        from elspeth.engine.dag_navigator import WorkItem
+        from elspeth.engine.work_items import WorkItem
         from elspeth.testing import make_token_info
 
         token = make_token_info(data={"v": 1}, token_id="tok-structural-1")
@@ -1408,12 +1557,10 @@ class TestFollowerBarrierNodeIds:
         in follower_barrier_node_ids, matching the leader's barrier_key so the
         adoption verb finds the correct row.
         """
-        from unittest.mock import MagicMock
-
         from elspeth.contracts.types import NodeID
-        from elspeth.engine.dag_navigator import WorkItem
         from elspeth.engine.processor import DAGTraversalContext, RowProcessor
         from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.work_items import WorkItem
         from elspeth.testing import make_token_info
         from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run
 
@@ -1435,7 +1582,7 @@ class TestFollowerBarrierNodeIds:
             coalesce_node_map={},
         )
 
-        stub_scheduler = MagicMock()
+        stub_scheduler = _UnusedScheduler()
 
         processor = RowProcessor(
             execution=factory.execution,

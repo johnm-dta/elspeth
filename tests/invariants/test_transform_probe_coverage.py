@@ -4,6 +4,7 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 from elspeth.plugins.transforms.batch_stats import BatchStats
+from elspeth.plugins.transforms.blob_csv_expand import BlobCSVExpand
 from elspeth.plugins.transforms.field_mapper import FieldMapper
 from elspeth.plugins.transforms.json_explode import JSONExplode
 from elspeth.plugins.transforms.llm.transform import LLMTransform
@@ -14,6 +15,7 @@ from tests.invariants.test_pass_through_invariants import _probe_context, _probe
 
 FORWARD_SCOPE = (
     WebScrapeTransform,
+    BlobCSVExpand,
     AzureContentSafety,
     AzurePromptShield,
     LLMTransform,

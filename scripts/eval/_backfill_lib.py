@@ -24,8 +24,24 @@ import yaml
 CONFIDENCE_GRACE_SECONDS = 60
 DEFAULT_CAPTURED_BY = "scripts/eval/backfill_2026_05_03_outputs.py"
 SHA256_CHUNK_BYTES = 65536
+ALLOWED_SINK_DATA_ROOTS = ("outputs", "blobs")
 
 Confidence = Literal["high", "low"]
+
+
+class BackfillPathOutsideDataRootError(ValueError):
+    """A captured sink path resolves outside the eval backfill data roots."""
+
+
+def _resolve_allowed_sink_path(path: str, *, data_dir: str | Path) -> Path:
+    base = Path(data_dir).resolve()
+    raw_path = Path(path)
+    resolved = raw_path.resolve() if raw_path.is_absolute() else (base / raw_path).resolve()
+    allowed_roots = tuple((base / root_name).resolve() for root_name in ALLOWED_SINK_DATA_ROOTS)
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        allowed = ", ".join(str(root) for root in allowed_roots)
+        raise BackfillPathOutsideDataRootError(f"Backfill sink path {resolved!s} resolves outside allowed eval data roots: {allowed}")
+    return resolved
 
 
 def extract_sink_paths_from_final_yaml(
@@ -45,8 +61,10 @@ def extract_sink_paths_from_final_yaml(
     ``sinks`` is a top-level **mapping** of ``sink_name → sink_config``,
     where each ``sink_config`` carries ``options.path`` as a path that may
     be absolute or relative to ``data_dir``. We resolve relative paths the
-    same way the runtime does (see ``elspeth.web.paths.resolve_data_path``):
-    relative paths are joined to ``data_dir`` and resolved.
+    same way the runtime does (see ``elspeth.web.paths.resolve_data_path``),
+    then reject anything that does not resolve under ``data_dir/outputs`` or
+    ``data_dir/blobs``. The captured YAML is an eval artifact, not a trusted
+    authority to make this operator-run backfill archive arbitrary local files.
 
     Why ``data_dir`` is a parameter (not hard-coded): we want this function
     testable with a ``tmp_path`` fixture, and it's the same primitive the
@@ -73,9 +91,7 @@ def extract_sink_paths_from_final_yaml(
         path = options.get("path")
         if not isinstance(path, str):
             continue
-        path_obj = Path(path)
-        absolute = path_obj.resolve() if path_obj.is_absolute() else (base / path_obj).resolve()
-        result.append((sink_name, str(absolute)))
+        result.append((sink_name, str(_resolve_allowed_sink_path(path, data_dir=base))))
     return result
 
 

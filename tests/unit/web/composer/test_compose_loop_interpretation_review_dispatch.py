@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -50,6 +51,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationKind,
     InterpretationSource,
 )
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
@@ -187,6 +189,26 @@ class _ScriptedLLM:
         if not self._responses:
             return _fake_text_response("Done.")
         return self._responses.pop(0)
+
+
+@dataclass(frozen=True)
+class _RecordedAsyncCall:
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class _AdvisorCheckpointFake:
+    """Async advisor test double that records awaits and returns one verdict."""
+
+    def __init__(self, verdict: AdvisorCheckpointVerdict) -> None:
+        self._verdict = verdict
+        self.await_count = 0
+        self.await_args_list: list[_RecordedAsyncCall] = []
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> AdvisorCheckpointVerdict:
+        self.await_count += 1
+        self.await_args_list.append(_RecordedAsyncCall(args=args, kwargs=kwargs))
+        return self._verdict
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +656,7 @@ def test_composer_runtime_preflight_uses_backend_readiness_contract(
     expected = ValidationResult(is_valid=True, checks=[], errors=[], readiness=_execution_ready())
 
     with patch("elspeth.web.composer.service.validate_pipeline", return_value=expected) as validate:
-        result = composer._runtime_preflight(state, user_id="alice")
+        result = composer._runtime_preflight(state, user_id="alice", session_id=None)
 
     assert result is expected
     validate.assert_called_once()
@@ -1401,6 +1423,21 @@ def test_has_pending_prompt_template_requirement_false_on_duplicate() -> None:
     )
 
 
+def test_has_pending_prompt_template_requirement_rejects_malformed_present_requirements() -> None:
+    """Present requirement state is internal composer data, not optional input."""
+
+    options = {
+        "prompt_template": "Rate {{ row.html }}.",
+        INTERPRETATION_REQUIREMENTS_KEY: [{"kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value, "status": "pending", "user_term": 123}],
+    }
+
+    with pytest.raises(InvariantError, match="user_term"):
+        ComposerServiceImpl._has_pending_prompt_template_requirement(
+            options,
+            user_term="llm_prompt_template:rate_node",
+        )
+
+
 @pytest.mark.asyncio
 async def test_missing_invented_source_review_event_forces_review_tool_retry(
     tmp_path: Path,
@@ -2156,7 +2193,7 @@ async def test_end_advisor_gate_reaches_unsurfaced_prompt_template_pipeline_p2(
 
     # Per-instance assertable advisor stub (instance attr wins over the autouse
     # class-level CLEAN stub) so we can assert it was awaited.
-    advisor_mock = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+    advisor_mock = _AdvisorCheckpointFake(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
     composer._run_advisor_checkpoint = advisor_mock  # type: ignore[method-assign]
 
     class _AssistantMessage:
@@ -2225,7 +2262,7 @@ async def test_end_advisor_gate_reaches_prompt_template_pipeline_p5_budget_exhau
     assert sites, "expected the unsurfaced PT site to be a (real) pending-review orphan pre-fix"
     assert all(site[2] is InterpretationKind.LLM_PROMPT_TEMPLATE for site in sites)
 
-    advisor_mock = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+    advisor_mock = _AdvisorCheckpointFake(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
     composer._run_advisor_checkpoint = advisor_mock  # type: ignore[method-assign]
 
     llm = _ScriptedLLM(
@@ -2288,8 +2325,6 @@ async def test_advisor_unavailable_terminal_return_surfaces_prompt_template(
     blocked return surfaces the resolvable pending event first.
     """
 
-    from unittest.mock import AsyncMock
-
     from elspeth.web.composer.audit import BufferingRecorder
 
     composer = _build_composer(tmp_path, sessions_service)
@@ -2298,8 +2333,8 @@ async def test_advisor_unavailable_terminal_return_surfaces_prompt_template(
 
     # Force the blocked-return branch (ok=False == unavailable). Instance attr
     # wins over the autouse class-level CLEAN stub.
-    composer._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
-        return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
+    composer._run_advisor_checkpoint = _AdvisorCheckpointFake(  # type: ignore[method-assign]
+        AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
     )
 
     class _AssistantMessage:
@@ -2374,16 +2409,14 @@ async def test_advisor_exhausted_terminal_return_surfaces_prompt_template(
     resolvable pending PT event so the persisted runnable state is resolvable.
     """
 
-    from unittest.mock import AsyncMock
-
     from elspeth.web.composer.audit import BufferingRecorder
 
     composer = _build_composer(tmp_path, sessions_service)
     state = _state_with_prompt_template_review_node()
     session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
 
-    composer._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
-        return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: review the prompt")
+    composer._run_advisor_checkpoint = _AdvisorCheckpointFake(  # type: ignore[method-assign]
+        AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: review the prompt")
     )
 
     class _AssistantMessage:
@@ -2437,8 +2470,6 @@ async def test_p5_budget_exhaustion_advisor_blocked_return_surfaces_prompt_templ
     before classify), exercising the P5-specific plumbing the P2 tests do not.
     """
 
-    from unittest.mock import AsyncMock
-
     composer = _build_composer(tmp_path, sessions_service, max_composition_turns=1)
     state = _state_with_prompt_template_review_node()  # model-less PT node: PT is the ONLY orphan site
     session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
@@ -2451,7 +2482,7 @@ async def test_p5_budget_exhaustion_advisor_blocked_return_surfaces_prompt_templ
     assert sites and all(site[2] is InterpretationKind.LLM_PROMPT_TEMPLATE for site in sites)
 
     # Force the P5 blocked-return branch (ok=False == unavailable -> fail closed).
-    advisor_mock = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable"))
+    advisor_mock = _AdvisorCheckpointFake(AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable"))
     composer._run_advisor_checkpoint = advisor_mock  # type: ignore[method-assign]
 
     # set_metadata (not set_pipeline) so the model-less PT node is not
@@ -2504,16 +2535,14 @@ async def test_advisor_blocked_terminal_return_still_fails_closed_on_bare_token_
     blocks). Pins that the DRY refactor did not regress genuine orphans.
     """
 
-    from unittest.mock import AsyncMock
-
     from elspeth.web.composer.audit import BufferingRecorder
 
     composer = _build_composer(tmp_path, sessions_service)
     state = _state_with_llm_node()  # bare {{interpretation:cool}}, no PT requirement, no event
     session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
 
-    composer._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
-        return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
+    composer._run_advisor_checkpoint = _AdvisorCheckpointFake(  # type: ignore[method-assign]
+        AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
     )
 
     class _AssistantMessage:

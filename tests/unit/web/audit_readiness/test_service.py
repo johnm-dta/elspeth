@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -122,6 +122,51 @@ def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
 _TEST_COMPOSITION_STATE_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 
+class _AsyncCallRecorder:
+    def __init__(self, return_value: Any = None, side_effect: BaseException | None = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    def assert_awaited_once_with(self, *args: Any, **kwargs: Any) -> None:
+        assert self.calls == [(args, kwargs)]
+
+    def assert_not_awaited(self) -> None:
+        assert self.calls == []
+
+
+class _CallRecorder:
+    def __init__(self, return_value: Any = None) -> None:
+        self.return_value = return_value
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return self.return_value
+
+
+class _ExecutionServiceDouble:
+    def __init__(self, validation_result: ValidationResult) -> None:
+        self.validate = _AsyncCallRecorder(side_effect=AssertionError("ReadinessService must validate the already-read state"))
+        self.validate_state = _AsyncCallRecorder(return_value=validation_result)
+
+
+class _ScopedSecretResolverDouble:
+    def __init__(self, inventory: tuple[SecretInventoryItem, ...] | list[SecretInventoryItem]) -> None:
+        self.list_refs = _CallRecorder(return_value=list(inventory))
+
+
+class _SettingsDouble:
+    def __init__(self, *, payload_store_retention_days: int = 90) -> None:
+        self.payload_store_retention_days = payload_store_retention_days
+
+
 def _ready_readiness() -> ValidationReadiness:
     return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
 
@@ -130,8 +175,8 @@ def _blocked_readiness() -> ValidationReadiness:
     return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
-def _interpretation_event_records_dispatch(events_by_source_and_state):
-    """Build an AsyncMock that filters a fixed event list per call args.
+class _InterpretationEventRecordsDispatch:
+    """Async recorder that filters a fixed event list per call args.
 
     The ReadinessService issues two reads:
       (a) opt-out probe — sources=(AUTO_INTERPRETED_OPT_OUT,), composition_state_id=None
@@ -143,47 +188,58 @@ def _interpretation_event_records_dispatch(events_by_source_and_state):
     is in the filter, route to the opt-out bucket; otherwise to scoped).
     """
 
-    async def _list(
+    def __init__(self, events_by_source_and_state: dict[str, list[InterpretationEventRecord]]) -> None:
+        self.events_by_source_and_state = events_by_source_and_state
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def __call__(
+        self,
         _session_id,
         *,
         status="all",
         composition_state_id=None,
         sources=None,
-    ):
+    ) -> list[InterpretationEventRecord]:
+        self.calls.append(
+            (
+                (_session_id,),
+                {"status": status, "composition_state_id": composition_state_id, "sources": sources},
+            )
+        )
         # `status` and `composition_state_id` accepted for signature
         # parity with the real method; the dispatch routes solely on
         # the `sources` argument (opt-out probe vs. scoped events).
         del status, composition_state_id
         if sources is not None and InterpretationSource.AUTO_INTERPRETED_OPT_OUT in sources:
-            return list(events_by_source_and_state.get("opt_out", []))
-        return list(events_by_source_and_state.get("scoped", []))
+            return list(self.events_by_source_and_state.get("opt_out", []))
+        return list(self.events_by_source_and_state.get("scoped", []))
 
-    return AsyncMock(side_effect=_list)
+    def assert_not_called(self) -> None:
+        assert self.calls == []
+
+
+class _SessionServiceDouble:
+    def __init__(self, record: Any, events_by_source_and_state: dict[str, list[InterpretationEventRecord]] | None = None) -> None:
+        self.get_current_state = _AsyncCallRecorder(return_value=record)
+        self.list_interpretation_events = _InterpretationEventRecordsDispatch(events_by_source_and_state or {})
 
 
 def _make_session_service(events_by_source_and_state=None):
-    sess_svc = MagicMock()
-    record = MagicMock()
+    record = type("CompositionStateRecordDouble", (), {})()
     # record.id is read by ReadinessService.compute_snapshot as a UUID
     # (CompositionStateRecord.id — protocol.py:369). Pin a deterministic
     # value so test events bound to this id are correctly scoped.
     record.id = _TEST_COMPOSITION_STATE_ID
-    sess_svc.get_current_state = AsyncMock(return_value=record)
-    sess_svc.list_interpretation_events = _interpretation_event_records_dispatch(events_by_source_and_state or {})
-    return sess_svc
+    return _SessionServiceDouble(record, events_by_source_and_state or {})
 
 
 def _make_service(state, validation_result, inventory=(), interpretation_events=None):
-    exec_svc = MagicMock()
-    exec_svc.validate = AsyncMock(side_effect=AssertionError("ReadinessService must validate the already-read state"))
-    exec_svc.validate_state = AsyncMock(return_value=validation_result)
+    exec_svc = _ExecutionServiceDouble(validation_result)
     sess_svc = _make_session_service(interpretation_events)
     # Use scoped_secret_resolver mock (list_refs(user_id) only — no auth_provider_type).
     # Matches app.py:470 precedent and the _SecretServiceLike Protocol (fix C4).
-    scoped_resolver = MagicMock()
-    scoped_resolver.list_refs = MagicMock(return_value=list(inventory))
-    settings = MagicMock()
-    settings.payload_store_retention_days = 90
+    scoped_resolver = _ScopedSecretResolverDouble(inventory)
+    settings = _SettingsDouble(payload_store_retention_days=90)
     return ReadinessService(
         execution_service=exec_svc,
         session_service=sess_svc,
@@ -195,10 +251,8 @@ def _make_service(state, validation_result, inventory=(), interpretation_events=
 
 def _make_service_with_execution_service(state, exec_svc, inventory=()):
     sess_svc = _make_session_service()
-    scoped_resolver = MagicMock()
-    scoped_resolver.list_refs = MagicMock(return_value=list(inventory))
-    settings = MagicMock()
-    settings.payload_store_retention_days = 90
+    scoped_resolver = _ScopedSecretResolverDouble(inventory)
+    settings = _SettingsDouble(payload_store_retention_days=90)
     return ReadinessService(
         execution_service=exec_svc,
         session_service=sess_svc,
@@ -363,9 +417,8 @@ def test_compute_snapshot_populates_utc_checked_at():
 
 def test_compute_snapshot_validates_already_read_state():
     state = _state(transforms=(("t", "passthrough"),))
-    exec_svc = MagicMock()
-    exec_svc.validate = AsyncMock(side_effect=AssertionError("must not re-read session state"))
-    exec_svc.validate_state = AsyncMock(return_value=_OK)
+    exec_svc = _ExecutionServiceDouble(_OK)
+    exec_svc.validate.side_effect = AssertionError("must not re-read session state")
     svc = _make_service_with_execution_service(state, exec_svc)
 
     asyncio.run(
@@ -444,6 +497,75 @@ def test_validation_row_error_lists_component_ids():
     row = _row(snap, "validation")
     assert row.status == "error"
     assert row.component_ids == ("out",)
+
+
+def test_validation_row_drops_engineer_prefix_and_uses_problem_wording():
+    """elspeth-901a404926: the Validation row must not leak the
+    "[component_type] component_id:" engineer prefix ("[unknown] unknown: …")
+    on a novice surface, and the summary reads "problem to fix"."""
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Add an output step so your pipeline has somewhere to send its results.",
+                suggestion=None,
+                error_code="missing_sink",
+            )
+        ],
+        readiness=_blocked_readiness(),
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "validation")
+    assert row.summary == "1 problem to fix — see details"
+    assert row.detail == "Add an output step so your pipeline has somewhere to send its results."
+    assert "unknown" not in (row.detail or "")
+
+
+def test_validation_row_pluralizes_and_joins_messages_only():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Add a data source so your pipeline has data to read.",
+                suggestion=None,
+                error_code="missing_source",
+            ),
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Add an output step so your pipeline has somewhere to send its results.",
+                suggestion=None,
+                error_code="missing_sink",
+            ),
+        ],
+        readiness=_blocked_readiness(),
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "validation")
+    assert row.summary == "2 problems to fix — see details"
+    assert row.detail == (
+        "Add a data source so your pipeline has data to read.\nAdd an output step so your pipeline has somewhere to send its results."
+    )
 
 
 def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
@@ -1151,13 +1273,10 @@ def test_plugin_trust_row_errors_on_non_catalog_plugin_name():
 
 
 def test_snapshot_raises_when_no_state():
-    exec_svc = MagicMock()
-    exec_svc.validate = AsyncMock(return_value=_OK)
-    sess_svc = MagicMock()
-    sess_svc.get_current_state = AsyncMock(return_value=None)
-    scoped_resolver = MagicMock()
-    scoped_resolver.list_refs = MagicMock(return_value=[])
-    settings = MagicMock(payload_store_retention_days=90)
+    exec_svc = _ExecutionServiceDouble(_OK)
+    sess_svc = _SessionServiceDouble(record=None)
+    scoped_resolver = _ScopedSecretResolverDouble([])
+    settings = _SettingsDouble(payload_store_retention_days=90)
     svc = ReadinessService(
         execution_service=exec_svc,
         session_service=sess_svc,
@@ -1183,7 +1302,7 @@ def test_snapshot_raises_when_no_state():
 # would slip past _record's safety net.
 
 
-from typing import Any, cast  # noqa: E402  — co-located with the helper-tests block.
+from typing import cast  # noqa: E402  — co-located with the helper-tests block.
 
 from elspeth.web.audit_readiness import service as _service_mod  # noqa: E402
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { CompletionBar } from "./CompletionBar";
 import { ExportYamlModal } from "@/components/sidebar/ExportYamlModal";
 import { useShareableReviewStore } from "@/stores/shareableReviewStore";
@@ -28,6 +28,21 @@ function _validValidation() {
   } as never;
 }
 
+// Minimal composition with content: the Export-YAML button gates on
+// pipeline content (elspeth-bff8043d33), NOT on validation state, so
+// validation-axis tests must hold content constant.
+function _nonEmptyComposition() {
+  return {
+    id: "state-1",
+    version: 1,
+    sources: { source: { plugin: "csv", options: {} } },
+    nodes: [],
+    edges: [],
+    outputs: [],
+    metadata: { name: null, description: null },
+  } as never;
+}
+
 function _invalidValidation() {
   return {
     is_valid: false,
@@ -45,7 +60,10 @@ function _invalidValidation() {
 
 describe("CompletionBar", () => {
   beforeEach(() => {
-    useSessionStore.setState({ activeSessionId: null } as never);
+    useSessionStore.setState({
+      activeSessionId: null,
+      compositionState: null,
+    } as never);
     useExecutionStore.setState({
       validationResult: null,
       isExecuting: false,
@@ -141,14 +159,17 @@ describe("CompletionBar", () => {
     expect(button.disabled).toBe(true);
   });
 
-  // Plan 19b:229 — AC 4: Export-YAML button is ALWAYS enabled, even when no
-  // validation has run and when validation is invalid. The button is the only
-  // completion-bar verb that the design doc (09) marks "Available always —
-  // even with warning status", so we pin both extremes: null validation (no
-  // run yet) and explicit invalid validation.
-  it("Export-YAML button is always enabled regardless of validation state (plan 19b:229, AC 4)", () => {
+  // Plan 19b:229 — AC 4: Export-YAML button is enabled regardless of
+  // VALIDATION state — it is the only completion-bar verb the design doc
+  // (09) marks "Available always — even with warning status". Both extremes
+  // are pinned with a content-bearing pipeline held constant: the button's
+  // only gate is pipeline content (elspeth-bff8043d33), never validation.
+  it("Export-YAML button ignores validation state on a non-empty pipeline (plan 19b:229, AC 4)", () => {
     // Case 1: no validation run yet (validationResult === null).
-    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: _nonEmptyComposition(),
+    } as never);
     // beforeEach already sets validationResult: null.
     const { unmount } = render(<CompletionBar />);
     const exportContainer = screen.getByTestId("completion-bar-export-yaml");
@@ -174,10 +195,26 @@ describe("CompletionBar", () => {
     expect(exportButtonInvalid.getAttribute("aria-disabled")).toBeNull();
   });
 
+  // elspeth-bff8043d33: on an EMPTY pipeline the three sibling completion
+  // verbs must agree — Export-YAML is disabled with a stated reason instead
+  // of opening a near-empty modal.
+  it("Export-YAML button is disabled with a reason on an empty pipeline", () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    // beforeEach leaves compositionState null (no pipeline yet).
+    render(<CompletionBar />);
+    const exportContainer = screen.getByTestId("completion-bar-export-yaml");
+    const exportButton = exportContainer.querySelector("button") as HTMLButtonElement;
+    expect(exportButton).not.toBeNull();
+    expect(exportButton.disabled).toBe(true);
+    expect(exportButton.getAttribute("aria-disabled")).toBe("true");
+    expect(exportButton.getAttribute("title")).toMatch(/add pipeline components/i);
+  });
+
   // Plan 19b:231 — AC 6: Clicking Run-pipeline calls the existing Execute
-  // action from executionStore. The ExecuteButton primitive carries the
-  // signature `execute(activeSessionId)` (see ExecuteButton.tsx line 74).
-  it("clicking Run-pipeline calls executionStore.execute with the active session id (plan 19b:231, AC 6)", () => {
+  // action from executionStore, via the pre-run egress disclosure
+  // (elspeth-c18ad229cc): the ConfirmDialog gates execute(), so the click
+  // opens it and confirming fires `execute(activeSessionId)`.
+  it("clicking Run-pipeline calls executionStore.execute with the active session id after the egress disclosure (plan 19b:231, AC 6)", () => {
     const executeSpy = vi.fn();
     useSessionStore.setState({ activeSessionId: "sess-RUN" } as never);
     useExecutionStore.setState({
@@ -185,6 +222,7 @@ describe("CompletionBar", () => {
       isExecuting: false,
       progress: null,
       execute: executeSpy,
+      runDisclosureAckBySession: {},
     } as never);
 
     render(<CompletionBar />);
@@ -195,6 +233,13 @@ describe("CompletionBar", () => {
 
     fireEvent.click(runButton);
 
+    // The disclosure gates execute(); confirming fires it.
+    expect(executeSpy).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog", { name: /run pipeline\?/i });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^run pipeline$/i }),
+    );
+
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(executeSpy).toHaveBeenCalledWith("sess-RUN");
   });
@@ -204,7 +249,10 @@ describe("CompletionBar", () => {
   // (OPEN_YAML_MODAL_EVENT) that ExportYamlModal listens for; rendering both
   // components together lets us assert the dialog becomes visible end-to-end.
   it("clicking Export-YAML opens the ExportYamlModal dialog (plan 19b:232, AC 7)", async () => {
-    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: _nonEmptyComposition(),
+    } as never);
     useExecutionStore.setState({
       validationResult: _validValidation(),
       isExecuting: false,

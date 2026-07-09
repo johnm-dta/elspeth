@@ -116,10 +116,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -128,7 +130,7 @@ from pydantic import ValidationError
 from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.contracts import Determinism
 from elspeth.contracts.audit import Run
-from elspeth.contracts.enums import RunStatus
+from elspeth.contracts.enums import CreationModality, RunStatus
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import (
@@ -152,7 +154,7 @@ from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
-from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobIntegrityError
+from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobIntegrityError, BlobRecord
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.state import (
     CompositionState,
@@ -163,6 +165,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.execution.accounting import load_run_accounting_from_db
+from elspeth.web.execution.progress import BroadcastResult
 from elspeth.web.execution.schemas import CompletedData
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.validation import validate_pipeline
@@ -2650,8 +2653,8 @@ class TestComposerRuntimeRunStatusAgreement:
 # ── Shape 6 — SecretInventoryItem biconditional agreement ────────────────────
 # Closes elspeth-0d31c22d26 / Phase 2.3 (commit 22e3e0d9).  Per-mode coverage
 # (fingerprint_resolver_not_configured, env_var_not_set,
-# value_decryption_failed) lives in tests/unit/web/secrets/{server,user}_store.py
-# and tests/unit/web/secrets/test_routes.py.  Per the Phase 2.3 closure
+# value_decryption_failed) lives in tests/unit/web/secrets/ and the contract
+# tests below.  Per the Phase 2.3 closure
 # rationale ("agreement-suite scope ... does not need duplication") this suite
 # DOES NOT duplicate the per-mode tests.  The single contract-layer assertion
 # below pins the structural invariant (``available ⟺ reason is None``) so a
@@ -3068,6 +3071,146 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         )
 
 
+@dataclass(slots=True)
+class _RuntimeSettingsFake:
+    data_dir: str
+    payload_store_path: Path
+    landscape_passphrase: str | None = None
+
+    def get_landscape_url(self) -> str:
+        return "sqlite:///:memory:"
+
+    def get_payload_store_path(self) -> Path:
+        return self.payload_store_path
+
+
+@dataclass(slots=True)
+class _RunSnapshot:
+    session_id: UUID
+    status: str = "running"
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class _FakeSessionService:
+    run: _RunSnapshot
+    update_run_status_calls: list[tuple[UUID, str, dict[str, Any]]] = field(default_factory=list)
+    appended_run_events: list[dict[str, Any]] = field(default_factory=list)
+    recorded_blob_inline_resolutions: list[dict[str, Any]] = field(default_factory=list)
+    record_blob_inline_resolutions_hook: Any = None
+    next_event_sequence: int = 0
+
+    async def update_run_status(self, run_id: UUID, status: str, **kwargs: Any) -> None:
+        self.run.status = status
+        if "error" in kwargs:
+            self.run.error = kwargs["error"]
+        self.update_run_status_calls.append((run_id, status, kwargs))
+
+    async def get_run(self, _run_id: UUID) -> _RunSnapshot:
+        return self.run
+
+    async def append_run_event(
+        self,
+        *,
+        run_id: UUID,
+        timestamp: datetime,
+        event_type: str,
+        data: dict[str, Any],
+    ) -> SimpleNamespace:
+        self.next_event_sequence += 1
+        self.appended_run_events.append(
+            {
+                "run_id": run_id,
+                "timestamp": timestamp,
+                "event_type": event_type,
+                "data": data,
+            }
+        )
+        return SimpleNamespace(sequence=self.next_event_sequence)
+
+    async def record_blob_inline_resolutions(
+        self,
+        *,
+        run_id: UUID,
+        resolutions: Any,
+        attempt: int = 1,
+    ) -> None:
+        if self.record_blob_inline_resolutions_hook is not None:
+            await self.record_blob_inline_resolutions_hook(
+                run_id=run_id,
+                resolutions=resolutions,
+                attempt=attempt,
+            )
+        self.recorded_blob_inline_resolutions.append(
+            {
+                "run_id": run_id,
+                "resolutions": tuple(resolutions),
+                "attempt": attempt,
+            }
+        )
+
+
+@dataclass(slots=True)
+class _FakeProgressBroadcaster:
+    broadcast_calls: list[tuple[str, Any]] = field(default_factory=list)
+    cleanup_run_ids: list[str] = field(default_factory=list)
+
+    def broadcast(self, run_id: str, event: Any) -> BroadcastResult:
+        self.broadcast_calls.append((run_id, event))
+        return BroadcastResult()
+
+    def cleanup_run(self, run_id: str) -> None:
+        self.cleanup_run_ids.append(run_id)
+
+
+@dataclass(slots=True)
+class _FakeBlobService:
+    blob_record: BlobRecord
+    content: bytes
+    link_blob_to_run_calls: list[tuple[UUID, UUID, str]] = field(default_factory=list)
+    read_blob_content_calls: list[UUID] = field(default_factory=list)
+    get_blob_calls: list[UUID] = field(default_factory=list)
+    finalize_run_output_blobs_calls: list[tuple[UUID, bool]] = field(default_factory=list)
+
+    async def link_blob_to_run(self, blob_id: UUID, run_id: UUID, direction: str) -> None:
+        self.link_blob_to_run_calls.append((blob_id, run_id, direction))
+
+    async def read_blob_content(self, blob_id: UUID) -> bytes:
+        self.read_blob_content_calls.append(blob_id)
+        return self.content
+
+    async def get_blob(self, blob_id: UUID) -> BlobRecord:
+        self.get_blob_calls.append(blob_id)
+        return self.blob_record
+
+    async def finalize_run_output_blobs(self, run_id: UUID, success: bool) -> BlobFinalizationResult:
+        self.finalize_run_output_blobs_calls.append((run_id, success))
+        return BlobFinalizationResult(finalized=(), errors=())
+
+
+def _ready_inline_blob_record(*, blob_id: UUID, session_id: UUID, content: bytes, content_hash: str) -> BlobRecord:
+    return BlobRecord(
+        id=blob_id,
+        session_id=session_id,
+        filename="prompt.txt",
+        mime_type="text/plain",
+        size_bytes=len(content),
+        content_hash=content_hash,
+        storage_path="prompt.txt",
+        created_at=datetime.now(tz=UTC),
+        created_by="assistant",
+        source_description=None,
+        status="ready",
+        creation_modality=CreationModality.VERBATIM,
+        created_from_message_id=None,
+        creating_model_identifier=None,
+        creating_model_version=None,
+        creating_provider=None,
+        creating_composer_skill_hash=None,
+        creating_arguments_hash=None,
+    )
+
+
 class TestComposerRuntimeBlobInlineAgreement:
     """Shape 9 — widened blob_ref / inline_content agreement.
 
@@ -3170,13 +3313,18 @@ class TestComposerRuntimeBlobInlineAgreement:
     @staticmethod
     def _pipeline_yaml(blob_id: UUID, sha256: str) -> str:
         return f"""
-source:
-  plugin: csv
-  options:
-    path: input.csv
+sources:
+  source:
+    plugin: csv
+    on_success: classify_in
+    options:
+      path: input.csv
 transforms:
   - name: classify
     plugin: llm
+    input: classify_in
+    on_success: results
+    on_error: results
     options:
       prompt_template:
         blob_ref: {blob_id}
@@ -3185,45 +3333,32 @@ transforms:
 sinks:
   results:
     plugin: json
+    on_write_failure: discard
     options:
       path: output.jsonl
 """
 
     @staticmethod
-    def _execution_service(tmp_path: Path) -> tuple[ExecutionServiceImpl, MagicMock, asyncio.AbstractEventLoop]:
+    def _execution_service(tmp_path: Path) -> tuple[ExecutionServiceImpl, _FakeSessionService, asyncio.AbstractEventLoop]:
         loop = asyncio.new_event_loop()
-        settings = MagicMock(
-            spec=[
-                "get_landscape_url",
-                "get_payload_store_path",
-                "landscape_passphrase",
-                "data_dir",
-            ]
+        settings = _RuntimeSettingsFake(
+            data_dir=str(tmp_path),
+            payload_store_path=tmp_path / "payloads",
         )
-        settings.get_landscape_url.return_value = "sqlite:///:memory:"
-        settings.get_payload_store_path.return_value = tmp_path / "payloads"
-        settings.landscape_passphrase = None
-        settings.data_dir = str(tmp_path)
 
-        session_service = MagicMock(spec=["update_run_status", "get_run", "record_blob_inline_resolutions", "append_run_event"])
-        session_service.update_run_status = AsyncMock()
-        # ``_persist_and_broadcast_run_event`` awaits append_run_event to durably
-        # record + broadcast each lifecycle event (multi-worker run coordination).
-        session_service.append_run_event = AsyncMock()
         # ``_run_pipeline`` resolves the run's owning session (get_run().session_id)
         # to scope inline-blob access before any metadata enforcement
         # (IDOR contract, elspeth-195ecb1d58). Tests below set their owned
         # blob_record.session_id to this value so ownership passes and they
         # exercise the hash/audit-ordering assertions they actually target.
-        session_service.get_run = AsyncMock(return_value=MagicMock(spec=object, status="running", session_id=uuid4()))
-        session_service.record_blob_inline_resolutions = AsyncMock()
+        session_service = _FakeSessionService(run=_RunSnapshot(session_id=uuid4()))
 
         service = ExecutionServiceImpl(
-            loop=MagicMock(spec=object),
-            broadcaster=cast(Any, MagicMock(spec=["broadcast", "cleanup_run"])),
+            loop=loop,
+            broadcaster=cast(Any, _FakeProgressBroadcaster()),
             settings=settings,
             session_service=session_service,
-            yaml_generator=MagicMock(spec=object),
+            yaml_generator=cast(Any, SimpleNamespace()),
             telemetry=build_sessions_telemetry(),
         )
 
@@ -3251,15 +3386,15 @@ sinks:
         assert any(error.component_id == "classify" and error.component_type == "transform" for error in result.errors)
 
     @patch("elspeth.web.execution.service.Orchestrator")
-    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.load_settings_from_config_dict")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
         self,
-        mock_payload_cls: MagicMock,
-        mock_landscape_cls: MagicMock,
-        mock_load: MagicMock,
-        mock_orch_cls: MagicMock,
+        mock_payload_cls: Any,
+        mock_landscape_cls: Any,
+        mock_load: Any,
+        mock_orch_cls: Any,
         tmp_path: Path,
     ) -> None:
         del mock_payload_cls, mock_landscape_cls
@@ -3267,17 +3402,13 @@ sinks:
         content = b"actual prompt bytes"
         blob_id = uuid4()
         run_id = uuid4()
-        blob_record = MagicMock(spec=object)
-        blob_record.mime_type = "text/plain"
-        blob_record.size_bytes = len(content)
-        blob_record.content_hash = hashlib.sha256(content).hexdigest()
-        blob_record.status = "ready"
-        blob_record.session_id = _session_service.get_run.return_value.session_id
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=content)
-        blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_record = _ready_inline_blob_record(
+            blob_id=blob_id,
+            session_id=_session_service.run.session_id,
+            content=content,
+            content_hash=hashlib.sha256(content).hexdigest(),
+        )
+        blob_service = _FakeBlobService(blob_record=blob_record, content=content)
         cast(Any, service)._blob_service = blob_service
 
         try:
@@ -3289,14 +3420,14 @@ sinks:
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
 
-    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.load_settings_from_config_dict")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_records_audit_hash_before_settings_load(
         self,
-        mock_payload_cls: MagicMock,
-        mock_landscape_cls: MagicMock,
-        mock_load: MagicMock,
+        mock_payload_cls: Any,
+        mock_landscape_cls: Any,
+        mock_load: Any,
         tmp_path: Path,
     ) -> None:
         del mock_payload_cls, mock_landscape_cls
@@ -3307,29 +3438,32 @@ sinks:
         run_id = uuid4()
         order: list[str] = []
 
-        blob_record = MagicMock(spec=object)
-        blob_record.mime_type = "text/plain"
-        blob_record.size_bytes = len(content)
-        blob_record.content_hash = sha256
-        blob_record.status = "ready"
-        blob_record.session_id = session_service.get_run.return_value.session_id
-        blob_service = MagicMock(spec=object)
-        blob_service.link_blob_to_run = AsyncMock(return_value=None)
-        blob_service.read_blob_content = AsyncMock(return_value=content)
-        blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        blob_record = _ready_inline_blob_record(
+            blob_id=blob_id,
+            session_id=session_service.run.session_id,
+            content=content,
+            content_hash=sha256,
+        )
+        blob_service = _FakeBlobService(blob_record=blob_record, content=content)
         cast(Any, service)._blob_service = blob_service
 
-        async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:
+        async def record_blob_inline_resolutions(
+            *,
+            run_id: UUID,
+            resolutions: Any,
+            attempt: int = 1,
+        ) -> None:
+            del run_id, resolutions, attempt
             order.append("record")
 
-        session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
+        session_service.record_blob_inline_resolutions_hook = record_blob_inline_resolutions
 
-        def stop_after_audit(yaml_text: str, *, expand_env_vars: bool = True) -> None:
+        def stop_after_audit(config_dict: dict[str, Any], *, expand_env_vars: bool = True) -> None:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
             # Web-authored YAML must never expand host ${VAR} placeholders.
             assert expand_env_vars is False
-            assert "You are an audited prompt." in yaml_text
+            prompt_template = config_dict["transforms"][0]["options"]["prompt_template"]
+            assert prompt_template == "You are an audited prompt."
             raise RuntimeError("stop after inline audit")
 
         mock_load.side_effect = stop_after_audit
@@ -3340,8 +3474,9 @@ sinks:
         finally:
             loop.close()
 
-        session_service.record_blob_inline_resolutions.assert_awaited_once()
-        resolutions = session_service.record_blob_inline_resolutions.await_args.kwargs["resolutions"]
+        assert len(session_service.recorded_blob_inline_resolutions) == 1
+        recorded_call = session_service.recorded_blob_inline_resolutions[0]
+        resolutions = recorded_call["resolutions"]
         assert len(resolutions) == 1
         assert resolutions[0].field_path == "node:classify.options.prompt_template"
         assert resolutions[0].content_hash == sha256

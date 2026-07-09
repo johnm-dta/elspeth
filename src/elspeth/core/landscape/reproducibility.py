@@ -19,7 +19,15 @@ from sqlalchemy import ColumnElement, CompoundSelect, select, union
 
 from elspeth.contracts import Determinism, ReproducibilityGrade
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.schema import calls_table, node_states_table, nodes_table, operations_table, runs_table
+from elspeth.core.landscape.schema import (
+    calls_table,
+    node_states_table,
+    nodes_table,
+    operations_table,
+    rows_table,
+    runs_table,
+    tokens_table,
+)
 
 __all__ = [
     "ReproducibilityGrade",
@@ -29,6 +37,35 @@ __all__ = [
 
 if TYPE_CHECKING:
     from elspeth.core.landscape.database import LandscapeDB
+
+
+_REPLAY_ONLY_DETERMINISM = (
+    Determinism.EXTERNAL_CALL,
+    Determinism.NON_DETERMINISTIC,
+    Determinism.IO_READ,
+    Determinism.IO_WRITE,
+)
+
+
+def _validate_node_determinism_values(raw_values: Sequence[object], *, run_id: str) -> list[Determinism]:
+    """Validate raw node determinism values loaded from the audit database."""
+    determinism_values: list[Determinism] = []
+    for det_value in raw_values:
+        if det_value is None:
+            raise AuditIntegrityError(f"NULL determinism value in nodes table for run {run_id} — audit data corruption")
+        if not isinstance(det_value, str):
+            raise AuditIntegrityError(
+                f"Invalid determinism value {det_value!r} in nodes table for run {run_id} — "
+                f"expected one of {[d.value for d in Determinism]}"
+            )
+        try:
+            determinism_values.append(Determinism(det_value))
+        except ValueError as exc:
+            raise AuditIntegrityError(
+                f"Invalid determinism value '{det_value}' in nodes table for run {run_id} — "
+                f"expected one of {[d.value for d in Determinism]}"
+            ) from exc
+    return determinism_values
 
 
 def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
@@ -67,31 +104,11 @@ def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
         result = conn.execute(query_all)
         raw_values = [row[0] for row in result.fetchall()]
 
-    # Validate all determinism values and convert to enum members
-    determinism_values: list[Determinism] = []
-    for det_value in raw_values:
-        if det_value is None:
-            raise AuditIntegrityError(f"NULL determinism value in nodes table for run {run_id} — audit data corruption")
-        try:
-            determinism_values.append(Determinism(det_value))
-        except ValueError as exc:
-            raise AuditIntegrityError(
-                f"Invalid determinism value '{det_value}' in nodes table for run {run_id} — "
-                f"expected one of {[d.value for d in Determinism]}"
-            ) from exc
-
-    # Determinism values that require replay (cannot reproduce from inputs alone)
-    # IO_READ/IO_WRITE are external/side-effectful - require captured data for replay
-    non_reproducible = {
-        Determinism.EXTERNAL_CALL,
-        Determinism.NON_DETERMINISTIC,
-        Determinism.IO_READ,
-        Determinism.IO_WRITE,
-    }
+    determinism_values = _validate_node_determinism_values(raw_values, run_id=run_id)
 
     # Check if any non-reproducible determinism values exist — both sides
     # are now Determinism enum members, no implicit StrEnum comparison.
-    has_non_reproducible = any(det in non_reproducible for det in determinism_values)
+    has_non_reproducible = any(det in _REPLAY_ONLY_DETERMINISM for det in determinism_values)
 
     if has_non_reproducible:
         return ReproducibilityGrade.REPLAY_REPRODUCIBLE
@@ -102,12 +119,12 @@ def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
 _PURGE_REF_CHUNK_SIZE = 100
 
 
-def _replay_critical_response_query(
+def _replay_critical_response_selects(
     *,
     run_id: str,
     non_reproducible_values: Sequence[Determinism],
     response_ref_condition: ColumnElement[bool],
-) -> CompoundSelect[Any]:
+) -> tuple[Any, Any]:
     """Find replay-critical state-call and operation-call responses."""
     determinism_values = [d.value for d in non_reproducible_values]
     state_call_query = (
@@ -136,22 +153,108 @@ def _replay_critical_response_query(
         .where(calls_table.c.response_hash.isnot(None))
         .where(response_ref_condition)
     )
-    return union(state_call_query, operation_call_query)
+    return state_call_query, operation_call_query
+
+
+def _replay_critical_response_query(
+    *,
+    run_id: str,
+    non_reproducible_values: Sequence[Determinism],
+    response_ref_condition: ColumnElement[bool],
+) -> CompoundSelect[Any]:
+    return union(
+        *_replay_critical_response_selects(
+            run_id=run_id,
+            non_reproducible_values=non_reproducible_values,
+            response_ref_condition=response_ref_condition,
+        )
+    )
+
+
+def _replay_critical_deleted_ref_query(
+    *,
+    run_id: str,
+    non_reproducible_values: Sequence[Determinism],
+    deleted_refs: Sequence[str],
+) -> CompoundSelect[Any]:
+    """Find replay-critical payload records whose refs were deleted."""
+    determinism_values = [d.value for d in non_reproducible_values]
+    source_rows_query = (
+        select(rows_table.c.row_id)
+        .select_from(
+            rows_table.join(
+                nodes_table,
+                (rows_table.c.source_node_id == nodes_table.c.node_id) & (rows_table.c.run_id == nodes_table.c.run_id),
+            )
+        )
+        .where(rows_table.c.run_id == run_id)
+        .where(nodes_table.c.determinism.in_(determinism_values))
+        .where(rows_table.c.source_data_hash.isnot(None))
+        .where(rows_table.c.source_data_ref.in_(deleted_refs))
+    )
+    token_payload_query = (
+        select(tokens_table.c.token_id)
+        .select_from(
+            tokens_table.join(rows_table, tokens_table.c.row_id == rows_table.c.row_id).join(
+                nodes_table,
+                (rows_table.c.source_node_id == nodes_table.c.node_id) & (rows_table.c.run_id == nodes_table.c.run_id),
+            )
+        )
+        .where(tokens_table.c.run_id == run_id)
+        .where(nodes_table.c.determinism.in_(determinism_values))
+        .where(tokens_table.c.token_data_ref.in_(deleted_refs))
+    )
+    operation_input_query = (
+        select(operations_table.c.operation_id)
+        .select_from(
+            operations_table.join(
+                nodes_table,
+                (operations_table.c.node_id == nodes_table.c.node_id) & (operations_table.c.run_id == nodes_table.c.run_id),
+            )
+        )
+        .where(operations_table.c.run_id == run_id)
+        .where(nodes_table.c.determinism.in_(determinism_values))
+        .where(operations_table.c.input_data_hash.isnot(None))
+        .where(operations_table.c.input_data_ref.in_(deleted_refs))
+    )
+    operation_output_query = (
+        select(operations_table.c.operation_id)
+        .select_from(
+            operations_table.join(
+                nodes_table,
+                (operations_table.c.node_id == nodes_table.c.node_id) & (operations_table.c.run_id == nodes_table.c.run_id),
+            )
+        )
+        .where(operations_table.c.run_id == run_id)
+        .where(nodes_table.c.determinism.in_(determinism_values))
+        .where(operations_table.c.output_data_hash.isnot(None))
+        .where(operations_table.c.output_data_ref.in_(deleted_refs))
+    )
+    return union(
+        *_replay_critical_response_selects(
+            run_id=run_id,
+            non_reproducible_values=non_reproducible_values,
+            response_ref_condition=calls_table.c.response_ref.in_(deleted_refs),
+        ),
+        source_rows_query,
+        token_payload_query,
+        operation_input_query,
+        operation_output_query,
+    )
 
 
 def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Sequence[str] | None = None) -> None:
     """Degrade reproducibility grade after payload purge.
 
-    After payloads are purged, nondeterministic runs can no longer be
-    replayed IF their response payloads have been purged. The grade degrades:
+    After payloads are purged, replay-only runs can no longer be replayed IF
+    replay-critical payloads have been purged. The grade degrades:
     - REPLAY_REPRODUCIBLE -> ATTRIBUTABLE_ONLY (only if replay-critical payloads purged)
     - FULL_REPRODUCIBLE -> unchanged (doesn't depend on payloads)
     - ATTRIBUTABLE_ONLY -> unchanged (already at lowest grade)
 
-    A response payload is replay-critical when:
-    - It belongs to a call under a nondeterministic node
-    - response_hash proves the payload once existed
-    - its retained response_ref was actually deleted by purge
+    A payload is replay-critical when it belongs to replay-only evidence:
+    call responses, source row payloads, operation inputs/outputs, and token
+    payload refs attached to replay-only determinism.
 
     When ``deleted_refs`` is omitted, this keeps the legacy fallback check for
     rows where ``response_ref`` has already been nulled.
@@ -186,33 +289,26 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Seque
                 f"expected one of {[g.value for g in ReproducibilityGrade]}"
             ) from exc
 
+        query_all_determinism = select(nodes_table.c.determinism).where(nodes_table.c.run_id == run_id).distinct()
+        raw_determinism_values = [determinism_row[0] for determinism_row in conn.execute(query_all_determinism).fetchall()]
+        _validate_node_determinism_values(raw_determinism_values, run_id=run_id)
+
         # Only REPLAY_REPRODUCIBLE can be downgraded (other grades are unaffected)
         if grade != ReproducibilityGrade.REPLAY_REPRODUCIBLE:
             return
 
-        # Check if any replay-critical payloads have been purged.
-        # A response payload is replay-critical when it belongs to a call
-        # under a nondeterministic node (the node's calls need replaying).
-        # In the real purge path, response_ref is intentionally retained and
-        # the payload store blob is deleted. The deleted_refs argument is the
+        # In the real purge path, refs are intentionally retained and the
+        # payload-store blobs are deleted. The deleted_refs argument is the
         # authoritative evidence of that deletion. The response_ref IS NULL
         # fallback preserves compatibility with older callers/tests that mark
-        # purged payloads by nulling refs.
-        #
-        # Non-reproducible determinism values (same set as compute_grade):
-        non_reproducible_values = [
-            Determinism.EXTERNAL_CALL,
-            Determinism.NON_DETERMINISTIC,
-            Determinism.IO_READ,
-            Determinism.IO_WRITE,
-        ]
+        # purged call responses by nulling refs.
 
         purged_critical = None
         if deleted_refs is None:
             purged_critical = conn.execute(
                 _replay_critical_response_query(
                     run_id=run_id,
-                    non_reproducible_values=non_reproducible_values,
+                    non_reproducible_values=_REPLAY_ONLY_DETERMINISM,
                     response_ref_condition=calls_table.c.response_ref.is_(None),
                 ).limit(1)
             ).fetchone()
@@ -221,10 +317,10 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Seque
             for offset in range(0, len(unique_deleted_refs), _PURGE_REF_CHUNK_SIZE):
                 chunk = unique_deleted_refs[offset : offset + _PURGE_REF_CHUNK_SIZE]
                 purged_critical = conn.execute(
-                    _replay_critical_response_query(
+                    _replay_critical_deleted_ref_query(
                         run_id=run_id,
-                        non_reproducible_values=non_reproducible_values,
-                        response_ref_condition=calls_table.c.response_ref.in_(chunk),
+                        non_reproducible_values=_REPLAY_ONLY_DETERMINISM,
+                        deleted_refs=chunk,
                     ).limit(1)
                 ).fetchone()
                 if purged_critical is not None:

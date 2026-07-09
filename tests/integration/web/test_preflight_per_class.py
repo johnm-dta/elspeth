@@ -6,7 +6,6 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -72,6 +71,10 @@ def _insert_session(service: SessionServiceImpl, session_id: UUID) -> None:
         )
 
 
+class _UnusedYamlGenerator:
+    pass
+
+
 def _execution_service(
     *,
     loop: asyncio.AbstractEventLoop,
@@ -83,7 +86,7 @@ def _execution_service(
         broadcaster=ProgressBroadcaster(loop),
         settings=_settings(tmp_path),
         session_service=session_service,
-        yaml_generator=MagicMock(),
+        yaml_generator=_UnusedYamlGenerator(),
         telemetry=build_sessions_telemetry(),
     )
 

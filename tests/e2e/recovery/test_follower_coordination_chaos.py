@@ -32,9 +32,10 @@ Cross-cutting invariants asserted for every test:
 from __future__ import annotations
 
 import types
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select, update
@@ -65,6 +66,34 @@ from tests.e2e.recovery.test_follower_join_and_drain import (
 )
 
 _GUARD_LIVE_SEAT_WINDOW_SECONDS = 10**9
+
+
+class _FollowerDrainFake:
+    """Small fake for the follower's one-method drain surface."""
+
+    def __init__(
+        self,
+        *,
+        drain: Callable[[PluginContext], list[Any]] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self._drain = drain
+        self._error = error
+        self.drain_calls = 0
+
+    def drain_follower_ready_work(
+        self,
+        ctx: PluginContext,
+        *,
+        before_claim: Callable[[], None] | None = None,
+    ) -> list[Any]:
+        del before_claim
+        self.drain_calls += 1
+        if self._error is not None:
+            raise self._error
+        if self._drain is None:
+            return []
+        return self._drain(ctx)
 
 
 def _seed_ready_row_direct(crashed: Any, *, ingest_sequence: int) -> tuple[str, str]:
@@ -131,8 +160,8 @@ class TestFollowerIsolation:
         # Admit second follower with a second join_run call.
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
         ):
             follower_b = _orchestrator(crashed).join_run(
                 run_id=crashed.run_id,
@@ -237,8 +266,8 @@ class TestFollowerIsolation:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
         ):
             follower_b = _orchestrator(crashed).join_run(
                 run_id=crashed.run_id,
@@ -310,8 +339,8 @@ class TestFollowerIsolation:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
         ):
             follower_b = _orchestrator(crashed).join_run(
                 run_id=crashed.run_id,
@@ -537,16 +566,17 @@ class TestFollowerChaos:
         leader_token = _seat_run_with_live_leader(crashed, leader_id=leader_id)
         follower_id = _join_follower(crashed, leader_token)
 
-        # Stub the inner RowProcessor to raise RunWorkerEvictedError on first drain.
-        stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.side_effect = RunWorkerEvictedError(
-            worker_id=follower_id,
-            run_id=crashed.run_id,
+        # Fake the inner RowProcessor raising RunWorkerEvictedError on first drain.
+        stub_proc = _FollowerDrainFake(
+            error=RunWorkerEvictedError(
+                worker_id=follower_id,
+                run_id=crashed.run_id,
+            )
         )
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -668,14 +698,10 @@ class TestFollowerChaos:
         # also idle; the wait_fn flips the run to FAILED so the loop exits.
         from elspeth.core.landscape.schema import runs_table
 
-        stub_proc = MagicMock()
-        idle_calls = [0]
-
-        def _idle_drain(**kw: Any) -> list[Any]:
-            idle_calls[0] += 1
+        def _idle_drain(_ctx: PluginContext) -> list[Any]:
             return []
 
-        stub_proc._drain_scheduler_claims.side_effect = _idle_drain
+        stub_proc = _FollowerDrainFake(drain=_idle_drain)
 
         def _wait(seconds: float) -> None:
             # After first idle wait, flip run to FAILED so the next terminal check exits.
@@ -684,7 +710,7 @@ class TestFollowerChaos:
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -697,7 +723,7 @@ class TestFollowerChaos:
         follower.run(ctx)  # must return normally
 
         # The follower completed ≥1 idle drain pass.
-        assert idle_calls[0] >= 1, "follower must have executed at least one drain pass"
+        assert stub_proc.drain_calls >= 1, "follower must have executed at least one drain pass"
 
         # Follower departed cleanly.
         workers = {w["worker_id"]: w for w in _run_workers(crashed.db, crashed.run_id)}

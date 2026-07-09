@@ -25,7 +25,28 @@ from elspeth.contracts.enums import (
     TerminalPath,
 )
 from elspeth.contracts.freeze import freeze_fields, require_int
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.contracts.token_usage import TokenUsage
+
+_PHASE_ERROR_MESSAGE_MAX_CHARS = 500
+_PHASE_ERROR_MESSAGE_TRUNCATION_SUFFIX = "...<truncated>"
+
+
+def _bounded_phase_error_message(message: str) -> str:
+    if len(message) <= _PHASE_ERROR_MESSAGE_MAX_CHARS:
+        return message
+    limit = _PHASE_ERROR_MESSAGE_MAX_CHARS - len(_PHASE_ERROR_MESSAGE_TRUNCATION_SUFFIX)
+    return f"{message[:limit]}{_PHASE_ERROR_MESSAGE_TRUNCATION_SUFFIX}"
+
+
+def _render_public_phase_error_message(error: BaseException) -> str:
+    try:
+        message = scrub_text_for_audit(str(error))
+    except BaseException:
+        return type(error).__name__
+    if not message.strip():
+        return type(error).__name__
+    return _bounded_phase_error_message(message)
 
 
 class PipelinePhase(StrEnum):
@@ -105,18 +126,42 @@ class PhaseCompleted:
 class PhaseError:
     """Emitted when a pipeline phase fails.
 
-    Stores the full exception object to preserve traceback, exception type,
-    and chained causes for debugging and audit trail integrity.
+    Public lifecycle event surfaces carry only a safe exception summary. Full
+    exception objects stay on the internal exception path so CLI/JSON event
+    subscribers cannot accidentally log raw row data, credentials, or tool
+    output embedded in exception messages.
     """
 
     phase: PipelinePhase
-    error: BaseException
+    error_type: str
+    error_message: str
     target: str | None = None  # What failed (plugin name, file path, etc.)
 
-    @property
-    def error_message(self) -> str:
-        """Human-readable error message for formatting."""
-        return str(self.error)
+    def __post_init__(self) -> None:
+        error_type = self.error_type if self.error_type.strip() else "Exception"
+        object.__setattr__(self, "error_type", error_type)
+        try:
+            message = scrub_text_for_audit(self.error_message)
+        except BaseException:
+            message = error_type
+        if not message.strip():
+            message = error_type
+        object.__setattr__(self, "error_message", _bounded_phase_error_message(message))
+
+    @classmethod
+    def from_exception(
+        cls,
+        *,
+        phase: PipelinePhase,
+        error: BaseException,
+        target: str | None = None,
+    ) -> "PhaseError":
+        return cls(
+            phase=phase,
+            error_type=type(error).__name__,
+            error_message=_render_public_phase_error_message(error),
+            target=target,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,7 +419,7 @@ class ExternalCallCompleted(TelemetryEvent):
         call_type: Type of external call (llm, http, sql, filesystem)
         provider: Service provider (e.g., "azure-openai", "anthropic")
         status: Call result (success, error)
-        latency_ms: Call duration in milliseconds
+        latency_ms: Call duration in milliseconds, or None when unmeasured
         request_hash: Hash of request payload for debugging (optional)
         response_hash: Hash of response payload for debugging (optional)
         request_payload: Full request data for observability (optional).
@@ -389,7 +434,7 @@ class ExternalCallCompleted(TelemetryEvent):
     call_type: CallType
     provider: str
     status: CallStatus
-    latency_ms: float
+    latency_ms: float | None
     state_id: str | None = None
     operation_id: str | None = None
     token_id: str | None = None

@@ -11,6 +11,7 @@ from typing import Any, cast
 import yaml
 
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.core.config import load_bounded_pipeline_yaml
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 from elspeth.web.execution import schemas as execution_schemas
@@ -78,7 +79,7 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     if not isinstance(pipeline_yaml, str):
         raise TypeError(f"YamlGenerator.generate_yaml() must return str; got {type(pipeline_yaml).__name__}")
 
-    loaded_config = yaml.safe_load(pipeline_yaml)
+    loaded_config = load_bounded_pipeline_yaml(pipeline_yaml)
     if type(loaded_config) is not dict:
         raise TypeError(f"YAML generator produced non-dict top-level value (got {type(loaded_config).__name__})")
     config = cast(dict[str, Any], loaded_config)

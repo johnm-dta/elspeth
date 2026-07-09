@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +19,8 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCal
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer import llm_response_parsing as llm_response_parsing_module
+from elspeth.web.composer.llm_response_parsing import build_llm_call_record, token_usage_from_response
 from elspeth.web.composer.protocol import ComposerConvergenceError, ComposerServiceError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
@@ -167,6 +171,105 @@ def _captured_llm_calls(exc: BaseException) -> Sequence[ComposerLLMCall]:
     calls = exc.__dict__["llm_calls"]
     assert isinstance(calls, tuple)
     return cast(tuple[ComposerLLMCall, ...], calls)
+
+
+def test_llm_response_parser_does_not_call_dynamic_getattr() -> None:
+    import inspect
+
+    assert "getattr(" not in inspect.getsource(llm_response_parsing_module)
+
+
+def test_token_usage_ignores_provider_properties_and_reads_own_fields() -> None:
+    class _ProviderUsage:
+        def __init__(self) -> None:
+            self.completion_tokens = 7
+
+        @property
+        def prompt_tokens(self) -> int:
+            raise AssertionError("provider property should not be invoked")
+
+    usage = token_usage_from_response(SimpleNamespace(usage=_ProviderUsage()))
+
+    assert usage.prompt_tokens is None
+    assert usage.completion_tokens == 7
+
+
+def test_token_usage_reads_real_litellm_pydantic_extra_fields() -> None:
+    """LiteLLM ModelResponse keeps ``usage`` in ``__pydantic_extra__``, not ``__dict__``.
+
+    Pydantic v2 models with ``extra="allow"`` store undeclared fields outside
+    ``vars()``; the parser must still see them or every real provider response
+    audits as unknown token counts with no provider cost.
+    """
+    from litellm.types.utils import ModelResponse, Usage
+
+    usage_obj = Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+    usage_obj.cost = 0.0123
+    response = ModelResponse(usage=usage_obj)
+    assert "usage" not in vars(response)  # the storage split this test pins
+
+    usage = token_usage_from_response(response)
+
+    assert usage.prompt_tokens == 11
+    assert usage.completion_tokens == 7
+    assert usage.reported_total == 18
+
+    record = build_llm_call_record(
+        model_requested="openrouter/openai/gpt-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        status=ComposerLLMCallStatus.SUCCESS,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        temperature=None,
+        seed=None,
+        response=response,
+    )
+    assert record.prompt_tokens == 11
+    assert record.provider_cost == 0.0123
+
+
+def test_llm_call_record_redacts_raw_provider_error_detail() -> None:
+    openai_key = "sk-" + ("A" * 48)
+    bearer_token = "Bearer " + ("x" * 32)
+    raw_error = (
+        "ProviderError headers={'Authorization': '"
+        + bearer_token
+        + "'} api_key="
+        + openai_key
+        + " prompt_template='classify {email}' "
+        + "sample_rows=[{'email':'person@example.com','ssn':'123-45-6789'}] "
+        + ("row detail " * 80)
+    )
+
+    call = build_llm_call_record(
+        model_requested="provider/model",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        status=ComposerLLMCallStatus.API_ERROR,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        temperature=None,
+        seed=None,
+        response=None,
+        error_class="ProviderError",
+        error_message=raw_error,
+    )
+
+    stored = call.error_message
+    assert stored is not None
+    assert stored.startswith("provider error detail redacted")
+    assert "raw_error_hash=" in stored
+    assert len(stored) <= 512
+    for leaked in (
+        openai_key,
+        bearer_token,
+        "person@example.com",
+        "123-45-6789",
+        "classify {email}",
+        "row detail",
+    ):
+        assert leaked not in stored
 
 
 @pytest.fixture(autouse=True)

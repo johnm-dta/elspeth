@@ -12,7 +12,8 @@ Tests cover:
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -24,11 +25,108 @@ from elspeth.contracts.audit import (
 )
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.lineage import LineageResult, explain
+from elspeth.core.landscape.lineage import LineageIntegrityValidator, LineageResult, explain
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeQuery:
+    token: Token | None = None
+    row_lineage: RowLineage | None = None
+    node_states: list[object] = field(default_factory=list)
+    routing_events: list[object] = field(default_factory=list)
+    calls: list[object] = field(default_factory=list)
+    token_parents: list[TokenParent] = field(default_factory=list)
+    token_side_effect: Callable[[str], Token | None] | None = None
+    get_token_calls: list[str] = field(default_factory=list)
+    get_tokens_by_ids_calls: list[tuple[str, ...]] = field(default_factory=list)
+    explain_row_calls: list[tuple[str, str]] = field(default_factory=list)
+
+    def get_token(self, token_id: str) -> Token | None:
+        self.get_token_calls.append(token_id)
+        if self.token_side_effect is not None:
+            return self.token_side_effect(token_id)
+        return self.token
+
+    def get_token_for_run(self, run_id: str, token_id: str) -> Token | None:
+        self.get_token_calls.append(token_id)
+        if self.token_side_effect is not None:
+            token = self.token_side_effect(token_id)
+        else:
+            token = self.token
+        if token is None or token.run_id != run_id:
+            return None
+        return token
+
+    def get_tokens_by_ids(self, token_ids: list[str]) -> list[Token]:
+        self.get_tokens_by_ids_calls.append(tuple(token_ids))
+        tokens: list[Token] = []
+        for token_id in token_ids:
+            if self.token_side_effect is not None:
+                token = self.token_side_effect(token_id)
+            else:
+                token = self.token
+            if token is not None:
+                tokens.append(token)
+        return tokens
+
+    def explain_row(self, _run_id: str, _row_id: str) -> RowLineage | None:
+        self.explain_row_calls.append((_run_id, _row_id))
+        return self.row_lineage
+
+    def get_node_states_for_token(self, _token_id: str) -> list[object]:
+        return self.node_states
+
+    def get_routing_events_for_states(self, _state_ids: list[str]) -> list[object]:
+        return self.routing_events
+
+    def get_calls_for_states(self, _state_ids: list[str]) -> list[object]:
+        return self.calls
+
+    def get_token_parents(self, _token_id: str) -> list[TokenParent]:
+        return self.token_parents
+
+    def get_scheduler_events(self, *, run_id: str, token_id: str) -> list[object]:
+        return []
+
+    def assert_get_token_called_with(self, token_id: str) -> None:
+        assert self.get_token_calls
+        assert self.get_token_calls[-1] == token_id
+
+
+@dataclass
+class _FakeDataFlow:
+    token_outcomes: list[TokenOutcome] = field(default_factory=list)
+    validation_errors: list[object] = field(default_factory=list)
+    transform_errors: list[object] = field(default_factory=list)
+    token_outcome: TokenOutcome | None = None
+
+    def get_token_outcomes_for_row(self, _run_id: str, _row_id: str) -> list[TokenOutcome]:
+        return self.token_outcomes
+
+    def get_validation_errors_for_row(
+        self,
+        _run_id: str,
+        _source_data_hash: str,
+        *,
+        row_id: str,
+    ) -> list[object]:
+        return self.validation_errors
+
+    def get_transform_errors_for_token(self, _token_id: str) -> list[object]:
+        return self.transform_errors
+
+    def get_token_outcome(self, _token_id: str) -> TokenOutcome | None:
+        return self.token_outcome
+
+
+@dataclass
+class _FakeFactory:
+    query: _FakeQuery
+    data_flow: _FakeDataFlow
 
 
 def _make_factory(
@@ -43,27 +141,24 @@ def _make_factory(
     validation_errors: list[object] | None = None,
     transform_errors: list[object] | None = None,
     token_outcome: TokenOutcome | None = None,
-) -> Mock:
-    """Create a mock factory with configurable return values."""
-    query = Mock()
-    query.get_token.return_value = token
-    query.explain_row.return_value = row_lineage
-    query.get_node_states_for_token.return_value = node_states or []
-    query.get_routing_events_for_states.return_value = routing_events or []
-    query.get_calls_for_states.return_value = calls or []
-    query.get_token_parents.return_value = token_parents or []
-    query.get_scheduler_events.return_value = []
-
-    data_flow = Mock()
-    data_flow.get_token_outcomes_for_row.return_value = token_outcomes or []
-    data_flow.get_validation_errors_for_row.return_value = validation_errors or []
-    data_flow.get_transform_errors_for_token.return_value = transform_errors or []
-    data_flow.get_token_outcome.return_value = token_outcome
-
-    factory = Mock()
-    factory.query = query
-    factory.data_flow = data_flow
-    return factory
+) -> _FakeFactory:
+    """Create a fake repository factory with configurable return values."""
+    return _FakeFactory(
+        query=_FakeQuery(
+            token=token,
+            row_lineage=row_lineage,
+            node_states=node_states or [],
+            routing_events=routing_events or [],
+            calls=calls or [],
+            token_parents=token_parents or [],
+        ),
+        data_flow=_FakeDataFlow(
+            token_outcomes=token_outcomes or [],
+            validation_errors=validation_errors or [],
+            transform_errors=transform_errors or [],
+            token_outcome=token_outcome,
+        ),
+    )
 
 
 def _make_token(
@@ -238,7 +333,7 @@ class TestExplainByRowId:
         result = explain(factory.query, factory.data_flow, "run-1", row_id="row-1", sink="errors")
         assert result is not None
         # Verify get_token was called with tok-2 (the errors sink token)
-        factory.query.get_token.assert_called_with("tok-2")
+        factory.query.assert_get_token_called_with("tok-2")
 
     def test_returns_none_when_sink_has_no_tokens(self) -> None:
         outcomes = [_make_outcome(token_id="tok-1", sink_name="output")]
@@ -294,14 +389,16 @@ class TestExplainTier1Corruption:
                 parent_tokens=(),
             )
 
-    def test_explain_direct_token_run_mismatch_raises_audit_integrity(self) -> None:
-        """explain() must fail closed when token belongs to a different run."""
+    def test_explain_direct_token_run_mismatch_returns_none(self) -> None:
+        """Caller-provided token IDs are scoped to the requested run."""
         token = _make_token(token_id="tok-cross-run", row_id="row-1", run_id="run-2")
         row_lineage = _make_row_lineage()  # same row_id, requested/source run is run-1
         factory = _make_factory(token=token, row_lineage=row_lineage)
 
-        with pytest.raises(AuditIntegrityError, match="run_id mismatch"):
-            explain(factory.query, factory.data_flow, "run-1", token_id="tok-cross-run")
+        result = explain(factory.query, factory.data_flow, "run-1", token_id="tok-cross-run")
+
+        assert result is None
+        assert factory.query.explain_row_calls == []
 
 
 # ===========================================================================
@@ -335,7 +432,7 @@ class TestExplainParentIntegrity:
             token_parents=[parent_ref],
         )
         # get_token returns the main token for tok-1, None for missing-parent
-        factory.query.get_token.side_effect = lambda tid: token if tid == "tok-1" else None
+        factory.query.token_side_effect = lambda tid: token if tid == "tok-1" else None
 
         with pytest.raises(AuditIntegrityError, match=r"parent token.*not found"):
             explain(factory.query, factory.data_flow, "run-1", token_id="tok-1")
@@ -361,10 +458,38 @@ class TestExplainParentIntegrity:
             row_lineage=row_lineage,
             token_parents=[parent_ref],
         )
-        factory.query.get_token.side_effect = lambda tid: child_token if tid == "child-1" else parent_token
+        factory.query.token_side_effect = lambda tid: child_token if tid == "child-1" else parent_token
 
         with pytest.raises(AuditIntegrityError, match="Cross-run parent lineage"):
             explain(factory.query, factory.data_flow, "run-1", token_id="child-1")
+
+    def test_parent_tokens_are_hydrated_in_one_batch(self) -> None:
+        """Parent hydration must not call get_token once per parent."""
+        child_token = _make_token(token_id="child-1", join_group_id="join-1")
+        parent_1 = _make_token(token_id="parent-1", row_id="row-parent-1")
+        parent_2 = _make_token(token_id="parent-2", row_id="row-parent-2")
+        parent_refs = [
+            TokenParent(token_id="child-1", parent_token_id="parent-1", ordinal=0),
+            TokenParent(token_id="child-1", parent_token_id="parent-2", ordinal=1),
+        ]
+        factory = _make_factory(
+            token=child_token,
+            row_lineage=_make_row_lineage(),
+            token_parents=parent_refs,
+        )
+        tokens_by_id = {
+            child_token.token_id: child_token,
+            parent_1.token_id: parent_1,
+            parent_2.token_id: parent_2,
+        }
+        factory.query.token_side_effect = tokens_by_id.get
+
+        result = explain(factory.query, factory.data_flow, "run-1", token_id="child-1")
+
+        assert result is not None
+        assert [token.token_id for token in result.parent_tokens] == ["parent-1", "parent-2"]
+        assert factory.query.get_tokens_by_ids_calls == [("parent-1", "parent-2")]
+        assert factory.query.get_token_calls == ["child-1"]
 
     def test_join_token_without_parents_raises(self) -> None:
         """Token with join_group_id but no parents is audit corruption."""
@@ -404,6 +529,44 @@ class TestExplainParentIntegrity:
         )
         with pytest.raises(AuditIntegrityError, match=r"parent relationships.*but no group ID"):
             explain(factory.query, factory.data_flow, "run-1", token_id="tok-1")
+
+
+class TestLineageIntegrityValidator:
+    """Tests for the reusable parent-lineage integrity boundary."""
+
+    def test_checked_parent_tokens_are_available_without_explain(self) -> None:
+        """Parent-lineage policy is reusable outside the query composer."""
+        child_token = _make_token(token_id="child-1", join_group_id="join-1")
+        parent_1 = _make_token(token_id="parent-1", row_id="row-parent-1")
+        parent_2 = _make_token(token_id="parent-2", row_id="row-parent-2")
+        parent_refs = [
+            TokenParent(token_id="child-1", parent_token_id="parent-1", ordinal=0),
+            TokenParent(token_id="child-1", parent_token_id="parent-2", ordinal=1),
+        ]
+        query = _FakeQuery(token_parents=parent_refs)
+        tokens_by_id = {
+            child_token.token_id: child_token,
+            parent_1.token_id: parent_1,
+            parent_2.token_id: parent_2,
+        }
+        query.token_side_effect = tokens_by_id.get
+
+        parent_tokens = LineageIntegrityValidator().get_parent_tokens_checked(query, child_token, "run-1")
+
+        assert [token.token_id for token in parent_tokens] == ["parent-1", "parent-2"]
+        assert query.get_tokens_by_ids_calls == [("parent-1", "parent-2")]
+        assert query.get_token_calls == []
+
+    def test_checked_parent_tokens_rejects_mismatched_child_run_context(self) -> None:
+        """Reusable callers cannot weaken the child-token run binding."""
+        child_token = _make_token(token_id="child-1", join_group_id="join-1", run_id="run-1")
+        parent_token = _make_token(token_id="parent-1", row_id="row-parent-1", run_id="run-2")
+        parent_ref = TokenParent(token_id="child-1", parent_token_id="parent-1", ordinal=0)
+        query = _FakeQuery(token_parents=[parent_ref])
+        query.token_side_effect = {parent_token.token_id: parent_token}.get
+
+        with pytest.raises(AuditIntegrityError, match=r"requested run.*child token"):
+            LineageIntegrityValidator().get_parent_tokens_checked(query, child_token, "run-2")
 
 
 # ===========================================================================
@@ -570,7 +733,7 @@ class TestExplainSinkFilterEquality:
         # With <=: "alpha_sink" <= "beta_sink" also matches → 2 results → raises ValueError
         result = explain(factory.query, factory.data_flow, "run-1", row_id="row-1", sink="beta_sink")
         assert result is not None
-        factory.query.get_token.assert_called_with("tok-beta")
+        factory.query.assert_get_token_called_with("tok-beta")
 
     def test_terminal_filter_excludes_non_terminal(self) -> None:
         """Verify non-terminal outcomes are excluded when mixed with terminal.
@@ -592,4 +755,4 @@ class TestExplainSinkFilterEquality:
 
         result = explain(factory.query, factory.data_flow, "run-1", row_id="row-1")
         assert result is not None
-        factory.query.get_token.assert_called_with("tok-terminal")
+        factory.query.assert_get_token_called_with("tok-terminal")

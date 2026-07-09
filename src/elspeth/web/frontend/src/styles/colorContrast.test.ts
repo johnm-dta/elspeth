@@ -228,10 +228,13 @@ describe("light theme colour contrast", () => {
 describe("disabled button contrast", () => {
   // The .btn:disabled / .btn[aria-disabled="true"] rule was migrated off
   // opacity:0.4 (which silently fails contrast against any non-white chrome)
-  // to a tokenised background+text pair. We use --color-bg (page background)
-  // rather than --color-surface-elevated because the latter is too close in
-  // luminance to --color-text-muted in the dark theme (3.84:1, fails AA).
-  // The chosen pair passes AA in both themes (dark 4.78:1, light 6.32:1).
+  // to a tokenised background+text pair on --color-bg (page background).
+  // Historical note: --color-surface-elevated was rejected at the time
+  // because the OLD dark muted value (#7a9a9a) was only 3.84:1 there; the
+  // elspeth-dae08efdc9 remediation raised dark muted to #93b3b3, which now
+  // clears every panel surface (see the muted-on-panel-surface composition
+  // suite below). The chosen pair passes AA in both themes
+  // (dark 6.45:1, light 6.32:1).
   // These assertions are the design system's gate: if a future colour rebalance
   // pushes the pair below AA, this test fails before the regression ships.
   it("keeps --color-text-muted on --color-bg at AA in the dark theme", () => {
@@ -256,6 +259,65 @@ describe("disabled button contrast", () => {
     expect(body).toContain("background-color: var(--color-bg)");
     expect(body).toContain("color: var(--color-text-muted)");
     expect(body).not.toMatch(/opacity:\s*0\.[0-9]+/);
+  });
+
+  // F4: side-rail buttons sit on the warm inspection surface, where the global
+  // --color-bg disabled fill reads as a raised chip rather than "inactive". A
+  // rail-scoped override re-merges disabled rail buttons into
+  // --color-surface-inspector so they read as recessed/outlined. These gate
+  // both that the override exists and that its muted text stays AA on the rail.
+  it("re-merges disabled side-rail buttons into the inspector surface", () => {
+    const railMatch =
+      /\.layout-siderail \.btn:disabled,[\s\S]*?\{([\s\S]*?)\n\}/.exec(appCss);
+    expect(
+      railMatch,
+      "rail-scoped disabled rule must exist in shared.css",
+    ).not.toBeNull();
+    expect(railMatch![1]).toContain(
+      "background-color: var(--color-surface-inspector)",
+    );
+  });
+
+  it("keeps disabled rail-button text at AA on the inspector surface in both themes", () => {
+    const darkText = extractRootToken("--color-text-muted");
+    const darkSurface = extractRootToken("--color-surface-inspector");
+    const lightText = extractLightThemeToken("--color-text-muted");
+    const lightSurface = extractLightThemeToken("--color-surface-inspector");
+    expect(contrastRatio(darkText, darkSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightSurface)).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("form input placeholder contrast", () => {
+  // The .input/.textarea ::placeholder colour was migrated off
+  // --color-text-muted (at the time #7a9a9a, only ~3.84:1 on
+  // --color-surface-elevated, the input background — below AA) to
+  // --color-text-secondary as part of the
+  // acknowledge-card-stack restyle. These assertions gate both the rule
+  // (placeholder uses the secondary token) and the underlying contrast so a
+  // future palette rebalance cannot silently regress placeholder legibility.
+  it("uses --color-text-secondary (not muted) for ::placeholder", () => {
+    const placeholderMatch =
+      /\.input::placeholder,\s*\n\s*\.textarea::placeholder\s*\{([\s\S]*?)\n\}/.exec(
+        appCss,
+      );
+    expect(
+      placeholderMatch,
+      "::placeholder rule must exist for .input/.textarea",
+    ).not.toBeNull();
+    const body = placeholderMatch![1];
+    expect(body).toContain("color: var(--color-text-secondary)");
+    expect(body).not.toContain("var(--color-text-muted)");
+  });
+
+  it("keeps placeholder text at AA on the input surface in both themes", () => {
+    const darkSecondary = extractRootToken("--color-text-secondary");
+    const darkSurface = extractRootToken("--color-surface-elevated");
+    const lightSecondary = extractLightThemeToken("--color-text-secondary");
+    const lightSurface = extractLightThemeToken("--color-surface-elevated");
+
+    expect(contrastRatio(darkSecondary, darkSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightSecondary, lightSurface)).toBeGreaterThanOrEqual(4.5);
   });
 });
 
@@ -414,5 +476,246 @@ describe("forced-colors accessibility fallbacks", () => {
     expect(forcedColorsBlock).toContain(".tutorial-progress-dot");
     expect(forcedColorsBlock).toContain(".tutorial-progress-dot--active");
     expect(forcedColorsBlock).toContain(".tutorial-progress-bar");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Design-review remediation (2026-06-29) — lock in the M02/M03/M04 contrast
+// fixes so the deepened semantic/status tokens, the muted→secondary switch on
+// elevated surfaces, and the new --color-input-border cannot silently regress.
+// These pairings were previously UNGATED by this file (see the design-review
+// epic elspeth-ea551cca69).
+// ---------------------------------------------------------------------------
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const m = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
+  if (!m) {
+    throw new Error(`Expected six-digit hex, got ${hex}`);
+  }
+  return {
+    r: Number.parseInt(m[1], 16),
+    g: Number.parseInt(m[2], 16),
+    b: Number.parseInt(m[3], 16),
+  };
+}
+
+function rgbToHex({ r, g, b }: { r: number; g: number; b: number }): string {
+  const c = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+function extractRootRawToken(tokenName: string): string {
+  const blockMatch = /^:root\s*\{([\s\S]*?)\n\}/m.exec(appCss);
+  if (!blockMatch) {
+    throw new Error("Could not find root token block");
+  }
+  return extractRawTokenFromBlock(tokenName, blockMatch[1], "root");
+}
+
+// Resolve a token to a flat hex for a theme, compositing rgba() tints over the
+// theme's --color-bg so a tinted alert/banner background can be contrast-tested.
+function resolveHex(theme: "dark" | "light", tokenName: string): string {
+  const rawOf = theme === "dark" ? extractRootRawToken : extractLightThemeRawToken;
+  const hexOf = theme === "dark" ? extractRootToken : extractLightThemeToken;
+  const raw = rawOf(tokenName);
+  if (raw.startsWith("#")) {
+    return raw;
+  }
+  const rgba = parseRgba(raw);
+  const base = hexToRgb(hexOf("--color-bg"));
+  return rgbToHex({
+    r: rgba.red * rgba.alpha + base.r * (1 - rgba.alpha),
+    g: rgba.green * rgba.alpha + base.g * (1 - rgba.alpha),
+    b: rgba.blue * rgba.alpha + base.b * (1 - rgba.alpha),
+  });
+}
+
+// Composite an rgba() TINT token over a SPECIFIC surface (not always
+// --color-bg). A tinted banner background is not self-contained — its real
+// contrast depends on the surface rendered behind it (e.g. the YamlView
+// validation banner sits on --color-surface-paper, not the page bg).
+function resolveTintOver(
+  theme: "dark" | "light",
+  tintToken: string,
+  surfaceToken: string,
+): string {
+  const rawOf = theme === "dark" ? extractRootRawToken : extractLightThemeRawToken;
+  const hexOf = theme === "dark" ? extractRootToken : extractLightThemeToken;
+  const rgba = parseRgba(rawOf(tintToken));
+  const base = hexToRgb(hexOf(surfaceToken));
+  return rgbToHex({
+    r: rgba.red * rgba.alpha + base.r * (1 - rgba.alpha),
+    g: rgba.green * rgba.alpha + base.g * (1 - rgba.alpha),
+    b: rgba.blue * rgba.alpha + base.b * (1 - rgba.alpha),
+  });
+}
+
+describe("design-review contrast remediation (2026-06-29)", () => {
+  const themes: Array<"dark" | "light"> = ["dark", "light"];
+
+  it("keeps semantic banner text at AA on its tint over EVERY surface a banner mounts on (M02)", () => {
+    // .alert-banner (page / LoginPage), .validation-banner (side-rail, on
+    // --color-surface-inspector), and YamlView's modal validation banners (on
+    // --color-surface-paper) all render color:var(--color-X) on the TINT
+    // var(--color-X-bg). The tint's real contrast depends on the surface BEHIND
+    // it — so gate every such surface, not just --color-bg. (The paper modal
+    // was the instance the first remediation pass missed; sign-off caught it.)
+    const surfaces = [
+      "--color-bg",
+      "--color-surface",
+      "--color-surface-inspector",
+      "--color-surface-paper",
+    ];
+    for (const theme of themes) {
+      for (const kind of ["error", "warning", "success"] as const) {
+        const fg = resolveHex(theme, `--color-${kind}`);
+        for (const surface of surfaces) {
+          const bg = resolveTintOver(theme, `--color-${kind}-bg`, surface);
+          expect(
+            contrastRatio(fg, bg),
+            `${kind} text on ${kind}-bg over ${surface} (${theme})`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    }
+  });
+
+  it("keeps semantic + status text at AA on the elevated surface (M02)", () => {
+    const tokens = [
+      "--color-error",
+      "--color-warning",
+      "--color-success",
+      "--color-status-failed",
+      "--color-status-completed",
+      "--color-status-cancelled",
+      "--color-status-running",
+      "--color-status-empty",
+    ];
+    for (const theme of themes) {
+      const elevated = resolveHex(theme, "--color-surface-elevated");
+      for (const token of tokens) {
+        expect(
+          contrastRatio(resolveHex(theme, token), elevated),
+          `${token} on elevated (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps secondary text (not muted) at AA on elevated + paper surfaces (M03)", () => {
+    // Components that previously used --color-text-muted on elevated/paper
+    // (audit-icon 10px label, catalog-reference-meta) were switched to
+    // --color-text-secondary because muted is only ~3.84:1 there.
+    for (const theme of themes) {
+      const secondary = resolveHex(theme, "--color-text-secondary");
+      for (const surface of ["--color-surface-elevated", "--color-surface-paper"]) {
+        expect(
+          contrastRatio(secondary, resolveHex(theme, surface)),
+          `secondary on ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps secondary text at AA on the page background in both themes (guided decision summary)", () => {
+    // The guided read-only decision summary renders small secondary-coloured
+    // text directly over the page/section background: the
+    // .guided-current-decision-eyebrow ("Current decision" label), the
+    // .guided-schema-summary-caveat (validation-failure note), and the
+    // .guided-schema-summary-needs-edit banner. Gate --color-text-secondary on
+    // --color-bg so a palette rebalance can't drop these below AA.
+    for (const theme of themes) {
+      // The eyebrow/caveat/needs-edit text actually renders on the decision
+      // card (--color-surface); the section sits on --color-bg. Gate both so a
+      // palette rebalance can't drop these below AA on either surface.
+      for (const surface of ["--color-bg", "--color-surface"]) {
+        expect(
+          contrastRatio(resolveHex(theme, "--color-text-secondary"), resolveHex(theme, surface)),
+          `secondary on ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("gives form inputs a resting boundary clearing WCAG 1.4.11 (3:1) (M04)", () => {
+    // --color-input-border replaces the 1px --color-border-strong (~1.7:1)
+    // boundary on .input/.textarea/.select/.guided-schema-input.
+    for (const theme of themes) {
+      expect(
+        contrastRatio(resolveHex(theme, "--color-input-border"), resolveHex(theme, "--color-surface-elevated")),
+        `input-border on elevated (${theme})`,
+      ).toBeGreaterThanOrEqual(3);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Muted-on-panel-surface COMPOSITIONS (elspeth-dae08efdc9, 2026-07-02).
+// The gap that let ~46 dark-theme axe hits ship: this file gated token PAIRS
+// (muted-on-bg, muted-on-inspector) but never the full set of surfaces muted
+// text actually sits on — composing-card labels on elevated (3.83:1 with the
+// old #7a9a9a), graph-mini labels on paper-adjacent surfaces (4.26:1), the
+// message-tools toggle on tinted washes. One token raise (#7a9a9a → #93b3b3
+// dark) cleared them; this suite gates muted against EVERY surface-family
+// token in BOTH themes, plus the hover-wash composites, so no single
+// surface pairing can silently regress again.
+// ---------------------------------------------------------------------------
+
+describe("muted text on every panel surface (elspeth-dae08efdc9)", () => {
+  const themes: Array<"dark" | "light"> = ["dark", "light"];
+  const surfaceTokens = [
+    "--color-bg",
+    "--color-surface",
+    "--color-surface-elevated",
+    "--color-surface-raised",
+    "--color-surface-inspector",
+    "--color-surface-paper",
+    "--color-surface-nav",
+    "--color-surface-nav-raised",
+    "--color-surface-input",
+  ];
+
+  it("keeps muted text at AA on every surface-family token in both themes", () => {
+    for (const theme of themes) {
+      const muted = resolveHex(theme, "--color-text-muted");
+      for (const surface of surfaceTokens) {
+        expect(
+          contrastRatio(muted, resolveHex(theme, surface)),
+          `muted on ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps muted text at AA on hover-washed surfaces in both themes", () => {
+    // Live composition: .version-selector-item--focused paints
+    // --color-surface-hover over the elevated dropdown while its meta/tag
+    // spans stay muted. The wash lightens dark surfaces (and darkens light
+    // ones), so it is the tightest composite muted text sits on.
+    for (const theme of themes) {
+      const muted = resolveHex(theme, "--color-text-muted");
+      for (const surface of ["--color-surface", "--color-surface-elevated"]) {
+        const washed = resolveTintOver(theme, "--color-surface-hover", surface);
+        expect(
+          contrastRatio(muted, washed),
+          `muted on surface-hover over ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps muted text visually quieter than secondary text in both themes", () => {
+    // The token raise must not collapse the muted/secondary hierarchy: muted
+    // stays the quieter register (lower contrast against the page background
+    // than secondary in each theme).
+    for (const theme of themes) {
+      const bg = resolveHex(theme, "--color-bg");
+      expect(
+        contrastRatio(resolveHex(theme, "--color-text-muted"), bg),
+        `muted vs secondary hierarchy (${theme})`,
+      ).toBeLessThan(
+        contrastRatio(resolveHex(theme, "--color-text-secondary"), bg),
+      );
+    }
   });
 });

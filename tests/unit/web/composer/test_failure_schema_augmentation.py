@@ -14,13 +14,14 @@ never preloaded any schema).
 
 from __future__ import annotations
 
-from typing import Any, Literal
-from unittest.mock import MagicMock
+from collections.abc import Mapping
+from typing import Any
 
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
+    PluginSecretRequirement,
     PluginSummary,
 )
 from elspeth.web.composer.state import (
@@ -41,55 +42,59 @@ def _empty_state() -> CompositionState:
     )
 
 
-def _make_catalog_with_schemas(
-    source_schemas: dict[str, PluginSchemaInfo] | None = None,
-    transform_schemas: dict[str, PluginSchemaInfo] | None = None,
-    sink_schemas: dict[str, PluginSchemaInfo] | None = None,
-) -> MagicMock:
-    """Build a MagicMock catalog whose ``get_schema`` dispatches per (kind, name)."""
-    source_schemas = source_schemas or {}
-    transform_schemas = transform_schemas or {}
-    sink_schemas = sink_schemas or {}
+class _CatalogWithSchemas:
+    def __init__(
+        self,
+        *,
+        source_schemas: dict[str, PluginSchemaInfo] | None = None,
+        transform_schemas: dict[str, PluginSchemaInfo] | None = None,
+        sink_schemas: dict[str, PluginSchemaInfo] | None = None,
+        schema_error: Exception | None = None,
+    ) -> None:
+        self._source_schemas = source_schemas or {}
+        self._transform_schemas = transform_schemas or {}
+        self._sink_schemas = sink_schemas or {}
+        self._schema_error = schema_error
 
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = [
-        PluginSummary(
-            name=name,
-            description=f"{name} source",
-            plugin_type="source",
-            config_fields=[
-                ConfigFieldSummary(name="path", type="string", required=True, description="File path", default=None),
-            ],
-        )
-        for name in (source_schemas or {"csv": None})
-    ]
-    catalog.list_transforms.return_value = [
-        PluginSummary(
-            name=name,
-            description=f"{name} transform",
-            plugin_type="transform",
-            config_fields=[],
-        )
-        for name in (transform_schemas or {"passthrough": None})
-    ]
-    catalog.list_sinks.return_value = [
-        PluginSummary(
-            name=name,
-            description=f"{name} sink",
-            plugin_type="sink",
-            config_fields=[],
-        )
-        for name in (sink_schemas or {"csv": None})
-    ]
+    def list_sources(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(
+                name=name,
+                description=f"{name} source",
+                plugin_type="source",
+                config_fields=[
+                    ConfigFieldSummary(name="path", type="string", required=True, description="File path", default=None),
+                ],
+            )
+            for name in (self._source_schemas or {"csv": None})
+        ]
 
-    def _dispatch_schema(plugin_type: Literal["source", "transform", "sink"], name: str) -> PluginSchemaInfo:
-        bucket: dict[str, PluginSchemaInfo]
-        if plugin_type == "source":
-            bucket = source_schemas
-        elif plugin_type == "transform":
-            bucket = transform_schemas
-        else:
-            bucket = sink_schemas
+    def list_transforms(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(
+                name=name,
+                description=f"{name} transform",
+                plugin_type="transform",
+                config_fields=[],
+            )
+            for name in (self._transform_schemas or {"passthrough": None})
+        ]
+
+    def list_sinks(self) -> list[PluginSummary]:
+        return [
+            PluginSummary(
+                name=name,
+                description=f"{name} sink",
+                plugin_type="sink",
+                config_fields=[],
+            )
+            for name in (self._sink_schemas or {"csv": None})
+        ]
+
+    def get_schema(self, plugin_type: PluginKind, name: str) -> PluginSchemaInfo:
+        if self._schema_error is not None:
+            raise self._schema_error
+        bucket = self._schemas_for(plugin_type)
         if name not in bucket:
             return PluginSchemaInfo(
                 name=name,
@@ -100,8 +105,46 @@ def _make_catalog_with_schemas(
             )
         return bucket[name]
 
-    catalog.get_schema.side_effect = _dispatch_schema
-    return catalog
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        return ()
+
+    def _schemas_for(self, plugin_type: PluginKind) -> dict[str, PluginSchemaInfo]:
+        if plugin_type == "source":
+            return self._source_schemas
+        if plugin_type == "transform":
+            return self._transform_schemas
+        return self._sink_schemas
+
+
+class _UnavailableSecretService:
+    def list_refs(self, _user_id: str) -> list[Any]:
+        return []
+
+    def has_ref(self, _user_id: str, _name: str) -> bool:
+        return False
+
+
+def _make_catalog_with_schemas(
+    source_schemas: dict[str, PluginSchemaInfo] | None = None,
+    transform_schemas: dict[str, PluginSchemaInfo] | None = None,
+    sink_schemas: dict[str, PluginSchemaInfo] | None = None,
+    *,
+    schema_error: Exception | None = None,
+) -> CatalogService:
+    """Build a catalog fake whose ``get_schema`` dispatches per (kind, name)."""
+    return _CatalogWithSchemas(
+        source_schemas=source_schemas,
+        transform_schemas=transform_schemas,
+        sink_schemas=sink_schemas,
+        schema_error=schema_error,
+    )
 
 
 def _csv_schema() -> PluginSchemaInfo:
@@ -139,6 +182,26 @@ def _passthrough_transform_schema() -> PluginSchemaInfo:
         description="Passthrough transform",
         json_schema={"title": "PassthroughConfig", "properties": {}},
         knob_schema={"fields": []},
+    )
+
+
+def _azure_prompt_shield_schema() -> PluginSchemaInfo:
+    return PluginSchemaInfo(
+        name="azure_prompt_shield",
+        plugin_type="transform",
+        description="Prompt injection shield",
+        json_schema={
+            "title": "AzurePromptShieldConfig",
+            "properties": {
+                "endpoint": {"type": "string"},
+                "api_key": {"type": "string"},
+                "fields": {"type": "string"},
+                "schema": {"type": "object"},
+            },
+            "required": ["endpoint", "api_key", "fields", "schema"],
+        },
+        knob_schema={"fields": []},
+        secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
     )
 
 
@@ -436,6 +499,36 @@ class TestFailureSchemaAugmentationPerToolCoverage:
         assert "plugin_schemas" in payload, payload
         assert "transform/passthrough" in payload["plugin_schemas"]
 
+    def test_unavailable_secret_required_transform_schema_is_not_inlined(self) -> None:
+        """Augmentation must not bypass get_plugin_schema's secret-availability gate."""
+        catalog = _make_catalog_with_schemas(
+            transform_schemas={"azure_prompt_shield": _azure_prompt_shield_schema()},
+        )
+        secret_service = _UnavailableSecretService()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "shield",
+                "node_type": "transform",
+                "plugin": "azure_prompt_shield",
+                "input": "rows",
+                "on_success": "llm",
+                "on_error": "discard",
+                "options": {},
+            },
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+        payload = result.to_dict()
+
+        assert result.success is False, payload
+        errors_text = " ".join(e["message"] for e in payload["validation"]["errors"])
+        assert "Invalid options for transform 'azure_prompt_shield'" in errors_text
+        assert "plugin_schemas" not in payload
+
     def test_patch_source_options_failure_carries_schema(self) -> None:
         """patch_source_options surfacing Invalid options for source 'csv' must carry the schema inline."""
         catalog = _make_catalog_with_schemas(
@@ -481,8 +574,7 @@ class TestFailureSchemaAugmentationPerToolCoverage:
 class TestFailureSchemaAugmentationNonAugmentedTools:
     def test_get_plugin_schema_does_not_carry_plugin_schemas_field(self) -> None:
         """Discovery tools — even on failure — must NOT trigger augmentation."""
-        catalog = _make_catalog_with_schemas()
-        catalog.get_schema.side_effect = ValueError("Unknown plugin: nope")
+        catalog = _make_catalog_with_schemas(schema_error=ValueError("Unknown plugin: nope"))
         result = execute_tool(
             "get_plugin_schema",
             {"plugin_type": "source", "name": "nope"},

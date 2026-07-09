@@ -336,6 +336,12 @@ export function AuditReadinessPanel() {
     throw new Error("compositionState missing after audit-readiness content guard");
   }
 
+  // Visible panel name, rendered in EVERY state (elspeth-4f69b267dd): the
+  // graduation card sends users to "the Audit panel", so the destination must
+  // exist by that name even while loading, collapsed, or errored — not only in
+  // the expanded view.
+  const panelHeading = <h2 className="audit-readiness-title audit-readiness-title--standalone">Audit</h2>;
+
   if (isLoading && !snapshot) {
     return (
       <section
@@ -343,6 +349,7 @@ export function AuditReadinessPanel() {
         className="audit-readiness audit-readiness--loading"
         aria-busy="true"
       >
+        {panelHeading}
         <div
           className="audit-readiness-live-region"
           aria-live="polite"
@@ -363,6 +370,7 @@ export function AuditReadinessPanel() {
         className="audit-readiness audit-readiness--error"
         aria-busy={isLoading ? "true" : undefined}
       >
+        {panelHeading}
         <div role="alert" className="audit-readiness-error">
           {error}
         </div>
@@ -396,7 +404,6 @@ export function AuditReadinessPanel() {
   }
 
   const checkedText = relativeTime(snapshot.checked_at);
-  const freshnessLabel = `Audit readiness checked ${checkedText} as of v${snapshot.composition_version}`;
 
   // Collapsed view — single summary line when nothing is actionable.
   if (!showExpanded) {
@@ -406,6 +413,7 @@ export function AuditReadinessPanel() {
         className="audit-readiness audit-readiness--collapsed"
         aria-busy={isLoading ? "true" : undefined}
       >
+        {panelHeading}
         <button
           type="button"
           className="audit-readiness-summary"
@@ -414,10 +422,11 @@ export function AuditReadinessPanel() {
           aria-label="Audit ready. Show details."
         >
           <span aria-hidden="true">{"✓"}</span> Audit ready
-          <span
-            className="audit-readiness-summary-meta"
-            aria-label={freshnessLabel}
-          >
+          {/* No aria-label here: on a role-less span it is never exposed
+              (elspeth-37293a3b7c), and the parent button's aria-label wins
+              the name computation anyway. The freshness detail is the
+              visible text. */}
+          <span className="audit-readiness-summary-meta">
             Checked {checkedText} · as of v{snapshot.composition_version}
           </span>
         </button>
@@ -434,12 +443,24 @@ export function AuditReadinessPanel() {
       >
         <header className="audit-readiness-header">
           <div>
-            <h2 className="audit-readiness-title">Audit readiness</h2>
-            <p
-              className="audit-readiness-freshness"
-              aria-label={freshnessLabel}
-            >
+            {/* "Audit" (not "Audit readiness"): the destination name the
+                graduation copy points at (elspeth-4f69b267dd). The freshness
+                line and the row content carry the readiness meaning. */}
+            <h2 className="audit-readiness-title">Audit</h2>
+            {/* No aria-label: naming is not exposed (and is prohibited) on
+                a paragraph role (elspeth-37293a3b7c); the visible text IS
+                the freshness statement. */}
+            <p className="audit-readiness-freshness">
               Checked {checkedText} · as of v{snapshot.composition_version}
+            </p>
+            {/* Gate legibility (elspeth-088bf83922 T-2, option (a)): a
+                one-line explanation of the per-row "Blocks Run" / "Advisory"
+                badges below — legibility only, no gating change. Reuses the
+                freshness paragraph's existing muted-text style rather than
+                introducing a new one. */}
+            <p className="audit-readiness-freshness">
+              Rows marked "Blocks Run" must be clear before you can run this
+              pipeline; the rest are advisory and do not stop a run.
             </p>
           </div>
           <div className="audit-readiness-actions">
@@ -587,6 +608,12 @@ export function AuditReadinessPanel() {
       {selectedRowId && (
         <ReadinessRowDetail
           row={snapshot.rows.find((r) => r.id === selectedRowId)!}
+          // The validation row's findings are re-humanised in the detail
+          // drawer (engine dumps must not render raw here either); other rows
+          // carry display-ready backend prose (elspeth-901a404926).
+          validationErrors={
+            selectedRowId === "validation" ? snapshot.validation_result.errors : undefined
+          }
           onClose={() => setSelectedRowId(null)}
         />
       )}

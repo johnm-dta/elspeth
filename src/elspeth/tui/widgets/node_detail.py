@@ -10,6 +10,7 @@ from elspeth.tui.types import (
     CoalesceErrorDisplay,
     ExecutionErrorDisplay,
     NodeStateInfo,
+    SelectionDetailInfo,
     TransformErrorDisplay,
 )
 
@@ -137,7 +138,7 @@ class NodeDetailPanel:
       for display (e.g., `value if value is not None else 'N/A'`).
     """
 
-    def __init__(self, node_state: NodeStateInfo | None) -> None:
+    def __init__(self, node_state: NodeStateInfo | SelectionDetailInfo | None) -> None:
         """Initialize with node state data.
 
         Args:
@@ -153,6 +154,9 @@ class NodeDetailPanel:
         """
         if self._state is None:
             return "No node selected. Select a node from the tree to view details."
+
+        if "detail_kind" in self._state:
+            return self._render_selection_detail(cast(SelectionDetailInfo, self._state))
 
         lines: list[str] = []
 
@@ -292,6 +296,67 @@ class NodeDetailPanel:
 
         return "\n".join(lines)
 
+    def _render_selection_detail(self, detail: SelectionDetailInfo) -> str:
+        """Render non-node tree selections."""
+        lines = [f"=== {detail['title']} ===", ""]
+        detail_kind = detail["detail_kind"]
+        if detail_kind == "run":
+            lines.append("Run:")
+            lines.append(f"  Run ID: {detail['run_id']}")
+        elif detail_kind == "token":
+            lines.append("Token:")
+            lines.append(f"  Token ID: {detail['token_id']}")
+            lines.append(f"  Row ID:   {detail['row_id']}")
+            if "sink" in detail:
+                lines.append(f"  Sink:     {detail['sink']}")
+        elif detail_kind == "edge":
+            lines.append("Branch:")
+            lines.append(f"  Label: {detail['edge_label']}")
+            lines.append(f"  From:  {detail['from_node_id']}")
+            lines.append(f"  To:    {detail['to_node_id']}")
+            if "edge_id" in detail:
+                lines.append(f"  Edge ID: {detail['edge_id']}")
+        elif detail_kind == "outcome":
+            lines.append("Outcome:")
+            lines.append(f"  Outcome:   {detail['outcome']}")
+            lines.append(f"  Path:      {detail['outcome_path']}")
+            lines.append(f"  Completed: {detail['completed']}")
+            if "state_id" in detail:
+                lines.append(f"  State ID: {detail['state_id']}")
+            if "token_id" in detail:
+                lines.append(f"  Token ID: {detail['token_id']}")
+            if "row_id" in detail:
+                lines.append(f"  Row ID:    {detail['row_id']}")
+            if "sink" in detail:
+                lines.append(f"  Sink:      {detail['sink']}")
+            if "error_hash" in detail:
+                lines.append(f"  Error hash: {detail['error_hash']}")
+            if "artifact_id" in detail:
+                lines.append("")
+                lines.append("Artifact:")
+                lines.append(f"  ID:   {detail['artifact_id']}")
+                if "artifact_type" in detail:
+                    lines.append(f"  Type: {detail['artifact_type']}")
+                if "artifact_path_or_uri" in detail:
+                    lines.append(f"  Path: {detail['artifact_path_or_uri']}")
+                if "artifact_hash" in detail:
+                    lines.append(f"  Hash: {detail['artifact_hash']}")
+                if "artifact_size_bytes" in detail:
+                    lines.append(f"  Size: {self._format_size(detail['artifact_size_bytes'])}")
+        elif detail_kind == "status":
+            lines.append("Status:")
+            if "run_id" in detail:
+                lines.append(f"  Run ID: {detail['run_id']}")
+            if "message" in detail:
+                lines.append(f"  Message: {detail['message']}")
+        else:
+            raise ValueError(f"Unsupported detail kind: {detail_kind}")
+
+        if "message" in detail:
+            lines.append("")
+            lines.append(detail["message"])
+        return "\n".join(lines)
+
     def _format_size(self, size_bytes: int) -> str:
         """Format byte size in human-readable form.
 
@@ -310,7 +375,7 @@ class NodeDetailPanel:
         else:
             return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
-    def update_state(self, node_state: NodeStateInfo | None) -> None:
+    def update_state(self, node_state: NodeStateInfo | SelectionDetailInfo | None) -> None:
         """Update the displayed node state.
 
         Args:

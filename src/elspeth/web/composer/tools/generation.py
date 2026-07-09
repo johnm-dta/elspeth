@@ -28,7 +28,7 @@ from elspeth.plugins.transforms.llm.model_catalog import (
     read_litellm_model_list,
 )
 from elspeth.web.catalog.protocol import PluginKind
-from elspeth.web.composer._producer_resolver import ProducerResolver
+from elspeth.web.composer._producer_resolver import ProducerResolver, is_source_producer_id
 from elspeth.web.composer.source_inspection import (
     SourceInspectionFacts,
     derive_extra_column_risk,
@@ -43,6 +43,7 @@ from elspeth.web.composer.state import (
     _source_options_have_schema,
     _validate_gate_expression,
 )
+from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     _DATA_ERROR_KEY,
     ToolContext,
@@ -235,6 +236,9 @@ def _handle_get_plugin_schema(
 ) -> ToolResult:
     try:
         schema = context.catalog.get_schema(arguments["plugin_type"], arguments["name"])
+        unavailable = schema_secret_unavailable_message(schema, context)
+        if unavailable is not None:
+            return _failure_result(state, unavailable)
         return _discovery_result(state, schema)
     except (ValueError, KeyError) as exc:
         # ValueError: catalog contract for "unknown plugin/type"
@@ -261,6 +265,7 @@ _GET_PLUGIN_SCHEMA_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["plugin_type", "name"],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -280,7 +285,7 @@ _GET_EXPRESSION_GRAMMAR_DECLARATION = ToolDeclaration(
     handler=_handle_get_expression_grammar,
     kind=ToolKind.DISCOVERY,
     description="Get the gate expression syntax reference.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -483,6 +488,7 @@ _EXPLAIN_VALIDATION_ERROR_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["error_text"],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -531,7 +537,6 @@ def _execute_get_plugin_assistance(
     Unknown plugin name or invalid plugin_type surfaces here as a tool
     failure with the original message so the agent can correct the call.
     """
-    del context  # unused; signature uniformity with the other handlers.
     plugin_type_raw = args["plugin_type"]
     plugin_name = args["plugin_name"]
     # ``args`` is LLM tool-call arguments (Tier 3). ``plugin_type``/``plugin_name``
@@ -547,6 +552,14 @@ def _execute_get_plugin_assistance(
             f"Unknown plugin_type: {plugin_type_raw!r}. Must be one of: 'source', 'transform', 'sink'.",
         )
     plugin_type: PluginKind = plugin_type_raw
+
+    try:
+        schema = context.catalog.get_schema(plugin_type, plugin_name)
+    except (ValueError, KeyError) as exc:
+        return _failure_result(state, str(exc))
+    unavailable = schema_secret_unavailable_message(schema, context)
+    if unavailable is not None:
+        return _failure_result(state, unavailable)
 
     manager = get_shared_plugin_manager()
     try:
@@ -622,6 +635,7 @@ _GET_PLUGIN_ASSISTANCE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["plugin_type", "plugin_name"],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -689,7 +703,7 @@ _GET_AUDIT_INFO_DECLARATION = ToolDeclaration(
         "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
         "that is operator-internal and intentionally not surfaced to the LLM."
     ),
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -818,6 +832,7 @@ _LIST_MODELS_DECLARATION = ToolDeclaration(
             },
         },
         "required": [],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -885,8 +900,11 @@ def _csv_source_field_resolution_error_diagnostic(
         code="csv_source_field_resolution_error",
         message=(
             "CSV source header resolution failed before proof diagnostics could compare "
-            f"declared fields to observed headers: {exc}. CSVSource would reject this "
-            "shape at runtime, so preview_pipeline is blocking it for repair."
+            "declared fields to observed headers. CSVSource would reject this shape at "
+            "runtime, so preview_pipeline is blocking it for repair. The raw resolver "
+            "error text and observed header values are withheld: header-resolution "
+            "failure means a headerless or malformed CSV can make the first data row "
+            "look like headers, so those values are treated as potential row content."
         ),
         suggested_repair=(
             "Rename colliding or invalid CSV headers, correct field_mapping keys and "
@@ -896,7 +914,9 @@ def _csv_source_field_resolution_error_diagnostic(
         evidence_locator={
             "source": "blob",
             "blob_id": str(blob_id),
-            "observed_headers": list(facts.observed_headers or ()),
+            "error_class": type(exc).__name__,
+            "observed_header_count": len(facts.observed_headers or ()),
+            "observed_headers_redacted": True,
         },
     )
 
@@ -917,15 +937,19 @@ def _csv_source_schema_config_error_diagnostic(
     is a malformed *schema declaration* (bad ``schema.mode``, a malformed field
     spec, a non-bool required flag), NOT a header-resolution problem — so the
     generic field-resolution repair text would misdirect the operator and the
-    LLM. The raw ``{exc}`` already carries the precise cause; this builder makes
-    the surrounding guidance accurate and auditable.
+    LLM. The raw ``{exc}`` is NOT interpolated: it can quote observed header /
+    field values that, under a failed header resolution, may be row content; the
+    exception class is surfaced structurally instead and the repair text points
+    at the ``schema.*`` knob.
     """
     return _blocking_diagnostic(
         code="csv_source_field_resolution_error",
         message=(
             "CSV source schema declaration failed to parse before proof diagnostics "
-            f"could compare declared fields to observed headers: {exc}. CSVSource would "
-            "reject this schema at runtime, so preview_pipeline is blocking it for repair."
+            "could compare declared fields to observed headers. CSVSource would reject "
+            "this schema at runtime, so preview_pipeline is blocking it for repair. The "
+            "raw parser error text and observed header values are withheld (they may "
+            "carry row content for a headerless or malformed CSV)."
         ),
         suggested_repair=(
             "Correct the source `schema` block: `schema.mode` must be one of "
@@ -936,7 +960,9 @@ def _csv_source_schema_config_error_diagnostic(
         evidence_locator={
             "source": "blob",
             "blob_id": str(blob_id),
-            "observed_headers": list(facts.observed_headers or ()),
+            "error_class": type(exc).__name__,
+            "observed_header_count": len(facts.observed_headers or ()),
+            "observed_headers_redacted": True,
         },
     )
 
@@ -1035,14 +1061,15 @@ def _gate_expression_type_diagnostics_for_observed_csv(
         for row_index, row in enumerate(rows):
             try:
                 parser.evaluate(row)
-            except ExpressionEvaluationError as exc:
+            except ExpressionEvaluationError:
                 diagnostics.append(
                     _blocking_diagnostic(
                         code="gate_expression_type_mismatch_against_source_schema",
                         message=(
                             f"Gate '{node.id}' condition {condition!r} fails against sampled observed CSV "
-                            f"rows before runtime: {exc}. Observed CSV source values are strings unless the "
-                            "source schema declares explicit field types."
+                            "rows before runtime. Observed CSV source values are strings unless the "
+                            "source schema declares explicit field types. (The raw evaluation error is "
+                            "withheld: it can quote sampled row values and the observed field/key set.)"
                         ),
                         suggested_repair=(
                             "Patch the source schema to declare the compared field with an explicit numeric "
@@ -1119,7 +1146,7 @@ def _source_field_reaches_connection_without_type_change(
         producer = resolver.find_producer_for(current)
         if producer is None:
             return False
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return True
 
         node = resolver.get_node(producer.producer_id)
@@ -1442,13 +1469,16 @@ def compute_proof_diagnostics(
                     )
                     field_resolution_failed = True
             if missing_declared and source.on_validation_failure == "discard":
+                observed_header_count = len(facts.observed_headers or ())
                 diagnostics.append(
                     _blocking_diagnostic(
                         code="csv_source_blob_header_mismatch",
                         message=(
                             f"CSV source declares required field(s) {list(missing_declared)} "
-                            f"but the bound blob's header parses as {list(facts.observed_headers or ())}, "
-                            "with no overlapping field names. Every row will fail validation; "
+                            f"but the bound blob's parsed header has {observed_header_count} column(s) "
+                            "with no overlapping field names. Header values are redacted because "
+                            "headerless CSV input can make the first data row look like headers. "
+                            "Every row will fail validation; "
                             "with on_validation_failure='discard', the run will terminate empty. "
                             "Either prepend a header row containing the declared field names or set "
                             "source options.columns to those names for headerless CSV input."
@@ -1463,7 +1493,8 @@ def compute_proof_diagnostics(
                             "source": "blob",
                             "blob_id": str(blob_id),
                             "declared_required_fields": list(missing_declared),
-                            "observed_headers": list(facts.observed_headers or ()),
+                            "observed_header_count": observed_header_count,
+                            "observed_headers_redacted": True,
                             "source_plugin": source.plugin,
                         },
                     )
@@ -1490,10 +1521,12 @@ def compute_proof_diagnostics(
                             _blocking_diagnostic(
                                 code="csv_fixed_schema_omits_observed_columns",
                                 message=(
-                                    f"Source schema is mode=fixed but omits observed columns "
-                                    f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
-                                    "Combined with on_validation_failure='discard', every row will be "
-                                    "dropped because each contains an undeclared column."
+                                    f"Source schema is mode=fixed but {len(missing)} observed column(s) "
+                                    "are not declared in schema.fields. Combined with "
+                                    "on_validation_failure='discard', every row will be dropped because "
+                                    "each contains an undeclared column. (Observed and missing column "
+                                    "values are withheld: an observed-mode or headerless CSV can make a "
+                                    "data row look like column headers.)"
                                 ),
                                 suggested_repair=(
                                     "patch_source_options with schema.mode='flexible' to accept extra "
@@ -1503,8 +1536,9 @@ def compute_proof_diagnostics(
                                 evidence_locator={
                                     "source": "blob",
                                     "blob_id": str(blob_id),
-                                    "missing_columns": list(missing),
-                                    "observed_columns": list(facts.observed_headers or ()),
+                                    "missing_column_count": len(missing),
+                                    "observed_column_count": len(facts.observed_headers or ()),
+                                    "observed_columns_redacted": True,
                                 },
                             )
                         )
@@ -1725,7 +1759,7 @@ _PREVIEW_PIPELINE_DECLARATION = ToolDeclaration(
     "validation status, source summary, and node/output overview "
     "without executing. Use this to confirm the pipeline is set up "
     "correctly before running.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=False,
 )
 
@@ -1768,7 +1802,7 @@ _DIFF_PIPELINE_DECLARATION = ToolDeclaration(
     description="Show what changed since the session was loaded or created. "
     "Returns added, removed, and modified nodes/edges/outputs, "
     "plus warnings introduced or resolved.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=False,
 )
 

@@ -22,11 +22,18 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
 from elspeth.mcp.analyzers.queries import _validate_readonly_sql
+
+
+class _ConnectionRecorder:
+    def __init__(self) -> None:
+        self.executed: list[object] = []
+
+    def execute(self, statement: object) -> None:
+        self.executed.append(statement)
 
 
 class TestBasicSelectAllowed:
@@ -327,14 +334,14 @@ class TestReadOnlyConnectionDefenseInDepth:
         """PostgreSQL defense-in-depth must not silently fall back to a writable transaction."""
         from elspeth.core.landscape.database import LandscapeDB
 
-        conn = Mock()
+        conn = _ConnectionRecorder()
 
         @contextmanager
         def begin() -> object:
             yield conn
 
         db = LandscapeDB.__new__(LandscapeDB)
-        db.connection_string = "postgresql://user:pass@host/db"
+        db.connection_string = "postgresql://user@host/db"
         db._passphrase = None
         db._journal = None
         # pool is a non-StaticPool so _maybe_serialize_shared_connection takes the
@@ -345,6 +352,6 @@ class TestReadOnlyConnectionDefenseInDepth:
         with db.read_only_connection():
             pass
 
-        assert conn.execute.call_count == 1
-        statement = conn.execute.call_args.args[0]
+        assert len(conn.executed) == 1
+        statement = conn.executed[0]
         assert str(statement) == "SET TRANSACTION READ ONLY"

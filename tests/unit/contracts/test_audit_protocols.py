@@ -14,7 +14,7 @@ from elspeth.contracts.errors import MissingFieldViolation, SinkDiversionReason,
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.factory import _PluginAuditWriterAdapter
+from elspeth.core.landscape.plugin_audit_writer import PluginAuditWriterAdapter
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 
 
@@ -43,23 +43,23 @@ def repos() -> tuple[MagicMock, MagicMock, MagicMock]:
 @pytest.fixture()
 def writer(
     repos: tuple[MagicMock, MagicMock, MagicMock],
-) -> _PluginAuditWriterAdapter:
+) -> PluginAuditWriterAdapter:
     execution, data_flow, run_lifecycle = repos
-    return _PluginAuditWriterAdapter(execution, data_flow, run_lifecycle)
+    return PluginAuditWriterAdapter(execution, data_flow, run_lifecycle)
 
 
 class TestAdapterConstruction:
     """Verify the adapter constructs without error and has the right type."""
 
-    def test_adapter_constructs_successfully(self, writer: _PluginAuditWriterAdapter) -> None:
-        assert isinstance(writer, _PluginAuditWriterAdapter)
+    def test_adapter_constructs_successfully(self, writer: PluginAuditWriterAdapter) -> None:
+        assert isinstance(writer, PluginAuditWriterAdapter)
 
-    def test_adapter_satisfies_plugin_audit_writer_protocol(self, writer: _PluginAuditWriterAdapter) -> None:
+    def test_adapter_satisfies_plugin_audit_writer_protocol(self, writer: PluginAuditWriterAdapter) -> None:
         assert isinstance(writer, PluginAuditWriter)
 
     def test_adapter_surface_matches_protocol_methods(self) -> None:
         protocol_methods = _public_method_names(PluginAuditWriter)
-        adapter_methods = _public_method_names(_PluginAuditWriterAdapter)
+        adapter_methods = _public_method_names(PluginAuditWriterAdapter)
 
         assert len(protocol_methods) <= 20
         assert adapter_methods == protocol_methods
@@ -81,7 +81,7 @@ class TestCallRecordingRoutesToExecution:
 
     def test_allocate_call_index_routes_to_execution(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
@@ -96,7 +96,7 @@ class TestCallRecordingRoutesToExecution:
 
     def test_record_call_routes_to_execution(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
@@ -143,7 +143,7 @@ class TestErrorRecordingRoutesToDataFlow:
 
     def test_record_validation_error_routes_to_data_flow(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         _execution, data_flow, _run_lifecycle = repos
@@ -177,7 +177,7 @@ class TestNodeStateRoutesToExecution:
 
     def test_get_node_state_routes_to_execution(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
@@ -194,7 +194,7 @@ class TestOperationCallRoutesToExecution:
 
     def test_record_operation_call_routes_to_execution(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
@@ -223,6 +223,7 @@ class TestOperationCallRoutesToExecution:
             None,
             error,
             3.25,
+            call_index=None,
             request_ref="op-request-ref",
             response_ref=None,
             # Phase 5b Task 9: cross-DB hash anchor; None unless the caller
@@ -236,7 +237,7 @@ class TestRoutingEventRoutesToExecution:
 
     def test_record_routing_event_routes_to_execution(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
@@ -268,7 +269,7 @@ class TestRoutingEventRoutesToExecution:
 
     def test_record_routing_events_routes_to_execution(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
@@ -287,7 +288,7 @@ class TestTransformErrorRoutesToDataFlow:
 
     def test_record_transform_error_routes_to_data_flow(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         _execution, data_flow, _run_lifecycle = repos
@@ -306,7 +307,7 @@ class TestContractMethodsRouteToDataFlow:
 
     def test_update_node_output_contract_routes_to_data_flow(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         _execution, data_flow, _run_lifecycle = repos
@@ -318,7 +319,7 @@ class TestContractMethodsRouteToDataFlow:
 
     def test_get_node_contracts_routes_to_data_flow(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         _execution, data_flow, _run_lifecycle = repos
@@ -335,7 +336,7 @@ class TestReadinessCheckRoutesToRunLifecycle:
 
     def test_record_readiness_check_routes_to_run_lifecycle(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         _execution, _data_flow, run_lifecycle = repos
@@ -364,7 +365,7 @@ class TestRunLifecycleRoutesToRunLifecycle:
 
     def test_get_source_field_resolution_routes_to_run_lifecycle(
         self,
-        writer: _PluginAuditWriterAdapter,
+        writer: PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
         _execution, _data_flow, run_lifecycle = repos

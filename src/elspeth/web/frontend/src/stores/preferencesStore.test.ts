@@ -42,6 +42,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -70,6 +74,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -110,6 +118,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-19T12:30:00Z",
     });
 
@@ -133,6 +145,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: "2026-05-19T12:30:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-19T12:30:00Z",
     });
 
@@ -160,6 +176,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: "2026-05-19T12:30:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-19T12:30:00Z",
     });
 
@@ -220,12 +240,26 @@ describe("preferencesStore", () => {
       default_mode: "guided",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-19T12:30:00Z",
     });
 
     await usePreferencesStore.getState().resetTutorial();
 
-    expect(mockUpdate).toHaveBeenCalledWith({ tutorial_completed_at: null });
+    // Completion AND the resume fields clear in one PATCH: Reset is also
+    // offered mid-tutorial (the wedged-resume escape hatch), where a stale
+    // stage/session surviving the reset would resume straight back into the
+    // state being escaped.
+    expect(mockUpdate).toHaveBeenCalledWith({
+      tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+    });
     expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
   });
@@ -237,6 +271,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: stamp,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: stamp,
     });
 
@@ -292,6 +330,10 @@ describe("preferencesStore", () => {
       default_mode: "guided",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -316,6 +358,10 @@ describe("preferencesStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -479,6 +525,10 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-16T00:00:00Z",
     });
 
@@ -497,6 +547,10 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
       default_mode: "guided",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-16T00:00:00Z",
     });
 
@@ -538,6 +592,10 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-16T00:00:00Z",
     });
 
@@ -553,6 +611,10 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
       default_mode: "freeform",
       banner_dismissed_at: stamp,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: stamp,
     });
 
@@ -619,5 +681,121 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     usePreferencesStore.setState({ writeError: "some error" });
     usePreferencesStore.getState().clearError();
     expect(usePreferencesStore.getState().writeError).toBeNull();
+  });
+});
+
+describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () => {
+  beforeEach(() => {
+    resetStore(usePreferencesStore);
+    vi.clearAllMocks();
+  });
+
+  it("bootstrap loads the persisted tutorial progress fields", async () => {
+    mockFetch.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      tutorial_stage: "run",
+      tutorial_session_id: "sess-1",
+      tutorial_run_id: "run-1",
+      tutorial_source_data_hash: "hash-1",
+      updated_at: "2026-07-02T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().bootstrap();
+
+    const state = usePreferencesStore.getState();
+    expect(state.tutorialStage).toBe("run");
+    expect(state.tutorialSessionId).toBe("sess-1");
+    expect(state.tutorialRunId).toBe("run-1");
+    expect(state.tutorialSourceDataHash).toBe("hash-1");
+  });
+
+  it("saveTutorialProgress PATCHes the four resume fields and mirrors the response", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      tutorial_stage: "guided",
+      tutorial_session_id: "sess-2",
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-02T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().saveTutorialProgress({
+      stage: "guided",
+      sessionId: "sess-2",
+      runId: null,
+      sourceDataHash: null,
+    });
+
+    expect(mockUpdate).toHaveBeenCalledWith({
+      tutorial_stage: "guided",
+      tutorial_session_id: "sess-2",
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+    });
+    const state = usePreferencesStore.getState();
+    expect(state.tutorialStage).toBe("guided");
+    expect(state.tutorialSessionId).toBe("sess-2");
+  });
+
+  it("saveTutorialProgress is not blocked by the writing serialisation flag", async () => {
+    // A stage transition must never be silently dropped because an
+    // unrelated preferences write is in flight — the PATCH touches only
+    // the disjoint tutorial_* fields.
+    usePreferencesStore.setState({ loaded: true, writing: true });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      tutorial_stage: "run",
+      tutorial_session_id: "sess-3",
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-02T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().saveTutorialProgress({
+      stage: "run",
+      sessionId: "sess-3",
+      runId: null,
+      sourceDataHash: null,
+    });
+
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(usePreferencesStore.getState().tutorialStage).toBe("run");
+  });
+
+  it("markTutorialGraduated mirrors the server clearing the resume fields", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-4",
+      tutorialRunId: "run-4",
+      tutorialSourceDataHash: "hash-4",
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: "2026-07-02T00:00:00Z",
+      // Completion-clears-progress: the backend terminated the resume state.
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-02T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().markTutorialGraduated();
+
+    const state = usePreferencesStore.getState();
+    expect(state.tutorialCompleted).toBe(true);
+    expect(state.tutorialStage).toBeNull();
+    expect(state.tutorialSessionId).toBeNull();
+    expect(state.tutorialRunId).toBeNull();
+    expect(state.tutorialSourceDataHash).toBeNull();
   });
 });

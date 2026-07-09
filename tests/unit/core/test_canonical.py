@@ -208,7 +208,38 @@ class TestSpecialTypeConversion:
 
         data = b"hello world"
         result = _normalize_value(data)
-        assert result == {"__bytes__": base64.b64encode(data).decode("ascii")}
+        assert result == {
+            "__elspeth_canonical_type__": "bytes",
+            "base64": base64.b64encode(data).decode("ascii"),
+        }
+
+    def test_bytes_wrapper_does_not_collide_with_caller_mapping(self) -> None:
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        data = b"hello world"
+        user_mapping = {"__bytes__": base64.b64encode(data).decode("ascii")}
+
+        assert canonical_json(data) != canonical_json(user_mapping)
+        assert stable_hash(data) != stable_hash(user_mapping)
+
+    def test_reserved_bytes_envelope_mapping_is_escaped(self) -> None:
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        data = b"hello world"
+        encoded = base64.b64encode(data).decode("ascii")
+        user_mapping = {
+            "__elspeth_canonical_type__": "bytes",
+            "base64": encoded,
+        }
+
+        assert canonical_json(data) != canonical_json(user_mapping)
+        assert stable_hash(data) != stable_hash(user_mapping)
+        assert canonical_json(user_mapping) == (
+            '{"__elspeth_canonical_type__":"mapping","entries":['
+            '{"key":"__elspeth_canonical_type__","value":"bytes"},'
+            f'{{"key":"base64","value":"{encoded}"}}'
+            "]}"
+        )
 
     def test_decimal_to_string(self) -> None:
         from elspeth.core.canonical import _normalize_value
@@ -421,6 +452,30 @@ class TestRecursiveNormalization:
 class TestCanonicalJsonSerialization:
     """RFC 8785 canonical JSON serialization."""
 
+    def test_canonical_json_delegates_after_domain_normalization(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core import canonical as canonical_mod
+
+        seen: dict[str, object] = {}
+
+        def fake_primitive_canonical_json(obj: object) -> str:
+            seen["obj"] = obj
+            return '"delegated"'
+
+        monkeypatch.setattr(canonical_mod, "_primitive_canonical_json", fake_primitive_canonical_json)
+
+        result = canonical_mod.canonical_json(
+            {
+                "count": np.int64(42),
+                "timestamp": pd.Timestamp("2026-01-12 10:30:00"),
+            }
+        )
+
+        assert result == '"delegated"'
+        assert seen["obj"] == {
+            "count": 42,
+            "timestamp": "2026-01-12T10:30:00+00:00",
+        }
+
     def test_canonical_json_sorts_keys(self) -> None:
         from elspeth.core.canonical import canonical_json
 
@@ -453,6 +508,22 @@ class TestCanonicalJsonSerialization:
 
 class TestStableHash:
     """Stable hashing with versioned algorithm."""
+
+    def test_stable_hash_delegates_after_domain_normalization(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core import canonical as canonical_mod
+
+        seen: dict[str, object] = {}
+
+        def fake_primitive_stable_hash(obj: object) -> str:
+            seen["obj"] = obj
+            return "0" * 64
+
+        monkeypatch.setattr(canonical_mod, "_primitive_stable_hash", fake_primitive_stable_hash)
+
+        result = canonical_mod.stable_hash({"value": np.array(5)})
+
+        assert result == "0" * 64
+        assert seen["obj"] == {"value": 5}
 
     def test_stable_hash_returns_hex_string(self) -> None:
         from elspeth.core.canonical import stable_hash

@@ -95,13 +95,13 @@ describe("subscriptions — validation result side effects", () => {
     vi.clearAllMocks();
   });
 
-  it("calls injectSystemMessage and sendValidationFeedback when validation fails", () => {
+  it("injects local validation status but does not send raw validation errors to the LLM", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -115,7 +115,7 @@ describe("subscriptions — validation result side effects", () => {
           {
             component_type: "source",
             component_id: "csv_source",
-            message: "Required field 'path' is missing",
+            message: "Required field 'path' contains expanded value sk-live-secret",
           },
         ],
         warnings: [],
@@ -123,29 +123,67 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).toHaveBeenCalled();
-    expect(sendValidationFeedback).toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
 
     const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
     expect(message).toContain("Validation failed");
-    expect(message).toContain("csv_source");
+    // Humanised (elspeth-d9e5d157cb): the engineer-grade "[type] id:" prefix and
+    // the raw internal component id no longer leak into the novice chat register.
+    expect(message).not.toContain("[source]");
+    expect(message).not.toContain("csv_source");
+    expect(message).not.toContain("sent to the agent");
     expect(stableId).toBe("system-validation-current");
   });
 
-  it("does NOT inject system message or send validation feedback for the structured empty_pipeline outcome", () => {
-    // Regression: after exit_to_freeform the backend used to surface its
-    // pydantic "ElspethSettings: source/sinks Field required" stack trace
-    // here, which the subscription would (a) inject into chat and (b) POST
-    // to /messages via sendValidationFeedback — provoking the LLM to
-    // confabulate a placeholder set_pipeline. Backend now returns a
-    // structured ``empty_pipeline`` error_code; this guard suppresses the
-    // broadcast so a user with no pipeline content gets no spurious chat
-    // noise and no LLM auto-fix.
+  it("humanises a contract-violation error into a plain-language chat headline (no raw dump, no [type] id: prefix)", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: "edge",
+            component_id: "rater",
+            message:
+              "Schema contract violation: edge 'rater' → 'cleaner'\n  Consumer expects field 'score'",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    const [message] = injectSystemMessage.mock.calls[0] as [string, string];
+    expect(message).toContain("Validation failed");
+    // The raw engine dump is replaced by a plain-language headline; the dump
+    // and the internal-id prefix never reach the novice chat register.
+    expect(message).toContain("aren't connected correctly");
+    expect(message).not.toContain("Schema contract violation");
+    expect(message).not.toContain("[edge]");
+    expect(message).not.toContain("rater");
+  });
+
+  it("does NOT inject system message or send a composer message for the structured empty_pipeline outcome", () => {
+    // Regression: after exit_to_freeform the backend used to surface its
+    // pydantic "ElspethSettings: source/sinks Field required" stack trace
+    // here, which the subscription would (a) inject into chat and (b) POST
+    // to /messages via the old automatic validation POST. Backend
+    // now returns a structured ``empty_pipeline`` error_code; this guard
+    // suppresses local chat noise for a user with no pipeline content.
+    const injectSystemMessage = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -157,8 +195,8 @@ describe("subscriptions — validation result side effects", () => {
           {
             component_type: null,
             component_id: null,
-            message: "Pipeline is empty. Add a source and at least one output to begin building.",
-            suggestion: "Pick a source plugin and an output destination, then validate again.",
+            message: "Pipeline is empty. Add a data source and an output step to begin building.",
+            suggestion: "Pick a data source like a CSV file or text input, and an output like CSV or JSON, then validate again.",
             error_code: "empty_pipeline",
           },
         ],
@@ -167,16 +205,51 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).not.toHaveBeenCalled();
-    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("injects review-pending status but does NOT send validation feedback for pending interpretation review", () => {
+  it("does NOT inject a chat message for the partial missing_source / missing_sink outcome (mid-build steady state)", () => {
+    // elspeth-901a404926: a source with no output (or vice-versa) is a normal
+    // mid-build step. The rail strip carries the plain "Add an output step…"
+    // guidance; injecting an alarmist "Validation failed" chat line on every
+    // intermediate step would be noise, so it stays silent like empty_pipeline.
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: null,
+            component_id: null,
+            message: "Add an output step so your pipeline has somewhere to send its results.",
+            suggestion: "Pick an output like CSV or JSON and connect your last step to it, then validate again.",
+            error_code: "missing_sink",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    expect(injectSystemMessage).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("injects review-pending status but does NOT send a composer message for pending interpretation review", () => {
+    const injectSystemMessage = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -220,7 +293,7 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).toHaveBeenCalled();
-    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
     const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
     // Human-centric copy that points at the review cards, NOT a dump of the
     // raw validation blockers. The machine-facing component id / detail
@@ -233,11 +306,9 @@ describe("subscriptions — validation result side effects", () => {
 
   it("replaces the pending message with a ready-to-run nudge once reviews resolve", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -297,11 +368,9 @@ describe("subscriptions — validation result side effects", () => {
 
   it("does NOT fire the ready-to-run nudge for an ordinary valid result", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -326,13 +395,13 @@ describe("subscriptions — validation result side effects", () => {
     expect(injectSystemMessage).not.toHaveBeenCalled();
   });
 
-  it("calls injectSystemMessage but NOT sendValidationFeedback when validation passes with warnings", () => {
+  it("injects local warning status without validation feedback egress", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -352,11 +421,14 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).toHaveBeenCalled();
-    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
 
     const [message] = injectSystemMessage.mock.calls[0] as [string, string];
     expect(message).toContain("Validation passed with warnings");
-    expect(message).toContain("select_cols");
+    expect(message).toContain("Identity passthrough detected");
+    // Humanised: no "[type] id:" prefix / raw internal id (elspeth-d9e5d157cb).
+    expect(message).not.toContain("[transform]");
+    expect(message).not.toContain("select_cols");
   });
 
   it("fires side effects exactly once when the same result reference is set twice (reference-equality guard)", () => {
@@ -387,11 +459,11 @@ describe("subscriptions — validation result side effects", () => {
 
   it("does not repeat side effects for a fresh object with the same validation outcome", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -411,7 +483,7 @@ describe("subscriptions — validation result side effects", () => {
     useExecutionStore.setState({ validationResult: second } as never);
 
     expect(injectSystemMessage).toHaveBeenCalledTimes(1);
-    expect(sendValidationFeedback).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -939,9 +1011,8 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     // but source=null nodes=[] outputs=[]. Without the guard, requestValidate
     // would queue validate and land the structured ``empty_pipeline``
     // failure — which the executionStore subscription used to broadcast
-    // via injectSystemMessage AND sendValidationFeedback (POST /messages
-    // as role=user). The LLM then "fixed" it with a confabulated placeholder
-    // source/sink, polluting the audit trail.
+    // via injectSystemMessage and the old automatic validation POST
+    // to /messages as role=user.
     const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
 
@@ -1034,5 +1105,79 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
       await Promise.resolve();
     });
     expect(validate).not.toHaveBeenCalled();
+  });
+});
+
+// Reload-resilience (elspeth-90db33baac): on session activation the
+// subscription must ask executionStore to rehydrate a live run (restore
+// activeRunId + reattach the progress WebSocket).
+describe("subscriptions — run rehydration on session activation", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    vi.clearAllMocks();
+  });
+
+  it("fires rehydrateActiveRun when the active session changes to a session", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: null } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+
+    expect(rehydrateActiveRun).toHaveBeenCalledTimes(1);
+    expect(rehydrateActiveRun).toHaveBeenCalledWith(SESSION_A);
+  });
+
+  it("does not re-fire on unrelated sessionStore writes with the same active session", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: null, sessions: [] } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useSessionStore.setState({
+      sessions: [
+        { id: SESSION_A, title: "A", created_at: "", updated_at: "" } as Session,
+      ],
+    } as never);
+
+    expect(rehydrateActiveRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires once per session activation when switching sessions", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: null } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useSessionStore.setState({ activeSessionId: SESSION_B } as never);
+
+    expect(rehydrateActiveRun).toHaveBeenNthCalledWith(1, SESSION_A);
+    expect(rehydrateActiveRun).toHaveBeenNthCalledWith(2, SESSION_B);
+  });
+
+  it("does not fire when the active session becomes null", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: null } as never);
+
+    expect(rehydrateActiveRun).not.toHaveBeenCalled();
+  });
+
+  it("does not fire for the session already active when init runs (seeded tracker)", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    // An unrelated write must not fire for the pre-init session.
+    useSessionStore.setState({ sessions: [] } as never);
+
+    expect(rehydrateActiveRun).not.toHaveBeenCalled();
   });
 });

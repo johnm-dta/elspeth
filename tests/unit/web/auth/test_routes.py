@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+import stat
+from dataclasses import dataclass, field
 
 import jwt as pyjwt
 import pytest
@@ -16,7 +17,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import auth_events_table
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
-from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
 from elspeth.web.auth.routes import RegisterRequest, create_auth_router
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.request_id import RequestIdMiddleware
@@ -41,6 +42,39 @@ class _NoopAuthAuditRecorder:
 
     def record_auth_failure(self, *args, **kwargs) -> None:
         return None
+
+
+@dataclass
+class _FakeAuthProvider:
+    authenticate_result: UserIdentity = field(default_factory=lambda: UserIdentity(user_id="alice", username="alice"))
+    authenticate_error: AuthenticationError | None = None
+    profile_result: UserProfile = field(default_factory=lambda: UserProfile(user_id="alice", username="alice"))
+    profile_error: AuthenticationError | None = None
+    authenticate_calls: int = 0
+    get_user_info_calls: int = 0
+    login_calls: int = 0
+    refresh_calls: int = 0
+
+    async def authenticate(self, _token: str) -> UserIdentity:
+        self.authenticate_calls += 1
+        if self.authenticate_error is not None:
+            raise self.authenticate_error
+        return self.authenticate_result
+
+    async def get_user_info(self, _token: str) -> UserProfile:
+        self.get_user_info_calls += 1
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.profile_result
+
+    async def login(self, _username: str, _password: str) -> str:
+        self.login_calls += 1
+        raise AssertionError("login should not be called")
+
+    async def refresh(self, _user_id: str, _username: str, *, original_iat: int) -> str:
+        _ = original_iat
+        self.refresh_calls += 1
+        raise AssertionError("refresh should not be called")
 
 
 def _create_test_app(provider, auth_provider_type: str = "local", **settings_overrides) -> FastAPI:
@@ -275,7 +309,7 @@ class TestLoginEndpoint:
         assert _read_auth_event_rows(audit_url) == []
 
     async def test_login_not_available_for_oidc(self, tmp_path) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
 
         async with _client_for(app) as client:
@@ -286,7 +320,7 @@ class TestLoginEndpoint:
         assert response.status_code == 404
 
     async def test_login_not_available_for_entra(self) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="entra", **_ENTRA_FIELDS)
         async with _client_for(app) as client:
             response = await client.post(
@@ -386,23 +420,185 @@ class TestRegisterEndpoint:
             )
         assert response.status_code == 404
 
-    async def test_register_email_verified_mode_returns_501(self, tmp_path) -> None:
+    async def test_register_email_verified_mode_creates_pending_user_and_verifies_token(self, tmp_path) -> None:
         provider = LocalAuthProvider(
             db_path=tmp_path / "auth.db",
             secret_key="test-key",
         )
-        app = _create_test_app(provider, registration_mode="email_verified")
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+            )
+            assert response.status_code == 202
+            body = response.json()
+            assert body == {
+                "status": "verification_required",
+                "email": "bob@example.com",
+            }
+
+            with pytest.raises(AuthenticationError, match="Email verification required"):
+                await provider.login("bob", "pw123")
+
+            outbox = tmp_path / "email-verifications.jsonl"
+            records = [json.loads(line) for line in outbox.read_text(encoding="utf-8").splitlines()]
+            assert len(records) == 1
+            assert records[0]["user_id"] == "bob"
+            assert records[0]["email"] == "bob@example.com"
+            assert "pw123" not in repr(records[0])
+            assert stat.S_IMODE(outbox.stat().st_mode) == 0o600
+
+            verify_response = await client.post(
+                "/api/auth/verify-email",
+                json={"token": records[0]["token"]},
+            )
+            assert verify_response.status_code == 200
+            _assert_token_response_uncacheable(verify_response)
+            assert "access_token" in verify_response.json()
+
+            login_response = await client.post(
+                "/api/auth/login",
+                json={"username": "bob", "password": "pw123"},
+            )
+            assert login_response.status_code == 200
+
+    async def test_register_email_verified_mode_requires_email(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
 
         async with _client_for(app) as client:
             response = await client.post(
                 "/api/auth/register",
                 json={"username": "bob", "password": "pw123", "display_name": "Bob"},
             )
-        assert response.status_code == 501
-        assert "Email verification" in response.json()["detail"]
+        assert response.status_code == 422
+        assert "email" in response.json()["detail"]
+
+    async def test_register_email_verified_mode_rejects_blank_email_without_user(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "   ",
+                },
+            )
+
+        assert response.status_code == 422
+        assert not (tmp_path / "email-verifications.jsonl").exists()
+        assert provider.delete_user("bob") is False
+
+    async def test_register_email_verified_mode_uses_configured_public_base_url(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(
+            provider,
+            registration_mode="email_verified",
+            data_dir=tmp_path,
+            public_base_url="https://composer.example.test",
+        )
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+                headers={"host": "evil.example"},
+            )
+
+        assert response.status_code == 202
+        outbox = tmp_path / "email-verifications.jsonl"
+        record = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])
+        assert record["verification_url"].startswith("https://composer.example.test/?verify_token=")
+        assert "evil.example" not in record["verification_url"]
+
+    async def test_register_email_verified_mode_uses_trusted_request_origin_for_dev_proxy(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(
+            provider,
+            registration_mode="email_verified",
+            data_dir=tmp_path,
+            host="127.0.0.1",
+            port=8462,
+            cors_origins=("http://127.0.0.1:5174",),
+        )
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+                headers={"origin": "http://127.0.0.1:5174"},
+            )
+
+        assert response.status_code == 202
+        outbox = tmp_path / "email-verifications.jsonl"
+        record = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])
+        assert record["verification_url"].startswith("http://127.0.0.1:5174/?verify_token=")
+
+    async def test_register_email_verified_mode_outbox_failure_removes_pending_user(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        def fail_outbox(*args, **kwargs) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("elspeth.web.auth.routes._write_email_verification_outbox", fail_outbox)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+            )
+
+        assert response.status_code == 500
+        assert provider.delete_user("bob") is False
 
     async def test_register_non_local_provider_returns_404(self) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(
             provider,
             auth_provider_type="oidc",
@@ -712,8 +908,22 @@ class TestAuthConfigEndpoint:
         assert body["oidc_issuer"] is None
         assert body["oidc_client_id"] is None
 
+    async def test_registration_mode_closed_is_exposed_to_frontend(self, tmp_path) -> None:
+        """The LoginPage gates its "Create an account" affordance on the
+        effective registration mode — /config must reflect a closed mode."""
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, auth_provider_type="local", registration_mode="closed")
+
+        async with _client_for(app) as client:
+            response = await client.get("/api/auth/config")
+        assert response.status_code == 200
+        assert response.json()["registration_mode"] == "closed"
+
     async def test_oidc_provider_returns_issuer_and_client_id(self) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(
             provider,
             auth_provider_type="oidc",
@@ -732,7 +942,7 @@ class TestAuthConfigEndpoint:
 
     async def test_config_endpoint_is_unauthenticated(self) -> None:
         """GET /api/auth/config must not require a Bearer token."""
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="local")
 
         # No Authorization header -- should still return 200
@@ -746,8 +956,7 @@ class TestTokenRefreshNonLocal:
     """Token refresh must be unavailable for non-local providers."""
 
     async def test_token_refresh_not_available_for_oidc(self) -> None:
-        provider = AsyncMock()
-        provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
         async with _client_for(app) as client:
             response = await client.post(
@@ -768,14 +977,14 @@ class TestTokenRefreshNonLocal:
         provider_type: str,
         settings_fields: dict[str, str],
     ) -> None:
-        provider = AsyncMock()
+        provider = _FakeAuthProvider()
         app = _create_test_app(provider, auth_provider_type=provider_type, **settings_fields)
 
         async with _client_for(app) as client:
             response = await client.post("/api/auth/token")
 
         assert response.status_code == 404
-        provider.authenticate.assert_not_awaited()
+        assert provider.authenticate_calls == 0
 
     @pytest.mark.parametrize(
         ("provider_type", "settings_fields"),
@@ -789,8 +998,7 @@ class TestTokenRefreshNonLocal:
         provider_type: str,
         settings_fields: dict[str, str],
     ) -> None:
-        provider = AsyncMock()
-        provider.authenticate.side_effect = AuthenticationError("bad token")
+        provider = _FakeAuthProvider(authenticate_error=AuthenticationError("bad token"))
         app = _create_test_app(provider, auth_provider_type=provider_type, **settings_fields)
 
         async with _client_for(app) as client:
@@ -800,7 +1008,7 @@ class TestTokenRefreshNonLocal:
             )
 
         assert response.status_code == 404
-        provider.authenticate.assert_not_awaited()
+        assert provider.authenticate_calls == 0
 
 
 @pytest.mark.asyncio
@@ -809,9 +1017,8 @@ class TestMeErrorPath:
 
     async def test_me_authenticate_invalid_tenant_records_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthenticationError("Invalid tenant: received tid='SECRET_TENANT'")
-        app = _create_test_app(mock_provider, auth_provider_type="entra", landscape_url=audit_url, **_ENTRA_FIELDS)
+        provider = _FakeAuthProvider(authenticate_error=AuthenticationError("Invalid tenant: received tid='SECRET_TENANT'"))
+        app = _create_test_app(provider, auth_provider_type="entra", landscape_url=audit_url, **_ENTRA_FIELDS)
         _enable_auth_audit(app)
 
         async with _client_for(app) as client:
@@ -836,9 +1043,8 @@ class TestMeErrorPath:
 
     async def test_me_authenticate_provider_unavailable_records_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.side_effect = AuthProviderUnavailable("JWKS unavailable: SECRET_URL")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(authenticate_error=AuthProviderUnavailable("JWKS unavailable: SECRET_URL"))
+        app = _create_test_app(provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
         _enable_auth_audit(app)
 
         async with _client_for(app) as client:
@@ -861,10 +1067,8 @@ class TestMeErrorPath:
 
     async def test_me_get_user_info_failure_returns_401(self) -> None:
         """If get_user_info raises, /me returns 401 with the detail."""
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
-        mock_provider.get_user_info.side_effect = AuthenticationError("Profile lookup failed")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Profile lookup failed"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
         async with _client_for(app) as client:
             response = await client.get(
                 "/api/auth/me",
@@ -875,10 +1079,8 @@ class TestMeErrorPath:
 
     async def test_me_get_user_info_failure_records_profile_lookup_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
-        mock_provider.get_user_info.side_effect = AuthenticationError("Missing required 'sub' claim SECRET_SUB")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Missing required 'sub' claim SECRET_SUB"))
+        app = _create_test_app(provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
         _enable_auth_audit(app)
 
         async with _client_for(app) as client:
@@ -903,10 +1105,8 @@ class TestMeErrorPath:
 
     async def test_me_get_user_info_unavailable_returns_503(self) -> None:
         """Provider availability failures during profile lookup return 503."""
-        mock_provider = AsyncMock()
-        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
-        mock_provider.get_user_info.side_effect = AuthProviderUnavailable("JWKS unavailable: ConnectError")
-        app = _create_test_app(mock_provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        provider = _FakeAuthProvider(profile_error=AuthProviderUnavailable("JWKS unavailable: ConnectError"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
         async with _client_for(app) as client:
             response = await client.get(
                 "/api/auth/me",

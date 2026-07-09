@@ -36,8 +36,7 @@ if TYPE_CHECKING:
 
     from azure.identity import ClientSecretCredential, DefaultAzureCredential, ManagedIdentityCredential
 
-    from elspeth.core.rate_limit.limiter import RateLimiter
-    from elspeth.core.rate_limit.registry import NoOpLimiter
+    from elspeth.contracts.contexts import LimiterProtocol
 
 logger = structlog.get_logger(__name__)
 
@@ -248,7 +247,7 @@ class DataverseClient:
         environment_url: str,
         credential: ClientSecretCredential | DefaultAzureCredential | ManagedIdentityCredential,
         api_version: str = "v9.2",
-        limiter: RateLimiter | NoOpLimiter | None = None,
+        limiter: LimiterProtocol | None = None,
         retry_after_cap: float = 60.0,
         additional_domains: tuple[str, ...] = (),
     ) -> None:

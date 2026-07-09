@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelTutorialRun,
   deleteTutorialOrphans,
   getRunAuditSummary,
   renameSession,
   runTutorialPipeline,
+  sendTutorialAbandonBeacon,
 } from "./client";
 
 describe("api/client tutorial helpers", () => {
@@ -17,7 +19,7 @@ describe("api/client tutorial helpers", () => {
     fetchSpy.mockRestore();
   });
 
-  it("POSTs tutorial run requests to /api/tutorial/run", async () => {
+  it("POSTs tutorial run requests to /api/tutorial/run keyed by session alone", async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -27,25 +29,21 @@ describe("api/client tutorial helpers", () => {
             source_data_hash: "a7f3e2",
             discarded_row_count: 0,
           },
-          seeded_from_cache: false,
-          cache_key: null,
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
 
-    const result = await runTutorialPipeline({
-      session_id: "session-1",
-      prompt: "rate these pages",
-    });
+    const result = await runTutorialPipeline({ session_id: "session-1" });
 
     expect(result.run_id).toBe("run-1");
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toBe("/api/tutorial/run");
     expect(init?.method).toBe("POST");
+    // The deleted tutorial cache keyed on `prompt`; the request body carries
+    // only the session id now (TutorialRunRequest contract).
     expect(JSON.parse(init?.body as string)).toEqual({
       session_id: "session-1",
-      prompt: "rate these pages",
     });
   });
 
@@ -59,8 +57,57 @@ describe("api/client tutorial helpers", () => {
     );
 
     await expect(
-      runTutorialPipeline({ session_id: "missing", prompt: "x" }),
+      runTutorialPipeline({ session_id: "missing" }),
     ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("POSTs the best-effort server cancel with keepalive", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ cancelled: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await cancelTutorialRun("session-1");
+
+    expect(result.cancelled).toBe(true);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("/api/tutorial/cancel");
+    expect(init?.method).toBe("POST");
+    // keepalive lets the cancel survive the user closing the tab right after
+    // clicking Cancel.
+    expect(init?.keepalive).toBe(true);
+    expect(JSON.parse(init?.body as string)).toEqual({
+      session_id: "session-1",
+    });
+  });
+
+  it("sends the abandon beacon as an authenticated keepalive POST", () => {
+    localStorage.setItem("auth_token", "beacon-token");
+    try {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      sendTutorialAbandonBeacon();
+
+      const [url, init] = fetchSpy.mock.calls[0];
+      expect(url).toBe("/api/tutorial/abandon");
+      expect(init?.method).toBe("POST");
+      // The endpoint requires the bearer header, which navigator.sendBeacon
+      // cannot carry — so the beacon is a keepalive fetch that survives
+      // pagehide.
+      expect(init?.keepalive).toBe(true);
+      expect((init?.headers as Record<string, string>).Authorization).toBe(
+        "Bearer beacon-token",
+      );
+    } finally {
+      localStorage.removeItem("auth_token");
+    }
+  });
+
+  it("swallows abandon-beacon failures (best-effort telemetry)", () => {
+    fetchSpy.mockRejectedValueOnce(new TypeError("network down"));
+    expect(() => sendTutorialAbandonBeacon()).not.toThrow();
   });
 
   it("GETs the run audit-story projection by session and run id", async () => {

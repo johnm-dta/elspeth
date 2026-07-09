@@ -206,8 +206,12 @@ class _SessionsTelemetry:
     mode_opted_in_total: _Counter
     session_switched_total: _Counter
     # Tutorial counters wired by Task 6 (conditional on Phase 4 ship).
+    # tutorial_completed_total — DELIBERATELY ABSENT here: completions are
+    # counted by composer/tutorial_telemetry.py's attribute-carrying
+    # composer.tutorial.completed_total (completion_path ∈ {first_time, skip,
+    # retake, repeat}); a second bare registration of the same counter name
+    # double-counted completions. Do NOT re-add a slot for it.
     tutorial_started_total: _Counter
-    tutorial_completed_total: _Counter
     # tutorial_replayed_total — DELIBERATELY ABSENT (Phase 9 deferred per
     # Decision 2 / Option C in 20-phase-8-polish-and-telemetry.md §"Phase
     # 9 follow-ups"). The replay button ships without the counter slot;
@@ -270,7 +274,6 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             mode_opted_in_total=_FakeCounter(),
             session_switched_total=_FakeCounter(),
             tutorial_started_total=_FakeCounter(),
-            tutorial_completed_total=_FakeCounter(),
             session_completed_total=_FakeCounter(),
             share_token_verify_failure_total=_FakeCounter(),
             share_link_expiry_hit_total=_FakeCounter(),
@@ -342,10 +345,6 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         tutorial_started_total=meter.create_counter(
             "composer.tutorial.started_total",
             description="Composer first-run tutorial started (Phase 4 surface; helper wired in Phase 8 for forward-fit).",
-        ),
-        tutorial_completed_total=meter.create_counter(
-            "composer.tutorial.completed_total",
-            description="Composer first-run tutorial completed (Phase 4 surface; helper wired in Phase 8 for forward-fit).",
         ),
         session_completed_total=meter.create_counter(
             "composer.session.completed_total",

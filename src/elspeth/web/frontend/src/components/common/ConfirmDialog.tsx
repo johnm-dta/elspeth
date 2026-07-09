@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 interface ConfirmDialogProps {
@@ -9,6 +9,13 @@ interface ConfirmDialogProps {
   variant?: "default" | "danger";
   onConfirm: () => void;
   onCancel: () => void;
+  /**
+   * Optional structured content rendered between the message and the
+   * action buttons (e.g. the pre-run egress summary list and its
+   * "don't ask again" opt-out). Interactive children participate in the
+   * focus trap automatically.
+   */
+  children?: ReactNode;
 }
 
 /**
@@ -26,6 +33,7 @@ export function ConfirmDialog({
   variant = "default",
   onConfirm,
   onCancel,
+  children,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -69,6 +77,7 @@ export function ConfirmDialog({
         <p id="confirm-dialog-message" className="confirm-dialog-message">
           {message}
         </p>
+        {children}
         <div className="confirm-dialog-actions">
           <button
             onClick={onCancel}

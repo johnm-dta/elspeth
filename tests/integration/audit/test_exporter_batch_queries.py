@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.config import GateSettings
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
@@ -536,5 +538,93 @@ class TestExporterBatchQueryIntegrity:
             _assert_seed_present(grouped, target_seed)
             _assert_seed_absent(grouped, sibling_seed)
             _assert_export_relationships_are_closed(grouped)
+        finally:
+            db.close()
+
+
+class TestExporterRowBatchStreaming:
+    """elspeth-3ae79a4775: the exporter streams the row family in bounded batches.
+
+    The export stream must be IDENTICAL regardless of row_batch_size — record
+    order feeds the per-record HMAC signatures and the manifest hash chain, so
+    any reordering under chunking is a compliance regression, not a cosmetic one.
+    """
+
+    _ROW_FAMILY_RECORD_TYPES = (
+        "row",
+        "token",
+        "token_parent",
+        "token_outcome",
+        "scheduler_event",
+        "node_state",
+        "routing_event",
+        "call",
+    )
+
+    def _build_seeded_fork_run(self, db: LandscapeDB, tmp_path: Path) -> str:
+        """Fork run + seeded extras so every row-family record type is exercised."""
+        run_id = _run_fork_on_db(
+            db,
+            tmp_path / "payloads",
+            [
+                {"id": "r0", "value": 80},
+                {"id": "r1", "value": 20},
+                {"id": "r2", "value": 60},
+                {"id": "r3", "value": 40},
+            ],
+        )
+        seed = _seed_exporter_isolation_records(db, run_id, "stream")
+        # The seeded families cover forks/batches/artifacts but not scheduler
+        # events; enqueue one so batching covers that export path too.
+        factory = make_factory(db)
+        payload = factory.scheduler.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+        factory.scheduler.enqueue_ready(
+            run_id=run_id,
+            token_id=sorted(seed.token_ids)[0],
+            row_id=seed.row_id,
+            node_id=seed.node_id,
+            step_index=1,
+            ingest_sequence=10_000,
+            available_at=datetime.now(UTC),
+            row_payload_json=payload,
+        )
+        return run_id
+
+    def test_export_identical_across_row_batch_sizes(self, tmp_path: Path) -> None:
+        """Chunked exports must be record-for-record identical to the default."""
+        db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
+        try:
+            run_id = self._build_seeded_fork_run(db, tmp_path)
+
+            baseline = list(LandscapeExporter(db).export_run(run_id))
+            grouped = _group_records(baseline)
+            for record_type in self._ROW_FAMILY_RECORD_TYPES:
+                assert grouped.get(record_type), f"equivalence fixture must exercise record type: {record_type}"
+            assert len(grouped["row"]) >= 4, "fixture must span multiple row batches at small batch sizes"
+
+            for batch_size in (1, 2, 3):
+                chunked = list(LandscapeExporter(db, row_batch_size=batch_size).export_run(run_id))
+                assert chunked == baseline, f"row_batch_size={batch_size} changed the export stream"
+        finally:
+            db.close()
+
+    def test_signed_export_hash_chain_identical_across_batch_sizes(self, tmp_path: Path) -> None:
+        """Signatures and the manifest hash chain must survive row batching."""
+        db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
+        try:
+            run_id = self._build_seeded_fork_run(db, tmp_path)
+            key = b"row-batch-equivalence-key"
+
+            signed_default = list(LandscapeExporter(db, signing_key=key).export_run(run_id, sign=True))
+            signed_batched = list(LandscapeExporter(db, signing_key=key, row_batch_size=1).export_run(run_id, sign=True))
+
+            # Every data record — signature included — must match; only the
+            # trailing manifest legitimately differs (exported_at timestamp).
+            assert signed_batched[:-1] == signed_default[:-1]
+            manifest_default, manifest_batched = signed_default[-1], signed_batched[-1]
+            assert manifest_default["record_type"] == "manifest"
+            assert manifest_batched["record_type"] == "manifest"
+            assert manifest_batched["final_hash"] == manifest_default["final_hash"]
+            assert manifest_batched["record_count"] == manifest_default["record_count"]
         finally:
             db.close()

@@ -12,28 +12,50 @@ These are pure delegation functions — no internal state — tested via mocks.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, RowResult, TokenInfo
+from elspeth.contracts.audit import Batch
 from elspeth.contracts.enums import BatchStatus, TerminalOutcome, TerminalPath, TriggerType
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     find_aggregation_transform,
     flush_remaining_aggregation_buffers,
-    handle_incomplete_batches,
 )
-from elspeth.engine.orchestrator.types import AggNodeEntry, PipelineConfig
+from elspeth.engine.orchestrator.ports import AggregationProcessorPort
+from elspeth.engine.orchestrator.resume import handle_incomplete_batches
+from elspeth.engine.orchestrator.run_state import AggNodeEntry
+from elspeth.engine.orchestrator.types import PipelineConfig
+from elspeth.engine.work_items import WorkItem
 from elspeth.testing import make_row, make_token_info
 
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+@dataclass(frozen=True)
+class _NamedPlugin:
+    name: str
+
+
+@dataclass(frozen=True)
+class _AggregationSettings:
+    name: str = "batch_agg"
+
+
+@dataclass(frozen=True)
+class _TransformPlaceholder:
+    node_id: str
 
 
 def _make_batch_transform(*, node_id: str, is_batch_aware: bool = True) -> Mock:
@@ -53,20 +75,16 @@ def _make_config(
     aggregation_settings: dict[str, Any] | None = None,
 ) -> PipelineConfig:
     """Build a minimal PipelineConfig for aggregation tests."""
-    source = Mock()
-    source.name = "test-source"
     return PipelineConfig(
-        sources={"primary": source},
+        sources={"primary": _NamedPlugin(name="test-source")},
         transforms=transforms or [],
-        sinks={"output": Mock()},
+        sinks={"output": _NamedPlugin(name="output")},
         aggregation_settings=aggregation_settings or {},
     )
 
 
-def _make_agg_settings(*, name: str = "batch_agg") -> Mock:
-    settings = Mock()
-    settings.name = name
-    return settings
+def _make_agg_settings(*, name: str = "batch_agg") -> _AggregationSettings:
+    return _AggregationSettings(name=name)
 
 
 def _make_result(
@@ -75,20 +93,17 @@ def _make_result(
     *,
     token: TokenInfo | None = None,
     sink_name: str | None = None,
-) -> Mock:
-    result = Mock()
-    result.outcome = outcome
-    result.path = path
-    result.token = token or make_token_info()
-    if path == TerminalPath.COALESCED and result.token.join_group_id is None:
-        result.token = replace(result.token, join_group_id="join-1")
-    result.sink_name = sink_name
-    # RowProcessingResult.scheduler_pending_sink (contracts/results.py) defaults
-    # False; accumulate_row_outcomes reads it and passes it to PendingOutcome,
-    # whose offensive guard rejects a non-bool. A bare Mock would auto-vivify a
-    # Mock here, so set the real default explicitly.
-    result.scheduler_pending_sink = False
-    return result
+) -> RowResult:
+    result_token = token or make_token_info()
+    if path == TerminalPath.COALESCED and result_token.join_group_id is None:
+        result_token = replace(result_token, join_group_id="join-1")
+    return RowResult(
+        token=result_token,
+        final_data=make_row({}),
+        outcome=outcome,
+        path=path,
+        sink_name=sink_name,
+    )
 
 
 def _make_work_item(
@@ -97,17 +112,50 @@ def _make_work_item(
     current_node_id: NodeID | None = None,
     coalesce_node_id: NodeID | None = None,
     coalesce_name: str | None = None,
-) -> Mock:
-    item = Mock()
-    item.token = token or make_token_info()
-    item.current_node_id = current_node_id if current_node_id is not None else NodeID("node-0")
-    item.coalesce_node_id = coalesce_node_id
-    item.coalesce_name = coalesce_name
-    return item
+) -> WorkItem:
+    return WorkItem(
+        token=token or make_token_info(),
+        current_node_id=current_node_id if current_node_id is not None else NodeID("node-0"),
+        coalesce_node_id=coalesce_node_id,
+        coalesce_name=coalesce_name,
+    )
 
 
 def _make_pending() -> dict[str, list[tuple[TokenInfo, PendingOutcome | None]]]:
     return {"output": []}
+
+
+def _make_batch(
+    batch_id: str,
+    status: BatchStatus,
+    *,
+    trigger_type: TriggerType | None = None,
+    trigger_reason: str | None = None,
+    aggregation_state_id: str | None = None,
+) -> Batch:
+    return Batch(
+        batch_id=batch_id,
+        run_id="run-1",
+        aggregation_node_id="agg-1",
+        attempt=0,
+        status=status,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        trigger_type=trigger_type,
+        trigger_reason=trigger_reason,
+        aggregation_state_id=aggregation_state_id,
+    )
+
+
+def _make_context() -> PluginContext:
+    return PluginContext(run_id="run-1", config={})
+
+
+def _make_processor() -> AggregationProcessorPort:
+    return create_autospec(AggregationProcessorPort, instance=True, spec_set=True)
+
+
+def _make_execution() -> ExecutionRepository:
+    return create_autospec(ExecutionRepository, instance=True, spec_set=True)
 
 
 # =============================================================================
@@ -121,7 +169,7 @@ class TestFindAggregationTransform:
     def test_finds_batch_aware_transform(self) -> None:
         """Returns transform and aggregation node ID for matching node_id."""
         t = _make_batch_transform(node_id="agg-node-1")
-        config = _make_config(transforms=[Mock(), t, Mock()])
+        config = _make_config(transforms=[_TransformPlaceholder("before"), t, _TransformPlaceholder("after")])
 
         result_transform, result_node_id = find_aggregation_transform(config, "agg-node-1", "batch1")
 
@@ -188,86 +236,99 @@ class TestHandleIncompleteBatches:
 
     def test_executing_batch_marked_failed_then_retried(self) -> None:
         """EXECUTING batch (crash interrupted) -> failed -> retried."""
-        batch = Mock()
-        batch.status = BatchStatus.EXECUTING
-        batch.batch_id = "batch-123"
+        batch = _make_batch(
+            "batch-123",
+            BatchStatus.EXECUTING,
+            trigger_type=TriggerType.COUNT,
+            trigger_reason="count=2",
+            aggregation_state_id="state-123",
+        )
 
-        retry_batch = Mock()
-        retry_batch.batch_id = "batch-123-retry"
+        retry_batch = _make_batch("batch-123-retry", BatchStatus.DRAFT)
 
-        recorder = Mock()
+        recorder = _make_execution()
         recorder.get_incomplete_batches.return_value = [batch]
         recorder.retry_batch.return_value = retry_batch
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
-        recorder.update_batch_status.assert_called_once_with("batch-123", BatchStatus.FAILED)
+        recorder.complete_batch.assert_called_once_with(
+            "batch-123",
+            BatchStatus.FAILED,
+            trigger_type=TriggerType.COUNT,
+            trigger_reason="count=2",
+            state_id="state-123",
+        )
+        recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_called_once_with("batch-123")
         assert mapping == {"batch-123": "batch-123-retry"}
 
     def test_failed_batch_retried(self) -> None:
         """FAILED batch is retried directly."""
-        batch = Mock()
-        batch.status = BatchStatus.FAILED
-        batch.batch_id = "batch-456"
+        batch = _make_batch("batch-456", BatchStatus.FAILED)
 
-        retry_batch = Mock()
-        retry_batch.batch_id = "batch-456-retry"
+        retry_batch = _make_batch("batch-456-retry", BatchStatus.DRAFT)
 
-        recorder = Mock()
+        recorder = _make_execution()
         recorder.get_incomplete_batches.return_value = [batch]
         recorder.retry_batch.return_value = retry_batch
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
+        recorder.complete_batch.assert_not_called()
         recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_called_once_with("batch-456")
         assert mapping == {"batch-456": "batch-456-retry"}
 
     def test_draft_batch_left_alone(self) -> None:
         """DRAFT batch continues collection — no action taken."""
-        batch = Mock()
-        batch.status = BatchStatus.DRAFT
-        batch.batch_id = "batch-789"
+        batch = _make_batch("batch-789", BatchStatus.DRAFT)
 
-        recorder = Mock()
+        recorder = _make_execution()
         recorder.get_incomplete_batches.return_value = [batch]
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
+        recorder.complete_batch.assert_not_called()
         recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_not_called()
         assert mapping == {}
 
     def test_no_incomplete_batches(self) -> None:
         """No incomplete batches means no action."""
-        recorder = Mock()
+        recorder = _make_execution()
         recorder.get_incomplete_batches.return_value = []
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
+        recorder.complete_batch.assert_not_called()
         recorder.update_batch_status.assert_not_called()
         recorder.retry_batch.assert_not_called()
         assert mapping == {}
 
     def test_multiple_batches_handled_independently(self) -> None:
         """Each batch handled according to its own status."""
-        executing = Mock(status=BatchStatus.EXECUTING, batch_id="b1")
-        failed = Mock(status=BatchStatus.FAILED, batch_id="b2")
-        draft = Mock(status=BatchStatus.DRAFT, batch_id="b3")
+        executing = _make_batch("b1", BatchStatus.EXECUTING)
+        failed = _make_batch("b2", BatchStatus.FAILED)
+        draft = _make_batch("b3", BatchStatus.DRAFT)
 
-        retry_b1 = Mock()
-        retry_b1.batch_id = "b1-retry"
-        retry_b2 = Mock()
-        retry_b2.batch_id = "b2-retry"
+        retry_b1 = _make_batch("b1-retry", BatchStatus.DRAFT)
+        retry_b2 = _make_batch("b2-retry", BatchStatus.DRAFT)
 
-        recorder = Mock()
+        recorder = _make_execution()
         recorder.get_incomplete_batches.return_value = [executing, failed, draft]
         recorder.retry_batch.side_effect = [retry_b1, retry_b2]
 
         mapping = handle_incomplete_batches(recorder, "run-1")
 
-        assert recorder.update_batch_status.call_count == 1
+        recorder.complete_batch.assert_called_once_with(
+            "b1",
+            BatchStatus.FAILED,
+            trigger_type=None,
+            trigger_reason=None,
+            state_id=None,
+        )
+        recorder.update_batch_status.assert_not_called()
         assert recorder.retry_batch.call_count == 2
         assert mapping == {"b1": "b1-retry", "b2": "b2-retry"}
 
@@ -283,13 +344,13 @@ class TestCheckAggregationTimeouts:
     def test_no_aggregation_settings_returns_zero_result(self) -> None:
         """No aggregation settings means nothing to check."""
         config = _make_config(aggregation_settings={})
-        processor = Mock()
+        processor = _make_processor()
         pending = _make_pending()
 
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -299,14 +360,14 @@ class TestCheckAggregationTimeouts:
     def test_no_flush_needed_returns_zero(self) -> None:
         """Timeout check says no flush needed — nothing happens."""
         config = _make_config(aggregation_settings={"agg-1": _make_agg_settings()})
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (False, None)
         pending = _make_pending()
 
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -315,14 +376,14 @@ class TestCheckAggregationTimeouts:
     def test_count_trigger_skipped(self) -> None:
         """Count triggers are handled in buffer_row — skip in pre-row check."""
         config = _make_config(aggregation_settings={"agg-1": _make_agg_settings()})
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.COUNT)
         pending = _make_pending()
 
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -337,16 +398,14 @@ class TestCheckAggregationTimeouts:
         (not hardcoded as TIMEOUT).
         """
         token = make_token_info()
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.CONDITION)
         processor.get_aggregation_buffer_count.return_value = 3
         processor.handle_timeout_flush.return_value = ([completed], [])
@@ -357,7 +416,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -373,7 +432,7 @@ class TestCheckAggregationTimeouts:
     def test_empty_buffer_skipped(self) -> None:
         """Timeout fires but buffer is empty — nothing to flush."""
         config = _make_config(aggregation_settings={"agg-1": _make_agg_settings()})
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 0
         pending = _make_pending()
@@ -381,7 +440,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -391,16 +450,14 @@ class TestCheckAggregationTimeouts:
     def test_timeout_flush_completed_results(self) -> None:
         """Timeout flush produces completed tokens routed to sink."""
         token = make_token_info()
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 5
         processor.handle_timeout_flush.return_value = ([completed], [])
@@ -411,7 +468,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -421,14 +478,14 @@ class TestCheckAggregationTimeouts:
 
     def test_timeout_flush_failed_results(self) -> None:
         """Failed results from flush increment failed counter."""
-        failed = Mock(outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED, scheduler_pending_sink=False)
+        failed = _make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 3
         processor.handle_timeout_flush.return_value = ([failed], [])
@@ -439,7 +496,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -455,10 +512,10 @@ class TestCheckAggregationTimeouts:
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
-            transforms=[agg_transform, Mock()],
+            transforms=[agg_transform, _TransformPlaceholder("continue-node")],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 2
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -470,7 +527,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -489,10 +546,10 @@ class TestCheckAggregationTimeouts:
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
-            transforms=[agg_transform, Mock(), Mock()],
+            transforms=[agg_transform, _TransformPlaceholder("continue-node"), _TransformPlaceholder("coalesce::merge")],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -504,7 +561,7 @@ class TestCheckAggregationTimeouts:
         check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -523,7 +580,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -535,7 +592,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -556,7 +613,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -568,7 +625,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -585,7 +642,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -597,7 +654,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -615,7 +672,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -627,7 +684,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -645,7 +702,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -657,7 +714,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -679,7 +736,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
@@ -691,7 +748,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -703,16 +760,14 @@ class TestCheckAggregationTimeouts:
     def test_completed_result_branch_fallback_in_timeout(self) -> None:
         """Completed result with branch not in pending routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="missing_sink")
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([completed], [])
@@ -723,7 +778,7 @@ class TestCheckAggregationTimeouts:
         result = check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=lookup,
         )
@@ -738,7 +793,7 @@ class TestCheckAggregationTimeouts:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.check_aggregation_timeout.return_value = (True, TriggerType.TIMEOUT)
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [])
@@ -749,7 +804,7 @@ class TestCheckAggregationTimeouts:
         check_aggregation_timeouts(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
             agg_transform_lookup=None,
         )
@@ -768,14 +823,14 @@ class TestFlushRemainingAggregationBuffers:
     def test_empty_buffer_skipped(self) -> None:
         """Aggregation with empty buffer is skipped."""
         config = _make_config(aggregation_settings={"agg-1": _make_agg_settings()})
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 0
         pending = _make_pending()
 
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -785,16 +840,14 @@ class TestFlushRemainingAggregationBuffers:
     def test_flush_completed_results(self) -> None:
         """Completed results from flush go to sink."""
         token = make_token_info()
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 3
         processor.handle_timeout_flush.return_value = ([completed], [])
 
@@ -803,7 +856,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -817,7 +870,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [])
 
@@ -826,7 +879,7 @@ class TestFlushRemainingAggregationBuffers:
         flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -841,10 +894,10 @@ class TestFlushRemainingAggregationBuffers:
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
-            transforms=[agg_transform, Mock()],
+            transforms=[agg_transform, _TransformPlaceholder("continue-node")],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = [downstream]
@@ -854,7 +907,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -870,7 +923,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = [routed]
@@ -880,7 +933,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -898,7 +951,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = [coalesced]
@@ -908,7 +961,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -918,16 +971,14 @@ class TestFlushRemainingAggregationBuffers:
     def test_branch_routing_for_completed_tokens(self) -> None:
         """Completed tokens route via result.sink_name, not branch_name."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="path_a")
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([completed], [])
 
@@ -936,7 +987,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -954,7 +1005,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = [failed]
@@ -964,7 +1015,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -981,7 +1032,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = [completed]
@@ -991,7 +1042,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -1008,7 +1059,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = [quarantined]
@@ -1018,7 +1069,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -1038,7 +1089,7 @@ class TestFlushRemainingAggregationBuffers:
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = outcomes
@@ -1048,7 +1099,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -1066,10 +1117,10 @@ class TestFlushRemainingAggregationBuffers:
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
-            transforms=[agg_transform, Mock(), Mock()],
+            transforms=[agg_transform, _TransformPlaceholder("continue-node"), _TransformPlaceholder("coalesce::merge")],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([], [work_item])
         processor.process_token.return_value = []
@@ -1079,7 +1130,7 @@ class TestFlushRemainingAggregationBuffers:
         flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -1089,16 +1140,14 @@ class TestFlushRemainingAggregationBuffers:
     def test_completed_result_branch_fallback_to_sink_name(self) -> None:
         """Completed result with branch not in pending routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="missing")
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([completed], [])
 
@@ -1107,7 +1156,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 
@@ -1117,16 +1166,14 @@ class TestFlushRemainingAggregationBuffers:
     def test_branch_routing_falls_back_to_sink_name(self) -> None:
         """Branch name not in pending_tokens routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="nonexistent")
-        completed = Mock(
-            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
-        )
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
             transforms=[agg_transform],
             aggregation_settings={"agg-1": _make_agg_settings()},
         )
-        processor = Mock()
+        processor = _make_processor()
         processor.get_aggregation_buffer_count.return_value = 1
         processor.handle_timeout_flush.return_value = ([completed], [])
 
@@ -1135,7 +1182,7 @@ class TestFlushRemainingAggregationBuffers:
         result = flush_remaining_aggregation_buffers(
             config=config,
             processor=processor,
-            ctx=Mock(),
+            ctx=_make_context(),
             pending_tokens=pending,
         )
 

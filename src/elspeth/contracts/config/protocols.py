@@ -130,11 +130,6 @@ class CheckpointSettingsProtocol(Protocol):
         """Row interval for frequency='every_n'; None otherwise."""
         ...
 
-    @property
-    def aggregation_boundaries(self) -> bool:
-        """Whether to checkpoint at aggregation flush boundaries."""
-        ...
-
 
 class TelemetryExporterSettingsProtocol(Protocol):
     """Settings-side shape for one telemetry exporter config."""
@@ -288,7 +283,6 @@ class RuntimeCheckpointProtocol(Protocol):
     Maps CheckpointSettings fields:
     - enabled: CheckpointSettings.enabled (direct)
     - frequency: CheckpointSettings.frequency mapped to int
-    - aggregation_boundaries: CheckpointSettings.aggregation_boundaries (direct)
 
     Note: checkpoint_interval is conditional on frequency="every_n" and
     handled during construction, not as a protocol field.
@@ -302,11 +296,6 @@ class RuntimeCheckpointProtocol(Protocol):
     @property
     def frequency(self) -> int:
         """Checkpoint every N rows (1 = every row, 0 = aggregation only)."""
-        ...
-
-    @property
-    def aggregation_boundaries(self) -> bool:
-        """Whether to checkpoint at aggregation flush boundaries."""
         ...
 
 

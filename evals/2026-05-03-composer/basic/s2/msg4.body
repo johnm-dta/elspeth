@@ -1,1 +1,0 @@
-{"content":"The operator just configured the fingerprint resolver. OPENROUTER_API_KEY should now be available. Please re-attempt wiring it as a secret reference, then add the JSONL sink (writing to results.jsonl) and a quarantine sink for source-validation failures (parse_failures.jsonl)."}

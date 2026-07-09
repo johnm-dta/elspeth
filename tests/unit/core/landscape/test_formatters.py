@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -16,6 +17,22 @@ from elspeth.core.landscape.formatters import (
     dataclass_to_dict,
     serialize_datetime,
 )
+from elspeth.core.landscape.lineage_text import LineageTextFormatter
+from elspeth.core.landscape.serialization import dataclass_to_dict as serialization_dataclass_to_dict
+from elspeth.core.landscape.serialization import serialize_datetime as serialization_serialize_datetime
+
+
+class TestFormatterBoundaries:
+    """Import homes for serialization, export formatting, and lineage text."""
+
+    def test_serialization_helpers_live_in_serialization_module(self) -> None:
+        assert serialization_serialize_datetime is serialize_datetime
+        assert serialization_dataclass_to_dict is dataclass_to_dict
+
+    def test_lineage_text_formatter_lives_next_to_cli_presentation(self) -> None:
+        from elspeth.core.landscape.formatters import LineageTextFormatter as compatibility_formatter
+
+        assert compatibility_formatter is LineageTextFormatter
 
 
 class TestSerializeDatetime:
@@ -347,6 +364,27 @@ class TestCSVFormatter:
         # Empty dict is preserved as JSON "{}" — an empty object is a
         # distinct datum from absence.
         assert flat["empty"] == "{}"
+
+    def test_csv_formatter_flattens_non_dict_mapping(self) -> None:
+        """Mapping values should flatten the same way as concrete dict values."""
+        formatter = CSVFormatter()
+
+        record = {
+            "record_type": "test",
+            "metadata": MappingProxyType(
+                {
+                    "attempt": 2,
+                    "context": MappingProxyType({"reason": "retry"}),
+                }
+            ),
+        }
+
+        flat = formatter.flatten(record)
+
+        assert flat["record_type"] == "test"
+        assert flat["metadata.attempt"] == 2
+        assert flat["metadata.context.reason"] == "retry"
+        assert "metadata" not in flat
 
     def test_csv_formatter_empty_dict_nested(self) -> None:
         """Empty dict inside a nested path is preserved."""
@@ -739,6 +777,7 @@ class TestLineageTextFormatter:
             TransformErrorRecord,
             ValidationErrorRecord,
         )
+        from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
         from elspeth.core.landscape.formatters import LineageTextFormatter
         from elspeth.core.landscape.lineage import LineageResult
 
@@ -799,6 +838,23 @@ class TestLineageTextFormatter:
                     created_at=now,
                 ),
             ),
+            scheduler_events=(
+                SchedulerEvent(
+                    event_id="sched-1",
+                    run_id="run-001",
+                    token_id="tok-child",
+                    work_item_id="work-1",
+                    node_id="transform-1",
+                    event_type=SchedulerEventType.CLAIM_READY,
+                    from_status=TokenWorkStatus.READY,
+                    to_status=TokenWorkStatus.LEASED,
+                    from_attempt=0,
+                    to_attempt=1,
+                    recorded_at=now,
+                    caller_owner="leader-1",
+                    to_lease_owner="worker-1",
+                ),
+            ),
             calls=(
                 Call(
                     call_id="call-1",
@@ -848,6 +904,7 @@ class TestLineageTextFormatter:
         assert "Path: BUFFERED" in text
         assert "[2] transform-1: completed" in text
         assert "[3] copy edge=edge-1 group=group-1 reason_hash=reason-hash" in text
+        assert "claim_ready work_item=work-1 node=transform-1 from=ready to=leased attempt=1 owner=worker-1 caller=leader-1" in text
         assert "http: success (7.2ms)" in text
         assert "[fixed] missing field" in text
         assert "[transform-1] fail-sink" in text

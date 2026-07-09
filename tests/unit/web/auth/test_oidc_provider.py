@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import create_autospec, patch
 
 import httpx
 import pytest
@@ -17,6 +17,22 @@ from tests.unit.web.auth.conftest import build_rsa_jwk, make_rs256_token, make_r
 
 ISSUER = "https://login.example.com"
 AUDIENCE = "my-app-client-id"
+
+
+def _http_response(
+    json_payload: object = None,
+    *,
+    json_error: Exception | None = None,
+    status_error: Exception | None = None,
+) -> httpx.Response:
+    response = create_autospec(httpx.Response, instance=True)
+    response.raise_for_status.return_value = None
+    response.json.return_value = json_payload
+    if json_error is not None:
+        response.json.side_effect = json_error
+    if status_error is not None:
+        response.raise_for_status.side_effect = status_error
+    return response
 
 
 def _valid_claims(overrides: dict[str, object] | None = None) -> dict[str, object]:
@@ -44,7 +60,7 @@ def mock_httpx_discovery(jwks_response):
     """
 
     async def mock_get(url, **kwargs):
-        response = MagicMock()
+        response = _http_response()
         response.raise_for_status = lambda: None
         if ".well-known/openid-configuration" in url:
             response.json.return_value = {
@@ -55,10 +71,10 @@ def mock_httpx_discovery(jwks_response):
             response.json.return_value = jwks_response
         return response
 
-    client_mock = AsyncMock()
+    client_mock = create_autospec(httpx.AsyncClient, instance=True)
     client_mock.get = mock_get
-    client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-    client_mock.__aexit__ = AsyncMock(return_value=False)
+    client_mock.__aenter__.return_value = client_mock
+    client_mock.__aexit__.return_value = False
 
     return patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock)
 
@@ -118,7 +134,7 @@ class TestOIDCDiscovery:
 
         # First call: mock returns valid JWKS
         async def success_get(url, **kwargs):
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             if ".well-known/openid-configuration" in url:
                 response.json.return_value = {"jwks_uri": f"{ISSUER}/keys", "issuer": ISSUER}
@@ -126,10 +142,10 @@ class TestOIDCDiscovery:
                 response.json.return_value = jwks_response
             return response
 
-        success_client = AsyncMock()
+        success_client = create_autospec(httpx.AsyncClient, instance=True)
         success_client.get = success_get
-        success_client.__aenter__ = AsyncMock(return_value=success_client)
-        success_client.__aexit__ = AsyncMock(return_value=False)
+        success_client.__aenter__.return_value = success_client
+        success_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=success_client):
             await provider.authenticate(token)
@@ -139,10 +155,10 @@ class TestOIDCDiscovery:
         async def failing_get(url, **kwargs):
             raise AssertionError("JWKS should have been cached -- HTTP call should not happen")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
             identity = await provider.authenticate(token)
@@ -454,10 +470,10 @@ class TestOIDCJWKSFailures:
         async def mock_get(url, **kwargs):
             raise httpx.ConnectError("Connection refused")
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
 
         with (
             patch(
@@ -474,16 +490,16 @@ class TestOIDCJWKSFailures:
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
 
         async def mock_get(url, **kwargs):
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             # Discovery response missing the jwks_uri key
             response.json.return_value = {"issuer": ISSUER}
             return response
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
 
         with (
             patch(
@@ -503,15 +519,15 @@ class TestOIDCJWKSFailures:
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
 
         async def mock_get(url, **kwargs):
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             response.json.side_effect = ValueError("No JSON object could be decoded")
             return response
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
 
         with (
             patch(
@@ -566,10 +582,10 @@ class TestOIDCJWKSFailures:
         async def failing_get(url, **kwargs):
             raise httpx.ConnectError("IdP is down")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with patch(
             "elspeth.web.auth.oidc.httpx.AsyncClient",
@@ -585,18 +601,20 @@ class TestOIDCJWKSFailures:
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
 
         async def mock_get(url, **kwargs):
-            response = MagicMock()
+            response = _http_response()
+            request = httpx.Request("GET", str(url))
+            error_response = httpx.Response(500, request=request)
             response.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "500 Server Error",
-                request=MagicMock(),
-                response=MagicMock(),
+                request=request,
+                response=error_response,
             )
             return response
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
 
         with (
             patch(
@@ -620,7 +638,7 @@ class TestOIDCJWKSShapeValidation:
     @staticmethod
     def _patch_responses(discovery_json: object, keys_json: object):
         async def mock_get(url, **kwargs):
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             if ".well-known/openid-configuration" in url:
                 response.json.return_value = discovery_json
@@ -628,10 +646,10 @@ class TestOIDCJWKSShapeValidation:
                 response.json.return_value = keys_json
             return response
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
         return patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock)
 
     @pytest.mark.asyncio
@@ -672,7 +690,7 @@ class TestOIDCJWKSShapeValidation:
 
         async def mock_get(url, **kwargs):
             requested_urls.append(str(url))
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             if ".well-known/openid-configuration" in str(url):
                 response.json.return_value = {
@@ -682,10 +700,10 @@ class TestOIDCJWKSShapeValidation:
                 return response
             raise AssertionError(f"unexpected JWKS fetch to {url}")
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock),
@@ -703,7 +721,7 @@ class TestOIDCJWKSShapeValidation:
 
         async def mock_get(url, **kwargs):
             requested_urls.append(str(url))
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             if ".well-known/openid-configuration" in str(url):
                 response.json.return_value = {
@@ -713,10 +731,10 @@ class TestOIDCJWKSShapeValidation:
                 return response
             raise AssertionError(f"unexpected JWKS fetch to {url}")
 
-        client_mock = AsyncMock()
+        client_mock = create_autospec(httpx.AsyncClient, instance=True)
         client_mock.get = mock_get
-        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
-        client_mock.__aexit__ = AsyncMock(return_value=False)
+        client_mock.__aenter__.return_value = client_mock
+        client_mock.__aexit__.return_value = False
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock),
@@ -857,10 +875,10 @@ class TestOIDCStaleCacheBackoff:
             attempt_count += 1
             raise httpx.ConnectError("IdP is down")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
             # First call under outage: attempts one fetch, falls back to stale cache.
@@ -906,10 +924,10 @@ class TestOIDCStaleCacheBackoff:
             attempt_count += 1
             raise httpx.ConnectError("IdP is down")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
             await provider.authenticate(token)  # first failed fetch
@@ -946,10 +964,10 @@ class TestOIDCJWKSFailureLogRedaction:
         async def failing_get(url, **kwargs):
             raise httpx.InvalidURL(f"bad JWKS URL: {sensitive_uri}")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
@@ -982,10 +1000,10 @@ class TestOIDCJWKSFailureLogRedaction:
         async def failing_get(url, **kwargs):
             raise httpx.InvalidURL(f"bad JWKS URL: {sensitive_uri}")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
@@ -1057,7 +1075,7 @@ class TestOIDCShapeFailureBackoff:
         async def shape_failing_get(url, **kwargs):
             nonlocal attempt_count
             attempt_count += 1
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             if ".well-known/openid-configuration" in url:
                 # Structurally wrong: JSON array where dict required.
@@ -1066,10 +1084,10 @@ class TestOIDCShapeFailureBackoff:
                 response.json.return_value = {"keys": []}
             return response
 
-        shape_client = AsyncMock()
+        shape_client = create_autospec(httpx.AsyncClient, instance=True)
         shape_client.get = shape_failing_get
-        shape_client.__aenter__ = AsyncMock(return_value=shape_client)
-        shape_client.__aexit__ = AsyncMock(return_value=False)
+        shape_client.__aenter__.return_value = shape_client
+        shape_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=shape_client):
             # First call: enters critical section, hits shape validator,
@@ -1152,10 +1170,10 @@ class TestOIDCConcurrentStaleDuringOutage:
             await release.wait()
             raise httpx.ConnectError("IdP is down")
 
-        hanging_client = AsyncMock()
+        hanging_client = create_autospec(httpx.AsyncClient, instance=True)
         hanging_client.get = hanging_get
-        hanging_client.__aenter__ = AsyncMock(return_value=hanging_client)
-        hanging_client.__aexit__ = AsyncMock(return_value=False)
+        hanging_client.__aenter__.return_value = hanging_client
+        hanging_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=hanging_client):
             # Winner: acquires the lock and blocks inside hanging_get.
@@ -1259,10 +1277,10 @@ class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
         async def buggy_get(url, **kwargs):
             raise AttributeError("'NoneType' object has no attribute 'json'")
 
-        buggy_client = AsyncMock()
+        buggy_client = create_autospec(httpx.AsyncClient, instance=True)
         buggy_client.get = buggy_get
-        buggy_client.__aenter__ = AsyncMock(return_value=buggy_client)
-        buggy_client.__aexit__ = AsyncMock(return_value=False)
+        buggy_client.__aenter__.return_value = buggy_client
+        buggy_client.__aexit__.return_value = False
 
         with (
             patch(
@@ -1294,10 +1312,10 @@ class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
         async def buggy_get(url, **kwargs):
             raise TypeError("unsupported operand type(s) for +: 'NoneType' and 'float'")
 
-        buggy_client = AsyncMock()
+        buggy_client = create_autospec(httpx.AsyncClient, instance=True)
         buggy_client.get = buggy_get
-        buggy_client.__aenter__ = AsyncMock(return_value=buggy_client)
-        buggy_client.__aexit__ = AsyncMock(return_value=False)
+        buggy_client.__aenter__.return_value = buggy_client
+        buggy_client.__aexit__.return_value = False
 
         with (
             patch(
@@ -1334,10 +1352,10 @@ class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
         async def buggy_get(url, **kwargs):
             raise KeyError("internal_dict_lookup_bug")
 
-        buggy_client = AsyncMock()
+        buggy_client = create_autospec(httpx.AsyncClient, instance=True)
         buggy_client.get = buggy_get
-        buggy_client.__aenter__ = AsyncMock(return_value=buggy_client)
-        buggy_client.__aexit__ = AsyncMock(return_value=False)
+        buggy_client.__aenter__.return_value = buggy_client
+        buggy_client.__aexit__.return_value = False
 
         with (
             patch(
@@ -1371,10 +1389,10 @@ class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
         async def outage_get(url, **kwargs):
             raise httpx.ConnectError("IdP is down")
 
-        outage_client = AsyncMock()
+        outage_client = create_autospec(httpx.AsyncClient, instance=True)
         outage_client.get = outage_get
-        outage_client.__aenter__ = AsyncMock(return_value=outage_client)
-        outage_client.__aexit__ = AsyncMock(return_value=False)
+        outage_client.__aenter__.return_value = outage_client
+        outage_client.__aexit__.return_value = False
 
         with patch(
             "elspeth.web.auth.oidc.httpx.AsyncClient",
@@ -1404,15 +1422,15 @@ class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
             await provider.authenticate(token)
 
         async def malformed_get(url, **kwargs):
-            response = MagicMock()
+            response = _http_response()
             response.raise_for_status = lambda: None
             response.json.side_effect = ValueError("No JSON object could be decoded")
             return response
 
-        malformed_client = AsyncMock()
+        malformed_client = create_autospec(httpx.AsyncClient, instance=True)
         malformed_client.get = malformed_get
-        malformed_client.__aenter__ = AsyncMock(return_value=malformed_client)
-        malformed_client.__aexit__ = AsyncMock(return_value=False)
+        malformed_client.__aenter__.return_value = malformed_client
+        malformed_client.__aexit__.return_value = False
 
         with patch(
             "elspeth.web.auth.oidc.httpx.AsyncClient",
@@ -1447,10 +1465,10 @@ class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
         async def invalid_url_get(url, **kwargs):
             raise httpx.InvalidURL("not a valid URL")
 
-        invalid_url_client = AsyncMock()
+        invalid_url_client = create_autospec(httpx.AsyncClient, instance=True)
         invalid_url_client.get = invalid_url_get
-        invalid_url_client.__aenter__ = AsyncMock(return_value=invalid_url_client)
-        invalid_url_client.__aexit__ = AsyncMock(return_value=False)
+        invalid_url_client.__aenter__.return_value = invalid_url_client
+        invalid_url_client.__aexit__.return_value = False
 
         with patch(
             "elspeth.web.auth.oidc.httpx.AsyncClient",
@@ -1500,10 +1518,10 @@ class TestOIDCColdStartBackoff:
             attempt_count += 1
             raise httpx.ConnectError("IdP is down")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
             # First call: attempts fetch, has no stale cache, raises AuthProviderUnavailable.
@@ -1548,10 +1566,10 @@ class TestOIDCColdStartBackoff:
             attempt_count += 1
             raise httpx.ConnectError("IdP is down")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
@@ -1595,10 +1613,10 @@ class TestOIDCColdStartBackoff:
             await asyncio.sleep(0.01)
             raise httpx.ConnectError("IdP is down")
 
-        failing_client = AsyncMock()
+        failing_client = create_autospec(httpx.AsyncClient, instance=True)
         failing_client.get = failing_get
-        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
-        failing_client.__aexit__ = AsyncMock(return_value=False)
+        failing_client.__aenter__.return_value = failing_client
+        failing_client.__aexit__.return_value = False
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
             results = await asyncio.gather(

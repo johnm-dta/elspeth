@@ -12,6 +12,7 @@ vi.mock("@/api/client", () => ({
   validatePipeline: vi.fn(),
   executePipeline: vi.fn(),
   cancelRun: vi.fn(),
+  createRunWebSocketTicket: vi.fn(),
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
   evaluateRunDiagnostics: vi.fn(),
@@ -56,7 +57,7 @@ describe("executionStore.validate", () => {
     resetInterpretationStore();
     useSessionStore.setState({
       activeSessionId: "session-1",
-      compositionState: { version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
   });
 
@@ -76,6 +77,7 @@ describe("executionStore.validate", () => {
     await useExecutionStore.getState().validate("session-1");
 
     const state = useExecutionStore.getState();
+    expect(validatePipeline).toHaveBeenCalledWith("session-1", "state-1");
     expect(state.validationResult).toEqual(result);
     expect(state.isValidating).toBe(false);
   });
@@ -314,7 +316,10 @@ describe("executionStore.execute", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+    } as never);
   });
 
   it("drops a late start success after the active session changes", async () => {
@@ -449,6 +454,30 @@ describe("executionStore failed run events", () => {
     resetInterpretationStore();
   });
 
+  it("passes an authenticated ticket provider to the websocket client", async () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const { createRunWebSocketTicket } = await import("@/api/client");
+    (createRunWebSocketTicket as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ticket: "opaque-ws-ticket",
+      expires_at: "2026-06-22T12:00:30.000Z",
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+
+    expect(connectToRun).toHaveBeenCalledTimes(1);
+    expect(connectToRun).toHaveBeenCalledWith(
+      "run-1",
+      expect.any(Function),
+      expect.objectContaining({
+        onAuthFailure: expect.any(Function),
+      }),
+    );
+    const ticketProvider = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][1] as () => Promise<string>;
+    await expect(ticketProvider()).resolves.toBe("opaque-ws-ticket");
+    expect(createRunWebSocketTicket).toHaveBeenCalledWith("run-1");
+  });
+
   it("preserves terminal failed event detail in progress and run list", () => {
     const close = vi.fn();
     (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
@@ -502,7 +531,10 @@ describe("executionStore fanout guard", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+    } as never);
   });
 
   const guard = {
@@ -537,7 +569,11 @@ describe("executionStore fanout guard", () => {
 
     const state = useExecutionStore.getState();
     expect(runId).toBeNull();
-    expect(executePipeline).toHaveBeenCalledWith("session-1");
+    expect(executePipeline).toHaveBeenCalledWith(
+      "session-1",
+      undefined,
+      "state-1",
+    );
     expect(state.pendingFanoutGuard).toEqual(guard);
     expect(state.pendingFanoutSessionId).toBe("session-1");
     expect(state.isExecuting).toBe(false);
@@ -560,10 +596,14 @@ describe("executionStore fanout guard", () => {
 
     const state = useExecutionStore.getState();
     expect(runId).toBe("run-1");
-    expect(executePipeline).toHaveBeenLastCalledWith("session-1", {
-      accepted: true,
-      token: "ack-line-explode",
-    });
+    expect(executePipeline).toHaveBeenLastCalledWith(
+      "session-1",
+      {
+        accepted: true,
+        token: "ack-line-explode",
+      },
+      "state-1",
+    );
     expect(state.pendingFanoutGuard).toBeNull();
     expect(state.pendingFanoutSessionId).toBeNull();
     expect(state.activeRunId).toBe("run-1");
@@ -711,6 +751,150 @@ describe("executionStore.loadRuns", () => {
     await loadPromise;
 
     expect(useExecutionStore.getState().runs).toEqual([currentRun]);
+  });
+});
+
+// Reload-resilience (elspeth-90db33baac): a page reload during a running
+// pipeline used to lose activeRunId + the WebSocket, leaving the run
+// uncancellable from the UI. rehydrateActiveRun (fired from
+// stores/subscriptions.ts on session activation) must reattach both.
+describe("executionStore.rehydrateActiveRun", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    resetInterpretationStore();
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+  });
+
+  it("restores activeRunId, seeds progress, and reconnects the WebSocket when a running run exists", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    const liveRun = makeRun({ id: "run-live", status: "running" });
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeRun({ id: "run-old", status: "completed" }),
+      liveRun,
+    ]);
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close: vi.fn() });
+
+    await useExecutionStore.getState().rehydrateActiveRun("session-1");
+
+    const state = useExecutionStore.getState();
+    expect(state.runs).toHaveLength(2);
+    expect(state.activeRunId).toBe("run-live");
+    expect(state.progress?.status).toBe("running");
+    expect(state.progress?.cancel_requested).toBe(false);
+    expect(connectToRun).toHaveBeenCalledTimes(1);
+    expect(connectToRun).toHaveBeenCalledWith(
+      "run-live",
+      expect.any(Function),
+      expect.any(Object),
+    );
+  });
+
+  it("also reattaches a queued (pending) run", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeRun({ id: "run-queued", status: "pending" }),
+    ]);
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close: vi.fn() });
+
+    await useExecutionStore.getState().rehydrateActiveRun("session-1");
+
+    expect(useExecutionStore.getState().activeRunId).toBe("run-queued");
+    expect(useExecutionStore.getState().progress?.status).toBe("pending");
+    expect(connectToRun).toHaveBeenCalledWith(
+      "run-queued",
+      expect.any(Function),
+      expect.any(Object),
+    );
+  });
+
+  it("does not connect when every run is terminal", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeRun({ id: "run-done", status: "completed" }),
+      makeRun({ id: "run-bad", status: "failed" }),
+    ]);
+
+    await useExecutionStore.getState().rehydrateActiveRun("session-1");
+
+    const state = useExecutionStore.getState();
+    expect(state.runs).toHaveLength(2);
+    expect(state.activeRunId).toBeNull();
+    expect(state.progress).toBeNull();
+    expect(connectToRun).not.toHaveBeenCalled();
+  });
+
+  it("does not stomp a run that execute() already owns", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeRun({ id: "run-live", status: "running" }),
+    ]);
+    useExecutionStore.setState({ activeRunId: "run-live" });
+
+    await useExecutionStore.getState().rehydrateActiveRun("session-1");
+
+    expect(connectToRun).not.toHaveBeenCalled();
+  });
+
+  it("drops a response that resolves after the active session changes", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    const pendingRuns = deferred<Run[]>();
+    (fetchRuns as ReturnType<typeof vi.fn>).mockReturnValue(pendingRuns.promise);
+
+    const rehydratePromise = useExecutionStore
+      .getState()
+      .rehydrateActiveRun("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    pendingRuns.resolve([makeRun({ id: "run-live", status: "running" })]);
+    await rehydratePromise;
+
+    expect(useExecutionStore.getState().activeRunId).toBeNull();
+    expect(connectToRun).not.toHaveBeenCalled();
+  });
+
+  it("swallows fetch failures (non-critical, polling retries)", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    (fetchRuns as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("network down"),
+    );
+
+    await expect(
+      useExecutionStore.getState().rehydrateActiveRun("session-1"),
+    ).resolves.toBeUndefined();
+    expect(useExecutionStore.getState().activeRunId).toBeNull();
+  });
+});
+
+// Pre-run egress disclosure opt-out (elspeth-c18ad229cc): per-session,
+// in-memory, survives reset() (which fires on every session switch) and is
+// flushed only by clearRunDisclosureAcks (auth identity change).
+describe("executionStore run-disclosure acknowledgements", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().clearRunDisclosureAcks();
+    useExecutionStore.getState().reset();
+  });
+
+  it("records an acknowledgement per session and preserves it across reset()", () => {
+    useExecutionStore.getState().acknowledgeRunDisclosure("sess-1");
+    expect(
+      useExecutionStore.getState().runDisclosureAckBySession["sess-1"],
+    ).toBe(true);
+    expect(
+      useExecutionStore.getState().runDisclosureAckBySession["sess-2"],
+    ).toBeUndefined();
+
+    useExecutionStore.getState().reset();
+    expect(
+      useExecutionStore.getState().runDisclosureAckBySession["sess-1"],
+    ).toBe(true);
+  });
+
+  it("clearRunDisclosureAcks flushes every acknowledgement", () => {
+    useExecutionStore.getState().acknowledgeRunDisclosure("sess-1");
+    useExecutionStore.getState().acknowledgeRunDisclosure("sess-2");
+    useExecutionStore.getState().clearRunDisclosureAcks();
+    expect(useExecutionStore.getState().runDisclosureAckBySession).toEqual({});
   });
 });
 

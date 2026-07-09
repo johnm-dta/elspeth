@@ -2,8 +2,86 @@
 """Tests for Landscape SQLAlchemy schema."""
 
 from datetime import UTC, datetime
+from enum import StrEnum
 
+import elspeth.core.landscape.schema as schema
 from elspeth.contracts import Determinism
+from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+from elspeth.core.landscape.schema import (
+    RunSourceLifecycleState,
+    run_sources_table,
+    scheduler_events_table,
+    token_work_items_table,
+)
+
+
+def _check_sql(table_name: str, constraint_name: str) -> str:
+    table = {
+        "run_sources": run_sources_table,
+        "scheduler_events": scheduler_events_table,
+        "token_work_items": token_work_items_table,
+    }[table_name]
+    check = next(c for c in table.constraints if getattr(c, "name", "") == constraint_name)
+    return str(check.sqltext)  # type: ignore[attr-defined]
+
+
+def _enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
+    assert hasattr(schema, "_enum_in_check")
+    return schema._enum_in_check(column_name, enum_type)
+
+
+def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
+    assert hasattr(schema, "_optional_enum_in_check")
+    return schema._optional_enum_in_check(column_name, enum_type)
+
+
+def _sql_string_literal(value: str) -> str:
+    assert hasattr(schema, "_sql_string_literal")
+    return schema._sql_string_literal(value)
+
+
+class TestEnumCheckConstraints:
+    """Schema CHECK value spaces should be generated from enum owners."""
+
+    def test_enum_in_check_renders_deterministic_sql(self) -> None:
+        class Example(StrEnum):
+            FIRST = "first"
+            QUOTED = "has'quote"
+
+        assert _enum_in_check("status", Example) == "status IN ('first', 'has''quote')"
+
+    def test_optional_enum_in_check_allows_null_then_enum_values(self) -> None:
+        assert _optional_enum_in_check("from_status", TokenWorkStatus) == (
+            "from_status IS NULL OR from_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')"
+        )
+
+    def test_run_source_lifecycle_check_matches_enum_values(self) -> None:
+        assert _check_sql("run_sources", "ck_run_sources_lifecycle_state") == _enum_in_check(
+            "lifecycle_state",
+            RunSourceLifecycleState,
+        )
+
+    def test_scheduler_event_type_check_matches_enum_values(self) -> None:
+        assert _check_sql("scheduler_events", "ck_scheduler_events_event_type") == _enum_in_check(
+            "event_type",
+            SchedulerEventType,
+        )
+
+    def test_scheduler_status_checks_match_enum_values(self) -> None:
+        assert _check_sql("scheduler_events", "ck_scheduler_events_from_status") == _optional_enum_in_check(
+            "from_status",
+            TokenWorkStatus,
+        )
+        assert _check_sql("scheduler_events", "ck_scheduler_events_to_status") == _enum_in_check(
+            "to_status",
+            TokenWorkStatus,
+        )
+
+    def test_lease_owner_check_uses_leased_enum_literal(self) -> None:
+        leased = _sql_string_literal(TokenWorkStatus.LEASED.value)
+        assert _check_sql("token_work_items", "ck_token_work_items_lease_owner_required_when_leased") == (
+            f"(status = {leased} AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != {leased}"
+        )
 
 
 class TestNodesDeterminismColumn:

@@ -400,8 +400,11 @@ describe("ChatInput pending-interpretation placeholder cue", () => {
     render(<StandaloneHarness />);
 
     const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    // Directionally neutral (elspeth-eba8820005): the review card sits in a
+    // different column in the guided workspace, so the cue names the card
+    // rather than pointing "above".
     expect(textarea.placeholder).toBe(
-      'Reviewing your interpretation of "cool" above — pick Use mine or Change it to continue.',
+      'Reviewing your interpretation of "cool" — pick Use mine or Change it on the review card to continue.',
     );
   });
 
@@ -455,5 +458,65 @@ describe("ChatInput pending-interpretation placeholder cue", () => {
 
     const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
     expect(textarea.placeholder).toBe("step-specific nudge");
+  });
+});
+
+// ============================================================================
+// ChatInput — tutorial readOnly lock.
+//
+// The guided tutorial reuses the REAL guided flow; the only difference is the
+// STEP_1 "Describe what you want" prompt is prepopulated AND locked, so the
+// learner steps through the normal flow but types nothing. This pins that lock:
+// the textarea shows the prepopulated value, is read-only, hides the
+// source-composition affordances, and Send still submits the locked value.
+// ============================================================================
+describe("ChatInput — tutorial readOnly lock (prepopulated + locked prompt)", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  const LOCKED = "Scrape these three synthetic project-brief pages.";
+
+  function LockedHarness({ onSend }: { onSend: (c: string) => void }) {
+    const inputRef = useRef<HTMLTextAreaElement>(
+      null,
+    ) as RefObject<HTMLTextAreaElement>;
+    return (
+      <ChatInput
+        onSend={onSend}
+        disabled={false}
+        inputRef={inputRef}
+        value={LOCKED}
+        onChange={() => undefined}
+        readOnly
+        onOpenSecrets={() => undefined}
+        onToggleBlobManager={() => undefined}
+      />
+    );
+  }
+
+  it("prepopulates the textarea, locks it read-only, and hides source-composition affordances", () => {
+    render(<LockedHarness onSend={() => undefined} />);
+    const textarea = screen.getByLabelText(
+      /message input/i,
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toBe(LOCKED);
+    expect(textarea.readOnly).toBe(true);
+    // The tutorial learner must not author a source by hand: the upload, file
+    // manager, and secrets affordances are hidden in locked mode.
+    expect(screen.queryByLabelText(/upload file/i)).toBeNull();
+    expect(
+      screen.queryByLabelText(/show file manager|hide file manager/i),
+    ).toBeNull();
+    expect(screen.queryByLabelText(/open secrets settings/i)).toBeNull();
+  });
+
+  it("Send submits the locked value (the learner presses Send, types nothing)", async () => {
+    const sent: string[] = [];
+    render(<LockedHarness onSend={(c) => sent.push(c)} />);
+    await userEvent.click(screen.getByLabelText(/send message/i));
+    expect(sent).toEqual([LOCKED]);
   });
 });

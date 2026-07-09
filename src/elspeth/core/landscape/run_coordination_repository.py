@@ -71,7 +71,7 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.canonical import canonical_json
-from elspeth.core.landscape.database import Tier1Engine, begin_write
+from elspeth.core.landscape.database import Tier1Engine, begin_write, verify_sqlite_tier1_pragmas
 from elspeth.core.landscape.schema import (
     run_coordination_events_table,
     run_coordination_table,
@@ -302,37 +302,10 @@ class RunCoordinationRepository:
     """Persistence boundary for the run-coordination substrate (ADR-030)."""
 
     def __init__(self, engine: Tier1Engine) -> None:
-        # Runtime PRAGMA probe — defence in depth against a caller that slips
-        # past the type checker (e.g. a ``cast()`` in test code or a mypy
-        # suppression).  Tier-1 doctrine: the coordination substrate arbitrates
-        # writes to the audit DB; we must refuse to proceed if the engine's
-        # SQLite guarantees are unmet.
-        #
-        # The probe mirrors :meth:`LandscapeDB._verify_sqlite_pragmas` and is
-        # replicated verbatim from :class:`TokenSchedulerRepository.__init__`.
-        # We check only ``foreign_keys`` and ``journal_mode`` here — they are
-        # the invariants most likely to be missing on a bare
-        # ``create_engine()`` call that bypassed
-        # ``LandscapeDB._configure_sqlite``.
-        with engine.connect() as conn:
-            fk_result = conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one_or_none()
-            jm_result = conn.exec_driver_sql("PRAGMA journal_mode").scalar_one_or_none()
-
-        foreign_keys = "" if fk_result is None else str(fk_result).lower()
-        journal_mode = "" if jm_result is None else str(jm_result).lower()
-
-        violations: list[str] = []
-        if foreign_keys != "1":
-            violations.append(f"PRAGMA foreign_keys: expected '1', observed {foreign_keys!r}")
-        if journal_mode not in ("wal", "memory"):
-            violations.append(f"PRAGMA journal_mode: expected 'wal' (or 'memory' for :memory: DBs), observed {journal_mode!r}")
-
-        if violations:
-            raise AuditIntegrityError(
-                "RunCoordinationRepository received an engine that does not meet Tier-1 audit-integrity "
-                "requirements; the engine was not opened through LandscapeDB. " + "; ".join(violations)
-            )
-
+        # Runtime SQLite PRAGMA probe — defence in depth against a caller that
+        # slips a bare SQLite engine past the type checker. Non-SQLite Tier-1
+        # engines skip this SQLite-only syntax.
+        verify_sqlite_tier1_pragmas(engine, owner="RunCoordinationRepository")
         self._engine = engine
 
     # ── seat lifecycle ───────────────────────────────────────────────────
@@ -349,12 +322,12 @@ class RunCoordinationRepository:
         """Mint the run's seat at epoch 1 (uniformity rule: N=1 = leader-of-its-own-run).
 
         Standalone-transaction form for repository-level callers and test
-        fixtures; ``begin_run`` composes :meth:`_register_run_leader_on` into
+        fixtures; ``begin_run`` composes :meth:`register_run_leader_on` into
         ITS transaction instead so the runs INSERT and the seat mint commit
         atomically (design §B.4 closing line).
         """
         with begin_write(self._engine) as conn:
-            return self._register_run_leader_on(
+            return self.register_run_leader_on(
                 conn,
                 run_id=run_id,
                 worker_id=worker_id,
@@ -363,7 +336,7 @@ class RunCoordinationRepository:
                 entry_point=entry_point,
             )
 
-    def _register_run_leader_on(
+    def register_run_leader_on(
         self,
         conn: Connection,
         *,
@@ -455,8 +428,9 @@ class RunCoordinationRepository:
         BUSY-vs-CAS-loss discrimination (§B.4): a busy timeout at BEGIN (or
         anywhere inside) is NOT "leadership held" — it means a live-or-frozen
         process holds the WAL write lock; raised as the operator-actionable
-        :class:`WriteLockHeldError` naming the registered workers (pids read
-        on a plain read connection — WAL readers don't block on the writer).
+        :class:`WriteLockHeldError` carrying structured registered-worker
+        forensics (pids read on a plain read connection — WAL readers don't
+        block on the writer).
         """
         try:
             with begin_write(self._engine) as conn:

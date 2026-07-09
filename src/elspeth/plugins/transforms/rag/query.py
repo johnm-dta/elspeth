@@ -141,7 +141,7 @@ class QueryBuilder:
 
         future = self._regex_pool.submit(run_regex_worker, self._compiled_pattern, extracted)
         try:
-            matched, group0, group1 = future.result(timeout=self._regex_timeout)
+            match_result = future.result(timeout=self._regex_timeout)
         except FuturesTimeoutError:
             future.cancel()
             # future.cancel() only prevents queued tasks from starting — it
@@ -185,7 +185,7 @@ class QueryBuilder:
                 f"worker or the Python regex engine — not a data issue."
             ) from exc
 
-        if not matched:
+        if not match_result.matched:
             return QueryResult(
                 error=TransformErrorReason(
                     reason="no_regex_match",
@@ -194,8 +194,8 @@ class QueryBuilder:
                 )
             )
 
-        # Use group1 if the pattern has capture groups (may be None if non-participating)
-        captured = group1 if self._compiled_pattern.groups else group0
+        # RAG policy: capture-group patterns use the first group; plain patterns use the full match.
+        captured = match_result.groups[0] if self._compiled_pattern.groups else match_result.full_match
         if captured is None:
             return QueryResult(
                 error=TransformErrorReason(

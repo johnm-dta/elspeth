@@ -6,6 +6,7 @@ import pytest
 
 from elspeth.web.composer.guided.protocol import (
     ControlSignal,
+    GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
     ProposeChainPayload,
@@ -14,11 +15,12 @@ from elspeth.web.composer.guided.protocol import (
     Turn,
     TurnResponse,
     TurnType,
+    validate_payload,
 )
 
 
 class TestTurnType:
-    def test_six_turn_types_defined(self) -> None:
+    def test_seven_turn_types_defined(self) -> None:
         expected = {
             "inspect_and_confirm",
             "single_select",
@@ -26,12 +28,19 @@ class TestTurnType:
             "schema_form",
             "propose_chain",
             "recipe_offer",
+            "confirm_wiring",
         }
         assert {t.value for t in TurnType} == expected
 
     def test_turn_type_is_str_enum(self) -> None:
         assert TurnType.SINGLE_SELECT.value == "single_select"
         assert TurnType("single_select") is TurnType.SINGLE_SELECT
+
+
+class TestGuidedStep:
+    def test_step_4_wire_defined(self) -> None:
+        assert GuidedStep.STEP_4_WIRE.value == "step_4_wire"
+        assert GuidedStep("step_4_wire") is GuidedStep.STEP_4_WIRE
 
 
 class TestPayloadShapes:
@@ -129,6 +138,7 @@ class TestTurnResponse:
             "request_advisor",
             "reject",
             "back",
+            "passthrough",
         }
 
     def test_turn_response_minimal(self) -> None:
@@ -204,6 +214,11 @@ class TestLegalTurnMatrix:
         assert TurnType.PROPOSE_CHAIN in legal
         assert TurnType.SINGLE_SELECT in legal
 
+    def test_step_4_wire_confirm_wiring_only(self) -> None:
+        from elspeth.web.composer.guided.protocol import legal_turn_types_for
+
+        assert legal_turn_types_for(GuidedStep.STEP_4_WIRE) == frozenset({TurnType.CONFIRM_WIRING})
+
 
 class TestPayloadValidation:
     def test_validate_single_select_ok(self) -> None:
@@ -257,6 +272,23 @@ class TestPayloadValidation:
         assert err is not None
         assert "payload.knobs" in err
         assert "fields" in err
+
+    def test_confirm_wiring_minimal_wire_payload_validates(self) -> None:
+        payload = {
+            "topology": {"sources": {}, "nodes": [], "outputs": []},
+            "edge_contracts": [],
+            "semantic_contracts": [],
+            "warnings": [],
+        }
+        assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
+
+    def test_confirm_wiring_payload_missing_key_rejected(self) -> None:
+        err = validate_payload(TurnType.CONFIRM_WIRING, {"topology": {}})
+        assert err is not None
+        assert "confirm_wiring" in err
+        assert "edge_contracts" in err
+        assert "semantic_contracts" in err
+        assert "warnings" in err
 
     def test_schema_form_plugin_options_requires_plugin(self) -> None:
         from elspeth.web.composer.guided.protocol import validate_payload

@@ -166,6 +166,17 @@ class TestFieldSemanticRequirement:
         assert SemanticValueType.STR not in requirement.accepted_value_types
         assert "extra" not in requirement.configured_by
 
+    @pytest.mark.parametrize("severity", ["critical", "High"])
+    def test_rejects_out_of_vocabulary_severity(self, severity):
+        with pytest.raises(ValueError, match="severity"):
+            FieldSemanticRequirement(
+                field_name="x",
+                accepted_content_kinds=frozenset({ContentKind.PLAIN_TEXT}),
+                accepted_text_framings=frozenset({TextFraming.NEWLINE_FRAMED}),
+                requirement_code="t.x.req",
+                severity=severity,
+            )
+
 
 class TestFieldSemanticFactsCoercion:
     def test_list_configured_by_coerced_to_tuple(self):

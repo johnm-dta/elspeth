@@ -1,12 +1,52 @@
 """Tests for AuditedHTTPClient.get_ssrf_safe() Call return."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 
+from elspeth.contracts import CallStatus
 from elspeth.contracts.audit import Call
 from elspeth.core.security.web import SSRFSafeRequest
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value = return_value
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self.call_args_list) == 1
+
+
+class _ExecutionRecorderDouble:
+    def __init__(self, call: Call) -> None:
+        self.record_call = _CallRecorder(call)
+        self.allocate_call_index = _CallRecorder(0)
+
+
+class _HTTPClientDouble:
+    def __init__(self, response: httpx.Response) -> None:
+        self.get = _CallRecorder(response)
+
+    def __enter__(self) -> "_HTTPClientDouble":
+        return self
+
+    def __exit__(self, *_args: object) -> bool:
+        return False
 
 
 class TestGetSsrfSafeCallReturn:
@@ -36,35 +76,30 @@ class TestGetSsrfSafeCallReturn:
             latency_ms=100.0,
         )
 
-    def _make_client_with_mock_recorder(self) -> tuple[AuditedHTTPClient, MagicMock]:
-        """Create AuditedHTTPClient with a mock recorder that returns a known Call."""
-        mock_recorder = MagicMock()
+    def _make_client_with_recorder(self) -> tuple[AuditedHTTPClient, _ExecutionRecorderDouble]:
+        """Create AuditedHTTPClient with a recorder double that returns a known Call."""
         mock_call = self._make_mock_call()
-        mock_recorder.record_call.return_value = mock_call
-        mock_recorder.allocate_call_index.return_value = 0
+        recorder = _ExecutionRecorderDouble(mock_call)
 
         client = AuditedHTTPClient(
-            execution=mock_recorder,
+            execution=recorder,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=lambda event: None,
             timeout=5.0,
         )
-        return client, mock_recorder
+        return client, recorder
 
     def test_returns_three_tuple_with_call_on_success(self):
         """get_ssrf_safe() returns (Response, str, Call) on success."""
-        client, _mock_recorder = self._make_client_with_mock_recorder()
+        client, _recorder = self._make_client_with_recorder()
 
-        # Mock the actual HTTP call
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "text/html"}
-        mock_response.content = b"<html>test</html>"
-        mock_response.text = "<html>test</html>"
-        mock_response.url = httpx.URL("http://93.184.216.34/")
-        mock_response.is_success = True
-        mock_response.is_redirect = False
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=b"<html>test</html>",
+            request=httpx.Request("GET", "http://93.184.216.34/"),
+        )
 
         safe_request = SSRFSafeRequest(
             original_url="http://example.com/",
@@ -77,11 +112,7 @@ class TestGetSsrfSafeCallReturn:
         )
 
         with patch("httpx.Client") as mock_client_class:
-            mock_http_instance = MagicMock()
-            mock_http_instance.__enter__ = MagicMock(return_value=mock_http_instance)
-            mock_http_instance.__exit__ = MagicMock(return_value=False)
-            mock_http_instance.get.return_value = mock_response
-            mock_client_class.return_value = mock_http_instance
+            mock_client_class.return_value = _HTTPClientDouble(response)
 
             result = client.get_ssrf_safe(safe_request)
 
@@ -94,9 +125,8 @@ class TestGetSsrfSafeCallReturn:
 
     def test_record_and_emit_returns_call(self):
         """_record_and_emit() returns a Call object."""
-        client, _mock_recorder = self._make_client_with_mock_recorder()
+        client, _recorder = self._make_client_with_recorder()
 
-        from elspeth.contracts import CallStatus
         from elspeth.contracts.call_data import HTTPCallRequest
 
         request_dto = HTTPCallRequest(
@@ -119,3 +149,57 @@ class TestGetSsrfSafeCallReturn:
 
         assert isinstance(result, Call)
         assert result.request_ref == "test-request-ref-hash"
+
+    def test_nonstandard_three_digit_status_is_recorded(self):
+        """Remote 6xx/9xx statuses must not crash before audit recording."""
+        client, recorder = self._make_client_with_recorder()
+        response = httpx.Response(
+            999,
+            headers={"content-type": "text/plain"},
+            text="nonstandard",
+            request=httpx.Request("GET", "https://example.com/nonstandard"),
+        )
+        client._client.get = _CallRecorder(response)
+
+        result = client.get("https://example.com/nonstandard")
+
+        assert result is response
+        recorder.record_call.assert_called_once()
+        assert recorder.record_call.call_args is not None
+        record_kwargs = recorder.record_call.call_args.kwargs
+        assert record_kwargs["status"] is CallStatus.ERROR
+        assert record_kwargs["response_data"].status_code == 999
+        assert record_kwargs["error"].status_code == 999
+
+    def test_ssrf_safe_nonstandard_three_digit_status_is_recorded(self):
+        """SSRF-safe requests also preserve non-standard three-digit statuses in audit."""
+        client, recorder = self._make_client_with_recorder()
+        response = httpx.Response(
+            999,
+            headers={"content-type": "text/plain"},
+            text="nonstandard",
+            request=httpx.Request("GET", "http://93.184.216.34/"),
+        )
+        safe_request = SSRFSafeRequest(
+            original_url="http://example.com/",
+            resolved_ip="93.184.216.34",
+            host_header="example.com",
+            port=80,
+            path="/",
+            scheme="http",
+            bare_hostname="example.com",
+        )
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client_class.return_value = _HTTPClientDouble(response)
+
+            result, _final_url, call = client.get_ssrf_safe(safe_request)
+
+        assert result is response
+        assert isinstance(call, Call)
+        recorder.record_call.assert_called_once()
+        assert recorder.record_call.call_args is not None
+        record_kwargs = recorder.record_call.call_args.kwargs
+        assert record_kwargs["status"] is CallStatus.ERROR
+        assert record_kwargs["response_data"].status_code == 999
+        assert record_kwargs["error"].status_code == 999

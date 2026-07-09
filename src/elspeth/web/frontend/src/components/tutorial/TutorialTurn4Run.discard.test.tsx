@@ -20,14 +20,11 @@ describe("TutorialTurn4Run — source-discarded row surfacing (#28)", () => {
         source_data_hash: "h",
         discarded_row_count: 3,
       },
-      seeded_from_cache: false,
-      cache_key: null,
     });
 
     render(
       <TutorialTurn4Run
         sessionId="sess-discard"
-        prompt="discard-prompt"
         onCompleted={noop}
         onCancelled={noop}
         onBack={noop}
@@ -45,14 +42,11 @@ describe("TutorialTurn4Run — source-discarded row surfacing (#28)", () => {
         source_data_hash: "h",
         discarded_row_count: 0,
       },
-      seeded_from_cache: false,
-      cache_key: null,
     });
 
     render(
       <TutorialTurn4Run
         sessionId="sess-clean"
-        prompt="clean-prompt"
         onCompleted={noop}
         onCancelled={noop}
         onBack={noop}
@@ -61,5 +55,35 @@ describe("TutorialTurn4Run — source-discarded row surfacing (#28)", () => {
 
     expect(await screen.findByText(/rows returned/i)).toBeInTheDocument();
     expect(screen.queryByText(/discarded at the source/i)).not.toBeInTheDocument();
+  });
+
+  it("labels the completed-run Back button with real behaviour, not the retired prompt-editor copy", async () => {
+    // The staged guided walk replaced the old free-text prompt turn; there is
+    // no "edit prompt and start over" surface any more (F6). The label must
+    // not resurrect that stale claim.
+    vi.mocked(api.runTutorialPipeline).mockResolvedValue({
+      run_id: "run-label",
+      output: {
+        rows: [{ url: "a" }],
+        source_data_hash: "h",
+        discarded_row_count: 0,
+      },
+    });
+
+    render(
+      <TutorialTurn4Run
+        sessionId="sess-label"
+        onCompleted={noop}
+        onCancelled={noop}
+        onBack={noop}
+      />,
+    );
+
+    await screen.findByText(/rows returned/i);
+    const backButton = screen.getByRole("button", {
+      name: "Back to the pipeline build",
+    });
+    expect(backButton).toBeInTheDocument();
+    expect(backButton).not.toHaveAccessibleName(/edit prompt/i);
   });
 });

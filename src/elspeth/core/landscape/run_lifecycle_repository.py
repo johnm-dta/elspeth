@@ -34,14 +34,15 @@ from elspeth.contracts.coordination import (
 )
 from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError, RunLeadershipLostError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.preflight import PreflightResult
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.canonical import canonical_json, stable_hash
-from elspeth.core.dependency_config import PreflightResult
+from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
-from elspeth.core.landscape._helpers import generate_id, now
+from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.errors import LandscapeRecordError, LandscapeRecordNotFoundError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.run_coordination_repository import (
@@ -333,9 +334,7 @@ class RunLifecycleRepository:
                     )
                 # Composes into THIS transaction (connection-accepting form):
                 # the runs row above satisfies the run_coordination FK.
-                # Private-by-underscore but designed for exactly this
-                # composition (see _register_run_leader_on's docstring).
-                coordination._register_run_leader_on(
+                coordination.register_run_leader_on(
                     conn,
                     run_id=run.run_id,
                     worker_id=worker_id,
@@ -712,12 +711,11 @@ class RunLifecycleRepository:
         }
         resolution_json = canonical_json(resolution_data)
 
+        stmt = runs_table.update().where(runs_table.c.run_id == run_id).values(source_field_resolution_json=resolution_json)
         try:
-            self._ops.execute_update(
-                runs_table.update().where(runs_table.c.run_id == run_id).values(source_field_resolution_json=resolution_json)
-            )
-        except AuditIntegrityError:
-            raise  # Preserve original error message from execute_update
+            self._ops.execute_update(stmt, context=f"record_source_field_resolution run_id={run_id}")
+        except LandscapeRecordNotFoundError as exc:
+            raise AuditIntegrityError(f"Cannot record source field resolution for run {run_id!r}: run not found") from exc
 
     def record_run_source(
         self,
@@ -1447,9 +1445,10 @@ class RunLifecycleRepository:
         if export_sink is not None:
             updates["export_sink"] = export_sink
 
+        stmt = runs_table.update().where(runs_table.c.run_id == run_id).values(**updates)
         try:
-            self._ops.execute_update(runs_table.update().where(runs_table.c.run_id == run_id).values(**updates))
-        except AuditIntegrityError as exc:
+            self._ops.execute_update(stmt, context=f"set_export_status run_id={run_id} status={status.value}")
+        except LandscapeRecordNotFoundError as exc:
             raise AuditIntegrityError(f"Cannot set export status to {status.value!r}: run {run_id} not found") from exc
 
     def finalize_run(self, run_id: str, status: RunStatus, *, token: CoordinationToken | None = None) -> Run:

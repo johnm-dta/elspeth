@@ -13,12 +13,45 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
-from elspeth.contracts.contexts import SourceContext
 from elspeth.plugins.sources.text_source import TextSource
+
+
+class _SourceContextStub:
+    run_id = "test-run"
+    node_id = "source"
+    operation_id = None
+    landscape = None
+
+    def __init__(self) -> None:
+        self.validation_errors: list[dict[str, Any]] = []
+
+    def telemetry_emit(self, _event: Any) -> None:
+        return None
+
+    def record_validation_error(
+        self,
+        row: Any,
+        error: str,
+        schema_mode: str,
+        destination: str,
+        *,
+        contract_violation: Any | None = None,
+    ) -> None:
+        self.validation_errors.append(
+            {
+                "row": row,
+                "error": error,
+                "schema_mode": schema_mode,
+                "destination": destination,
+                "contract_violation": contract_violation,
+            }
+        )
+
+    def record_call(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 class TestTextSourceHeuristicEnforcement:
@@ -36,8 +69,7 @@ class TestTextSourceHeuristicEnforcement:
                 "on_validation_failure": "quarantine",
             }
             source = TextSource(config)
-            ctx = MagicMock(spec=SourceContext)
-            ctx.record_validation_error = MagicMock()
+            ctx = _SourceContextStub()
 
             rows = list(source.load(ctx))
 

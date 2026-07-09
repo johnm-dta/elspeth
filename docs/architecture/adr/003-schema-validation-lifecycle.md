@@ -63,12 +63,9 @@ Make schemas class attributes instead of instance attributes.
 
 ## Implementation
 
-See implementation plans:
-- `docs/plans/2026-01-24-schema-refactor-00-overview.md` - Overview and design
-- `docs/plans/2026-01-24-schema-refactor-01-foundation.md` - Tasks 1-4
-- `docs/plans/2026-01-24-schema-refactor-02-cli-refactor.md` - Tasks 5-7
-- `docs/plans/2026-01-24-schema-refactor-03-testing.md` - Tasks 8-10
-- `docs/plans/2026-01-24-schema-refactor-04-cleanup.md` - Tasks 11-15
+Historical implementation plans for this refactor were removed from active
+docs during later documentation cleanouts. Git history remains the provenance
+source for the January 2026 schema-refactor plan series.
 
 ## Key Technical Details
 

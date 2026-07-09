@@ -250,6 +250,8 @@ test("explicit approve tool call is visible before commit", async ({ page }) => 
 
   await expect(page.getByText(/Applied: set_pipeline/)).toBeVisible();
   await expect(
-    page.getByRole("log", { name: "Chat messages" }).getByText("audit event-ac"),
+    // Accessible name updated with the keyboard-focusable conversation region
+    // (elspeth-5e43a0c8b2).
+    page.getByRole("log", { name: "Conversation" }).getByText("audit event-ac"),
   ).toBeVisible();
 });

@@ -1,8 +1,10 @@
 # tests/plugins/llm/test_azure.py
 """Tests for Azure OpenAI LLM provider via unified LLMTransform."""
 
+import threading
 from collections.abc import Generator
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -23,6 +25,95 @@ from .conftest import chaosllm_azure_openai_client
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+class _RecordCallSpy:
+    """Callable fake that exposes the one interaction assertion these tests need."""
+
+    def __init__(self) -> None:
+        self.called = False
+        self.call_count = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, *args: object, **kwargs: object) -> SimpleNamespace:
+        with self._lock:
+            self.called = True
+            self.call_count += 1
+        return SimpleNamespace(
+            call_id=f"call-{self.call_count}",
+            call_index=kwargs.get("call_index", self.call_count - 1),
+            request_hash="request-hash",
+            response_hash="response-hash",
+        )
+
+
+class _FakeAuditWriter:
+    """Minimal PluginAuditWriter fake for audited LLM client tests."""
+
+    def __init__(self) -> None:
+        self.record_call = _RecordCallSpy()
+        self.record_operation_call = _RecordCallSpy()
+        self._call_indices: dict[str, int] = {}
+        self._operation_call_indices: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def allocate_call_index(self, state_id: str) -> int:
+        return self._next_index(self._call_indices, state_id)
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return self._next_index(self._operation_call_indices, operation_id)
+
+    def get_node_state(self, _state_id: str) -> SimpleNamespace:
+        return SimpleNamespace(token_id="token-row-1")
+
+    def _next_index(self, indices: dict[str, int], parent_id: str) -> int:
+        with self._lock:
+            next_index = indices.get(parent_id, 0)
+            indices[parent_id] = next_index + 1
+            return next_index
+
+
+def _make_azure_sdk_response(
+    *,
+    content: str = "Response",
+    model: str = "my-gpt4o-deployment",
+    prompt_tokens: int = 10,
+    completion_tokens: int = 5,
+    raw_response: dict[str, object] | None = None,
+) -> SimpleNamespace:
+    """Create the Azure SDK response shape consumed by AuditedLLMClient."""
+
+    response_data = {} if raw_response is None else raw_response
+
+    def model_dump(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return response_data
+
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+                finish_reason="stop",
+            )
+        ],
+        model=model,
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        ),
+        model_dump=model_dump,
+    )
+
+
+def _make_azure_sdk_client(response: SimpleNamespace) -> SimpleNamespace:
+    """Create the nested AzureOpenAI client surface used by the provider."""
+
+    def create(**_kwargs: object) -> SimpleNamespace:
+        return response
+
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        close=lambda: None,
+    )
 
 
 def make_token(row_id: str = "row-1", token_id: str | None = None) -> TokenInfo:
@@ -291,11 +382,9 @@ class TestLLMTransformAzurePipelining:
     """
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
+    def audit_writer(self) -> _FakeAuditWriter:
+        """Create fake audit writer."""
+        return _FakeAuditWriter()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -303,17 +392,17 @@ class TestLLMTransformAzurePipelining:
         return CollectorOutputPort()
 
     @pytest.fixture
-    def ctx(self, mock_factory: Mock) -> PluginContext:
+    def ctx(self, audit_writer: _FakeAuditWriter) -> PluginContext:
         """Create plugin context with landscape, state_id, and token."""
         token = make_token("row-1")
-        return make_context(state_id="test-state-id", token=token, landscape=mock_factory)
+        return make_context(state_id="test-state-id", token=token, landscape=audit_writer)
 
     @pytest.fixture
-    def transform(self, collector: CollectorOutputPort, mock_factory: Mock) -> Generator[LLMTransform, None, None]:
+    def transform(self, collector: CollectorOutputPort, audit_writer: _FakeAuditWriter) -> Generator[LLMTransform, None, None]:
         """Create and initialize LLMTransform with Azure provider and pipelining."""
         t = LLMTransform(_make_azure_config(prompt_template="Analyze: {{ row.text }}"))
         # Initialize with factory reference
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         t.on_start(init_ctx)
         # Connect output port
         t.connect_output(collector, max_pending=10)
@@ -446,7 +535,7 @@ class TestLLMTransformAzurePipelining:
         assert "429" in str(result.exception)
 
     def test_missing_state_id_propagates_exception(
-        self, mock_factory: Mock, transform: LLMTransform, collector: CollectorOutputPort
+        self, audit_writer: _FakeAuditWriter, transform: LLMTransform, collector: CollectorOutputPort
     ) -> None:
         """Missing state_id causes exception propagation, not error result.
 
@@ -463,7 +552,7 @@ class TestLLMTransformAzurePipelining:
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_factory,
+            landscape=audit_writer,
             state_id=None,  # Missing state_id - calling code bug
             token=token,
         )
@@ -479,12 +568,12 @@ class TestLLMTransformAzurePipelining:
         assert isinstance(result.exception, RuntimeError)
         assert "state_id" in str(result.exception)
 
-    def test_process_row_missing_token_raises_runtime_error(self, mock_factory: Mock, transform: LLMTransform) -> None:
+    def test_process_row_missing_token_raises_runtime_error(self, audit_writer: _FakeAuditWriter, transform: LLMTransform) -> None:
         """Direct _process_row call with missing token must crash explicitly."""
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_factory,
+            landscape=audit_writer,
             state_id="test-state-id",
             token=None,
         )
@@ -494,7 +583,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_system_prompt_included_in_messages(
         self,
-        mock_factory: Mock,
+        audit_writer: _FakeAuditWriter,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -505,12 +594,12 @@ class TestLLMTransformAzurePipelining:
                 system_prompt="You are a helpful assistant.",
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=audit_writer)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server) as mock_client:
@@ -529,7 +618,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_temperature_and_max_tokens_passed_to_client(
         self,
-        mock_factory: Mock,
+        audit_writer: _FakeAuditWriter,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -541,12 +630,12 @@ class TestLLMTransformAzurePipelining:
                 max_tokens=500,
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=audit_writer)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server) as mock_client:
@@ -562,7 +651,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_custom_response_field(
         self,
-        mock_factory: Mock,
+        audit_writer: _FakeAuditWriter,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -573,12 +662,12 @@ class TestLLMTransformAzurePipelining:
                 response_field="analysis",
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=audit_writer)
 
         try:
             with chaosllm_azure_openai_client(
@@ -619,10 +708,10 @@ class TestLLMTransformAzurePipelining:
         with pytest.raises(RuntimeError, match="connect_output"):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
 
-    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_factory: Mock) -> None:
+    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, audit_writer: _FakeAuditWriter) -> None:
         """connect_output() raises if called more than once."""
         transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -637,21 +726,8 @@ class TestLLMTransformAzurePipelining:
     ) -> None:
         """AzureOpenAI client is created with correct credentials."""
         with patch("openai.AzureOpenAI") as mock_azure_class:
-            mock_client = Mock()
-            mock_usage = Mock()
-            mock_usage.prompt_tokens = 10
-            mock_usage.completion_tokens = 5
-            mock_message = Mock()
-            mock_message.content = "Response"
-            mock_choice = Mock()
-            mock_choice.message = mock_message
-            mock_response = Mock()
-            mock_response.choices = [mock_choice]
-            mock_response.model = "my-gpt4o-deployment"
-            mock_response.usage = mock_usage
-            mock_response.model_dump = Mock(return_value={})
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_azure_class.return_value = mock_client
+            azure_client = _make_azure_sdk_client(_make_azure_sdk_response())
+            mock_azure_class.return_value = azure_client
 
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
             transform.flush_batch_processing(timeout=10.0)
@@ -668,11 +744,9 @@ class TestLLMTransformAzureIntegration:
     """Integration-style tests for Azure-specific edge cases via LLMTransform."""
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
+    def audit_writer(self) -> _FakeAuditWriter:
+        """Create fake audit writer."""
+        return _FakeAuditWriter()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -687,7 +761,7 @@ class TestLLMTransformAzureIntegration:
 
     def test_complex_template_with_multiple_variables(
         self,
-        mock_factory: Mock,
+        audit_writer: _FakeAuditWriter,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -704,12 +778,12 @@ class TestLLMTransformAzureIntegration:
                 """,
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=audit_writer)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server) as mock_client:
@@ -736,18 +810,18 @@ class TestLLMTransformAzureIntegration:
 
     def test_calls_are_recorded_to_landscape(
         self,
-        mock_factory: Mock,
+        audit_writer: _FakeAuditWriter,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
         """LLM calls are recorded via AuditedLLMClient."""
         transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=audit_writer)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server):
@@ -757,18 +831,16 @@ class TestLLMTransformAzureIntegration:
             transform.close()
 
         # Verify record_call was called (by AuditedLLMClient)
-        assert mock_factory.record_call.called
+        assert audit_writer.record_call.called
 
 
 class TestLLMTransformAzureConcurrency:
     """Tests for concurrent row processing via BatchTransformMixin with Azure provider."""
 
     @pytest.fixture
-    def mock_factory(self) -> Mock:
-        """Create mock RecorderFactory."""
-        factory = Mock()
-        factory.record_call = Mock()
-        return factory
+    def audit_writer(self) -> _FakeAuditWriter:
+        """Create fake audit writer."""
+        return _FakeAuditWriter()
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -777,13 +849,13 @@ class TestLLMTransformAzureConcurrency:
 
     def test_multiple_rows_processed_in_fifo_order(
         self,
-        mock_factory: Mock,
+        audit_writer: _FakeAuditWriter,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
         """Multiple rows are emitted in submission order (FIFO)."""
         transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -801,7 +873,7 @@ class TestLLMTransformAzureConcurrency:
                         run_id="test-run",
                         state_id=f"state-{i}",
                         token=token,
-                        landscape=mock_factory,
+                        landscape=audit_writer,
                     )
                     transform.accept(make_pipeline_row(row), ctx)
 
@@ -817,23 +889,23 @@ class TestLLMTransformAzureConcurrency:
             assert result.row is not None
             assert result.row["text"] == rows[i]["text"]
 
-    def test_on_start_captures_recorder(self, mock_factory: Mock) -> None:
+    def test_on_start_captures_recorder(self, audit_writer: _FakeAuditWriter) -> None:
         """on_start() captures factory reference for provider creation."""
         transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
 
         # Verify _recorder starts as None
         assert transform._recorder is None
 
-        ctx = make_context(state_id="test-state-id", landscape=mock_factory)
+        ctx = make_context(state_id="test-state-id", landscape=audit_writer)
         transform.on_start(ctx)
 
         # Verify factory was captured
-        assert transform._recorder is mock_factory
+        assert transform._recorder is audit_writer
 
-    def test_close_clears_recorder(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
+    def test_close_clears_recorder(self, audit_writer: _FakeAuditWriter, collector: CollectorOutputPort) -> None:
         """close() clears factory reference."""
         transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_factory)
+        init_ctx = make_context(run_id="test", landscape=audit_writer)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 

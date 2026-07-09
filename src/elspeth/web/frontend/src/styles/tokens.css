@@ -28,18 +28,43 @@
   /* ── Text ────────────────────────────────────────────────────────────────── */
   --color-text:              #dff0ee;
   --color-text-secondary:    #a8d0d0;
-  --color-text-muted:        #7a9a9a;
+  /* Muted text must clear WCAG AA (4.5:1) on EVERY panel surface it composes
+     with, not just --color-bg — the old #7a9a9a passed on the page background
+     but failed on elevated cards (3.84:1 on #1a3d47) and paper modals
+     (4.37:1 on #332f2c), ~46 live axe hits (elspeth-dae08efdc9). #93b3b3
+     clears every surface family: bg 6.45, surface 6.28, elevated/raised 5.18,
+     inspector 6.53, paper 5.90, nav 7.61, nav-raised 6.71, and 4.60 on the
+     4%-white hover wash over elevated. Gated by the muted-on-panel-surface
+     composition tests in colorContrast.test.ts. Mirrored in
+     website/tokens/colors.css — change both. */
+  --color-text-muted:        #93b3b3;
   --color-text-inverse:      #ffffff;
 
   /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
   --color-border:            rgba(143, 200, 200, 0.12);
   --color-border-strong:     rgba(143, 200, 200, 0.25);
+  /* Interactive-option (chip) border. A brighter accent-green than --color-accent
+     (#1a7a52, only ~2.2:1 on the chip surface) so the resting button affordance
+     clears WCAG 1.4.11 (3:1) in the dark default theme: #3fa980 ≈ 4:1 vs
+     --color-surface-elevated #1a3d47. Light theme overrides to the plain accent
+     (already ~7.5:1 on white). */
+  --color-chip-border:       #3fa980;
+  /* Resting form-input boundary — the input fill ~matches surface, so the
+     border is the sole affordance and must clear WCAG 1.4.11 (3:1). 1px
+     --color-border-strong is only ~1.7:1; this solid teal-grey is ~3.1:1 on
+     --color-surface-elevated. */
+  --color-input-border:      #608a8a;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
-  --color-bubble-user:           rgba(40, 130, 100, 0.14);
-  --color-bubble-user-border:    rgba(40, 130, 100, 0.35);
-  --color-bubble-assistant:      rgba(255, 255, 255, 0.05);
-  --color-bubble-assistant-border: rgba(255, 255, 255, 0.18);
+  /* The user (green) and assistant/reply (cool-teal) fills are pushed apart so
+     the two speakers read as two distinct shades even where they overlap in the
+     centred column. The reply was previously a 5%-white wash that all but
+     vanished into the teal workspace surface; a 10% cool-teal tint gives it a
+     visible "card" presence without competing with the user's green. */
+  --color-bubble-user:           rgba(40, 150, 112, 0.20);
+  --color-bubble-user-border:    rgba(40, 150, 112, 0.42);
+  --color-bubble-assistant:      rgba(174, 214, 214, 0.10);
+  --color-bubble-assistant-border: rgba(174, 214, 214, 0.24);
   --color-bubble-system:         rgba(255, 255, 255, 0.03);
 
   /* ── Component type badges — functional colour coding ────────────────────── */
@@ -71,9 +96,9 @@
   --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
-  --color-success:           #14b0ae;
-  --color-error:             #e85653;
-  --color-warning:           #e38444;
+  --color-success:           #16bab8;
+  --color-error:             #ef8784;
+  --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
@@ -107,15 +132,15 @@
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #14b0ae;
-  --color-status-failed:     #e85653;
-  --color-status-cancelled:  #e38444;
+  --color-status-completed:  #16bab8;
+  --color-status-failed:     #ef8784;
+  --color-status-cancelled:  #e79761;
   /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
      darker than --color-status-pending so the two non-success-but-clean
      statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
      reuses --color-status-completed (teal) and signals "with caveats"
      via the warning glyph rather than a different colour. */
-  --color-status-empty:      #888888;
+  --color-status-empty:      #a4a4a4;
 
   /* ── Surface variants ─────────────────────────────────────────────────── */
   --color-surface-raised:    #1a3d47;
@@ -142,6 +167,9 @@
   /* ── Sizing ──────────────────────────────────────────────────────────────── */
   --inspector-default-width: 320px;
   --inspector-min-width:     240px;
+  /* Composer shell right rail. Consumed by .app-layout's grid template in
+     shared.css (previously a hardcoded inline style in Layout.tsx). */
+  --siderail-width:          320px;
 
   /* ── Typography — Inter for body, system fallback ────────────────────────── */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -149,8 +177,13 @@
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code",
     "Source Code Pro", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 
-  --font-size-3xs:  10px;   /* sub-chrome micro-text (e.g. tab counts, ribbon icons, required-field badge) — a distinct register, smaller than 2xs */
-  --font-size-2xs:  11px;   /* chrome hints, micro-text (e.g. .chat-input-hint, breadcrumbs) */
+  /* Type floor (elspeth-5836435926): 12px is the minimum rendered size — the
+     10/11px micro registers failed the desktop comfort floor and compounded
+     the dark-theme contrast failures. Do not lower --font-size-xs below 12px;
+     hierarchy below body text is carried by weight, case, and letter-spacing
+     instead of sub-12px sizes. (--font-size-3xs and --font-size-2xs were
+     consolidated into this one token — elspeth-892528c899 — once the floor
+     raise left all three byte-identical at 12px.) */
   --font-size-xs:   12px;
   --font-size-sm:   13px;
   --font-size-md:   15px;   /* preserves the h2/h3 hierarchy step in markdown-body rendering — h3 sits between h2 (base/16) and body (sm/13) */
@@ -164,10 +197,21 @@
   --line-height-normal:  1.5;
   --line-height-relaxed: 1.7;
 
+  /* ── Font weights ────────────────────────────────────────────────────────── */
+  --font-weight-regular:  400;
+  --font-weight-medium:   500;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* ── Brand wordmark tracking — JetBrains Mono, uppercase ─────────────────── */
+  --tracking-wordmark: 0.18em;
+
   /* ── Spacing ─────────────────────────────────────────────────────────────── */
   --space-2xs: 2px;          /* chip insets, badge padding (covers the 2px axis) */
   --space-xs:  4px;
+  --space-1-5: 6px;          /* between xs/sm — compact chip/pill padding, tight gaps (elspeth-892528c899: recurred as a raw literal ×20+, promoted rather than snapped) */
   --space-sm:  8px;
+  --space-2-5: 10px;         /* between sm/md — same rationale as --space-1-5, for the ~10px sibling literal */
   --space-md:  12px;
   --space-lg:  16px;
   --space-xl:  24px;
@@ -180,6 +224,15 @@
   --radius-xl:   12px;
   --radius-pill: 9999px;   /* fully-rounded pills, circular FABs, progress-bar tracks */
 
+  /* ── Elevation (elspeth-892528c899) ──────────────────────────────────────── */
+  /* Three tiers matching what the app actually raises off the page. Smaller
+     one-off recipes (command palette, oversized config panels) stay literal —
+     they sit at a different weight than any of these three and forcing them
+     onto the nearest tier would be a visible regression, not a hygiene fix. */
+  --shadow-popover:  0 4px 12px rgba(0, 0, 0, 0.15);   /* tooltips, mini floating panels, the scroll-to-bottom pill */
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.18);   /* menus, the graph-canvas controls panel */
+  --shadow-modal:    0 8px 32px rgba(0, 0, 0, 0.25);   /* blocking dialogs (was copy-pasted identically ×7) */
+
   /* ── Control heights ─────────────────────────────────────────────────────── */
   /* --size-control is the WCAG 2.5.5 (AAA) 44×44 touch-target floor used by
      .btn for canvas-area primary actions. --size-control-compact is the smaller
@@ -188,6 +241,9 @@
      .btn or .btn-compact — do not redeclare min-height literally. */
   --size-control:         44px;
   --size-control-compact: 36px;
+  /* Fixed app-header row height (desktop); the <=960px wrap rule reuses it as
+     a min-height so a wrapped header never renders shorter than the fixed row. */
+  --size-header-height:   40px;
 
   /* ── Transitions ─────────────────────────────────────────────────────────── */
   --transition-fast:   100ms ease;
@@ -248,12 +304,19 @@
   /* ── Borders — darker for light backgrounds ───────────────────────────── */
   --color-border:            rgba(15, 45, 53, 0.12);
   --color-border-strong:     rgba(15, 45, 53, 0.25);
+  /* Light theme: the plain accent already clears 3:1 on the white chip surface. */
+  --color-chip-border:       var(--color-accent);
+  --color-input-border:      #6c919d;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
-  --color-bubble-user:           rgba(40, 130, 100, 0.10);
-  --color-bubble-user-border:    rgba(40, 130, 100, 0.30);
-  --color-bubble-assistant:      rgba(15, 45, 53, 0.05);
-  --color-bubble-assistant-border: rgba(15, 45, 53, 0.15);
+  /* Light-theme mirror of the dark widened split: a stronger green for the user
+     and a more present navy tint for the reply so the two speakers stay clearly
+     distinct on the light paper surface (the old 5% navy reply was nearly
+     invisible), while keeping dark text well above AA on both fills. */
+  --color-bubble-user:           rgba(40, 130, 100, 0.15);
+  --color-bubble-user-border:    rgba(40, 130, 100, 0.40);
+  --color-bubble-assistant:      rgba(15, 45, 53, 0.09);
+  --color-bubble-assistant-border: rgba(15, 45, 53, 0.22);
   --color-bubble-system:         rgba(15, 45, 53, 0.03);
 
   /* ── Semantic backgrounds — adjusted for light theme ────────────────────── */
@@ -272,9 +335,9 @@
      colorContrast.test.ts. The semantic-colour-on-tinted-bg pairings (e.g.
      --color-info on --color-info-bg) become slightly higher-contrast, which
      is the desired direction. */
-  --color-success:           #0d8a88;
-  --color-error:             #c93b38;
-  --color-warning:           #b86830;
+  --color-success:           #0b6e6c;
+  --color-error:             #b23331;
+  --color-warning:           #905126;
   --color-info:              #176d8a;
   --color-state-positive:    #056e6c;
 
@@ -323,10 +386,10 @@
 
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #5a7a84;
-  --color-status-running:    #2890b8;
-  --color-status-completed:  #0d8a88;
+  --color-status-running:    #237c9f;
+  --color-status-completed:  #0b6e6c;
   --color-status-failed:     #c93b38;
-  --color-status-cancelled:  #b86830;
+  --color-status-cancelled:  #905126;
   --color-status-empty:      #4d6a73;
 
   /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */
@@ -336,4 +399,9 @@
 
   /* ── React Flow canvas grid (light) ──────────────────────────────────── */
   --color-canvas-grid:           rgba(15, 45, 53, 0.20);
+
+  /* ── Elevation (light) ──────────────────────────────────────────────── */
+  /* Dropdown shadow swaps to a tinted-navy base on light backgrounds —
+     plain black at the same alpha reads too heavy on white/cream surfaces. */
+  --shadow-dropdown: 0 8px 24px rgba(15, 45, 53, 0.10);
 }

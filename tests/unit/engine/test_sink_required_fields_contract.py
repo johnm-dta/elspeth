@@ -29,7 +29,7 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
-from elspeth.engine.executors.sink_required_fields import SinkRequiredFieldsContract
+from elspeth.engine.executors.sink_required_fields import SinkRequiredFieldsContract, _format_optional_missing_fields_context
 from elspeth.plugins.infrastructure.base import BaseSink
 
 
@@ -209,7 +209,7 @@ def test_contract_claims_boundary_dispatch_site() -> None:
 def test_boundary_check_raises_on_missing_required_field() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(
-        plugin=_plugin(),
+        plugin=_plugin(node_id="n-1"),
         node_id="n-1",
         run_id="run-1",
         row_id="row-1",
@@ -227,10 +227,102 @@ def test_boundary_check_raises_on_missing_required_field() -> None:
     assert "coalesce merge" in str(exc_info.value)
 
 
+def test_boundary_check_rejects_dispatcher_plugin_node_drift() -> None:
+    contract = SinkRequiredFieldsContract()
+    inputs = BoundaryInputs(
+        plugin=_plugin(node_id="sink-node"),
+        node_id="dispatcher-node",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        static_contract=frozenset({"customer_id", "amount"}),
+        row_data={"customer_id": "v"},
+        row_contract=None,
+    )
+
+    with pytest.raises(OrchestrationInvariantError, match="node_id drift"):
+        contract.boundary_check(inputs, BoundaryOutputs())
+
+
+def test_boundary_check_uses_static_contract_snapshot_not_mutable_plugin_state() -> None:
+    contract = SinkRequiredFieldsContract()
+    inputs = BoundaryInputs(
+        plugin=_plugin(node_id="n-1", declared_required_fields=frozenset({"plugin_mutated_field"})),
+        node_id="n-1",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        static_contract=frozenset({"snapshot_required_field"}),
+        row_data={"plugin_mutated_field": "v"},
+        row_contract=None,
+    )
+
+    with pytest.raises(SinkRequiredFieldsViolation) as exc_info:
+        contract.boundary_check(inputs, BoundaryOutputs())
+
+    assert tuple(exc_info.value.payload["declared"]) == ("snapshot_required_field",)
+    assert tuple(exc_info.value.payload["missing"]) == ("snapshot_required_field",)
+
+
+def test_optional_missing_fields_context_resolves_original_names() -> None:
+    contract = SchemaContract(
+        mode="OBSERVED",
+        fields=(
+            FieldContract(
+                normalized_name="customer_id",
+                original_name="Customer ID",
+                python_type=str,
+                required=False,
+                source="inferred",
+                nullable=False,
+            ),
+        ),
+        locked=True,
+    )
+
+    context = _format_optional_missing_fields_context(
+        missing=("Customer ID", "absent"),
+        row_contract=contract,
+    )
+
+    assert context == (
+        " Fields ['Customer ID'] are optional in the row's schema contract "
+        "(likely from coalesce merge). Fix: ensure all branches produce these fields as required."
+    )
+
+
+def test_boundary_check_bounds_runtime_observed_diagnostics() -> None:
+    contract = SinkRequiredFieldsContract()
+    long_suffix = "x" * 120
+    row_data = {f"field_{index:03d}_{long_suffix}": "v" for index in range(50)}
+    inputs = BoundaryInputs(
+        plugin=_plugin(node_id="n-1", declared_required_fields=frozenset({"required_field"})),
+        node_id="n-1",
+        run_id="run-1",
+        row_id="row-1",
+        token_id="token-1",
+        static_contract=frozenset({"required_field"}),
+        row_data=row_data,
+        row_contract=None,
+    )
+
+    with pytest.raises(SinkRequiredFieldsViolation) as exc_info:
+        contract.boundary_check(inputs, BoundaryOutputs())
+
+    payload = exc_info.value.payload
+    assert payload["runtime_observed_count"] == 50
+    assert payload["runtime_observed_truncated"] is True
+    assert len(payload["runtime_observed"]) == 20
+    assert all(len(name) <= 64 for name in payload["runtime_observed"])
+    assert payload["runtime_observed_omitted_count"] == 30
+    assert len(payload["runtime_observed_omitted_hashes"]) == 20
+    assert long_suffix not in str(exc_info.value)
+
+
 def test_boundary_check_returns_none_when_required_fields_present() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(
-        plugin=_plugin(),
+        plugin=_plugin(node_id="n-1"),
         node_id="n-1",
         run_id="run-1",
         row_id="row-1",
@@ -246,7 +338,7 @@ def test_boundary_check_returns_none_when_required_fields_present() -> None:
 def test_boundary_check_skips_contract_annotation_when_row_contract_absent() -> None:
     contract = SinkRequiredFieldsContract()
     inputs = BoundaryInputs(
-        plugin=_plugin(),
+        plugin=_plugin(node_id="n-1"),
         node_id="n-1",
         run_id="run-1",
         row_id="row-1",

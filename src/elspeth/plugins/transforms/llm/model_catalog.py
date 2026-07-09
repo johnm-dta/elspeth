@@ -140,6 +140,11 @@ def reset_live_openrouter_catalog() -> None:
     Used by ``tests/unit/plugins/llm/test_model_catalog.py`` to enforce
     test-order independence.
     """
+    _clear_live_openrouter_catalog()
+
+
+def _clear_live_openrouter_catalog() -> None:
+    """Clear the process-global live snapshot under the catalog lock."""
     global _LIVE_CATALOG, _LIVE_CATALOG_SHA256
     with _LIVE_CATALOG_LOCK:
         _LIVE_CATALOG = None
@@ -246,6 +251,12 @@ async def prime_openrouter_catalog_from_live(
     supply a fixture without monkeypatching ``httpx``; the lifespan
     passes a bound method of an ``httpx.AsyncClient`` instance.
 
+    If called again in the same process, a failed refresh must not leave a
+    previous live snapshot active behind a "falling back to bundled"
+    warning. Failed attempts therefore clear any existing live snapshot before
+    returning ``False``; successful attempts publish the replacement snapshot
+    atomically at the end.
+
     Tier-3 trust boundary discipline (CLAUDE.md "Data Manifesto"):
     OpenRouter's response is external. We validate the top-level shape
     (``{"data": [...]}``) and per-entry shape (each entry is a dict with
@@ -270,6 +281,7 @@ async def prime_openrouter_catalog_from_live(
             exc_class=type(exc).__name__,
             action="falling back to bundled litellm catalog",
         )
+        _clear_live_openrouter_catalog()
         return False
 
     if response.status_code != 200:
@@ -279,6 +291,7 @@ async def prime_openrouter_catalog_from_live(
             status_code=response.status_code,
             action="falling back to bundled litellm catalog",
         )
+        _clear_live_openrouter_catalog()
         return False
 
     try:
@@ -290,6 +303,7 @@ async def prime_openrouter_catalog_from_live(
             exc_class=type(exc).__name__,
             action="falling back to bundled litellm catalog",
         )
+        _clear_live_openrouter_catalog()
         return False
 
     # Tier-3 top-level shape validation. Missing ``data`` key or wrong
@@ -302,6 +316,7 @@ async def prime_openrouter_catalog_from_live(
             top_level_type=type(payload).__name__,
             action="falling back to bundled litellm catalog",
         )
+        _clear_live_openrouter_catalog()
         return False
 
     entries: list[Any] = payload["data"]
@@ -327,6 +342,7 @@ async def prime_openrouter_catalog_from_live(
             entries_skipped=skipped,
             action="falling back to bundled litellm catalog",
         )
+        _clear_live_openrouter_catalog()
         return False
 
     snapshot = frozenset(ids)

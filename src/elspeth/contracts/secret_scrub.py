@@ -38,14 +38,23 @@ _REDACTED = "<redacted-secret>"
 #    HTTPS endpoints (Landscape resource URIs, example.com links) do not
 #    get nuked in triage payloads — see ``test_plain_https_url_without
 #    _credentials_passes_through``.
+#  - Common hosted-service credentials: fine-grained GitHub PATs and app
+#    tokens, Google API keys, newer Slack token prefixes, and Azure storage
+#    account keys (64 raw bytes serialized as 88-character base64).
 _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]{20,}"),  # OpenRouter API key
     re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI / generic "sk-" key
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained PAT
+    re.compile(r"gh[osr]_[A-Za-z0-9]{36,}"),  # GitHub OAuth/server/refresh token
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),  # Google API key
     re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),  # Slack token
+    re.compile(r"xapp-[A-Za-z0-9-]{10,}"),  # Slack app token
+    re.compile(r"xoxe-[A-Za-z0-9-]{10,}"),  # Slack workspace token
     re.compile(r"ghp_[A-Za-z0-9]{36,}"),  # GitHub PAT
     re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"),  # JWT
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),  # PEM
+    re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{86}==(?=$|[^A-Za-z0-9+/=])"),  # Azure storage account key
     # Azure SAS signature — the ``sig=`` parameter value is the authenticator.
     re.compile(r"sig=[A-Za-z0-9%/+=]{20,}"),
     # ODBC-style conn-string password field; case-insensitive because
@@ -53,15 +62,24 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(?:password|pwd)=[^;\s]+"),
     # URL-style DB connection strings with embedded credentials.
     re.compile(r"postgres(?:ql)?://[^:/\s]+:[^@/\s]+@"),
-    re.compile(r"mysql://[^:/\s]+:[^@/\s]+@"),
+    re.compile(r"mysql://[^:/\s]+:[^@/\s]+@"),  # secret-scan: allow-this-line
     re.compile(r"mongodb(?:\+srv)?://[^:/\s]+:[^@/\s]+@"),
     # Basic-auth HTTP(S) URLs — require the ``user:pass@`` discriminator so
     # credential-free endpoint URIs are NOT redacted.
     re.compile(r"https?://[^:/\s]+:[^@/\s]+@"),
+    # Low-entropy key/value secret disclosures in freeform violation messages.
+    re.compile(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
+        r"auth[_-]?token|id[_-]?token|bearer[_-]?token|client[_-]?secret|"
+        r"private[_-]?key|secret[_-]?key|connection[_-]?string|authorization|"
+        r"password|passwd|pwd|credentials?)\s*[:=]\s*['\"]?[^'\"\s,;)}\]]+"
+    ),
 )
 
-# Key-name match is case-insensitive (see ``_scrub_value``). Every entry must
-# be lowercase here; the lookup applies ``.lower()`` on the observed key.
+_HTTP_URL_CANDIDATE_RE = re.compile(r"https?://[^\s'\"<>]+")
+
+# Key-name match is case-insensitive and separator-insensitive (see
+# ``_is_secret_key_name``). Every entry must be lowercase here.
 #
 # ADR-010 §Payload-schema enforcement H5 Layer 2 additions: bearer/session tokens
 # carried under non-``authorization`` keys, and connection-string keys
@@ -77,17 +95,28 @@ _SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "password",
         "passwd",
         "authorization",
+        "credentials",
         # H5 additions — bearer / session / refresh families.
         "access_token",
         "refresh_token",
         "session_token",
+        "auth_token",
+        "x_auth_token",
+        "id_token",
+        "bearer_token",
         "auth_cookie",
+        "client_secret",
+        "secret_key",
+        "private_key",
+        "x_api_key",
+        "proxy_authorization",
         # H5 additions — connection / SAS families.
         "sas_token",
         "connection_string",
         "conn_string",
     }
 )
+_SECRET_KEY_NAMES_NORMALIZED: frozenset[str] = frozenset(name.replace("_", "").replace("-", "") for name in _SECRET_KEY_NAMES)
 
 
 def scrub_payload_for_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -113,7 +142,7 @@ def scrub_text_for_audit(text: str) -> str:
 
 
 def _scrub_value(value: Any, *, parent_key: str | None) -> Any:
-    if parent_key is not None and parent_key.lower() in _SECRET_KEY_NAMES:
+    if parent_key is not None and _is_secret_key_name(parent_key):
         return _REDACTED
     if isinstance(value, Mapping):
         return {k: _scrub_value(v, parent_key=k) for k, v in value.items()}
@@ -135,7 +164,26 @@ def _scrub_value(value: Any, *, parent_key: str | None) -> Any:
     return value
 
 
+def _is_secret_key_name(key: str) -> bool:
+    return key.lower().replace("_", "").replace("-", "") in _SECRET_KEY_NAMES_NORMALIZED
+
+
 def _contains_sensitive_http_url(value: str) -> bool:
+    return any(_parsed_http_url_contains_sensitive_parts(candidate) for candidate in _http_url_candidates(value))
+
+
+def _http_url_candidates(value: str) -> tuple[str, ...]:
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        standalone: tuple[str, ...] = ()
+    else:
+        standalone = (value,)
+
+    embedded = tuple(candidate for match in _HTTP_URL_CANDIDATE_RE.finditer(value) if (candidate := match.group(0).rstrip(".,;:!?)]}")))
+    return standalone + embedded
+
+
+def _parsed_http_url_contains_sensitive_parts(value: str) -> bool:
     parsed = urlparse(value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return False

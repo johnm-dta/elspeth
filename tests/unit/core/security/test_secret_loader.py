@@ -5,8 +5,8 @@ from __future__ import annotations
 import builtins
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import ModuleType
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,6 +55,26 @@ def _install_fake_azure_modules(monkeypatch: pytest.MonkeyPatch) -> type[Excepti
     monkeypatch.setitem(sys.modules, "azure.core", core_module)
     monkeypatch.setitem(sys.modules, "azure.core.exceptions", core_exceptions_module)
     return FakeResourceNotFoundError
+
+
+@dataclass(frozen=True, slots=True)
+class _KeyVaultSecretDouble:
+    value: str | None
+
+
+class _KeyVaultClientDouble:
+    def __init__(self, *, secret: _KeyVaultSecretDouble | None = None, error: Exception | None = None) -> None:
+        self._secret = secret
+        self._error = error
+        self.calls: list[str] = []
+
+    def get_secret(self, name: str) -> _KeyVaultSecretDouble:
+        self.calls.append(name)
+        if self._error is not None:
+            raise self._error
+        if self._secret is None:
+            raise AssertionError("Key Vault client double needs a secret or an error")
+        return self._secret
 
 
 def test_get_keyvault_client_creates_secret_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,9 +135,12 @@ class TestKeyVaultSecretLoader:
     def test_get_secret_caches_successful_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://cache-test.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="from-vault")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value="from-vault"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         first_value, first_ref = loader.get_secret("API_KEY")
         second_value, second_ref = loader.get_secret("API_KEY")
@@ -126,21 +149,35 @@ class TestKeyVaultSecretLoader:
         assert second_value == "from-vault"
         assert first_ref.source == "keyvault"
         assert second_ref.source == "keyvault"
-        assert client.get_secret.call_count == 1
+        assert client.calls == ["API_KEY"]
+
+    def test_cache_policy_is_delegated_to_generic_cache_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_azure_modules(monkeypatch)
+        loader = KeyVaultSecretLoader("https://delegated-cache.vault.azure.net")
+
+        assert not hasattr(loader, "_cache")
+        assert isinstance(loader._cache_loader, CachedSecretLoader)
 
     def test_get_secret_none_value_raises_secret_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://empty-secret.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value=None)
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value=None))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         with pytest.raises(SecretNotFoundError, match="has no value"):
             loader.get_secret("EMPTY_SECRET")
 
     def test_get_secret_import_error_from_client_creation_propagates(self) -> None:
         loader = KeyVaultSecretLoader("https://imports.vault.azure.net")
-        loader._get_client = MagicMock(side_effect=ImportError("azure unavailable"))  # type: ignore[method-assign]
+
+        def get_client() -> object:
+            raise ImportError("azure unavailable")
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         with pytest.raises(ImportError, match="azure unavailable"):
             loader.get_secret("API_KEY")
@@ -148,9 +185,12 @@ class TestKeyVaultSecretLoader:
     def test_get_secret_translates_azure_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_not_found = _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://missing-secret.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.side_effect = fake_not_found("404")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(error=fake_not_found("404"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         with pytest.raises(SecretNotFoundError, match="not found in Key Vault"):
             loader.get_secret("DOES_NOT_EXIST")
@@ -165,9 +205,12 @@ class TestKeyVaultSecretLoader:
         _install_fake_azure_modules(monkeypatch)
 
         loader = KeyVaultSecretLoader("https://sdk-present.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="vault-success")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value="vault-success"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         value, ref = loader.get_secret("ANY_SECRET")
 
@@ -177,15 +220,18 @@ class TestKeyVaultSecretLoader:
     def test_clear_cache_forces_refetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://clear-cache.vault.azure.net")
-        client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="refetch-me")
-        loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
+        client = _KeyVaultClientDouble(secret=_KeyVaultSecretDouble(value="refetch-me"))
+
+        def get_client() -> _KeyVaultClientDouble:
+            return client
+
+        loader._get_client = get_client  # type: ignore[method-assign]
 
         loader.get_secret("REFRESH")
         loader.clear_cache()
         loader.get_secret("REFRESH")
 
-        assert client.get_secret.call_count == 2
+        assert client.calls == ["REFRESH", "REFRESH"]
 
 
 class _CountingLoader:
@@ -272,34 +318,22 @@ class TestCompositeSecretLoader:
 
 
 class TestClearCacheThreadSafety:
-    """Regression: clear_cache() must acquire the lock."""
+    """Clear-cache delegation and locking behavior."""
 
-    def test_keyvault_clear_cache_acquires_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_keyvault_clear_cache_delegates_to_generic_cache_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://test.vault.azure.net")
-        # Verify lock is acquired by checking that clear_cache
-        # blocks when lock is held
-        import threading
+        delegated = False
 
-        lock_acquired = threading.Event()
-        clear_started = threading.Event()
+        def clear_cache() -> None:
+            nonlocal delegated
+            delegated = True
 
-        def blocking_test() -> None:
-            clear_started.set()
-            with loader._lock:
-                lock_acquired.set()
-                # Hold lock briefly
-                import time
+        loader._cache_loader.clear_cache = clear_cache  # type: ignore[method-assign]
 
-                time.sleep(0.1)
-
-        t = threading.Thread(target=blocking_test)
-        t.start()
-        clear_started.wait()
-        lock_acquired.wait()
-        # clear_cache should block until lock is released
         loader.clear_cache()
-        t.join()
+
+        assert delegated is True
 
     def test_cached_loader_clear_cache_acquires_lock(self) -> None:
         inner = _MissingLoader()
@@ -322,3 +356,80 @@ class TestClearCacheThreadSafety:
         loader.clear_cache()
         clear_done.set()
         t.join()
+
+
+def _resolve_challenge_verify_flag(client: object) -> bool:
+    """Read the effective verify-challenge-resource flag off a live SecretClient.
+
+    The flag is not a public attribute; it lives on the Key Vault
+    ``ChallengeAuthPolicy`` inside the client's transport pipeline. We reach
+    through SDK internals deliberately: the pin below must observe the *real*
+    runtime posture, so if a future ``azure-keyvault-secrets`` release reorganises
+    these internals the walk fails loudly. That failure is the intended
+    "someone must re-verify this security assumption" signal — not a silent pass.
+    """
+    try:
+        policies = client._client._client._pipeline._impl_policies  # type: ignore[attr-defined]
+    except AttributeError as e:  # pragma: no cover - only trips on an SDK reshuffle
+        raise AssertionError(
+            "Could not reach the SecretClient transport pipeline via the known "
+            "azure-keyvault-secrets internals — the SDK layout changed. Re-verify "
+            "that Key Vault challenge-resource verification is still on by default, "
+            "then update this walk (see test_keyvault_client_verifies_challenge_"
+            "resource_by_default)."
+        ) from e
+
+    for policy in policies:
+        if "Challenge" not in type(policy).__name__:
+            continue
+        try:
+            return bool(policy._verify_challenge_resource)  # type: ignore[attr-defined]
+        except AttributeError:
+            continue
+
+    raise AssertionError(
+        "No challenge-auth policy exposing _verify_challenge_resource was found on "
+        "the SecretClient pipeline — azure-keyvault-secrets no longer challenge-"
+        "verifies by construction. Re-verify the SSRF/credential-boundary "
+        "assumption (elspeth-7572facbc6) before adjusting this pin."
+    )
+
+
+def test_keyvault_client_verifies_challenge_resource_by_default() -> None:
+    """Pin the SDK default our SSRF hardening quietly leans on (elspeth-7572facbc6).
+
+    WHY THIS MATTERS. The ``vault_url`` SSRF hardening has two visible layers: a
+    validator that restricts ``vault_url`` to approved Azure Key Vault host
+    suffixes, and an optional deployment allowlist. Together they stop a settings
+    file from aiming a ``DefaultAzureCredential``-backed client at an *arbitrary*
+    host. What neither layer covers is token leakage during the auth *challenge*:
+    absent challenge-resource verification, a host that answers with a crafted
+    ``WWW-Authenticate`` challenge could induce the client to request — and send —
+    a bearer token scoped to a resource the responder names. ``azure-keyvault-
+    secrets`` >= 4.11 defaults ``verify_challenge_resource=True`` (it rejects a
+    challenge whose resource is not the vault's own domain), and our loader relies
+    entirely on that default: ``_get_keyvault_client`` never passes the flag.
+
+    That reliance is an invisible assumption, so we pin it. This test fails if
+    either side erodes:
+
+    * a future SDK release flips the default to ``False`` (guarded further by the
+      ``azure-keyvault-secrets>=4.11,<5`` pin in pyproject), or
+    * someone edits ``_get_keyvault_client`` to pass
+      ``verify_challenge_resource=False``.
+
+    A failure here is a prompt to re-verify the credential-egress posture, not a
+    test to silence.
+    """
+    pytest.importorskip("azure.keyvault.secrets")
+    pytest.importorskip("azure.identity")
+
+    # Build via the real production path. Both SecretClient and
+    # DefaultAzureCredential defer all network I/O until the first token/secret
+    # fetch, so constructing the client here is side-effect free.
+    client = _get_keyvault_client("https://elspeth-pin-test.vault.azure.net")
+
+    assert _resolve_challenge_verify_flag(client) is True, (
+        "Key Vault client is not verifying the challenge resource — the SSRF "
+        "hardening's token-leak defense (elspeth-7572facbc6) has regressed."
+    )

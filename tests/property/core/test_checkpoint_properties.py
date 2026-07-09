@@ -36,11 +36,13 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.contracts import Checkpoint, Determinism, NodeType, RunStatus
+from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.core.canonical import stable_hash
 from elspeth.core.checkpoint import CheckpointCompatibilityValidator, CheckpointManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, tokens_table
+from tests.helpers.checkpoint import checkpoint_draft
 from tests.strategies.json import json_primitives
 
 # =============================================================================
@@ -81,6 +83,24 @@ def create_test_graph(num_transforms: int = 2) -> ExecutionGraph:
     graph.add_edge(prev, "sink", label="continue")
 
     return graph
+
+
+def create_checkpoint(
+    manager: CheckpointManager,
+    *,
+    run_id: str,
+    sequence_number: int,
+    graph: ExecutionGraph,
+    barrier_scalars: BarrierScalars | None = None,
+) -> Checkpoint:
+    return manager.create_checkpoint(
+        draft=checkpoint_draft(
+            run_id=run_id,
+            sequence_number=sequence_number,
+            graph=graph,
+            barrier_scalars=barrier_scalars,
+        )
+    )
 
 
 def create_test_db() -> tuple[LandscapeDB, Path]:
@@ -198,8 +218,6 @@ class TestFormatVersionProperties:
         Cross-version resume is explicitly forbidden - both older AND newer
         versions must be rejected to prevent silent corruption.
         """
-        from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
-
         # Skip current version (it's valid)
         assume(version != Checkpoint.CURRENT_FORMAT_VERSION)
 
@@ -211,7 +229,8 @@ class TestFormatVersionProperties:
             setup_checkpoint_prerequisites(db, "test-run-version", token_id="token-version")
 
             # Create a valid checkpoint first
-            manager.create_checkpoint(
+            create_checkpoint(
+                manager,
                 run_id="test-run-version",
                 sequence_number=1,
                 barrier_scalars=None,
@@ -229,9 +248,16 @@ class TestFormatVersionProperties:
                     update(checkpoints_table).where(checkpoints_table.c.run_id == "test-run-version").values(format_version=version)
                 )
 
-            # Now try to load - should raise
-            with pytest.raises(IncompatibleCheckpointError):
-                manager.get_latest_checkpoint("test-run-version")
+            # Raw repository load succeeds; compatibility validation owns
+            # the resume refusal.
+            loaded = manager.get_latest_checkpoint("test-run-version")
+            assert loaded is not None
+            assert loaded.format_version == version
+
+            result = CheckpointCompatibilityValidator().validate(loaded, graph)
+            assert result.can_resume is False
+            assert result.reason is not None
+            assert "incompatible format version" in result.reason
 
         finally:
             db.close()
@@ -245,7 +271,8 @@ class TestFormatVersionProperties:
 
             setup_checkpoint_prerequisites(db, "test-run-current", token_id="token-current")
 
-            checkpoint = manager.create_checkpoint(
+            checkpoint = create_checkpoint(
+                manager,
                 run_id="test-run-current",
                 sequence_number=1,
                 barrier_scalars=None,
@@ -356,7 +383,8 @@ class TestCompatibilityValidationProperties:
 
             setup_checkpoint_prerequisites(db, "test-unchanged", token_id="token-unchanged")
 
-            checkpoint = manager.create_checkpoint(
+            checkpoint = create_checkpoint(
+                manager,
                 run_id="test-unchanged",
                 sequence_number=1,
                 barrier_scalars=None,
@@ -379,7 +407,8 @@ class TestCompatibilityValidationProperties:
 
             setup_checkpoint_prerequisites(db, "test-missing-node", token_id="token-missing", node_id="transform_1")
 
-            checkpoint = manager.create_checkpoint(
+            checkpoint = create_checkpoint(
+                manager,
                 run_id="test-missing-node",
                 sequence_number=1,
                 barrier_scalars=None,
@@ -417,7 +446,8 @@ class TestCompatibilityValidationProperties:
 
             setup_checkpoint_prerequisites(db, "test-config-change", token_id="token-config")
 
-            checkpoint = manager.create_checkpoint(
+            checkpoint = create_checkpoint(
+                manager,
                 run_id="test-config-change",
                 sequence_number=1,
                 barrier_scalars=None,
@@ -466,7 +496,8 @@ class TestSequenceNumberProperties:
 
             # Create checkpoints in reversed order
             for seq in reversed(seq_numbers):
-                manager.create_checkpoint(
+                create_checkpoint(
+                    manager,
                     run_id="test-ordering",
                     sequence_number=seq,
                     barrier_scalars=None,
@@ -494,7 +525,8 @@ class TestSequenceNumberProperties:
             setup_checkpoint_prerequisites(db, "test-latest")
 
             for seq in seq_numbers:
-                manager.create_checkpoint(
+                create_checkpoint(
+                    manager,
                     run_id="test-latest",
                     sequence_number=seq,
                     barrier_scalars=None,
@@ -519,19 +551,14 @@ class TestSequenceNumberProperties:
 class TestCheckpointCreationProperties:
     """Property tests for checkpoint creation validation."""
 
-    def test_create_checkpoint_requires_graph(self) -> None:
-        """Property: Checkpoint creation fails if graph is None."""
+    def test_create_checkpoint_requires_draft(self) -> None:
+        """Property: Checkpoint creation requires a persistence-ready draft."""
         db, _ = create_test_db()
         try:
             manager = CheckpointManager(db)
 
-            with pytest.raises(ValueError, match="graph parameter is required"):
-                manager.create_checkpoint(
-                    run_id="test-no-graph",
-                    sequence_number=1,
-                    barrier_scalars=None,
-                    graph=None,  # type: ignore
-                )
+            with pytest.raises(TypeError, match="draft must be CheckpointDraft"):
+                manager.create_checkpoint(draft=None)  # type: ignore[arg-type]
         finally:
             db.close()
 

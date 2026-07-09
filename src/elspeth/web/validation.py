@@ -184,6 +184,30 @@ def _reject_credential_shaped_content(value: str) -> None:
             raise ValueError(_CREDENTIAL_REJECTION_MESSAGE)
 
 
+def _redact_sensitive_content(value: str) -> str:
+    """Substitute credential/PII-shaped substrings with fixed sentinels.
+
+    This is for egress surfaces that should preserve surrounding diagnostic
+    prose while removing sensitive tokens. Rejection boundaries should keep
+    using :func:`_reject_credential_shaped_content`.
+    """
+
+    redacted = value
+    for name, pattern in _CREDENTIAL_PATTERNS:
+        redacted = pattern.sub(f"<redacted-sensitive:{name}>", redacted)
+
+    def _card_replacement(match: re.Match[str]) -> str:
+        digits = "".join(match.groups())
+        if _luhn_check(digits):
+            return "<redacted-sensitive:credit_card>"
+        return match.group(0)
+
+    redacted = _CREDIT_CARD_RE.sub(_card_replacement, redacted)
+    for name, pattern in _PII_WARNING_PATTERNS:
+        redacted = pattern.sub(f"<redacted-sensitive:{name}>", redacted)
+    return redacted
+
+
 @dataclass(frozen=True, slots=True)
 class PIIWarning:
     """Operational-telemetry payload for a PII-shaped value detected in input.

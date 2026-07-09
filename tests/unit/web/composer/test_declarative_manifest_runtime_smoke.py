@@ -91,10 +91,9 @@ def test_declarative_entry_argument_redaction_runtime(tool_name: str, entry: Too
     #   * ``recent_errors`` / ``attempted_actions`` summarizers expect
     #     ``list[str]`` (request_advisor_hint).  We pass a list there.
     #   * Every other declared sensitive key currently accepts ``str`` or
-    #     ``dict``.  ``dict`` is a superset that lands a valid input across
-    #     :func:`_summarize_set_source_options` (calls
-    #     :func:`redact_source_storage_path` which expects a dict) AND
-    #     :func:`_summarize_set_metadata_patch` (expects a dict).  The
+    #     ``dict``.  ``dict`` is a representative input across
+    #     :func:`_summarize_set_source_options` and
+    #     :func:`_summarize_set_metadata_patch`.  The
     #     :func:`_summarize_advisor_problem_summary` /
     #     :func:`_summarize_advisor_schema_excerpt` summarizers expect ``str``.
     list_keys = {"recent_errors", "attempted_actions"}

@@ -128,12 +128,12 @@ class TestWiredTransformIntegrity:
 
     def test_wired_transform_mismatched_plugin_name_raises(self) -> None:
         from elspeth.core.config import TransformSettings
-        from elspeth.core.dag import WiredTransform
+        from elspeth.core.dag.wiring import WiredTransform
 
         class DummyTransform:
             name = "actual_plugin"
 
-        with pytest.raises(ValueError, match="WiredTransform mismatch"):
+        with pytest.raises(GraphValidationError, match="WiredTransform mismatch") as exc_info:
             WiredTransform(
                 plugin=DummyTransform(),  # type: ignore[arg-type]
                 settings=TransformSettings(
@@ -145,3 +145,5 @@ class TestWiredTransformIntegrity:
                     options={},
                 ),
             )
+        assert exc_info.value.component_id == "t0"
+        assert exc_info.value.component_type == "transform"

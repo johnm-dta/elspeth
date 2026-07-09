@@ -29,11 +29,11 @@ _ALL_RULE_IDS = frozenset(RULES)
 # freeze guard. list/set are included because isinstance(self.x, list) gates a
 # deep_freeze the same way the wrapper types do.
 _FREEZE_GUARD_TYPES = {"dict", "list", "set", "tuple", "MappingProxyType", "frozenset", "Mapping"}
-# Callables whose presence in an object.__setattr__(self, "field", <expr>) RHS
-# (or a freeze_fields call) means a field is frozen. tuple/frozenset are shallow
-# immutable constructors; the rule already accepts shallow MappingProxyType wraps,
-# so shallow tuple/frozenset coverage is consistent.
-_FREEZE_PRODUCERS = frozenset({"freeze_fields", "deep_freeze", "MappingProxyType", "tuple", "frozenset"})
+# Top-level callables whose object.__setattr__(self, "field", <expr>) RHS can
+# produce a frozen replacement value. tuple/frozenset are shallow and need extra
+# annotation checks before they can cover nested mutable containers.
+_DEEP_FREEZE_PRODUCERS = frozenset({"deep_freeze", "MappingProxyType"})
+_SHALLOW_FREEZE_PRODUCERS = frozenset({"tuple", "frozenset"})
 # Immutable carriers that STORE their subscript args as elements — recursion into
 # their type parameters can reach nested mutable containers (tuple[dict, ...]).
 # Deliberately excludes Callable/ClassVar/etc. whose subscripts are signatures,
@@ -93,7 +93,8 @@ class FreezeGuardVisitor(ast.NodeVisitor):
         self._in_post_init = False
 
         if is_frozen_dataclass(node):
-            container_fields = self._get_container_fields(node)
+            container_field_annotations = self._get_container_field_annotations(node)
+            container_fields = list(container_field_annotations)
             if container_fields:
                 post_init = self._find_post_init(node)
                 if post_init is None:
@@ -103,7 +104,7 @@ class FreezeGuardVisitor(ast.NodeVisitor):
                         f"Frozen dataclass '{node.name}' has container fields {container_fields} but no __post_init__",
                     )
                 else:
-                    covered = self._post_init_covered_fields(post_init)
+                    covered = self._post_init_covered_fields(post_init, container_field_annotations)
                     uncovered = [] if covered is None else [field_name for field_name in container_fields if field_name not in covered]
                     if uncovered:
                         self._add_finding(
@@ -159,6 +160,11 @@ class FreezeGuardVisitor(ast.NodeVisitor):
         # (e.g. tuple[dict[str, object], ...], frozenset[Mapping[...]]) is caught.
         if annotation is None:
             return False
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            parsed = _parse_string_annotation(annotation.value)
+            if parsed is not None:
+                return self._annotation_contains_container(parsed)
+            return any(container_type in annotation.value for container_type in _CONTAINER_TYPES)
         if isinstance(annotation, ast.Name):
             return annotation.id in _CONTAINER_TYPES
         if isinstance(annotation, ast.Attribute):
@@ -175,18 +181,38 @@ class FreezeGuardVisitor(ast.NodeVisitor):
             return any(self._annotation_contains_container(element) for element in elements)
         if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
             return self._annotation_contains_container(annotation.left) or self._annotation_contains_container(annotation.right)
-        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-            return any(container_type in annotation.value for container_type in _CONTAINER_TYPES)
         return False
 
-    def _get_container_fields(self, node: ast.ClassDef) -> list[str]:
-        return [
-            item.target.id
+    def _annotation_has_nested_mutable_container(self, annotation: ast.expr | None) -> bool:
+        if annotation is None:
+            return False
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            parsed = _parse_string_annotation(annotation.value)
+            return self._annotation_has_nested_mutable_container(parsed) if parsed is not None else False
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            return self._annotation_has_nested_mutable_container(annotation.left) or self._annotation_has_nested_mutable_container(
+                annotation.right
+            )
+        if not isinstance(annotation, ast.Subscript):
+            return False
+
+        outer = annotation.value
+        outer_name = outer.id if isinstance(outer, ast.Name) else (outer.attr if isinstance(outer, ast.Attribute) else "")
+        if outer_name not in _CONTAINER_TYPES and outer_name not in _NESTED_CARRIERS:
+            return False
+
+        sub = annotation.slice
+        elements = sub.elts if isinstance(sub, ast.Tuple) else [sub]
+        return any(self._annotation_contains_container(element) for element in elements)
+
+    def _get_container_field_annotations(self, node: ast.ClassDef) -> dict[str, ast.expr]:
+        return {
+            item.target.id: item.annotation
             for item in node.body
             if isinstance(item, ast.AnnAssign)
             and isinstance(item.target, ast.Name)
             and self._annotation_contains_container(item.annotation)
-        ]
+        }
 
     def _find_post_init(self, node: ast.ClassDef) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         for item in node.body:
@@ -194,7 +220,11 @@ class FreezeGuardVisitor(ast.NodeVisitor):
                 return item
         return None
 
-    def _post_init_covered_fields(self, post_init: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str] | None:
+    def _post_init_covered_fields(
+        self,
+        post_init: ast.FunctionDef | ast.AsyncFunctionDef,
+        field_annotations: dict[str, ast.expr],
+    ) -> set[str] | None:
         """Return the field names a __post_init__ actually freezes.
 
         A field is covered when it is named in a ``freeze_fields(self, "x", ...)``
@@ -229,13 +259,23 @@ class FreezeGuardVisitor(ast.NodeVisitor):
                     and target.id == "self"
                     and isinstance(field_node, ast.Constant)
                     and isinstance(field_node.value, str)
-                    and self._expr_is_freeze_producing(value_node)
+                    and self._expr_is_freeze_producing(value_node, field_annotations.get(field_node.value))
                 ):
                     covered.add(field_node.value)
         return covered
 
-    def _expr_is_freeze_producing(self, expr: ast.expr) -> bool:
-        return any(isinstance(node, ast.Call) and _called_name(node.func) in _FREEZE_PRODUCERS for node in ast.walk(expr))
+    def _expr_is_freeze_producing(self, expr: ast.expr, annotation: ast.expr | None) -> bool:
+        if not isinstance(expr, ast.Call):
+            return False
+
+        name = _called_name(expr.func)
+        if name in _DEEP_FREEZE_PRODUCERS:
+            return True
+        if name not in _SHALLOW_FREEZE_PRODUCERS:
+            return False
+        if not self._annotation_has_nested_mutable_container(annotation):
+            return True
+        return _expr_contains_deep_freeze_call(expr)
 
     def _is_mapping_proxy_call(self, node: ast.Call) -> bool:
         func = node.func
@@ -283,6 +323,18 @@ def _called_name(func: ast.expr) -> str:
     if isinstance(func, ast.Attribute):
         return func.attr
     return ""
+
+
+def _expr_contains_deep_freeze_call(expr: ast.expr) -> bool:
+    return any(isinstance(node, ast.Call) and _called_name(node.func) == "deep_freeze" for node in ast.walk(expr))
+
+
+def _parse_string_annotation(annotation: str) -> ast.expr | None:
+    try:
+        parsed = ast.parse(annotation, mode="eval")
+    except SyntaxError:
+        return None
+    return parsed.body
 
 
 def _guard_type_name(node: ast.expr) -> str | None:

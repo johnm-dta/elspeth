@@ -57,6 +57,21 @@ class TestRetrySettings:
         with pytest.raises(ValidationError):
             RetrySettings(initial_delay_seconds=-1.0)
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("initial_delay_seconds", 0.005),
+            ("max_delay_seconds", 0.05),
+        ],
+    )
+    def test_delay_floors_match_runtime_contract(self, field_name: str, value: float) -> None:
+        from elspeth.core.config import RetrySettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            RetrySettings(**{field_name: value})
+
+        assert exc_info.value.errors()[0]["loc"] == (field_name,)
+
 
 class TestElspethSettings:
     """Top-level settings validation."""
@@ -225,6 +240,141 @@ sources:
         settings = load_settings(config_file)
         assert "output" in settings.sinks
         assert settings.sinks["output"].plugin == "csv"
+
+    def test_load_settings_rejects_report_assemble_title_placeholder_before_env_expansion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("REPORT_SECRET", "expanded-host-secret")
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: text_rows
+    options:
+      path: input.csv
+transforms:
+  - name: report
+    plugin: report_assemble
+    input: text_rows
+    on_success: output
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      title: "${REPORT_SECRET}"
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: output.csv
+""")
+
+        with pytest.raises(ValueError, match=r"report_assemble.*title.*environment-variable placeholders"):
+            load_settings(config_file)
+
+    def test_load_settings_from_yaml_string_rejects_report_assemble_join_with_placeholder_before_env_expansion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("REPORT_JOINER", "expanded-host-secret")
+
+        with pytest.raises(ValueError, match=r"report_assemble.*join_with.*environment-variable placeholders"):
+            load_settings_from_yaml_string(
+                """
+sources:
+  primary:
+    plugin: csv
+    on_success: text_rows
+    options:
+      path: input.csv
+transforms:
+  - name: report
+    plugin: report_assemble
+    input: text_rows
+    on_success: output
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      join_with: "${REPORT_JOINER}"
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: output.csv
+"""
+            )
+
+    def test_load_env_override_lowercases_structural_schema_option_keys(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Environment overrides under options.schema must reach runtime schema config."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+
+""")
+        monkeypatch.setenv("ELSPETH_SOURCES__PRIMARY__OPTIONS__SCHEMA__MODE", "observed")
+
+        settings = load_settings(config_file)
+
+        assert settings.sources["primary"].options == {"schema": {"mode": "observed"}}
+        assert "SCHEMA" not in settings.sources["primary"].options
+
+    def test_load_env_override_merges_with_existing_schema_option(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Environment overrides for options.schema fields must override YAML schema fields."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      schema:
+        mode: fixed
+        fields:
+          - name: customer_id
+            type: str
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+
+""")
+        monkeypatch.setenv("ELSPETH_SOURCES__PRIMARY__OPTIONS__SCHEMA__MODE", "flexible")
+
+        settings = load_settings(config_file)
+
+        assert settings.sources["primary"].options["schema"] == {
+            "mode": "flexible",
+            "fields": [{"name": "customer_id", "type": "str"}],
+        }
+        assert "SCHEMA" not in settings.sources["primary"].options
 
     def test_load_validates_schema(self, tmp_path: Path) -> None:
         from elspeth.core.config import load_settings
@@ -395,7 +545,11 @@ class TestLandscapeSettings:
         ls = LandscapeSettings()
         assert ls.enabled is True
         assert ls.backend == "sqlite"
-        assert ls.url == "sqlite:///./state/audit.db"
+        # Default audit DB lives under data/ alongside the other system DBs
+        # (sessions.db, auth.db, runs/audit.db) — a separate file from the web's
+        # data/runs/audit.db to avoid SQLite write-contention with the running
+        # web service. Examples override landscape.url in their own settings.yaml.
+        assert ls.url == "sqlite:///./data/audit.db"
 
     def test_landscape_settings_postgresql_url(self) -> None:
         """LandscapeSettings accepts PostgreSQL DSNs without mangling."""
@@ -707,7 +861,6 @@ class TestCheckpointSettings:
 
         assert settings.enabled is True
         assert settings.frequency == "every_row"
-        assert settings.aggregation_boundaries is True
 
     def test_checkpoint_frequency_options(self) -> None:
         from elspeth.core.config import CheckpointSettings
@@ -1622,6 +1775,37 @@ gates:
         assert gate.routes == {"High": "urgent", "Medium": "standard", "Low": "archive"}
         assert "High" in gate.routes
         assert "high" not in gate.routes
+
+    def test_load_settings_preserves_schema_route_label(self, tmp_path: Path) -> None:
+        """Route labels named SCHEMA are user data, not plugin schema options."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: priority_router
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+  schema_sink:
+    plugin: csv
+    on_write_failure: discard
+gates:
+  - name: priority_router
+    input: source_out
+    condition: "row['priority']"
+    routes:
+      SCHEMA: schema_sink
+      fallback: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert settings.gates[0].routes == {"SCHEMA": "schema_sink", "fallback": "output"}
+        assert "schema" not in settings.gates[0].routes
 
 
 class TestCoalesceSettings:
@@ -2686,6 +2870,33 @@ telemetry:
             assert "api_key" not in provider
             assert "api_key_fingerprint" in provider
 
+    def test_structural_key_fields_not_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Structural ``*_key`` fields stay plaintext in the audit config capture.
+
+        Regression for elspeth-61f2c0732e: ``data_key`` (JSON extraction key)
+        and ``alternate_key`` (Dataverse upsert column) are exempt from the
+        bare ``_key`` suffix heuristic. ``secret_key`` is the leak guard — a
+        real credential matched only by that suffix must keep fingerprinting.
+        """
+        from elspeth.core.config import _fingerprint_secrets
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        options = {
+            "data_key": "results",
+            "sink": {"alternate_key": "crabc_code"},
+            "secret_key": "sk-lf-1234",
+        }
+
+        result = _fingerprint_secrets(options)
+
+        assert result["data_key"] == "results"
+        assert "data_key_fingerprint" not in result
+        assert result["sink"]["alternate_key"] == "crabc_code"
+        assert "alternate_key_fingerprint" not in result["sink"]
+        assert "secret_key" not in result
+        assert "secret_key_fingerprint" in result
+
     # === Tests for fail-closed behavior ===
 
     def test_missing_key_raises_error_on_fingerprint(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3142,6 +3353,61 @@ sinks:
         reparsed = make_url(sanitized).query["odbc_connect"]
         assert reparsed == "DRIVER={SQL Server};Server=host"
 
+    def test_dsn_repeated_odbc_connect_pwd_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Repeated odbc_connect params parse as a tuple and must all be scrubbed."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+17%7D%3BSERVER%3Ddb&odbc_connect=PWD%3DTupleSecret123%3BUID%3Dsa"
+        sanitized, fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert fingerprint is not None
+        assert "TupleSecret123" not in sanitized
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == ("DRIVER={ODBC Driver 17};SERVER=db", "UID=sa")
+
+    def test_dsn_repeated_odbc_connect_password_braced_value_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every repeated odbc_connect value uses the ODBC password parser."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = (
+            "mssql+pyodbc:///?"
+            "odbc_connect=DRIVER%3D%7BODBC+Driver+17%7D%3BSERVER%3Ddb"
+            "&odbc_connect=Password%3D%7Bsemi%3Bsecret%7D%3BAPP%3Dreporting"
+        )
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert "semi" not in sanitized
+        assert "secret" not in sanitized
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == ("DRIVER={ODBC Driver 17};SERVER=db", "APP=reporting")
+
+    def test_dsn_repeated_odbc_connect_scrubs_secret_from_each_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No repeated odbc_connect value may keep an embedded password."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "mssql+pyodbc:///?odbc_connect=PWD%3Dfirst-secret%3BUID%3Dsa&odbc_connect=Password%3Dsecond-secret%3BAPP%3Dreporting"
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert "first-secret" not in sanitized
+        assert "second-secret" not in sanitized
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == ("UID=sa", "APP=reporting")
+
     def test_dsn_query_param_password_no_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Query-param password without userinfo password still detected."""
         from elspeth.core.config import _sanitize_dsn
@@ -3300,6 +3566,43 @@ class TestRunModeSettings:
 
 class TestExpandTemplateFiles:
     """Tests for _expand_template_files function."""
+
+    def test_template_option_materializer_registry_drives_plugin_collections(self, tmp_path: Path) -> None:
+        from elspeth.core.template_materialization import FILE_BACKED_TEMPLATE_OPTION_KEYS, TemplateOptionMaterializer
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "template.j2").write_text("Hello {{ row.name }}")
+        (prompts_dir / "lookup.yaml").write_text("categories:\n  - Clothing\n")
+        (prompts_dir / "system.txt").write_text("Use concise labels.")
+
+        materializer = TemplateOptionMaterializer(tmp_path / "settings.yaml")
+        config = materializer.materialize_config(
+            {
+                "transforms": [
+                    {
+                        "name": "classify",
+                        "options": {
+                            "template_file": "prompts/template.j2",
+                            "lookup_file": "prompts/lookup.yaml",
+                        },
+                    }
+                ],
+                "aggregations": [
+                    {
+                        "name": "summarize",
+                        "options": {
+                            "system_prompt_file": "prompts/system.txt",
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert frozenset({"template_file", "lookup_file", "system_prompt_file"}) == FILE_BACKED_TEMPLATE_OPTION_KEYS
+        assert config["transforms"][0]["options"]["prompt_template"] == "Hello {{ row.name }}"
+        assert config["transforms"][0]["options"]["lookup"] == {"categories": ["Clothing"]}
+        assert config["aggregations"][0]["options"]["system_prompt"] == "Use concise labels."
 
     def test_expand_template_file_not_found(self, tmp_path: Path) -> None:
         """Missing template file raises TemplateFileError."""
@@ -3854,8 +4157,8 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
-    def test_load_settings_from_yaml_string_expands_env_vars_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The in-memory loader preserves historical ${VAR} expansion by default."""
+    def test_load_settings_from_yaml_string_preserves_env_placeholders_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The in-memory loader treats ${VAR} as literal user data by default."""
         from elspeth.core.config import load_settings_from_yaml_string
 
         monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
@@ -3874,6 +4177,31 @@ sinks:
     on_write_failure: discard
     options: {}
 """
+        )
+
+        assert settings.sources["primary"].options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+
+    def test_load_settings_from_yaml_string_can_opt_into_env_expansion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Trusted in-process callers can explicitly request host environment expansion."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+""",
+            expand_env_vars=True,
         )
 
         assert settings.sources["primary"].options["prompt_template"] == "prefix-server-secret-value-suffix"
@@ -3907,6 +4235,198 @@ sinks:
         )
 
         assert settings.sources["primary"].options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+
+    def test_load_settings_from_yaml_string_rejects_aggregation_file_backed_options(self) -> None:
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        with pytest.raises(ValueError) as exc_info:
+            load_settings_from_yaml_string(
+                """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: batch_input
+    options: {}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+aggregations:
+  - name: summarize
+    plugin: llm
+    input: batch_input
+    on_success: output
+    on_error: discard
+    trigger:
+      count: 10
+    options:
+      system_prompt_file: prompts/system.txt
+"""
+            )
+
+        message = str(exc_info.value)
+        assert "system_prompt_file" in message
+        assert "aggregations['summarize']" in message
+        assert "load_settings()" in message
+
+
+class TestBoundedYamlStringLoader:
+    """In-memory web-facing YAML loader hardening."""
+
+    def test_load_settings_from_yaml_string_accepts_inline_blob_aggregate_sized_content(self) -> None:
+        """Resolved inline content up to the blob aggregate cap fits under the YAML cap."""
+        from elspeth.core.blobs_inline import BLOB_INLINE_AGGREGATE_BYTE_CAP
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        inline_content = "x" * BLOB_INLINE_AGGREGATE_BYTE_CAP
+        settings = load_settings_from_yaml_string(
+            f"""
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      inline_content: {inline_content}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {{}}
+"""
+        )
+
+        assert settings.sources["primary"].options["inline_content"] == inline_content
+
+    def test_load_settings_from_config_dict_accepts_content_that_would_dump_over_yaml_cap(self) -> None:
+        """Resolved inline content is not serialized back through the YAML byte cap."""
+        import yaml
+
+        from elspeth.core.blobs_inline import BLOB_INLINE_AGGREGATE_BYTE_CAP
+        from elspeth.core.config import MAX_IN_MEMORY_PIPELINE_YAML_BYTES, load_settings_from_config_dict
+
+        inline_content = "\x00" * BLOB_INLINE_AGGREGATE_BYTE_CAP
+        config_dict = {
+            "sources": {
+                "primary": {
+                    "plugin": "csv_local",
+                    "on_success": "output",
+                    "options": {"inline_content": inline_content},
+                }
+            },
+            "sinks": {
+                "output": {
+                    "plugin": "json",
+                    "on_write_failure": "discard",
+                    "options": {},
+                }
+            },
+        }
+        assert len(yaml.dump(config_dict, default_flow_style=False).encode("utf-8")) > MAX_IN_MEMORY_PIPELINE_YAML_BYTES
+
+        settings = load_settings_from_config_dict(config_dict)
+
+        assert settings.sources["primary"].options["inline_content"] == inline_content
+
+    def test_load_settings_from_yaml_string_rejects_oversized_yaml_before_parse(self) -> None:
+        """Web-facing YAML must be byte-capped before PyYAML parses it."""
+        from elspeth.core.config import MAX_IN_MEMORY_PIPELINE_YAML_BYTES, load_settings_from_yaml_string
+
+        oversized = (
+            """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options: {}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+            + "\n#"
+            + ("x" * MAX_IN_MEMORY_PIPELINE_YAML_BYTES)
+        )
+
+        with pytest.raises(ValueError, match="byte YAML limit"):
+            load_settings_from_yaml_string(oversized)
+
+    def test_load_settings_from_yaml_string_rejects_aliases_before_construction(self) -> None:
+        """Aliases are rejected so small YAML cannot amplify during object construction."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        aliased = """
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      shared: &shared
+        value: one
+      copied: *shared
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            load_settings_from_yaml_string(aliased)
+
+    def test_load_settings_from_yaml_string_rejects_excessive_depth(self) -> None:
+        """Deep but textually small YAML is rejected before recursive construction."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        lines = [
+            "sources:",
+            "  primary:",
+            "    plugin: csv_local",
+            "    on_success: output",
+            "    options:",
+            "      nested:",
+        ]
+        for depth in range(70):
+            lines.append(f"{'      ' + ('  ' * (depth + 1))}level_{depth}:")
+        lines.append(f"{'      ' + ('  ' * 71)}value: done")
+        lines.extend(
+            [
+                "sinks:",
+                "  output:",
+                "    plugin: json",
+                "    on_write_failure: discard",
+                "    options: {}",
+            ]
+        )
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            load_settings_from_yaml_string("\n".join(lines))
+
+    def test_load_settings_from_yaml_string_rejects_excessive_node_count(self) -> None:
+        """Many small YAML nodes are rejected even when the byte cap is not reached."""
+        from elspeth.core.config import MAX_IN_MEMORY_PIPELINE_YAML_BYTES, load_settings_from_yaml_string
+
+        option_lines = [f"      key_{index}: value" for index in range(5_100)]
+        yaml_content = "\n".join(
+            [
+                "sources:",
+                "  primary:",
+                "    plugin: csv_local",
+                "    on_success: output",
+                "    options:",
+                *option_lines,
+                "sinks:",
+                "  output:",
+                "    plugin: json",
+                "    on_write_failure: discard",
+                "    options: {}",
+            ]
+        )
+        assert len(yaml_content.encode("utf-8")) < MAX_IN_MEMORY_PIPELINE_YAML_BYTES
+
+        with pytest.raises(ValueError, match=r"^YAML parse failed: \w+Error$"):
+            load_settings_from_yaml_string(yaml_content)
 
 
 class TestSinkNameCasing:
@@ -4250,6 +4770,51 @@ class TestLowercaseSchemaKeysBranchPreservation:
     coalesce execution.
     """
 
+    def test_dynaconf_key_normalizer_preserves_declarative_user_data_paths(self) -> None:
+        from elspeth.core.dynaconf_normalization import USER_DATA_KEYS, DynaconfKeyNormalizer
+
+        normalizer = DynaconfKeyNormalizer()
+        result = normalizer.normalize(
+            {
+                "TRANSFORMS": [
+                    {
+                        "NAME": "classify",
+                        "OPTIONS": {
+                            "PromptKey": "preserved",
+                            "SCHEMA": {
+                                "MODE": "fixed",
+                                "FIELDS": ["Label: str"],
+                            },
+                        },
+                    }
+                ],
+                "GATES": [
+                    {
+                        "NAME": "router",
+                        "ROUTES": {
+                            "High": "urgent",
+                            "SCHEMA": "schema_sink",
+                        },
+                    }
+                ],
+                "COALESCE": [
+                    {
+                        "NAME": "merge",
+                        "BRANCHES": {
+                            "SentimentPath": "sentiment_out",
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert frozenset({"options", "routes", "branches"}) == USER_DATA_KEYS
+        assert result["transforms"][0]["name"] == "classify"
+        assert result["transforms"][0]["options"]["PromptKey"] == "preserved"
+        assert result["transforms"][0]["options"]["schema"] == {"mode": "fixed", "fields": ["Label: str"]}
+        assert result["gates"][0]["routes"] == {"High": "urgent", "SCHEMA": "schema_sink"}
+        assert result["coalesce"][0]["branches"] == {"SentimentPath": "sentiment_out"}
+
     def test_branches_keys_are_preserved(self) -> None:
         from elspeth.core.config import _lowercase_schema_keys
 
@@ -4281,6 +4846,32 @@ class TestLowercaseSchemaKeysBranchPreservation:
         # Values inside branches must also be preserved
         assert branches["SentimentPath"] == "sentiment_out"
         assert branches["EntityPath"] == "entity_out"
+
+    def test_schema_branch_key_is_preserved(self) -> None:
+        """A branch named SCHEMA is user data, not plugin schema config."""
+        from elspeth.core.config import _lowercase_schema_keys
+
+        config = {
+            "COALESCE": [
+                {
+                    "NAME": "merge_results",
+                    "BRANCHES": {
+                        "SCHEMA": "schema_out",
+                        "fallback": "fallback_out",
+                    },
+                    "POLICY": "require_all",
+                    "MERGE": "select",
+                    "SELECT_BRANCH": "SCHEMA",
+                    "ON_SUCCESS": "output",
+                }
+            ]
+        }
+        result = _lowercase_schema_keys(config)
+
+        coalesce = result["coalesce"][0]
+        assert coalesce["branches"] == {"SCHEMA": "schema_out", "fallback": "fallback_out"}
+        assert coalesce["select_branch"] == "SCHEMA"
+        assert "schema" not in coalesce["branches"]
 
     def test_load_settings_preserves_coalesce_branch_names(self, tmp_path: Path) -> None:
         """Full config loading preserves mixed-case coalesce branch names."""

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -21,6 +23,23 @@ from elspeth.plugins.infrastructure.clients.llm import (
 )
 
 _RETRYABLE_CLASSES = {"rate_limit", "server", "network"}
+
+
+class _CreateCompletionFake:
+    def __init__(self) -> None:
+        self.side_effect: BaseException | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        if self.side_effect is not None:
+            raise self.side_effect
+        return SimpleNamespace(choices=[])
+
+
+class _OpenAIClientFake:
+    def __init__(self) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=_CreateCompletionFake()))
 
 
 class TestErrorClassification:
@@ -138,14 +157,14 @@ class TestLLMClientExceptionTypes:
         return execution
 
     @pytest.fixture
-    def mock_openai_client(self) -> Mock:
-        """Create a mock OpenAI client."""
-        return Mock()
+    def mock_openai_client(self) -> _OpenAIClientFake:
+        """Create a fake OpenAI client."""
+        return _OpenAIClientFake()
 
     def test_rate_limit_raises_rate_limit_error(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Rate limit error (429) should raise RateLimitError."""
         # Configure mock to raise rate limit error
@@ -171,7 +190,7 @@ class TestLLMClientExceptionTypes:
     def test_non_rate_substring_error_raises_non_retryable_llm_client_error(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Non-rate errors containing 'rate' substrings should not raise RateLimitError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("400 Bad Request: enumerate at least one item")
@@ -202,7 +221,7 @@ class TestLLMClientExceptionTypes:
     def test_server_error_raises_server_error(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Server error (503) should raise ServerError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("503 Service Unavailable")
@@ -227,7 +246,7 @@ class TestLLMClientExceptionTypes:
     def test_network_error_raises_network_error(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Network timeout should raise NetworkError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("Connection timeout")
@@ -252,7 +271,7 @@ class TestLLMClientExceptionTypes:
     def test_content_policy_raises_content_policy_error(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Content policy violation should raise ContentPolicyError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("Your request was rejected by our safety system")
@@ -277,7 +296,7 @@ class TestLLMClientExceptionTypes:
     def test_context_length_raises_context_length_error(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Context length exceeded should raise ContextLengthError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("This model's maximum context length is 8192 tokens")
@@ -302,7 +321,7 @@ class TestLLMClientExceptionTypes:
     def test_client_error_raises_llm_client_error_non_retryable(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Client error (401) should raise non-retryable LLMClientError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("401 Unauthorized: Invalid API key")
@@ -327,7 +346,7 @@ class TestLLMClientExceptionTypes:
     def test_audit_trail_records_retryable_flag(
         self,
         mock_execution: Mock,
-        mock_openai_client: Mock,
+        mock_openai_client: _OpenAIClientFake,
     ) -> None:
         """Audit trail should record correct retryable flag."""
         # Test retryable error

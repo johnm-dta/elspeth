@@ -1,38 +1,31 @@
+// E2E spec: the first-run tutorial as the staged guided flow.
+//
+// P7.4/P7.5/P7.6 rewired the tutorial from the old big-bang
+// describe→showBuilt→graph→mode turns to: welcome bookend →
+// TutorialGuidedShell (the real ChatPanel guided surface, started with the
+// "tutorial" profile) → run → audit → graduation. This spec drives that flow
+// with the whole API surface route-mocked (no live backend), so it owns the
+// guided protocol responses end to end.
+//
+// The happy path mocks:
+//   POST /api/sessions                         → {id} (tutorial then graduation session)
+//   POST /api/sessions/{id}/guided/start       → 200, idempotent (profile seed)
+//   GET  /api/sessions/{id}/guided             → step_1_source turn
+//   POST /api/sessions/{id}/guided/respond     → walks source → sink →
+//                                                recipe-apply → step_4_wire,
+//                                                then wire-confirm → completed
+//   POST /api/tutorial/run                     → the canonical run result
+//   GET  .../runs/{id}/audit-story             → the audit story
+//
+// Wire-stage assertions (M1 + D11/B4 prompt-shield):
+//   - the topology + edge-contract overlay renders a `from`/`to` edge cell
+//     (a "{from} to {to}" listitem), never from_id/to_id;
+//   - the live prompt-injection shield advisory is visible for the canonical
+//     web_scrape → llm shape, AND no azure_prompt_shield node appears.
+// On terminal=completed the TutorialGuidedShell hands off to the run turn (no
+// 409 dead-end), then the run/audit/graduation tail completes.
+
 import { expect, test, type Page, type Route } from "@playwright/test";
-
-interface RouteState {
-  sessionPostCount: number;
-  preferencePatchBodies: Array<Record<string, unknown>>;
-  interpretationEvents: InterpretationEventPayload[];
-  requestLog: string[];
-  renamedSession: boolean;
-}
-
-interface InterpretationEventPayload {
-  id: string;
-  session_id: string;
-  composition_state_id: string;
-  affected_node_id: string;
-  tool_call_id: string;
-  user_term: string;
-  kind: "vague_term" | "invented_source" | "llm_prompt_template";
-  llm_draft: string;
-  accepted_value: string | null;
-  choice: "pending" | "accepted_as_drafted" | "amended";
-  created_at: string;
-  resolved_at: string | null;
-  actor: string;
-  interpretation_source: "user_approved";
-  model_identifier: string;
-  model_version: string;
-  provider: string;
-  composer_skill_hash: string;
-  arguments_hash: string | null;
-  hash_domain_version: string | null;
-  runtime_model_identifier_at_resolve: string | null;
-  runtime_model_version_at_resolve: string | null;
-  resolved_prompt_template_hash: string | null;
-}
 
 const tutorialSession = {
   id: "session-tutorial",
@@ -41,13 +34,16 @@ const tutorialSession = {
   updated_at: "2026-05-19T12:00:00Z",
 };
 
-const emptySession = {
-  id: "session-empty",
+const graduationSession = {
+  id: "session-graduation",
   title: "New session",
   created_at: "2026-05-19T12:10:00Z",
   updated_at: "2026-05-19T12:10:00Z",
 };
 
+// Composition state the guided respond/state endpoints return. The canonical
+// tutorial pipeline is web_scrape → llm (rate) → jsonl, the shape that triggers
+// the prompt-injection shield advisory at the wire stage.
 const compositionState = {
   id: "state-1",
   version: 1,
@@ -55,13 +51,7 @@ const compositionState = {
     source: {
       plugin: "inline_blob",
       options: {
-        rows: [
-          { url: "dta.gov.au" },
-          { url: "data.gov.au" },
-          { url: "ato.gov.au" },
-          { url: "finance.gov.au" },
-          { url: "australia.gov.au" },
-        ],
+        rows: [{ url: "dta.gov.au" }, { url: "data.gov.au" }],
       },
     },
   },
@@ -80,7 +70,7 @@ const compositionState = {
       node_type: "transform",
       plugin: "llm_rate",
       input: "scrape",
-      on_success: "sink",
+      on_success: "ratings",
       on_error: null,
       options: {},
     },
@@ -90,68 +80,144 @@ const compositionState = {
   metadata: { name: null, description: null },
 };
 
-function makePendingInterpretationEvents(): InterpretationEventPayload[] {
-  const base = {
-    session_id: tutorialSession.id,
-    composition_state_id: compositionState.id,
-    actor: "composer-llm",
-    interpretation_source: "user_approved" as const,
-    model_identifier: "openrouter/openai/gpt-5.4-mini",
-    model_version: "openai/gpt-5.4-mini-20260317",
-    provider: "openrouter",
-    composer_skill_hash: "a".repeat(64),
-    arguments_hash: null,
-    hash_domain_version: null,
-    runtime_model_identifier_at_resolve: null,
-    runtime_model_version_at_resolve: null,
-    resolved_prompt_template_hash: null,
-    accepted_value: null,
-    choice: "pending" as const,
-    resolved_at: null,
-  };
-  return [
-    {
-      ...base,
-      id: "interpretation-invented-source",
-      affected_node_id: "source",
-      tool_call_id: "tool-source",
-      user_term: "starter URL list",
-      kind: "invented_source",
-      llm_draft: [
-        "https://dta.gov.au",
-        "https://data.gov.au",
-        "https://ato.gov.au",
-        "https://finance.gov.au",
-        "https://australia.gov.au",
-      ].join("\n"),
-      created_at: "2026-05-19T12:00:02Z",
-    },
-    {
-      ...base,
-      id: "interpretation-vague-term",
-      affected_node_id: "rate",
-      tool_call_id: "tool-rate-vague",
-      user_term: "primary colour",
-      kind: "vague_term",
-      llm_draft:
-        "the dominant brand or visual identity colour visible on the page",
-      created_at: "2026-05-19T12:00:03Z",
-    },
-    {
-      ...base,
-      id: "interpretation-prompt-template",
-      affected_node_id: "rate",
-      tool_call_id: "tool-rate-template",
-      user_term: "rating prompt",
-      kind: "llm_prompt_template",
-      llm_draft:
-        "Rate {{ row.url }} for a civic-service audit. Include whether the page clearly states ownership, primary colour, and a concise rationale for the score.",
-      created_at: "2026-05-19T12:00:04Z",
-    },
-  ];
+interface GuidedFixtureState {
+  sessionPostCount: number;
+  guidedRespondCount: number;
+  requestLog: string[];
 }
 
-async function installTutorialRoutes(page: Page, state: RouteState): Promise<void> {
+// A guided session at a given step with no terminal yet.
+function guidedSession(step: string): Record<string, unknown> {
+  return {
+    step,
+    history: [],
+    terminal: null,
+    chat_history: [],
+    chat_turn_seq: 0,
+    // null profile == empty/live; the tutorial seeds via /guided/start. The
+    // shell reads profile.bookends but tolerates a null profile (defaults true).
+    profile: {
+      coaching: true,
+      bookends: true,
+      recipe_match: true,
+      advisor_checkpoints: true,
+    },
+  };
+}
+
+function singleSelectTurn(question: string, options: Array<[string, string]>): Record<string, unknown> {
+  return {
+    type: "single_select",
+    step_index: 0,
+    payload: {
+      question,
+      options: options.map(([id, label]) => ({ id, label, hint: null })),
+      allow_custom: false,
+    },
+  };
+}
+
+// The step_4_wire turn payload. The canonical web_scrape → llm shape surfaces
+// the prompt-injection shield advisory (warnings[].message) and renders the
+// source → scrape → rate → output edges with from/to naming.
+//
+// IMPORTANT: the warning message contains "prompt-injection shield" (the
+// advisory) but deliberately NOT the literal "azure_prompt_shield" — the
+// count-0 assertion is about the absence of an azure_prompt_shield NODE, and a
+// page-wide text match would otherwise trip on the advisory prose.
+const wireTurn: Record<string, unknown> = {
+  type: "confirm_wiring",
+  step_index: 3,
+  payload: {
+    topology: {
+      sources: {
+        source: {
+          id: "source",
+          plugin: "inline_blob",
+          on_success: "scrape",
+          on_validation_failure: "discard",
+        },
+      },
+      nodes: [
+        {
+          id: "scrape",
+          node_type: "transform",
+          plugin: "web_scrape",
+          input: "scrape",
+          on_success: "rate",
+          on_error: "discard",
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+        {
+          id: "rate",
+          node_type: "transform",
+          plugin: "llm_rate",
+          input: "rate",
+          on_success: "ratings",
+          on_error: "discard",
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+      ],
+      outputs: [
+        {
+          id: "output:ratings",
+          sink_name: "ratings",
+          plugin: "jsonl",
+          on_write_failure: "discard",
+        },
+      ],
+    },
+    edge_contracts: [
+      {
+        from: "source",
+        to: "scrape",
+        producer_guarantees: ["url"],
+        consumer_requires: ["url"],
+        missing_fields: [],
+        satisfied: true,
+      },
+      {
+        from: "scrape",
+        to: "rate",
+        producer_guarantees: ["url", "html"],
+        consumer_requires: ["html"],
+        missing_fields: [],
+        satisfied: true,
+      },
+    ],
+    semantic_contracts: [],
+    warnings: [
+      {
+        component: "rate",
+        severity: "medium",
+        // Advisory copy — contains "prompt-injection shield" but not the
+        // azure_prompt_shield node literal (see note above).
+        message:
+          "LLM node 'rate' consumes externally-fetched content from a web_scrape upstream without an authorized prompt-injection shield between them. Continuing without it is allowed.",
+      },
+    ],
+  },
+};
+
+function completedSession(): Record<string, unknown> {
+  return {
+    ...guidedSession("step_4_wire"),
+    terminal: {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "sources:\n  source:\n    plugin: inline_blob\n",
+    },
+  };
+}
+
+async function installTutorialRoutes(
+  page: Page,
+  state: GuidedFixtureState,
+): Promise<void> {
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -185,12 +251,6 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
 
     if (path === "/api/composer-preferences" && method === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
-      state.preferencePatchBodies.push(body);
-      state.requestLog.push(
-        "tutorial_completed_at" in body
-          ? "preferences-patch:tutorial-completed"
-          : "preferences-patch:default-mode",
-      );
       await route.fulfill({
         json: {
           default_mode: body.default_mode ?? "guided",
@@ -206,7 +266,15 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
     }
 
     if (path === "/api/sessions" && method === "GET") {
-      await route.fulfill({ json: [] });
+      await route.fulfill({
+        json: [
+          {
+            ...tutorialSession,
+            title: "First-run tutorial",
+            updated_at: "2026-05-19T12:11:00Z",
+          },
+        ],
+      });
       return;
     }
 
@@ -214,15 +282,13 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       state.sessionPostCount += 1;
       state.requestLog.push(`session-post:${state.sessionPostCount}`);
       await route.fulfill({
-        json: state.sessionPostCount === 1 ? tutorialSession : emptySession,
+        json: state.sessionPostCount === 1 ? tutorialSession : graduationSession,
       });
       return;
     }
 
     if (path === `/api/sessions/${tutorialSession.id}` && method === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
-      state.renamedSession =
-        body.title === "hello-world (cool government pages)";
       await route.fulfill({
         json: {
           ...tutorialSession,
@@ -233,47 +299,180 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/messages`) {
-      if (method === "POST") {
-        await route.fulfill({
-          json: {
-            message: {
-              id: "message-1",
-              session_id: tutorialSession.id,
-              role: "assistant",
-              content: "Drafted a tutorial pipeline.",
-              tool_calls: null,
-              created_at: "2026-05-19T12:00:01Z",
-            },
-            state: compositionState,
-            proposals: [],
-          },
-        });
-        return;
-      }
-      if (method === "GET") {
-        await route.fulfill({
-          json: [
-            {
-              id: "message-1",
-              session_id: tutorialSession.id,
-              role: "assistant",
-              content: "Drafted a tutorial pipeline.",
-              tool_calls: null,
-              created_at: "2026-05-19T12:00:01Z",
-            },
-          ],
-        });
-        return;
-      }
-    }
-
-    if (path === `/api/sessions/${tutorialSession.id}/proposals` && method === "GET") {
-      await route.fulfill({ json: [] });
+    // ── Guided protocol ─────────────────────────────────────────────────────
+    if (
+      path === `/api/sessions/${tutorialSession.id}/guided/start` &&
+      method === "POST"
+    ) {
+      state.requestLog.push("guided-start");
+      await route.fulfill({
+        json: {
+          guided_session: guidedSession("step_1_source"),
+          next_turn: singleSelectTurn("Which data source would you like to use?", [
+            ["inline_blob", "inline_blob"],
+            ["csv", "csv"],
+          ]),
+          terminal: null,
+          composition_state: null,
+        },
+      });
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/composer/preferences` && method === "GET") {
+    if (
+      path === `/api/sessions/${tutorialSession.id}/guided/tutorial-sample` &&
+      method === "GET"
+    ) {
+      await route.fulfill({
+        json: {
+          sample_urls: [
+            "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html",
+            "https://johnm-dta.github.io/elspeth/tutorial-site/project-2.html",
+            "https://johnm-dta.github.io/elspeth/tutorial-site/project-3.html",
+          ],
+        },
+      });
+      return;
+    }
+
+    if (
+      path === `/api/sessions/${tutorialSession.id}/guided` &&
+      method === "GET"
+    ) {
+      await route.fulfill({
+        json: {
+          guided_session: guidedSession("step_1_source"),
+          next_turn: singleSelectTurn("Which data source would you like to use?", [
+            ["inline_blob", "inline_blob"],
+            ["csv", "csv"],
+          ]),
+          terminal: null,
+          composition_state: null,
+        },
+      });
+      return;
+    }
+
+    if (
+      path === `/api/sessions/${tutorialSession.id}/guided/chat` &&
+      method === "POST"
+    ) {
+      state.guidedRespondCount += 1;
+      const n = state.guidedRespondCount;
+      state.requestLog.push(`guided-chat:${n}`);
+      let next: Record<string, unknown> | null;
+      let session = guidedSession("step_2_sink");
+      if (n === 1) {
+        next = singleSelectTurn("What format should the output be in?", [
+          ["jsonl", "jsonl"],
+          ["json", "json"],
+        ]);
+      } else {
+        next = {
+          type: "recipe_offer",
+          step_index: 2,
+          payload: {
+            mode: "recipe_decision",
+            knobs: { fields: [] },
+            prefilled: {},
+            recipe_context: {
+              recipe_name: "web-scrape-llm-rate-jsonl",
+              description: "Scrape each URL and rate the page.",
+              alternatives: [],
+            },
+          },
+        };
+        session = guidedSession("step_2_5_recipe_match");
+      }
+      await route.fulfill({
+        json: {
+          assistant_message:
+            n === 1
+              ? "I set this up as an inline source."
+              : "I set up a JSONL output.",
+          assistant_message_kind: "assistant",
+          guided_session: session,
+          next_turn: next,
+          terminal: null,
+          composition_state: compositionState,
+        },
+      });
+      return;
+    }
+
+    if (
+      path === `/api/sessions/${tutorialSession.id}/guided/respond` &&
+      method === "POST"
+    ) {
+      state.guidedRespondCount += 1;
+      const n = state.guidedRespondCount;
+      state.requestLog.push(`guided-respond:${n}`);
+      // Drive a deterministic walk: source → sink → recipe-apply → wire →
+      // completed. The mock ignores the request body and advances by count.
+      let next: Record<string, unknown> | null;
+      let session = guidedSession("step_2_sink");
+      if (n === 1) {
+        // after source pick → sink pick turn
+        next = singleSelectTurn("What format should the output be in?", [
+          ["jsonl", "jsonl"],
+          ["json", "json"],
+        ]);
+        session = guidedSession("step_2_sink");
+      } else if (n === 2) {
+        // after sink pick → recipe offer
+        next = {
+          type: "recipe_offer",
+          step_index: 2,
+          payload: {
+            mode: "recipe_decision",
+            knobs: { fields: [] },
+            prefilled: {},
+            recipe_context: {
+              recipe_name: "web-scrape-llm-rate-jsonl",
+              description: "Scrape each URL and rate the page.",
+              alternatives: [],
+            },
+          },
+        };
+        session = guidedSession("step_2_5_recipe_match");
+      } else if (n === 3) {
+        // after apply recipe → wire turn
+        next = wireTurn;
+        session = guidedSession("step_4_wire");
+      } else {
+        // wire confirm → completed
+        next = null;
+        session = completedSession();
+      }
+      const terminal =
+        next === null
+          ? (session.terminal as Record<string, unknown>)
+          : null;
+      await route.fulfill({
+        json: {
+          guided_session: session,
+          next_turn: next,
+          terminal,
+          composition_state: compositionState,
+        },
+      });
+      return;
+    }
+
+    // Interpretation events: the canonical mock has none pending (the wire
+    // confirm is not blocked by D12 in this fixture).
+    if (
+      path === `/api/sessions/${tutorialSession.id}/interpretations` &&
+      method === "GET"
+    ) {
+      await route.fulfill({ json: { events: [] } });
+      return;
+    }
+
+    if (
+      path === `/api/sessions/${tutorialSession.id}/composer/preferences` &&
+      method === "GET"
+    ) {
       await route.fulfill({
         json: {
           session_id: tutorialSession.id,
@@ -286,7 +485,10 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/composer-progress` && method === "GET") {
+    if (
+      path === `/api/sessions/${tutorialSession.id}/composer-progress` &&
+      method === "GET"
+    ) {
       await route.fulfill({
         json: {
           session_id: tutorialSession.id,
@@ -307,7 +509,10 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/state/versions` && method === "GET") {
+    if (
+      path === `/api/sessions/${tutorialSession.id}/state/versions` &&
+      method === "GET"
+    ) {
       await route.fulfill({
         json: [
           {
@@ -321,66 +526,16 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/interpretations` && method === "GET") {
-      const status = url.searchParams.get("status");
-      const events =
-        status === "pending"
-          ? state.interpretationEvents.filter(
-              (event) => event.choice === "pending",
-            )
-          : state.interpretationEvents;
-      await route.fulfill({ json: { events } });
+    if (path === `/api/sessions/${tutorialSession.id}/messages` && method === "GET") {
+      await route.fulfill({ json: [] });
       return;
     }
 
-    const resolveInterpretationMatch = path.match(
-      new RegExp(
-        `^/api/sessions/${tutorialSession.id}/interpretations/([^/]+)/resolve$`,
-      ),
-    );
-    if (resolveInterpretationMatch !== null && method === "POST") {
-      const eventId = resolveInterpretationMatch[1];
-      const eventIndex = state.interpretationEvents.findIndex(
-        (event) => event.id === eventId,
-      );
-      if (eventIndex === -1) {
-        await route.fulfill({
-          status: 404,
-          json: { detail: "interpretation event not found" },
-        });
-        return;
-      }
-      const body = request.postDataJSON() as Record<string, unknown>;
-      const event = state.interpretationEvents[eventIndex];
-      const acceptedValue =
-        typeof body.accepted_value === "string"
-          ? body.accepted_value
-          : event.llm_draft;
-      const resolvedEvent: InterpretationEventPayload = {
-        ...event,
-        accepted_value: acceptedValue,
-        choice:
-          body.choice === "amended" ? "amended" : "accepted_as_drafted",
-        resolved_at: "2026-05-19T12:00:05Z",
-      };
-      state.interpretationEvents[eventIndex] = resolvedEvent;
-      await route.fulfill({
-        json: {
-          event: resolvedEvent,
-          new_state: compositionState,
-        },
-      });
-      return;
-    }
-
-    if (path === `/api/sessions/${tutorialSession.id}/interpretations/opt_out` && method === "POST") {
-      await route.fulfill({
-        json: {
-          session_id: tutorialSession.id,
-          interpretation_review_disabled: true,
-          opted_out_at: "2026-05-19T12:00:02Z",
-        },
-      });
+    if (
+      path === `/api/sessions/${tutorialSession.id}/proposals` &&
+      method === "GET"
+    ) {
+      await route.fulfill({ json: [] });
       return;
     }
 
@@ -398,67 +553,16 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/runs` && method === "GET") {
-      await route.fulfill({ json: [] });
-      return;
-    }
-
-    if (path === `/api/sessions/${tutorialSession.id}/audit-readiness` && method === "GET") {
+    if (
+      path === `/api/sessions/${tutorialSession.id}/audit-readiness` &&
+      method === "GET"
+    ) {
       await route.fulfill({
         json: {
           session_id: tutorialSession.id,
-          composition_version: compositionState.version,
-          checked_at: "2026-05-19T12:00:00Z",
-          rows: [
-            {
-              id: "validation",
-              label: "Validation",
-              status: "ok",
-              summary: "Tutorial pipeline validates.",
-              detail: null,
-              component_ids: [],
-            },
-            {
-              id: "plugin_trust",
-              label: "Plugin trust",
-              status: "ok",
-              summary: "Tutorial plugins are trusted.",
-              detail: null,
-              component_ids: [],
-            },
-            {
-              id: "provenance",
-              label: "Provenance",
-              status: "ok",
-              summary: "Tutorial provenance is present.",
-              detail: null,
-              component_ids: [],
-            },
-            {
-              id: "retention",
-              label: "Retention",
-              status: "ok",
-              summary: "Tutorial retention is configured.",
-              detail: null,
-              component_ids: [],
-            },
-            {
-              id: "llm_interpretations",
-              label: "LLM interpretations",
-              status: "not_applicable",
-              summary: "No unresolved interpretations.",
-              detail: null,
-              component_ids: [],
-            },
-            {
-              id: "secrets",
-              label: "Secrets",
-              status: "not_applicable",
-              summary: "No tutorial secrets required.",
-              detail: null,
-              component_ids: [],
-            },
-          ],
+          composition_version: 1,
+          checked_at: "2026-05-19T12:11:00Z",
+          rows: [],
           validation_result: {
             is_valid: true,
             summary: "Tutorial pipeline is valid.",
@@ -472,12 +576,17 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
+    if (path === `/api/sessions/${tutorialSession.id}/runs` && method === "GET") {
+      await route.fulfill({ json: [] });
+      return;
+    }
+
     if (path === `/api/sessions/${tutorialSession.id}/blobs` && method === "GET") {
       await route.fulfill({ json: [] });
       return;
     }
 
-    if (path === `/api/sessions/${emptySession.id}/runs` && method === "GET") {
+    if (path === `/api/sessions/${graduationSession.id}/runs` && method === "GET") {
       await route.fulfill({ json: [] });
       return;
     }
@@ -497,6 +606,7 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
               { url: "dta.gov.au", score: 9, rationale: "bold" },
               { url: "data.gov.au", score: 8, rationale: "useful" },
             ],
+            discarded_row_count: 0,
           },
           seeded_from_cache: false,
           cache_key: null,
@@ -505,7 +615,10 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
-    if (path === `/api/sessions/${tutorialSession.id}/runs/run-1/audit-story` && method === "GET") {
+    if (
+      path === `/api/sessions/${tutorialSession.id}/runs/run-1/audit-story` &&
+      method === "GET"
+    ) {
       await route.fulfill({
         json: {
           run_id: "run-1",
@@ -525,98 +638,72 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
   });
 }
 
-async function installTutorialRoutesWithSlowRun(
-  page: Page,
-  state: RouteState,
-): Promise<void> {
-  // Same routes as installTutorialRoutes but holds the /api/tutorial/run
-  // response open for ~7s so the 5s cancel-button timer can fire and the
-  // user can click cancel before the run resolves.
-  await installTutorialRoutes(page, state);
-  await page.route("**/api/tutorial/run", async (route) => {
-    await new Promise<void>((resolve) => setTimeout(resolve, 7_000));
-    await route.fulfill({
-      json: {
-        run_id: "run-slow",
-        output: {
-          source_data_hash: "neverreachedhash",
-          rows: [],
-        },
-        seeded_from_cache: false,
-        cache_key: null,
-      },
-    });
-  });
-}
-
-test.describe("first-run tutorial", () => {
-  test("walks the tutorial flow through final preference selection", async ({
+test.describe("first-run tutorial (staged guided flow)", () => {
+  test("welcome → guided (source/sink/recipe/wire) → run → audit → graduation", async ({
     page,
   }) => {
-    const state: RouteState = {
+    const state: GuidedFixtureState = {
       sessionPostCount: 0,
-      preferencePatchBodies: [],
-      interpretationEvents: makePendingInterpretationEvents(),
+      guidedRespondCount: 0,
       requestLog: [],
-      renamedSession: false,
     };
     await installTutorialRoutes(page, state);
 
+    // ── Welcome bookend ──────────────────────────────────────────────────────
     await page.goto("/");
-    await expect(page.getByRole("main", { name: /first-run tutorial/i })).toBeVisible();
+    await expect(
+      page.getByRole("main", { name: /first-run tutorial/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Welcome to ELSPETH/i }),
+    ).toBeVisible();
 
+    // Start mounts the guided surface (chat-panel--guided).
     await page.getByRole("button", { name: "Let's go" }).click();
-    await page.getByRole("button", { name: "Build it" }).click();
-    await expect(page.getByText(/Here is what the composer drafted/i)).toBeVisible();
-    await expect(page.getByText("dta.gov.au", { exact: true })).toBeVisible();
-    await expect(page.getByText("3 assumptions to review")).toBeVisible();
-    const continueFromAssumptions = page.getByRole("button", {
-      name: "Looks good",
-    });
-    await expect(continueFromAssumptions).toBeDisabled();
+    await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
-    await page
-      .getByRole("button", { name: /Accept invented source data/i })
-      .click();
-    await expect
-      .poll(
-        () =>
-          state.interpretationEvents.filter(
-            (event) => event.choice === "pending",
-          ).length,
-      )
-      .toBe(2);
-    await expect(continueFromAssumptions).toBeDisabled();
-    await page
-      .getByRole("button", {
-        name: /Accept the LLM's interpretation of primary colour/i,
-      })
-      .click();
-    await expect
-      .poll(
-        () =>
-          state.interpretationEvents.filter(
-            (event) => event.choice === "pending",
-          ).length,
-      )
-      .toBe(1);
-    await expect(continueFromAssumptions).toBeDisabled();
-    const promptTemplateReview = page.getByRole("region", {
-      name: /Prompt template review/i,
-    });
-    await promptTemplateReview.evaluate((element) => {
-      element.scrollTop = element.scrollHeight;
-      element.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
-    await page
-      .getByRole("button", { name: /Accept LLM prompt template/i })
-      .click();
-    await expect(continueFromAssumptions).toBeEnabled();
+    // ── Step 1 source ────────────────────────────────────────────────────────
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    // ── Step 2 sink ──────────────────────────────────────────────────────────
+    await expect(page.getByText(/Save the pipeline's results/i)).toBeVisible();
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    // ── Step 2.5 recipe-apply ────────────────────────────────────────────────
+    await expect(
+      page.getByRole("button", { name: "Apply recipe", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Apply recipe", exact: true }).click();
 
-    await continueFromAssumptions.click();
-    await page.getByRole("button", { name: "Looks good, run it" }).click();
+    // ── Step 4 wire stage: topology + edge-contract overlay (M1 from/to) ─────
+    await expect(page.getByRole("heading", { name: "Review wiring" })).toBeVisible();
+    await expect(
+      page.getByRole("listitem", { name: "Source to Fetch step" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("listitem", { name: "Fetch step to Llm Rate step" }),
+    ).toBeVisible();
+    await expect(page.getByText(/Source\s+→\s+Fetch step\s+—\s+connected/)).toBeVisible();
+    await expect(page.getByText(/Fetch step\s+→\s+Llm Rate step\s+—\s+connected/)).toBeVisible();
+    // M1 guard: post-M1 naming, never from_id/to_id.
+    await expect(
+      page.getByRole("listitem", { name: /from_id|to_id/ }),
+    ).toHaveCount(0);
+
+    // The wire validation payload surfaces the live prompt-shield advisory for
+    // the canonical web_scrape → llm shape (D11/B4 rev-4), and must NOT contain
+    // an azure_prompt_shield node. The mock seeds the advisory (without the
+    // azure_prompt_shield literal) and no such node in the topology.
+    await expect(page.getByText(/prompt-injection shield/i)).toBeVisible();
+    await expect(page.locator("text=azure_prompt_shield")).toHaveCount(0);
+
+    // ── Wire confirm → completed → run turn (no 409 dead-end) ────────────────
+    await page.getByRole("button", { name: "Confirm wiring", exact: true }).click();
+    // TutorialGuidedShell handed off to the run turn on terminal=completed.
+    await expect(
+      page.getByRole("heading", { name: /Running your pipeline/i }),
+    ).toBeVisible();
     await expect(page.getByText("bold")).toBeVisible();
 
+    // ── Audit story ──────────────────────────────────────────────────────────
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(page.getByText(/This is the audit story/i)).toBeVisible();
     await expect(
@@ -625,162 +712,51 @@ test.describe("first-run tutorial", () => {
         .getByText("5", { exact: true }),
     ).toBeVisible();
 
+    // ── Graduation ───────────────────────────────────────────────────────────
     await page.getByRole("button", { name: "Continue" }).click();
-    await page.getByRole("radio", { name: /Freeform/i }).click();
-    await page.getByRole("button", { name: "Save and go" }).click();
-
-    await expect.poll(() => state.preferencePatchBodies.length).toBe(1);
-    expect(state.preferencePatchBodies[0]).toEqual({ default_mode: "freeform" });
-    expect(state.renamedSession).toBe(true);
-
     await expect(
       page.getByRole("heading", { name: "You're ready to use the composer." }),
     ).toBeVisible();
-    await expect.poll(() => state.sessionPostCount).toBe(1);
     await page.getByRole("button", { name: "Take me to the composer" }).click();
 
-    await expect.poll(() => state.preferencePatchBodies.length).toBe(2);
-    expect(Object.keys(state.preferencePatchBodies[1] ?? {})).toEqual([
-      "tutorial_completed_at",
-    ]);
-    expect(state.preferencePatchBodies[1]).toEqual({
-      tutorial_completed_at: expect.any(String),
-    });
-    await expect.poll(() => state.sessionPostCount).toBe(2);
-    expect(state.requestLog).toEqual([
-      "session-post:1",
-      "preferences-patch:default-mode",
-      "preferences-patch:tutorial-completed",
-      "session-post:2",
-    ]);
+    // Graduation renamed the tutorial session, saved guided default, and
+    // landed on the built pipeline instead of creating a fresh empty session.
+    await expect.poll(() => state.sessionPostCount).toBe(1);
+    await expect(
+      page.getByRole("button", { name: /Session switcher: First-run tutorial/i }),
+    ).toBeVisible();
+    expect(state.requestLog).toContain("guided-start");
   });
 
-  test("Edit prompt button on Turn 2b returns to Describe with prompt preserved", async ({
-    page,
-  }) => {
-    const state: RouteState = {
+  test("skip from welcome lands directly on graduation", async ({ page }) => {
+    const state: GuidedFixtureState = {
       sessionPostCount: 0,
-      preferencePatchBodies: [],
-      interpretationEvents: [],
+      guidedRespondCount: 0,
       requestLog: [],
-      renamedSession: false,
     };
     await installTutorialRoutes(page, state);
 
     await page.goto("/");
-    await page.getByRole("button", { name: "Let's go" }).click();
-
-    // Edit the prompt before building so we can confirm it survives the
-    // back trip.
-    const promptInput = page.getByLabel("Pipeline description");
-    await promptInput.fill("a custom prompt the user typed");
-
-    await page.getByRole("button", { name: "Build it" }).click();
-    await expect(page.getByText(/Here is what the composer drafted/i)).toBeVisible();
-
-    // The Edit-prompt button is the back-to-describe affordance on Turn 2b.
-    await page.getByRole("button", { name: "Edit prompt" }).click();
-
-    // We're back on Describe with the user's prompt intact.
+    await page.getByRole("button", { name: "Skip the tutorial" }).click();
     await expect(
-      page.getByRole("heading", { name: /Describe your pipeline/i }),
-    ).toBeVisible();
-    await expect(promptInput).toHaveValue("a custom prompt the user typed");
-  });
-
-  test("Turn 5 hash copy button copies the full hash, not a truncation", async ({
-    page,
-  }) => {
-    const state: RouteState = {
-      sessionPostCount: 0,
-      preferencePatchBodies: [],
-      interpretationEvents: [],
-      requestLog: [],
-      renamedSession: false,
-    };
-    await installTutorialRoutes(page, state);
-    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-
-    await page.goto("/");
-    await page.getByRole("button", { name: "Let's go" }).click();
-    await page.getByRole("button", { name: "Build it" }).click();
-    await page.getByRole("button", { name: "Looks good" }).click();
-    await page.getByRole("button", { name: "Looks good, run it" }).click();
-    await expect(page.getByText("bold")).toBeVisible();
-    await page.getByRole("button", { name: "Continue" }).click();
-
-    // Audit story turn — full hash visible (not truncated to 12 chars + "...")
-    await expect(page.getByText("a7f3e2fullhash")).toBeVisible();
-
-    // Click the copy button for the source-data hash and verify clipboard
-    // contents match the full hash, not a "..."-truncated prefix.
-    await page
-      .getByRole("button", { name: /Copy full source data hash/i })
-      .click();
-    const clipboardText = await page.evaluate(() =>
-      navigator.clipboard.readText(),
-    );
-    expect(clipboardText).toBe("a7f3e2fullhash");
-
-    // Button feedback flips to "Copied".
-    await expect(
-      page.getByRole("button", { name: /Copy full source data hash/i }),
-    ).toHaveText("Copied");
-  });
-
-  test("Turn 4 cancel skips the audit story and acknowledges on Turn 6", async ({
-    page,
-  }) => {
-    const state: RouteState = {
-      sessionPostCount: 0,
-      preferencePatchBodies: [],
-      interpretationEvents: [],
-      requestLog: [],
-      renamedSession: false,
-    };
-    await installTutorialRoutesWithSlowRun(page, state);
-
-    await page.goto("/");
-    await page.getByRole("button", { name: "Let's go" }).click();
-    await page.getByRole("button", { name: "Build it" }).click();
-    await page.getByRole("button", { name: "Looks good" }).click();
-    await page.getByRole("button", { name: "Looks good, run it" }).click();
-
-    // The cancel button appears 5 seconds after the run starts (per the
-    // SHOW_CANCEL_DELAY_MS constant in TutorialTurn4Run).
-    const cancelButton = page.getByRole("button", { name: "Cancel run" });
-    await expect(cancelButton).toBeVisible({ timeout: 10_000 });
-    await cancelButton.click();
-
-    // Should land directly on Turn 6 (skipping Turn 5 audit) with the
-    // cancelled-run acknowledgement.
-    await expect(
-      page.getByRole("heading", { name: /Choose your default composer mode/i }),
-    ).toBeVisible();
-    await expect(
-      page.getByText(/Your run was cancelled/i),
+      page.getByRole("heading", { name: "You're ready to use the composer." }),
     ).toBeVisible();
   });
 
-  test("Turn 1 surfaces the privacy preamble before the run starts", async ({
+  test("welcome surfaces the privacy preamble before starting", async ({
     page,
   }) => {
-    const state: RouteState = {
+    const state: GuidedFixtureState = {
       sessionPostCount: 0,
-      preferencePatchBodies: [],
-      interpretationEvents: [],
+      guidedRespondCount: 0,
       requestLog: [],
-      renamedSession: false,
     };
     await installTutorialRoutes(page, state);
 
     await page.goto("/");
-
-    // Preamble appears on Turn 1 (welcome) and again on Turn 4 (run).
-    // Verifying Turn 1 here; Turn 4 is exercised in the happy-path spec.
     await expect(
       page.getByText(
-        /This is calling the configured LLM and fetching the URLs/i,
+        /This step calls the configured LLM and fetches pages over the network/i,
       ),
     ).toBeVisible();
   });

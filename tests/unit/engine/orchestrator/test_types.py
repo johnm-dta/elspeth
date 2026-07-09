@@ -10,8 +10,7 @@ field ordering mistakes during construction or addition.
 """
 
 from dataclasses import FrozenInstanceError
-from types import MappingProxyType
-from unittest.mock import Mock
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -21,9 +20,8 @@ from elspeth.engine.orchestrator.types import (
     AggregationFlushResult,
     ExecutionCounters,
     PipelineConfig,
-    ValueSourceFinding,
-    ValueSourceValidationError,
 )
+from elspeth.engine.orchestrator.value_source_validation import ValueSourceFinding, ValueSourceValidationError
 
 
 class TestAggregationFlushResult:
@@ -41,7 +39,8 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
-            routed_destinations={"sink_a": 9},
+            rows_diverted=9,
+            routed_destinations={"sink_a": 10},
         )
 
         # Each field must be accessible and have the correct value
@@ -54,7 +53,8 @@ class TestAggregationFlushResult:
         assert result.rows_forked == 6
         assert result.rows_expanded == 7
         assert result.rows_buffered == 8
-        assert result.routed_destinations == {"sink_a": 9}
+        assert result.rows_diverted == 9
+        assert result.routed_destinations == {"sink_a": 10}
 
     def test_frozen_dataclass_immutability(self) -> None:
         """Verify frozen=True prevents mutation."""
@@ -76,6 +76,7 @@ class TestAggregationFlushResult:
         assert result.rows_forked == 0
         assert result.rows_expanded == 0
         assert result.rows_buffered == 0
+        assert result.rows_diverted == 0
         assert result.routed_destinations == {}
 
     def test_addition_operator_sums_all_fields(self) -> None:
@@ -90,6 +91,7 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
+            rows_diverted=9,
             routed_destinations={"sink_a": 10, "sink_b": 20},
         )
         result_b = AggregationFlushResult(
@@ -102,6 +104,7 @@ class TestAggregationFlushResult:
             rows_forked=60,
             rows_expanded=70,
             rows_buffered=80,
+            rows_diverted=90,
             routed_destinations={"sink_b": 30, "sink_c": 40},
         )
 
@@ -116,6 +119,7 @@ class TestAggregationFlushResult:
         assert combined.rows_forked == 66
         assert combined.rows_expanded == 77
         assert combined.rows_buffered == 88
+        assert combined.rows_diverted == 99
         assert combined.routed_destinations == {"sink_a": 10, "sink_b": 50, "sink_c": 40}
 
     def test_addition_operator_commutative(self) -> None:
@@ -130,6 +134,7 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
+            rows_diverted=9,
             routed_destinations={"sink_a": 10},
         )
         result_b = AggregationFlushResult(
@@ -142,6 +147,7 @@ class TestAggregationFlushResult:
             rows_forked=60,
             rows_expanded=70,
             rows_buffered=80,
+            rows_diverted=90,
             routed_destinations={"sink_b": 20},
         )
 
@@ -159,6 +165,7 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
+            rows_diverted=9,
             routed_destinations={"sink_a": 9},
         )
         zero = AggregationFlushResult()
@@ -182,15 +189,40 @@ class TestAggregationFlushResult:
 
 
 # ---------------------------------------------------------------------------
-# T18: New type tests
+# New type tests
 # ---------------------------------------------------------------------------
+
+
+def test_processor_ports_live_outside_types_module() -> None:
+    from elspeth.engine.orchestrator import ports, types
+
+    assert not hasattr(types, "RowProcessorHandle")
+    assert ports.RowProcessorHandle.__module__ == "elspeth.engine.orchestrator.ports"
+    assert ports.RowProcessingPort.__module__ == "elspeth.engine.orchestrator.ports"
+    assert ports.SchedulerJournalPort.__module__ == "elspeth.engine.orchestrator.ports"
+    assert ports.AggregationProcessorPort.__module__ == "elspeth.engine.orchestrator.ports"
+
+
+def test_types_keeps_compatibility_reexports_for_moved_owned_types() -> None:
+    from elspeth.engine.orchestrator import plugin_types, ports, run_state, types, value_source_validation
+
+    assert types.RowPlugin is plugin_types.RowPlugin
+    assert types.TelemetryManagerProtocol is ports.TelemetryManagerProtocol
+    assert types.GraphArtifacts is run_state.GraphArtifacts
+    assert types.AggNodeEntry is run_state.AggNodeEntry
+    assert types.RunContext is run_state.RunContext
+    assert types.LoopContext is run_state.LoopContext
+    assert types.LoopResult is run_state.LoopResult
+    assert types.ResumeState is run_state.ResumeState
+    assert types.ValueSourceFinding is value_source_validation.ValueSourceFinding
+    assert types.ValueSourceValidationError is value_source_validation.ValueSourceValidationError
 
 
 class TestGraphArtifacts:
     """Test GraphArtifacts frozen dataclass with MappingProxyType wrapping."""
 
     def test_fields_frozen_to_mapping_proxy(self) -> None:
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         artifacts = GraphArtifacts(
             edge_map={(NodeID("node1"), "continue"): "edge1"},
@@ -209,7 +241,7 @@ class TestGraphArtifacts:
         assert isinstance(artifacts.coalesce_id_map, MappingProxyType)
 
     def test_is_frozen(self) -> None:
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         artifacts = GraphArtifacts(
             edge_map={},
@@ -228,17 +260,17 @@ class TestAggNodeEntry:
     """Test AggNodeEntry named pair."""
 
     def test_attribute_access(self) -> None:
-        from elspeth.engine.orchestrator.types import AggNodeEntry
+        from elspeth.engine.orchestrator.run_state import AggNodeEntry
 
-        mock_transform = Mock()
-        entry = AggNodeEntry(transform=mock_transform, node_id=NodeID("agg1"))
-        assert entry.transform is mock_transform
+        transform = object()
+        entry = AggNodeEntry(transform=transform, node_id=NodeID("agg1"))
+        assert entry.transform is transform
         assert entry.node_id == NodeID("agg1")
 
     def test_is_frozen(self) -> None:
-        from elspeth.engine.orchestrator.types import AggNodeEntry
+        from elspeth.engine.orchestrator.run_state import AggNodeEntry
 
-        entry = AggNodeEntry(transform=Mock(), node_id=NodeID("agg1"))
+        entry = AggNodeEntry(transform=object(), node_id=NodeID("agg1"))
         with pytest.raises(AttributeError):
             entry.node_id = NodeID("other")  # type: ignore[misc]
 
@@ -247,14 +279,14 @@ class TestRunContext:
     """Test RunContext frozen dataclass."""
 
     def test_mapping_fields_frozen(self) -> None:
-        from elspeth.engine.orchestrator.types import AggNodeEntry, RunContext
+        from elspeth.engine.orchestrator.run_state import AggNodeEntry, RunContext
 
         run_ctx = RunContext(
-            ctx=Mock(),
-            processor=Mock(),
+            ctx=object(),
+            processor=object(),
             coalesce_executor=None,
             coalesce_node_map={CoalesceName("m1"): NodeID("c1")},
-            agg_transform_lookup={"node1": AggNodeEntry(transform=Mock(), node_id=NodeID("agg1"))},
+            agg_transform_lookup={"node1": AggNodeEntry(transform=object(), node_id=NodeID("agg1"))},
         )
         assert isinstance(run_ctx.coalesce_node_map, MappingProxyType)
         assert isinstance(run_ctx.agg_transform_lookup, MappingProxyType)
@@ -264,14 +296,14 @@ class TestLoopContext:
     """Test LoopContext mutable dataclass."""
 
     def test_mutable_fields_can_be_updated(self) -> None:
-        from elspeth.engine.orchestrator.types import LoopContext
+        from elspeth.engine.orchestrator.run_state import LoopContext
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
             pending_tokens={"output": []},
-            processor=Mock(),
-            ctx=Mock(),
-            config=Mock(),
+            processor=object(),
+            ctx=object(),
+            config=object(),
             agg_transform_lookup={},
             coalesce_executor=None,
             coalesce_node_map={},
@@ -281,15 +313,15 @@ class TestLoopContext:
         assert loop_ctx.counters.rows_processed == 1
 
         # Mutable: pending_tokens can be appended
-        loop_ctx.pending_tokens["output"].append((Mock(), None))
+        loop_ctx.pending_tokens["output"].append((object(), None))
         assert len(loop_ctx.pending_tokens["output"]) == 1
 
 
 class TestExecutionCountersToRunResultRequired:
-    """Test that to_run_result requires status parameter (T18 safety fix)."""
+    """Test that to_run_result requires the status parameter (no implicit default)."""
 
     def test_status_is_required_parameter(self) -> None:
-        """After T18, status has no default — callers must be explicit.
+        """Status has no default — callers must be explicit.
 
         Phase 2.2 (elspeth-0de989c56d): the biconditional invariant on
         :class:`RunResult` rejects ``status=COMPLETED`` with zero counters
@@ -311,21 +343,17 @@ class TestPipelineConfig:
 
     def _make_config(self) -> PipelineConfig:
         """Minimal valid PipelineConfig for testing."""
-        source = Mock()
-        source.node_id = None
-        transform = Mock()
-        transform.node_id = None
-        transform.on_error = "discard"
-        sink = Mock()
-        sink.node_id = None
+        source = SimpleNamespace(node_id=None)
+        transform = SimpleNamespace(node_id=None, on_error="discard")
+        sink = SimpleNamespace(node_id=None)
         return PipelineConfig(
             sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
             config={"key": "value"},
-            gates=[Mock()],
-            aggregation_settings={"agg-1": Mock()},
-            coalesce_settings=[Mock()],
+            gates=[object()],
+            aggregation_settings={"agg-1": object()},
+            coalesce_settings=[object()],
         )
 
     def test_list_fields_frozen_to_tuple(self) -> None:
@@ -343,26 +371,24 @@ class TestPipelineConfig:
     def test_tuple_fields_reject_append(self) -> None:
         config = self._make_config()
         with pytest.raises(AttributeError):
-            config.transforms.append(Mock())  # type: ignore[attr-defined]
+            config.transforms.append(object())  # type: ignore[attr-defined]
 
     def test_mapping_proxy_fields_reject_assignment(self) -> None:
         config = self._make_config()
         with pytest.raises(TypeError):
-            config.sinks["new"] = Mock()  # type: ignore[index]
+            config.sinks["new"] = object()  # type: ignore[index]
         with pytest.raises(TypeError):
             config.config["new"] = "value"  # type: ignore[index]
 
     def test_idempotent_with_already_frozen_inputs(self) -> None:
-        source = Mock()
-        source.node_id = None
-        sink = Mock()
-        sink.node_id = None
-        frozen_transforms = (Mock(),)
+        source = SimpleNamespace(node_id=None)
+        sink = SimpleNamespace(node_id=None)
+        frozen_transforms = (SimpleNamespace(node_id=None, on_error="discard"),)
         frozen_sinks = MappingProxyType({"output": sink})
         frozen_config = MappingProxyType({"key": "value"})
-        frozen_gates = (Mock(),)
-        frozen_agg = MappingProxyType({"agg-1": Mock()})
-        frozen_coal = (Mock(),)
+        frozen_gates = (object(),)
+        frozen_agg = MappingProxyType({"agg-1": object()})
+        frozen_coal = (object(),)
 
         config = PipelineConfig(
             sources={"primary": source},

@@ -5,63 +5,48 @@ DAG navigation concerns. All methods are pure queries on immutable
 topology data — no mutable state dependencies.
 
 Used by:
-- RowProcessor (work item creation, node resolution)
+- RowProcessor (node and terminal route resolution)
 - Future: aggregation flush helpers (routing without RowProcessor coupling)
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
 
-from elspeth.contracts import TokenInfo, TransformProtocol
+from elspeth.contracts import TransformProtocol
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.config import GateSettings
-from elspeth.engine.orchestrator.types import RowPlugin
+from elspeth.engine.orchestrator.plugin_types import RowPlugin
 
 
 class DAGTraversalSnapshot(Protocol):
     """Traversal fields consumed by DAGNavigator.from_traversal_context()."""
 
-    coalesce_node_map: Mapping[CoalesceName, NodeID]
-    node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings]
-    node_to_next: Mapping[NodeID, NodeID | None]
-    branch_first_node: Mapping[str, NodeID]
+    @property
+    def coalesce_node_map(self) -> Mapping[CoalesceName, NodeID]: ...
 
+    @property
+    def node_to_plugin(self) -> Mapping[NodeID, RowPlugin | GateSettings]: ...
 
-@dataclass(frozen=True, slots=True)
-class WorkItem:
-    """Item in the work queue for DAG processing.
+    @property
+    def node_to_next(self) -> Mapping[NodeID, NodeID | None]: ...
 
-    Frozen to prevent post-construction mutation. Use DAGNavigator.create_work_item()
-    factory method for construction with coalesce node resolution.
-    """
+    @property
+    def branch_first_node(self) -> Mapping[str, NodeID]: ...
 
-    token: TokenInfo
-    current_node_id: NodeID | None
-    coalesce_node_id: NodeID | None = None
-    coalesce_name: CoalesceName | None = None  # Name of the coalesce point (if any)
-    on_success_sink: str | None = None  # Inherited sink for terminal children (deagg)
-
-    def __post_init__(self) -> None:
-        has_id = self.coalesce_node_id is not None
-        has_name = self.coalesce_name is not None
-        if has_id != has_name:
-            raise OrchestrationInvariantError(
-                f"WorkItem coalesce fields must be both set or both None: "
-                f"coalesce_node_id={self.coalesce_node_id}, coalesce_name={self.coalesce_name}"
-            )
+    @property
+    def structural_node_ids(self) -> frozenset[NodeID]: ...
 
 
 class DAGNavigator:
     """Pure topology queries for DAG traversal.
 
-    Resolves next-nodes, creates work items, and walks the DAG to find
-    terminal sinks. All methods are pure queries on immutable data — no
-    mutable state mutations.
+    Resolves next-nodes, coalesce identifiers, branch starts, and terminal
+    sinks. All methods are pure queries on immutable data — no mutable state
+    mutations.
 
     Constructed from a DAGTraversalContext (built by orchestrator) plus
     supplementary routing data from RowProcessor's constructor params.
@@ -81,6 +66,9 @@ class DAGNavigator:
     ) -> None:
         # Wrap all mappings in MappingProxyType for true immutability
         self._node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings] = MappingProxyType(dict(node_to_plugin))
+        self._fork_gate_node_ids = frozenset(
+            node_id for node_id, plugin in self._node_to_plugin.items() if isinstance(plugin, GateSettings)
+        )
         self._node_to_next: Mapping[NodeID, NodeID | None] = MappingProxyType(dict(node_to_next))
         self._coalesce_node_ids: Mapping[CoalesceName, NodeID] = MappingProxyType(dict(coalesce_node_ids))
         self._structural_node_ids = structural_node_ids
@@ -99,13 +87,18 @@ class DAGNavigator:
     ) -> DAGNavigator:
         """Create a DAGNavigator from a DAGTraversalContext plus supplementary params.
 
-        Derives structural_node_ids and coalesce_name_by_node_id automatically.
+        Consumes the context's explicit structural_node_ids allowlist —
+        never the complement of node_to_plugin, which silently classified
+        unmapped plugin nodes as skippable (elspeth-c522931bd1) — and
+        derives coalesce_name_by_node_id automatically.
         """
         coalesce_node_ids = dict(traversal.coalesce_node_map)
         node_to_plugin = dict(traversal.node_to_plugin)
         node_to_next = dict(traversal.node_to_next)
 
-        structural_node_ids = frozenset(nid for nid in node_to_next if nid not in node_to_plugin)
+        # Coalesce nodes are structural by definition; the union keeps that
+        # invariant even for snapshot implementations that omit them.
+        structural_node_ids = frozenset(traversal.structural_node_ids) | frozenset(coalesce_node_ids.values())
         coalesce_name_by_node_id = {node_id: coalesce_name for coalesce_name, node_id in coalesce_node_ids.items()}
 
         return cls(
@@ -117,48 +110,6 @@ class DAGNavigator:
             coalesce_on_success_map=coalesce_on_success_map or {},
             sink_names=sink_names or frozenset(),
             branch_first_node=dict(traversal.branch_first_node),
-        )
-
-    def create_work_item(
-        self,
-        *,
-        token: TokenInfo,
-        current_node_id: NodeID | None,
-        coalesce_name: CoalesceName | None = None,
-        coalesce_node_id: NodeID | None = None,
-        on_success_sink: str | None = None,
-    ) -> WorkItem:
-        """Create node-id based work item."""
-        resolved_coalesce_node_id = coalesce_node_id
-        resolved_coalesce_name = coalesce_name
-
-        # Resolve missing node id from name (existing behavior)
-        if resolved_coalesce_node_id is None and resolved_coalesce_name is not None:
-            try:
-                resolved_coalesce_node_id = self._coalesce_node_ids[resolved_coalesce_name]
-            except KeyError as exc:
-                raise OrchestrationInvariantError(
-                    f"Unknown coalesce name '{resolved_coalesce_name}' — "
-                    f"not in coalesce_node_ids map. "
-                    f"Known coalesce names: {sorted(self._coalesce_node_ids.keys())}"
-                ) from exc
-        # Resolve missing name from node id (symmetric resolution)
-        elif resolved_coalesce_node_id is not None and resolved_coalesce_name is None:
-            try:
-                resolved_coalesce_name = self._coalesce_name_by_node_id[resolved_coalesce_node_id]
-            except KeyError as exc:
-                raise OrchestrationInvariantError(
-                    f"Unknown coalesce node id '{resolved_coalesce_node_id}' — "
-                    f"not in coalesce_name_by_node_id map. "
-                    f"Known coalesce nodes: {sorted(self._coalesce_name_by_node_id.keys())}"
-                ) from exc
-
-        return WorkItem(
-            token=token,
-            current_node_id=current_node_id,
-            coalesce_node_id=resolved_coalesce_node_id,
-            coalesce_name=resolved_coalesce_name,
-            on_success_sink=on_success_sink,
         )
 
     def resolve_plugin_for_node(self, node_id: NodeID) -> TransformProtocol | GateSettings | None:
@@ -181,6 +132,20 @@ class DAGNavigator:
             f"structural nodes: {sorted(self._structural_node_ids)}"
         )
 
+    def is_fork_gate_node(self, node_id: NodeID) -> bool:
+        """Return whether ``node_id`` is a configured fork gate node.
+
+        Continuation routing depends on a reified topology predicate, not on
+        local plugin type probing in the work-item factory. A structural or
+        unknown node cannot be a valid fork-origin cursor and fails here.
+        """
+        if node_id in self._node_to_plugin:
+            return node_id in self._fork_gate_node_ids
+        if node_id in self._structural_node_ids:
+            raise OrchestrationInvariantError(f"Node ID '{node_id}' is structural and cannot be used as a fork-origin continuation cursor")
+        self.resolve_plugin_for_node(node_id)
+        raise AssertionError("resolve_plugin_for_node returned for an unknown non-plugin node")
+
     def resolve_next_node(self, node_id: NodeID) -> NodeID | None:
         """Resolve the next processing node from traversal metadata."""
         if node_id not in self._node_to_next:
@@ -198,6 +163,28 @@ class DAGNavigator:
                 f"Context: {context}"
             )
         return self._coalesce_on_success_map[coalesce_name]
+
+    def resolve_coalesce_node(self, coalesce_name: CoalesceName) -> NodeID:
+        """Resolve a coalesce node id from its configured coalesce name."""
+        try:
+            return self._coalesce_node_ids[coalesce_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Unknown coalesce name '{coalesce_name}' — "
+                f"not in coalesce_node_ids map. "
+                f"Known coalesce names: {sorted(self._coalesce_node_ids.keys())}"
+            ) from exc
+
+    def resolve_coalesce_name(self, coalesce_node_id: NodeID) -> CoalesceName:
+        """Resolve a coalesce name from its structural node id."""
+        try:
+            return self._coalesce_name_by_node_id[coalesce_node_id]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Unknown coalesce node id '{coalesce_node_id}' — "
+                f"not in coalesce_name_by_node_id map. "
+                f"Known coalesce nodes: {sorted(self._coalesce_name_by_node_id.keys())}"
+            ) from exc
 
     def resolve_jump_target_sink(self, start_node_id: NodeID) -> str | None:
         """Resolve terminal on_success sink reachable from a route jump target.
@@ -251,85 +238,11 @@ class DAGNavigator:
             )
         return resolved_sink
 
-    def create_continuation_work_item(
-        self,
-        *,
-        token: TokenInfo,
-        current_node_id: NodeID,
-        coalesce_name: CoalesceName | None = None,
-        on_success_sink: str | None = None,
-    ) -> WorkItem:
-        """Create child work item that continues after current node or resumes at coalesce.
-
-        For fresh fork children (coalesce_name is set AND current_node_id is a
-        gate node), routes the token to the first processing node for its branch:
-        - Identity branches: first_node == coalesce_node_id (same as before)
-        - Transform branches: first_node is the first transform in the chain
-
-        For non-fork continuations (deaggregation, aggregation flush) where the
-        token is already mid-branch, advances to the next node via
-        resolve_next_node while preserving coalesce metadata for eventual
-        coalesce handling.
-
-        resume_attempt_offset and resume_checkpoint_id are carried on the token
-        itself (TokenInfo fields) and propagate automatically via the token
-        reference — no explicit threading through WorkItem required.
-        """
-        if coalesce_name is not None:
-            coalesce_node_id = self._coalesce_node_ids[coalesce_name]
-
-            # Only route to branch-start when the continuation originates from
-            # a fork gate (the node that created the fork children). Non-fork
-            # continuations (deaggregation, aggregation flush) are already
-            # mid-branch and must advance forward via resolve_next_node.
-            plugin = self.resolve_plugin_for_node(current_node_id)
-            is_fork_origin = isinstance(plugin, GateSettings)
-
-            if is_fork_origin:
-                # Fresh fork child — route to the first node in the branch.
-                branch_name = token.branch_name
-                if branch_name is None:
-                    raise OrchestrationInvariantError(
-                        f"Token '{token.token_id}' has coalesce_name='{coalesce_name}' but branch_name is None. "
-                        "Fork children must have branch_name set."
-                    )
-                try:
-                    first_node = self._branch_first_node[branch_name]
-                except KeyError as exc:
-                    raise OrchestrationInvariantError(
-                        f"Unknown branch name '{branch_name}' — "
-                        f"not in branch_first_node map. "
-                        f"Known branches: {sorted(self._branch_first_node.keys())}"
-                    ) from exc
-                return self.create_work_item(
-                    token=token,
-                    current_node_id=first_node,
-                    coalesce_name=coalesce_name,
-                    coalesce_node_id=coalesce_node_id,
-                    on_success_sink=on_success_sink,
-                )
-
-            # Non-fork continuation — advance forward, preserving coalesce metadata.
-            return self.create_work_item(
-                token=token,
-                current_node_id=self.resolve_next_node(current_node_id),
-                coalesce_name=coalesce_name,
-                coalesce_node_id=coalesce_node_id,
-                on_success_sink=on_success_sink,
-            )
-
-        return self.create_work_item(
-            token=token,
-            current_node_id=self.resolve_next_node(current_node_id),
-            on_success_sink=on_success_sink,
-        )
-
     def resolve_branch_first_node(self, branch_name: str) -> NodeID:
         """First processing node for a fork branch routed to a coalesce.
 
-        Exposes the same _branch_first_node lookup that create_continuation_work_item
-        performs inline (for fresh fork children); this accessor is the explicit entry
-        point used by the resume path (RowProcessor.resume_incomplete_token).
+        Exposes the _branch_first_node lookup for fresh fork children and the
+        resume path (RowProcessor.resume_incomplete_token).
 
         _branch_first_node covers all coalesce-bound branches (built by
         ExecutionGraph.get_branch_first_nodes). Callers must only invoke this for

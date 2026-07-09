@@ -34,6 +34,18 @@ class ConfigFieldSummary(_StrictResponse):
     default: Any | None = None
 
 
+class PluginSecretRequirement(_StrictResponse):
+    """Secret inventory requirement for composer plugin discovery.
+
+    ``candidates`` names browser-safe secret refs, never secret values. Empty
+    means the plugin requires the field to be wired to some available secret,
+    but does not declare a canonical inventory name.
+    """
+
+    field: str
+    candidates: tuple[str, ...] = ()
+
+
 class PluginSummary(_StrictResponse):
     """Lightweight plugin info for catalog browsing.
 
@@ -71,6 +83,10 @@ class PluginSummary(_StrictResponse):
     # coaching only — not contract, not audit-hashed.
     composer_hints: tuple[str, ...] = ()
 
+    # Secret availability gate for composer discovery. The composer filters
+    # plugins with unsatisfied requirements before exposing them to the LLM.
+    secret_requirements: tuple[PluginSecretRequirement, ...] = ()
+
 
 class PluginSchemaInfo(_StrictResponse):
     """Full plugin schema detail for the composer.
@@ -93,3 +109,7 @@ class PluginSchemaInfo(_StrictResponse):
     # the same hints it would have seen from list_*. Avoids requiring
     # a follow-up get_plugin_assistance call to surface the hints.
     composer_hints: tuple[str, ...] = ()
+
+    # Mirrors PluginSummary.secret_requirements on the full-schema surface so
+    # get_plugin_schema and get_plugin_assistance can enforce the same gate.
+    secret_requirements: tuple[PluginSecretRequirement, ...] = ()

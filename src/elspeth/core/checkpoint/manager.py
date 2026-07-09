@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import asc, delete, desc, select
 
-from elspeth.contracts import Checkpoint
+from elspeth.contracts import Checkpoint, CheckpointDraft
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.core.canonical import compute_full_topology_hash
+from elspeth.core.checkpoint.compatibility import IncompatibleCheckpointError as IncompatibleCheckpointError
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
@@ -24,15 +24,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Connection
 
-    from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.coordination import CoordinationToken
-    from elspeth.core.dag import ExecutionGraph
-
-
-class IncompatibleCheckpointError(Exception):
-    """Raised when attempting to load a checkpoint from an incompatible version."""
-
-    pass
 
 
 class CheckpointCorruptionError(Exception):
@@ -62,6 +54,35 @@ def _validate_barrier_scalars_json_size(serialized: str) -> None:
         f"Barrier scalars carry only trigger latches and lost-branch records; "
         f"a payload this large indicates a bug in barrier state construction."
     )
+
+
+def _validated_persisted_barrier_scalars_json(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"barrier_scalars_json must be str or None, got {type(value).__name__}")
+    try:
+        _validate_barrier_scalars_json_size(value)
+    except OrchestrationInvariantError as exc:
+        raise ValueError(f"barrier_scalars_json is invalid: {exc}") from exc
+    return value
+
+
+def _checkpoint_from_row(row: Any, *, requested_run_id: str) -> Checkpoint:
+    try:
+        return Checkpoint(
+            checkpoint_id=row.checkpoint_id,
+            run_id=row.run_id,
+            sequence_number=row.sequence_number,
+            created_at=row.created_at,
+            upstream_topology_hash=row.upstream_topology_hash,
+            barrier_scalars_json=_validated_persisted_barrier_scalars_json(row.barrier_scalars_json),
+            format_version=row.format_version,  # None for legacy checkpoints
+        )
+    except ValueError as e:
+        raise CheckpointCorruptionError(
+            f"Checkpoint corruption detected for run '{requested_run_id}', checkpoint '{row.checkpoint_id}': {e}"
+        ) from e
 
 
 class CheckpointManager:
@@ -114,21 +135,15 @@ class CheckpointManager:
     def create_checkpoint(
         self,
         *,
-        run_id: str,
-        sequence_number: int,
-        barrier_scalars: BarrierScalars | None,
-        graph: ExecutionGraph,
+        draft: CheckpointDraft,
         coordination_token: CoordinationToken | None = None,
     ) -> Checkpoint:
         """Create a checkpoint at current progress point.
 
         Args:
-            run_id: The run being checkpointed
-            sequence_number: Monotonic progress marker
-            barrier_scalars: Scalar barrier metadata for in-flight
-                aggregation/coalesce barriers, or None. Empty scalars
-                (``has_state`` False) persist NULL, same as None.
-            graph: Execution graph for topology validation (REQUIRED)
+            draft: Persistence-ready checkpoint data. The topology hash is
+                computed by the orchestration/compatibility boundary before
+                reaching this repository.
             coordination_token: Leader fencing token (ADR-030). When
                 supplied, the verify-and-extend epoch fence is the first
                 statement of the write transaction; a stale epoch raises
@@ -136,24 +151,20 @@ class CheckpointManager:
 
         Returns:
             The created Checkpoint
-
-        Raises:
-            ValueError: If graph is None
         """
-        # Validate parameters early
-        if graph is None:
-            raise ValueError("graph parameter is required for checkpoint creation")
+        if not isinstance(draft, CheckpointDraft):
+            raise TypeError(f"draft must be CheckpointDraft, got {type(draft).__name__}")
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
         with self._fenced_or_plain_write(coordination_token=coordination_token, verb="create_checkpoint") as conn:
             existing_sequence = conn.execute(
                 select(checkpoints_table.c.checkpoint_id)
-                .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
+                .where((checkpoints_table.c.run_id == draft.run_id) & (checkpoints_table.c.sequence_number == draft.sequence_number))
                 .limit(1)
             ).fetchone()
             if existing_sequence is not None:
                 raise OrchestrationInvariantError(
-                    f"Duplicate checkpoint sequence_number={sequence_number} for run '{run_id}' "
+                    f"Duplicate checkpoint sequence_number={draft.sequence_number} for run '{draft.run_id}' "
                     f"would make resume ordering ambiguous; existing checkpoint={existing_sequence.checkpoint_id}"
                 )
 
@@ -167,38 +178,31 @@ class CheckpointManager:
             # Note: We don't use canonical_json because it normalizes floats to
             # integers, breaking round-trip for the float trigger-offset latches.
             scalars_json: str | None = None
-            if barrier_scalars is not None and barrier_scalars.has_state:
-                scalars_json = checkpoint_dumps(barrier_scalars.to_dict())
+            if draft.barrier_scalars is not None and draft.barrier_scalars.has_state:
+                scalars_json = checkpoint_dumps(draft.barrier_scalars.to_dict())
                 _validate_barrier_scalars_json_size(scalars_json)
-
-            # Compute topology hash inside transaction
-            # This ensures hash matches graph state at exact moment of checkpoint creation
-            # Use FULL topology hash (every node's id + config hash + all edges).
-            # This ensures changes to ANY branch (including sibling sink branches)
-            # are detected during resume validation, enforcing "one run = one config".
-            upstream_topology_hash = compute_full_topology_hash(graph)
 
             conn.execute(
                 checkpoints_table.insert().values(
                     checkpoint_id=checkpoint_id,
-                    run_id=run_id,
-                    sequence_number=sequence_number,
+                    run_id=draft.run_id,
+                    sequence_number=draft.sequence_number,
                     barrier_scalars_json=scalars_json,
                     created_at=created_at,
-                    upstream_topology_hash=upstream_topology_hash,
-                    format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+                    upstream_topology_hash=draft.upstream_topology_hash,
+                    format_version=draft.format_version,
                 )
             )
             # begin() auto-commits on clean exit, auto-rollbacks on exception
 
         return Checkpoint(
             checkpoint_id=checkpoint_id,
-            run_id=run_id,
-            sequence_number=sequence_number,
+            run_id=draft.run_id,
+            sequence_number=draft.sequence_number,
             created_at=created_at,
-            upstream_topology_hash=upstream_topology_hash,
+            upstream_topology_hash=draft.upstream_topology_hash,
             barrier_scalars_json=scalars_json,
-            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+            format_version=draft.format_version,
         )
 
     def get_latest_checkpoint(self, run_id: str) -> Checkpoint | None:
@@ -210,8 +214,8 @@ class CheckpointManager:
         Returns:
             Latest Checkpoint or None if no checkpoints exist
 
-        Raises:
-            IncompatibleCheckpointError: If checkpoint predates deterministic node IDs
+        This is a raw persistence read. Resume compatibility policy is enforced
+        by CheckpointCompatibilityValidator, not by the repository boundary.
         """
         with self._db.engine.connect() as conn:
             result = conn.execute(
@@ -224,25 +228,7 @@ class CheckpointManager:
         if result is None:
             return None
 
-        try:
-            checkpoint = Checkpoint(
-                checkpoint_id=result.checkpoint_id,
-                run_id=result.run_id,
-                sequence_number=result.sequence_number,
-                created_at=result.created_at,
-                upstream_topology_hash=result.upstream_topology_hash,
-                barrier_scalars_json=result.barrier_scalars_json,
-                format_version=result.format_version,  # None for legacy checkpoints
-            )
-        except ValueError as e:
-            raise CheckpointCorruptionError(
-                f"Checkpoint corruption detected for run '{run_id}', checkpoint '{result.checkpoint_id}': {e}"
-            ) from e
-
-        # Validate checkpoint compatibility before returning
-        self._validate_checkpoint_compatibility(checkpoint)
-
-        return checkpoint
+        return _checkpoint_from_row(result, requested_run_id=run_id)
 
     def get_checkpoints(self, run_id: str) -> list[Checkpoint]:
         """Get all checkpoints for a run, ordered by sequence.
@@ -260,22 +246,7 @@ class CheckpointManager:
 
         checkpoints = []
         for r in results:
-            try:
-                checkpoints.append(
-                    Checkpoint(
-                        checkpoint_id=r.checkpoint_id,
-                        run_id=r.run_id,
-                        sequence_number=r.sequence_number,
-                        created_at=r.created_at,
-                        upstream_topology_hash=r.upstream_topology_hash,
-                        barrier_scalars_json=r.barrier_scalars_json,
-                        format_version=r.format_version,  # None for legacy checkpoints
-                    )
-                )
-            except ValueError as e:
-                raise CheckpointCorruptionError(
-                    f"Checkpoint corruption detected for run '{run_id}', checkpoint '{r.checkpoint_id}': {e}"
-                ) from e
+            checkpoints.append(_checkpoint_from_row(r, requested_run_id=run_id))
         return checkpoints
 
     def delete_checkpoints(self, run_id: str, *, coordination_token: CoordinationToken | None = None) -> int:
@@ -299,32 +270,3 @@ class CheckpointManager:
             result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
             # begin() auto-commits on clean exit, auto-rollbacks on exception
             return result.rowcount
-
-    def _validate_checkpoint_compatibility(self, checkpoint: Checkpoint) -> None:
-        """Verify checkpoint was created with compatible format version.
-
-        CRITICAL: Node IDs changed from random UUID to deterministic hash-based
-        in format version 2. Old checkpoints cannot be resumed because node IDs
-        will not match between checkpoint and current graph.
-
-        Args:
-            checkpoint: Checkpoint to validate
-
-        Raises:
-            IncompatibleCheckpointError: If checkpoint format version is incompatible
-        """
-        if checkpoint.format_version is None:
-            raise IncompatibleCheckpointError(
-                f"Checkpoint '{checkpoint.checkpoint_id}' is missing format_version. "
-                "Resume not supported for unversioned checkpoints. "
-                "Please restart pipeline from beginning."
-            )
-
-        # CRITICAL: Reject BOTH older AND newer versions - cross-version resume is unsupported
-        if checkpoint.format_version != Checkpoint.CURRENT_FORMAT_VERSION:
-            raise IncompatibleCheckpointError(
-                f"Checkpoint '{checkpoint.checkpoint_id}' has incompatible format version "
-                f"(checkpoint: v{checkpoint.format_version}, current: v{Checkpoint.CURRENT_FORMAT_VERSION}). "
-                "Resume requires exact format version match. "
-                "Please restart pipeline from beginning."
-            )

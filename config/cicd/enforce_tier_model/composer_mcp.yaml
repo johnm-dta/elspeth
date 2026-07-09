@@ -6,45 +6,43 @@ per_file_rules:
     to JSON-safe types; RuntimePreflightFailure union dispatch in _mcp_preview_runtime_preflight
     also uses isinstance to narrow the result type
   expires: null
-  max_hits: 4
-allow_hits: []
-
+  max_hits: 14
 allow_hits:
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=a187f54762a062cc
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=658eeb3e33dab651
   owner: john
   reason: |-
-    LLM tool arguments are Tier-3 external input; this path validates and canonicalizes before state mutation, with audit-safe failure propagation.
+    This is the MCP tool-call argument canonicalization boundary in `src/elspeth/composer_mcp/server.py:642`. The caught `ValueError`/`TypeError` is not a Tier-1 audit-data read failure and is not silently swallowed: `arguments` are external MCP client input, and the handler converts non-canonicalizable input into a safe audit sentinel and an explicit tool argument error. At `src/elspeth/composer_mcp/server.py:666` the code catches `except (ValueError, TypeError) as canon_exc:`, then at `src/elspeth/composer_mcp/server.py:672-675` records a sentinel with `build_canonicalization_sentinel(canon_exc, arguments)`, `arguments_canonical = canonical_json(sentinel)`, `arguments_hash = stable_hash(sentinel)`, and `canonicalization_failed = canon_exc`. The enclosing flow then checks that sentinel at `src/elspeth/composer_mcp/server.py:719-721` and returns `_argument_error_result(ValueError(f"arguments not canonicalizable ({type(canonicalization_failed).__name__})"))`, whose helper marks `status = ComposerToolStatus.ARG_ERROR` and returns `CallToolResult(..., isError=True)` at `src/elspeth/composer_mcp/server.py:694-706`. Future drift that removes the `canonicalization_failed` check, the ARG_ERROR status, or the `isError=True` result would invalidate this suppression.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
+  expires: '2026-10-06'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:23:18.461004+00:00'
+  judge_recorded_at: '2026-07-08T12:21:46.772545+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: R6 flags silent-except, but this except is neither silent nor a swallow. The handler catches ValueError/TypeError from canonical_json on external MCP client `arguments` (Tier-3 boundary), builds an explicit forensic sentinel, records it into the audit-ready canonical/hash fields, and sets `canonicalization_failed = canon_exc` which the downstream flow checks to route to `_argument_error_result` (status=ARG_ERROR, isError=True). The visible code shows the sentinel construction and the `canonicalization_failed` capture; the rationale plainly states the downstream routing at lines 719-721 and 694-706 and nothing in the excerpt contradicts it. This is the prescribed Tier-3 boundary form: coerce/record what we got and produce an explicit error result rather than swallowing.
+  judge_signature_version: 2
+  scope_fingerprint: 18a46404d3f8eb9a5d9900a34587c480756a97a62231c61730901b33cb71ebd8
+  judge_transport: openrouter
+  ast_path: 'body[55]/body[11]/body[5]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:3fdbe02c30bda3a20feaff28bc83a222ac0381f10c142c8be29035dd44762eba'
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=7a915965664e0751
+  owner: john
+  reason: |-
+    This is a prescribed audit-canonicalization sentinel, not an unrecorded swallow. In `create_server.call_tool`, the catch is only reached after a successful MCP response has already been built and the coroutine is in the mandatory `finally` audit path: `composer_mcp/server.py:817` gates it to `status == ComposerToolStatus.SUCCESS and result_dict is not None`, and `composer_mcp/server.py:825-833` replaces a non-canonicalizable result with `sentinel = build_canonicalization_sentinel(canon_result_exc, result_dict)` followed by `result_canonical = canonical_json(sentinel)` and `result_hash = stable_hash(sentinel)`. The audit record still carries that canonical/hash at `composer_mcp/server.py:849-856`. The sentinel helper is specifically bounded for this use: `audit.py:139` says it "replaces a non-canonicalizable audit payload", and `audit.py:170-174` states "All captured metadata is bounded" before constructing `{"_canonicalization_error": type(exc).__name__}`. If this site stopped canonicalizing/hashing the sentinel, stopped recording it in `ComposerToolInvocation`, or began catching broader exceptions without a bounded sentinel, this suppression would drift and should fail.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T12:21:53.606831+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.86
   judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The except block does not swallow the error — it captures the exception into `canonicalization_failed`, builds a forensic sentinel via `build_canonicalization_sentinel(canon_exc, arguments)`, and substitutes a sentinel-derived canonical/hash so the audit record is complete. The surrounding code shows the audit envelope explicitly threads ARG_ERROR/PLUGIN_CRASH status through to the recorder, so the exception is structurally propagated as an audit outcome rather than silently dropped. This is the prescribed Tier-3 boundary form for LLM tool arguments: canonicalization failure on external input is recorded with a value-free sentinel, not crashed and not hidden. R6's concern (swallow-without-explicit-result) does not apply.
+    PRESCRIBED FORM. The except is not a silent swallow: it catches narrowly (ValueError, TypeError) from canonical_json/stable_hash on already-built result_dict, then substitutes a bounded sentinel via build_canonicalization_sentinel and re-canonicalizes/re-hashes it, so the audit row at lines 849-856 still records a truthful canonical+hash plus the error class. This is the correct auditability response at the finally boundary — failing to canonicalize would otherwise mask the successful return and destroy the audit record. The rationale identifies the exact sentinel discipline, cites the helper's bounded contract, and names the drift conditions that would invalidate the exemption.
   judge_signature_version: 2
-  scope_fingerprint: 56455b7fdf8553ac9cff81fddce38213a6ade1a4972eae499cdfcd91bca96669
+  scope_fingerprint: 18a46404d3f8eb9a5d9900a34587c480756a97a62231c61730901b33cb71ebd8
   judge_transport: openrouter
-  ast_path: 'body[53]/body[11]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:73c064785c2e8415e72e25b91b46eeae4e8a666801fb3ac2312f46de7afb5a5a'
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=b2caae76fe340e14
-  owner: john
-  reason: |-
-    Audit result canonicalization is intentionally guarded so malformed optional tool-result material records a sentinel without fabricating success or hiding the operation outcome.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:23:25.429812+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    PRESCRIBED FORM. This is the audit-record finalization path running in `finally`: canonicalizing the already-returned successful result for the audit row. A raise from finally would mask the legitimate success return to the LLM and corrupt the audit trail. The except catches narrow serialization errors (ValueError/TypeError from canonical_json) and substitutes a documented shared sentinel (build_canonicalization_sentinel) that records the failure mode rather than fabricating success — the audit row still lands with a faithful sentinel, which matches the Auditability Standard's 'record what we got' discipline. The error is not swallowed silently; it is converted into a recorded canonical sentinel keyed to the exception.
-  judge_signature_version: 2
-  scope_fingerprint: 56455b7fdf8553ac9cff81fddce38213a6ade1a4972eae499cdfcd91bca96669
-  judge_transport: openrouter
-  ast_path: 'body[53]/body[11]/body[14]/finalbody[5]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:c84d3dca07fefd8577d8b5aea996808ce24041aba80d3820735112fc311e3577'
+  ast_path: 'body[55]/body[11]/body[14]/finalbody[5]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:415938336160a72c79b2fff38d6d04e177737ed5df08f3fbacd2b7a10f030dd8'

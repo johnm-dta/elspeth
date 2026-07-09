@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import json
 import sys
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,6 @@ from elspeth_lints.core.ast_walker import (
     PythonFileReadError,
     PythonSyntaxError,
     parse_python_file,
-    walk_python_files,
 )
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope
@@ -129,7 +129,17 @@ def _is_fixture_item(path: Path) -> bool:
 def _run_fixture_case(case: RuleFixtureCase) -> list[Finding]:
     rule = _rule_for_case(case)
     root = case.fixture_path if case.fixture_path.is_dir() else case.fixture_path.parent
-    context = RuleContext(root=root)
+    fixture_allowlist_dir = _fixture_allowlist_dir(root)
+    if fixture_allowlist_dir is not None:
+        context = RuleContext(root=root, allowlist_dir_override=fixture_allowlist_dir)
+        return _run_fixture_case_with_context(case, rule, root, context)
+
+    with tempfile.TemporaryDirectory(prefix="elspeth-lints-empty-allowlist-") as empty_allowlist:
+        context = RuleContext(root=root, allowlist_dir_override=Path(empty_allowlist))
+        return _run_fixture_case_with_context(case, rule, root, context)
+
+
+def _run_fixture_case_with_context(case: RuleFixtureCase, rule: Rule, root: Path, context: RuleContext) -> list[Finding]:
     if rule.scope == RuleScope.WHOLE_REPO:
         return list(rule.analyze(ast.Module(body=[], type_ignores=[]), root, context))
 
@@ -146,13 +156,32 @@ def _run_fixture_case(case: RuleFixtureCase) -> list[Finding]:
         findings.extend(rule.analyze(parsed.tree, parsed.path, context))
         return findings
 
-    for parsed in walk_python_files(case.fixture_path):
+    for parsed in _walk_fixture_python_files(case.fixture_path):
         if isinstance(parsed, PythonSyntaxError):
             raise AssertionError(f"{case.name}: fixture has syntax error: {parsed.message}")
         if isinstance(parsed, PythonFileReadError):
             raise AssertionError(f"{case.name}: fixture I/O error ({parsed.error_type}): {parsed.message}")
         findings.extend(_run_incremental_rule(rule, parsed, context))
     return findings
+
+
+def _walk_fixture_python_files(root: Path) -> Iterable[ParsedPythonFile | PythonSyntaxError | PythonFileReadError]:
+    """Parse fixture files even when the repository worktree path is hidden."""
+    for file_path in sorted(root.rglob("*.py")):
+        if "__pycache__" in file_path.parts or "node_modules" in file_path.parts:
+            continue
+        yield parse_python_file(file_path)
+
+
+def _fixture_allowlist_dir(root: Path) -> Path | None:
+    """Return the fixture-local allowlist directory when one is unambiguous."""
+    cicd_dir = root / "config" / "cicd"
+    if not cicd_dir.is_dir():
+        return None
+    allowlist_dirs = tuple(sorted(item for item in cicd_dir.iterdir() if item.is_dir()))
+    if len(allowlist_dirs) == 1:
+        return allowlist_dirs[0]
+    return None
 
 
 def _rule_for_case(case: RuleFixtureCase) -> Rule:

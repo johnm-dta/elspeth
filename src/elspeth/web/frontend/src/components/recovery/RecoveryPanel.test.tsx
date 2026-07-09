@@ -94,8 +94,13 @@ describe("RecoveryPanel", () => {
       screen.getByRole("dialog", { name: "Recover partial composer draft" }),
     ).toHaveAttribute("aria-modal", "true");
     expect(screen.getByText("Composer failed after a tool call")).toBeInTheDocument();
-    expect(screen.getByLabelText("Recovery reason: composer plugin crash")).toHaveTextContent(
-      "Composer plugin crash",
+    // The reason badge carries a visually-hidden "Recovery reason:" prefix
+    // (an aria-label on a role-less span is not exposed to AT — WCAG 1.3.1,
+    // elspeth-37293a3b7c).
+    const reasonBadge = screen.getByText("Composer plugin crash");
+    expect(reasonBadge).toHaveClass("recovery-panel-reason");
+    expect(reasonBadge).toHaveTextContent(
+      "Recovery reason: Composer plugin crash",
     );
     expect(screen.getByText("2 tool calls attempted")).toBeInTheDocument();
     expect(screen.getByText("1 tool response persisted")).toBeInTheDocument();
@@ -117,21 +122,20 @@ describe("RecoveryPanel", () => {
     expect(onApply).not.toHaveBeenCalled();
   });
 
-  it("does not consume Escape without a close action", () => {
+  // elspeth-83eb51334f: this panel was the only role=dialog surface without
+  // Escape dismissal. Escape routes through Discard — the panel's safe exit
+  // (it drops the recovery OFFER, not composed state).
+  it("dismisses via Discard when Escape is pressed", async () => {
+    const user = userEvent.setup();
     const onDiscard = vi.fn();
-    renderPanel({ onDiscard });
+    const onApply = vi.fn(() => ({ applied: false, needsConfirmation: false }));
+    renderPanel({ onDiscard, onApply });
 
-    const escapeEvent = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    screen.getByRole("dialog").focus();
+    await user.keyboard("{Escape}");
 
-    const eventWasNotCancelled = screen.getByRole("dialog").dispatchEvent(escapeEvent);
-
-    expect(eventWasNotCancelled).toBe(true);
-    expect(escapeEvent.defaultPrevented).toBe(false);
-    expect(onDiscard).not.toHaveBeenCalled();
+    expect(onDiscard).toHaveBeenCalledTimes(1);
+    expect(onApply).not.toHaveBeenCalled();
   });
 
   it("opens inline confirmation when apply reports a concurrent edit", async () => {

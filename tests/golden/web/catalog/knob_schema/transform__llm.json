@@ -16,7 +16,7 @@
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
         "label": "Schema",
-        "name": "schema_config",
+        "name": "schema",
         "nullable": false,
         "required": true,
         "visible_when": {
@@ -324,7 +324,7 @@
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
         "label": "Schema",
-        "name": "schema_config",
+        "name": "schema",
         "nullable": false,
         "required": true,
         "visible_when": {

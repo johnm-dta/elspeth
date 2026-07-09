@@ -8,8 +8,10 @@ Migrated from tests/integration/test_rate_limit_integration.py
 """
 
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 import pytest
 
 from elspeth.contracts import Determinism, TransformResult
@@ -21,6 +23,8 @@ from elspeth.core.config import RateLimitSettings
 from elspeth.core.rate_limit import RateLimitRegistry
 from elspeth.engine import Orchestrator
 from elspeth.plugins.infrastructure.base import BaseTransform
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.landscape import make_landscape_db
 
@@ -61,6 +65,113 @@ class RateLimitAwareTransform(BaseTransform):
     def call_times(self) -> list[float]:
         """Get the recorded call times."""
         return self._call_times
+
+
+class FakeCallRecorder:
+    """Minimal audit recorder for audited client integration tests."""
+
+    def __init__(self) -> None:
+        self._next_index = 0
+        self.calls: list[dict[str, Any]] = []
+
+    def allocate_call_index(self, state_id: str) -> int:
+        call_index = self._next_index
+        self._next_index += 1
+        return call_index
+
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        call_index = self._next_index
+        self._next_index += 1
+        return call_index
+
+    def record_call(self, *args: Any, **kwargs: Any) -> object:
+        self.calls.append({"args": args, **kwargs})
+        return object()
+
+    def record_operation_call(self, *args: Any, **kwargs: Any) -> object:
+        self.calls.append({"args": args, **kwargs})
+        return object()
+
+
+@dataclass(slots=True)
+class FakeLLMUsage:
+    prompt_tokens: int = 10
+    completion_tokens: int = 5
+    total_tokens: int | None = None
+
+
+@dataclass(slots=True)
+class FakeLLMMessage:
+    content: str
+
+
+@dataclass(slots=True)
+class FakeLLMChoice:
+    message: FakeLLMMessage
+    finish_reason: str = "stop"
+
+
+@dataclass(slots=True)
+class FakeLLMResponse:
+    content: str
+    model: str = "gpt-4"
+    usage: FakeLLMUsage = field(default_factory=FakeLLMUsage)
+    choices: list[FakeLLMChoice] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.choices = [FakeLLMChoice(message=FakeLLMMessage(self.content))]
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {"content": self.content},
+                    "finish_reason": self.choices[0].finish_reason,
+                }
+            ],
+            "model": self.model,
+            "usage": {
+                "prompt_tokens": self.usage.prompt_tokens,
+                "completion_tokens": self.usage.completion_tokens,
+                "total_tokens": self.usage.total_tokens,
+            },
+        }
+
+
+class FakeChatCompletions:
+    def __init__(self, response: FakeLLMResponse) -> None:
+        self._response = response
+        self.requests: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> FakeLLMResponse:
+        self.requests.append(kwargs)
+        return self._response
+
+
+class FakeOpenAIChat:
+    def __init__(self, response: FakeLLMResponse) -> None:
+        self.completions = FakeChatCompletions(response)
+
+
+class FakeOpenAIClient:
+    def __init__(self, response: FakeLLMResponse) -> None:
+        self.chat = FakeOpenAIChat(response)
+
+
+class FakeHTTPXClient:
+    response: httpx.Response | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.init_args = args
+        self.init_kwargs = kwargs
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        if self.response is None:
+            raise AssertionError("FakeHTTPXClient.response must be set before use")
+        return self.response
+
+    def close(self) -> None:
+        pass
 
 
 class TestRateLimitRegistryInOrchestrator:
@@ -279,12 +390,6 @@ class TestAuditedClientRateLimiting:
         This verifies that P2-2026-02-01 (rate limit registry not consumed)
         is fixed - audited clients now actually use rate limiters.
         """
-        from unittest.mock import MagicMock
-
-        from elspeth.core.config import RateLimitSettings
-        from elspeth.core.rate_limit import RateLimitRegistry
-        from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
-
         settings = RateLimitSettings(enabled=True, default_requests_per_minute=60)
         config = RuntimeRateLimitConfig.from_settings(settings)
         registry = RateLimitRegistry(config)
@@ -304,26 +409,16 @@ class TestAuditedClientRateLimiting:
 
             limiter.acquire = counting_acquire  # type: ignore[method-assign]
 
-            # Mock the recorder (we don't need full landscape infrastructure for this test)
-            mock_recorder = MagicMock()
-            mock_recorder.allocate_call_index.return_value = 0
-
-            # Mock the underlying OpenAI client
-            mock_openai = MagicMock()
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock(message=MagicMock(content="Hello!"))]
-            mock_response.model = "gpt-4"
-            mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
-            mock_response.model_dump.return_value = {}
-            mock_openai.chat.completions.create.return_value = mock_response
+            fake_recorder = FakeCallRecorder()
+            fake_openai = FakeOpenAIClient(FakeLLMResponse(content="Hello!"))
 
             # Create audited client WITH limiter
             client = AuditedLLMClient(
-                execution=mock_recorder,
+                execution=fake_recorder,
                 state_id="test-state-001",
                 run_id="test-run-001",
                 telemetry_emit=lambda event: None,
-                underlying_client=mock_openai,
+                underlying_client=fake_openai,
                 provider="test",
                 limiter=limiter,
             )
@@ -338,7 +433,6 @@ class TestAuditedClientRateLimiting:
             assert acquire_call_count == 1, "limiter.acquire() should be called before LLM call"
 
             # Make another call
-            mock_recorder.allocate_call_index.return_value = 1
             client.chat_completion(
                 model="gpt-4",
                 messages=[{"role": "user", "content": "World"}],
@@ -349,14 +443,8 @@ class TestAuditedClientRateLimiting:
         finally:
             registry.close()
 
-    def test_audited_http_client_acquires_rate_limit(self) -> None:
+    def test_audited_http_client_acquires_rate_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AuditedHTTPClient calls limiter.acquire() before making calls."""
-        from unittest.mock import MagicMock, patch
-
-        from elspeth.core.config import RateLimitSettings
-        from elspeth.core.rate_limit import RateLimitRegistry
-        from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
-
         settings = RateLimitSettings(enabled=True, default_requests_per_minute=60)
         config = RuntimeRateLimitConfig.from_settings(settings)
         registry = RateLimitRegistry(config)
@@ -376,33 +464,27 @@ class TestAuditedClientRateLimiting:
 
             limiter.acquire = counting_acquire  # type: ignore[method-assign]
 
-            # Mock the recorder
-            mock_recorder = MagicMock()
-            mock_recorder.allocate_call_index.return_value = 0
+            fake_recorder = FakeCallRecorder()
+            FakeHTTPXClient.response = httpx.Response(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                json={"result": "ok"},
+                request=httpx.Request("POST", "https://api.example.com/v1/test"),
+            )
+            monkeypatch.setattr(httpx, "Client", FakeHTTPXClient)
 
-            # Mock httpx.Client to avoid actual network calls
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.headers = {"content-type": "application/json"}
-            mock_response.json.return_value = {"result": "ok"}
-            mock_response.content = b'{"result": "ok"}'
-            mock_response.text = '{"result": "ok"}'
+            # Create audited client WITH limiter
+            client = AuditedHTTPClient(
+                execution=fake_recorder,
+                state_id="test-state-001",
+                run_id="test-run-001",
+                telemetry_emit=lambda event: None,
+                timeout=30.0,
+                limiter=limiter,
+            )
 
-            with patch("httpx.Client") as mock_client_class:
-                # Create audited client WITH limiter (inside patch so __init__ gets the mock)
-                client = AuditedHTTPClient(
-                    execution=mock_recorder,
-                    state_id="test-state-001",
-                    run_id="test-run-001",
-                    telemetry_emit=lambda event: None,
-                    timeout=30.0,
-                    limiter=limiter,
-                )
-                mock_client_instance = mock_client_class.return_value
-                mock_client_instance.post.return_value = mock_response
-
-                # Make a call
-                client.post("https://api.example.com/v1/test", json={"data": "value"})
+            # Make a call
+            client.post("https://api.example.com/v1/test", json={"data": "value"})
 
             # Verify limiter.acquire() was called
             assert acquire_call_count == 1, "limiter.acquire() should be called before HTTP call"
@@ -411,30 +493,16 @@ class TestAuditedClientRateLimiting:
 
     def test_audited_client_without_limiter_no_throttle(self) -> None:
         """AuditedLLMClient works without limiter."""
-        from unittest.mock import MagicMock
-
-        from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
-
-        # Mock the recorder
-        mock_recorder = MagicMock()
-        mock_recorder.allocate_call_index.return_value = 0
-
-        # Mock the underlying OpenAI client
-        mock_openai = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="Hello!"))]
-        mock_response.model = "gpt-4"
-        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
-        mock_response.model_dump.return_value = {}
-        mock_openai.chat.completions.create.return_value = mock_response
+        fake_recorder = FakeCallRecorder()
+        fake_openai = FakeOpenAIClient(FakeLLMResponse(content="Hello!"))
 
         # Create audited client WITHOUT limiter (limiter=None is default)
         client = AuditedLLMClient(
-            execution=mock_recorder,
+            execution=fake_recorder,
             state_id="test-state-001",
             run_id="test-run-001",
             telemetry_emit=lambda event: None,
-            underlying_client=mock_openai,
+            underlying_client=fake_openai,
             provider="test",
             # limiter not passed - should default to None
         )

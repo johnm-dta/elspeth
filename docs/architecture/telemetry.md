@@ -245,6 +245,9 @@ XOR enforcement: exactly ONE of `state_id` or `operation_id` must be set.
 | PassThrough, BatchReplicate, BatchStats, KeywordFilter, Truncate, JSONExplode, FieldMapper | None | N/A | OK |
 | AzureContentSafety | Azure API | Via `AuditedHTTPClient` | OK |
 | AzurePromptShield | Azure API | Via `AuditedHTTPClient` | OK |
+| AzureDocumentIntelligence | Azure Document Intelligence API | Via `AuditedHTTPClient` | OK |
+| BlobFetch | HTTP(S) document fetch into payload store | Via `AuditedHTTPClient` plus payload metadata | OK |
+| BlobCsvExpand | Payload-store CSV read | Audit-readiness IO-read boundary; no external network call | OK |
 
 #### Sink Plugins
 

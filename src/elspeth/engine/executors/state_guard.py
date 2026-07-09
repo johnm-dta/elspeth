@@ -12,11 +12,12 @@ the ``with`` block automatically completes the state as FAILED before propagatin
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Mapping
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from elspeth.contracts import ExecutionError, NodeStateOpen
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
@@ -25,6 +26,7 @@ from elspeth.contracts.errors import (
     AuditIntegrityError,
     OrchestrationInvariantError,
 )
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -34,6 +36,62 @@ if TYPE_CHECKING:
     from elspeth.contracts.node_state_context import NodeStateContext
 
 logger = logging.getLogger(__name__)
+
+_GUARD_TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateStatus.FAILED})
+
+# Attribute name for the node-state id stamped onto exceptions that cross a
+# NodeStateGuard. Executors scope ctx.state_id per operation (it is restored
+# on exceptional exit), so the exception itself is the only channel that can
+# carry the failed state's id to callers that convert the exception into
+# row-scoped audit records (e.g. the DIVERT routing_event for on_error sinks).
+_EXCEPTION_NODE_STATE_ID_ATTR = "_elspeth_node_state_id"
+
+
+def stamp_node_state_id(exc: BaseException, state_id: str) -> None:
+    """Stamp ``state_id`` onto ``exc`` as the node state it escaped.
+
+    Called by ``NodeStateGuard.__exit__`` for every exception crossing the
+    guard. When an exception crosses nested guards, the outermost stamp wins —
+    that is the state closest to the caller reading the stamp. Best-effort:
+    an exception type that rejects attribute assignment (``__slots__``) is
+    left unstamped; the consumer's state_id-required invariant then fails
+    loudly rather than mis-attributing the audit record.
+    """
+    with contextlib.suppress(AttributeError, TypeError):
+        setattr(exc, _EXCEPTION_NODE_STATE_ID_ATTR, state_id)
+
+
+def stamped_node_state_id(exc: BaseException) -> str | None:
+    """Return the node-state id stamped on ``exc``, or None if unstamped."""
+    try:
+        stamped = vars(exc).get(_EXCEPTION_NODE_STATE_ID_ATTR)
+    except TypeError:
+        return None
+    return stamped if isinstance(stamped, str) else None
+
+
+def _render_exception_message(exc_type: type[BaseException], exc_val: BaseException | None) -> str:
+    """Render a guaranteed non-empty message for the auto-fail audit record.
+
+    ``ExecutionError`` rejects empty exception strings, and a hostile
+    ``__str__`` can raise — either would abort the terminal FAILED write and
+    leave the node state permanently OPEN (elspeth-d67453c22f). Audit
+    terminality outranks message fidelity: fall back to the exception type
+    name (guaranteed non-empty) when the message is empty/whitespace or
+    unrenderable. ``ExecutionError.exception`` and guard-raised
+    ``AuditIntegrityError`` messages reuse this rendered string, so scrub it
+    at the shared source.
+    """
+    if exc_val is None:
+        return exc_type.__name__
+    try:
+        message = str(exc_val)
+    except BaseException:
+        # A raising __str__ must not abort terminality.
+        return exc_type.__name__
+    if not message.strip():
+        return exc_type.__name__
+    return scrub_text_for_audit(message)
 
 
 class NodeStateGuard:
@@ -116,6 +174,12 @@ class NodeStateGuard:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        if exc_val is not None:
+            # Stamp before the terminal-state early returns: the explicit
+            # complete(FAILED)-then-reraise path must stamp too, since the
+            # caller's ctx.state_id is scope-restored during unwind.
+            stamp_node_state_id(exc_val, self.state_id)
+
         if self._completed:
             return
 
@@ -171,8 +235,9 @@ class NodeStateGuard:
         # was the reason we did not use a structural Protocol here).
         context, evidence_failure = self._extract_audit_evidence_context(exc_val)
 
+        exc_message = _render_exception_message(exc_type, exc_val)
         exc_error = ExecutionError(
-            exception=str(exc_val),
+            exception=exc_message,
             exception_type=exc_type.__name__,
             phase="executor_post_process",
             context=context,
@@ -189,7 +254,7 @@ class NodeStateGuard:
             self._terminal_persisted = True
             raise AuditIntegrityError(
                 f"FAILED state for {self.state_id} was persisted while handling "
-                f"{exc_type.__name__}: {exc_val}, but it became unreadable immediately "
+                f"{exc_type.__name__}: {exc_message}, but it became unreadable immediately "
                 f"after completion (Tier 1 violation). Recorder error: "
                 f"{type(db_err).__name__}: {db_err}"
             ) from db_err
@@ -198,14 +263,14 @@ class NodeStateGuard:
             # the original exception. Raise AuditIntegrityError with both contexts.
             raise AuditIntegrityError(
                 f"Cannot record FAILED for state {self.state_id} while handling "
-                f"{exc_type.__name__}: {exc_val} — audit trail has permanent OPEN state "
+                f"{exc_type.__name__}: {exc_message} — audit trail has permanent OPEN state "
                 f"(Tier 1 violation). DB error: {type(db_err).__name__}: {db_err}"
             ) from db_err
 
         if evidence_failure is not None:
             raise AuditIntegrityError(
                 f"Recorded FAILED for state {self.state_id} while handling "
-                f"{exc_type.__name__}: {exc_val}, but audit evidence serialization failed "
+                f"{exc_type.__name__}: {exc_message}, but audit evidence serialization failed "
                 f"and structured context was dropped to preserve terminality."
             ) from evidence_failure
 
@@ -230,7 +295,7 @@ class NodeStateGuard:
 
     def complete(
         self,
-        status: NodeStateStatus,
+        status: Literal[NodeStateStatus.COMPLETED, NodeStateStatus.FAILED],
         *,
         output_data: dict[str, Any] | list[dict[str, Any]] | None = None,
         duration_ms: float | None = None,
@@ -245,16 +310,45 @@ class NodeStateGuard:
         but post-commit materialization failures must not trigger a second
         terminal write on top of an already-persisted state.
         """
-        try:
-            self._execution.complete_node_state(  # type: ignore[call-overload,misc]  # generic NodeStateStatus vs Literal overloads
-                state_id=self.state_id,
-                status=status,
-                output_data=output_data,
-                duration_ms=duration_ms,
-                error=error,
-                success_reason=success_reason,
-                context_after=context_after,
+        if status not in _GUARD_TERMINAL_NODE_STATE_STATUSES:
+            valid = ", ".join(member.name for member in sorted(_GUARD_TERMINAL_NODE_STATE_STATUSES, key=lambda item: item.value))
+            status_name = status.name if isinstance(status, NodeStateStatus) else repr(status)
+            raise OrchestrationInvariantError(
+                f"NodeStateGuard.complete() only accepts terminal node states ({valid}); got {status_name}. "
+                "Use ExecutionRepository.complete_node_state() directly for non-terminal state transitions."
             )
+
+        # The repository signature takes Mapping-typed rows; rebuilding the
+        # list widens the invariant element type (dict[str, Any] stays the
+        # runtime type either way).
+        normalized_output: Mapping[str, object] | list[Mapping[str, object]] | None = (
+            list(output_data) if isinstance(output_data, list) else output_data
+        )
+
+        try:
+            if status is NodeStateStatus.COMPLETED:
+                self._execution.complete_node_state(
+                    state_id=self.state_id,
+                    status=NodeStateStatus.COMPLETED,
+                    output_data=normalized_output,
+                    duration_ms=duration_ms,
+                    error=error,
+                    success_reason=success_reason,
+                    context_after=context_after,
+                )
+            else:
+                # The FAILED completion contract has no success_reason;
+                # reject rather than silently drop a caller's value.
+                if success_reason is not None:
+                    raise OrchestrationInvariantError("NodeStateGuard.complete(FAILED) does not accept success_reason.")
+                self._execution.complete_node_state(
+                    state_id=self.state_id,
+                    status=NodeStateStatus.FAILED,
+                    output_data=normalized_output,
+                    duration_ms=duration_ms,
+                    error=error,
+                    context_after=context_after,
+                )
         except LandscapePostCommitError:
             self._terminal_persisted = True
             raise
@@ -274,6 +368,9 @@ class NodeStateGuard:
             context = exc_val.to_audit_dict()
             if not isinstance(context, Mapping):
                 raise TypeError(f"Audit evidence must be a mapping, got {type(context).__name__}")
+            if any(type(key) is not str for key in context):
+                raise TypeError("Audit evidence keys must be strings")
+            context = scrub_payload_for_audit(context)
             canonical_json(context)
             return context, None
         except Exception as exc:

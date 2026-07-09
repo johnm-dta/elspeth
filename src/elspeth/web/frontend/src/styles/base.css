@@ -106,7 +106,7 @@ summary:focus-visible {
   background-color: var(--color-accent);
   color: var(--color-text-inverse);
   font-size: var(--font-size-base);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   text-decoration: none;
   border-radius: 0 0 var(--radius-md) 0;
 }
@@ -115,8 +115,13 @@ summary:focus-visible {
   top: 0;
 }
 
-/* Screen-reader-only utility */
-.sr-only {
+/* Screen-reader-only utility. Both names are honoured: components use either
+   `.sr-only` (tutorial) or `.visually-hidden` (guided widgets, e.g.
+   InterpretationReviewTurn / GuidedChatHistory). `.visually-hidden` was
+   undefined, so those widgets' SR-only status text ("… needs review") rendered
+   visibly as a redundant line above each card. */
+.sr-only,
+.visually-hidden {
   position: absolute;
   width: 1px;
   height: 1px;

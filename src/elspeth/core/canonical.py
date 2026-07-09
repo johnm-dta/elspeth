@@ -3,7 +3,7 @@ Canonical JSON serialization for deterministic hashing.
 
 Two-phase approach:
 1. Normalize: Convert pandas/numpy types to JSON-safe primitives (our code)
-2. Serialize: Produce deterministic JSON per RFC 8785/JCS (rfc8785 package)
+2. Serialize: Delegate primitive canonical JSON/hash policy to contracts.hashing
 
 IMPORTANT: NaN and Infinity are strictly REJECTED, not silently converted.
 This is defense-in-depth for audit integrity.
@@ -18,7 +18,6 @@ problematic.
 from __future__ import annotations
 
 import base64
-import hashlib
 import math
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time
@@ -29,13 +28,19 @@ from uuid import UUID
 import networkx as nx
 import numpy as np
 import pandas as pd
-import rfc8785
 
 from elspeth.contracts.hashing import CANONICAL_VERSION as CANONICAL_VERSION
+from elspeth.contracts.hashing import canonical_json as _primitive_canonical_json
+from elspeth.contracts.hashing import stable_hash as _primitive_stable_hash
 from elspeth.contracts.schema_contract import PipelineRow
 
 if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
+
+
+_CANONICAL_TYPE_KEY = "__elspeth_canonical_type__"
+_CANONICAL_BYTES_TAG = "bytes"
+_CANONICAL_MAPPING_TAG = "mapping"
 
 
 def _normalize_value(obj: Any) -> Any:
@@ -86,19 +91,13 @@ def _normalize_value(obj: Any) -> Any:
     if isinstance(obj, np.bool_):
         return bool(obj)
     if isinstance(obj, np.ndarray):
-        # BUG-CANON-01 fix: Reject NaN/Infinity in arrays
-        # Multi-dimensional arrays need element-wise validation
-        if obj.size > 0:  # Only check non-empty arrays
-            try:
-                # np.any() works on all dtypes, returns False for non-numeric
-                if np.any(np.isnan(obj)) or np.any(np.isinf(obj)):
-                    raise ValueError(
-                        "NaN/Infinity found in NumPy array. Audit trail requires finite values only. Use None for missing values, not NaN."
-                    )
-            except TypeError:
-                # np.isnan/isinf raise TypeError for non-numeric dtypes (e.g., strings)
-                # This is expected and safe - non-numeric arrays can't contain NaN/Inf
-                pass
+        # Numeric arrays can be checked vectorially; object/string arrays are
+        # normalized element-by-element below so embedded Python floats still
+        # use the scalar non-finite checks.
+        if obj.size > 0 and np.issubdtype(obj.dtype, np.number) and not np.all(np.isfinite(obj)):
+            raise ValueError(
+                "NaN/Infinity found in NumPy array. Audit trail requires finite values only. Use None for missing values, not NaN."
+            )
         # 0-D arrays convert to scalars via tolist()/item(); normalize that scalar directly.
         if obj.ndim == 0:
             return _normalize_value(obj.item())
@@ -141,7 +140,10 @@ def _normalize_value(obj: Any) -> Any:
         return str(obj)
 
     if isinstance(obj, bytes):
-        return {"__bytes__": base64.b64encode(obj).decode("ascii")}
+        return {
+            _CANONICAL_TYPE_KEY: _CANONICAL_BYTES_TAG,
+            "base64": base64.b64encode(obj).decode("ascii"),
+        }
 
     if isinstance(obj, Decimal):
         if not obj.is_finite():  # Rejects NaN, sNaN, Infinity, -Infinity
@@ -171,6 +173,18 @@ def _normalize_for_canonical(data: Any) -> Any:
         data = data.to_dict()
 
     if isinstance(data, Mapping):
+        if _CANONICAL_TYPE_KEY in data:
+            entries = [
+                {
+                    "key": _normalize_for_canonical(key),
+                    "value": _normalize_for_canonical(value),
+                }
+                for key, value in data.items()
+            ]
+            return {
+                _CANONICAL_TYPE_KEY: _CANONICAL_MAPPING_TAG,
+                "entries": sorted(entries, key=lambda entry: _primitive_canonical_json(entry["key"])),
+            }
         return {k: _normalize_for_canonical(v) for k, v in data.items()}
     if isinstance(data, list | tuple):
         return [_normalize_for_canonical(v) for v in data]
@@ -182,7 +196,7 @@ def canonical_json(obj: Any) -> str:
 
     Two-phase approach:
     1. Normalize pandas/numpy types to JSON-safe primitives (our code)
-    2. Serialize per RFC 8785/JCS standard (rfc8785 package)
+    2. Serialize via the shared contracts.hashing primitive policy
 
     Args:
         obj: Data structure to serialize
@@ -195,8 +209,7 @@ def canonical_json(obj: Any) -> str:
         TypeError: If data contains types that cannot be serialized
     """
     normalized = _normalize_for_canonical(obj)
-    result: bytes = rfc8785.dumps(normalized)
-    return result.decode("utf-8")
+    return _primitive_canonical_json(normalized)
 
 
 def stable_hash(obj: Any) -> str:
@@ -208,8 +221,8 @@ def stable_hash(obj: Any) -> str:
     Returns:
         SHA-256 hex digest of canonical JSON
     """
-    canonical = canonical_json(obj)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    normalized = _normalize_for_canonical(obj)
+    return _primitive_stable_hash(normalized)
 
 
 def compute_full_topology_hash(graph: ExecutionGraph) -> str:

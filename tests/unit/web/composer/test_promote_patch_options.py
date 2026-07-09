@@ -16,6 +16,7 @@ against the persistence boundary.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -282,11 +283,10 @@ class TestPromotePatchSourceOptionsArgErrorRouting:
         """The Sensitive marker on 'patch' collapses the dict to a string via
         the summarizer — the raw ``dict`` value is not persisted as-is.
 
-        When blob_ref is absent, :func:`_summarize_set_source_options` serialises
-        the dict to canonical JSON (no path-redaction in that case).  The key
-        contract is that the field's value TYPE changes from ``dict`` to ``str``
-        at the persistence boundary — the raw LLM-supplied object never enters
-        ``chat_messages.tool_calls`` as a nested dict.
+        The shared option summarizer serialises a shape-only view of the dict.
+        The key contract is that the field's value TYPE changes from ``dict``
+        to ``str`` at the persistence boundary — the raw LLM-supplied object
+        and scalar values never enter ``chat_messages.tool_calls``.
         """
         raw_args = {"patch": {"api_key": "secret-ref", "path": "/data/in.csv"}}
         redacted = redact_tool_call_arguments(
@@ -298,6 +298,12 @@ class TestPromotePatchSourceOptionsArgErrorRouting:
         assert "patch" in redacted
         # The summarizer collapses the dict to a string, not a nested dict.
         assert isinstance(redacted["patch"], str), "patch field should be a string summary, not a raw dict"
+        assert json.loads(redacted["patch"]) == {
+            "api_key": "<redacted-option-value>",
+            "path": "<redacted-option-value>",
+        }
+        assert "secret-ref" not in redacted["patch"]
+        assert "/data/in.csv" not in redacted["patch"]
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +542,12 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
         assert "patch" in redacted
         # The summarizer collapses the dict to a string, not a nested dict.
         assert isinstance(redacted["patch"], str), "patch field should be a string summary, not a raw dict"
+        assert json.loads(redacted["patch"]) == {
+            "api_key": "<redacted-option-value>",
+            "prompt_template": "<redacted-option-value>",
+        }
+        assert "secret-ref" not in redacted["patch"]
+        assert "prompt-text" not in redacted["patch"]
         # node_id is non-sensitive — passes through verbatim
         assert redacted.get("node_id") == "t1"
 
@@ -624,5 +636,11 @@ class TestPromotePatchOutputOptionsArgErrorRouting:
         assert "patch" in redacted
         # The summarizer collapses the dict to a string, not a nested dict.
         assert isinstance(redacted["patch"], str), "patch field should be a string summary, not a raw dict"
+        assert json.loads(redacted["patch"]) == {
+            "api_key": "<redacted-option-value>",
+            "path": "<redacted-option-value>",
+        }
+        assert "secret-ref" not in redacted["patch"]
+        assert "/private/out.json" not in redacted["patch"]
         # sink_name is non-sensitive — passes through verbatim
         assert redacted.get("sink_name") == "out1"

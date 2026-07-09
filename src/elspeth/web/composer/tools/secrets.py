@@ -103,6 +103,14 @@ def _inventory_item_payload(item: SecretInventoryItem) -> _SecretInventoryItemPa
     }
 
 
+def _live_validation_failure_reason(item: SecretInventoryItem) -> SecretUnavailabilityReason:
+    if item.reason is not None:
+        return item.reason
+    if item.source_kind == "env" or item.scope == "server":
+        return "env_var_not_set"
+    return "value_decryption_failed"
+
+
 def _handle_list_secret_refs(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -121,7 +129,7 @@ _LIST_SECRET_REFS_DECLARATION = ToolDeclaration(
     handler=_handle_list_secret_refs,
     kind=ToolKind.SECRET_DISCOVERY,
     description="List available secret references (API keys, credentials). Shows names and scopes, never values.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 )
 
 
@@ -141,11 +149,18 @@ def _handle_validate_secret_ref(
             actual_type=type(exc).__name__,
         ) from exc
     name = validated.name
+    matching_item: SecretInventoryItem | None = None
     for item in context.secret_service.list_refs(context.user_id):
         if item.name == name:
-            return _discovery_result(state, _inventory_item_payload(item))
+            matching_item = item
+            break
 
     available = context.secret_service.has_ref(context.user_id, name)
+    if matching_item is not None:
+        payload = _inventory_item_payload(matching_item)
+        payload["available"] = available
+        payload["reason"] = None if available else _live_validation_failure_reason(matching_item)
+        return _discovery_result(state, payload)
     return _discovery_result(state, {"name": name, "available": available})
 
 
@@ -160,6 +175,7 @@ _VALIDATE_SECRET_REF_DECLARATION = ToolDeclaration(
             "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
         },
         "required": ["name"],
+        "additionalProperties": False,
     },
 )
 
@@ -272,6 +288,7 @@ _WIRE_SECRET_REF_DECLARATION = ToolDeclaration(
             "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
         },
         "required": ["name", "target", "option_key"],
+        "additionalProperties": False,
     },
 )
 

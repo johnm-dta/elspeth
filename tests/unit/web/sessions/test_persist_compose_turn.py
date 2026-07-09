@@ -12,6 +12,7 @@ import pytest
 import structlog
 from sqlalchemy import text
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.sessions._persist_payload import StatePayload
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -363,6 +364,78 @@ def test_insert_chat_message_persists_raw_content(service):
         row = conn.execute(text("SELECT content, raw_content FROM chat_messages WHERE session_id='s3_raw'")).first()
         assert row.content == "redacted output"
         assert row.raw_content == "original LLM output before preflight redaction"
+
+
+@pytest.mark.parametrize(
+    ("session_suffix", "content", "raw_content"),
+    (
+        ("empty_strings", "", ""),
+        ("whitespace_only", " \n\t", " \t"),
+        ("raw_none", "", None),
+    ),
+)
+def test_insert_chat_message_rejects_blank_assistant_without_raw_or_tool_calls(
+    service,
+    session_suffix,
+    content,
+    raw_content,
+):
+    """elspeth-dd99915063: do not persist an unauditable empty assistant row."""
+    now = datetime.now(UTC)
+    session_id = f"s3_blank_assistant_{session_suffix}"
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id=session_id)
+        with (
+            service._session_write_lock(conn, session_id),
+            pytest.raises(AuditIntegrityError, match="empty assistant audit row"),
+        ):
+            service._insert_chat_message(
+                conn,
+                session_id=session_id,
+                role="assistant",
+                content=content,
+                raw_content=raw_content,
+                tool_calls=None,
+                sequence_no=1,
+                writer_principal="compose_loop",
+                composition_state_id=None,
+                tool_call_id=None,
+                parent_assistant_id=None,
+                created_at=now,
+            )
+
+        rows = conn.execute(text("SELECT id FROM chat_messages WHERE session_id=:session_id"), {"session_id": session_id}).fetchall()
+        assert rows == []
+
+
+def test_insert_chat_message_allows_empty_assistant_with_tool_calls(service):
+    """Tool-call assistant turns commonly have no prose; the calls are the audit content."""
+    now = datetime.now(UTC)
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s3_tool_call_assistant")
+        with service._session_write_lock(conn, "s3_tool_call_assistant"):
+            msg_id = service._insert_chat_message(
+                conn,
+                session_id="s3_tool_call_assistant",
+                role="assistant",
+                content="",
+                raw_content="",
+                tool_calls=[{"id": "tc_1", "type": "function", "function": {"name": "set_source", "arguments": "{}"}}],
+                sequence_no=1,
+                writer_principal="compose_loop",
+                composition_state_id=None,
+                tool_call_id=None,
+                parent_assistant_id=None,
+                created_at=now,
+            )
+
+        row = conn.execute(
+            text("SELECT id, content, raw_content, tool_calls FROM chat_messages WHERE session_id='s3_tool_call_assistant'")
+        ).first()
+        assert row.id == msg_id
+        assert row.content == ""
+        assert row.raw_content == ""
+        assert row.tool_calls is not None
 
 
 def test_insert_chat_message_requires_session_write_lock(service):
@@ -972,6 +1045,43 @@ def test_persist_compose_turn_zero_tool_rows(service):
         assert roles == ["assistant"]
         states = conn.execute(text("SELECT id FROM composition_states WHERE session_id='s_zero'")).fetchall()
         assert states == []
+
+
+@pytest.mark.parametrize(
+    ("session_suffix", "assistant_content", "raw_content"),
+    (
+        ("empty_strings", "", ""),
+        ("whitespace_only", " \n\t", " \t"),
+        ("raw_none", "", None),
+    ),
+)
+def test_persist_compose_turn_rejects_blank_zero_tool_assistant(
+    service,
+    session_suffix,
+    assistant_content,
+    raw_content,
+):
+    """elspeth-dd99915063: zero-tool assistant turns still need content or raw attribution."""
+    session_id = f"s_zero_blank_{session_suffix}"
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id=session_id)
+
+    with pytest.raises(AuditIntegrityError, match="empty assistant audit row"):
+        service.persist_compose_turn(
+            session_id=session_id,
+            assistant_content=assistant_content,
+            raw_content=raw_content,
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    with service._engine.begin() as conn:
+        rows = conn.execute(text("SELECT id FROM chat_messages WHERE session_id=:session_id"), {"session_id": session_id}).fetchall()
+        assert rows == []
 
 
 def test_persist_compose_turn_persists_raw_content(service):

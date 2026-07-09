@@ -1,10 +1,36 @@
 """Tests for SchemaContract factory from SchemaConfig."""
 
+import pytest
+
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract_factory import (
     create_contract_from_config,
+    expected_runtime_output_contract,
     map_schema_mode,
 )
+
+
+class TestExpectedRuntimeOutputContract:
+    """The single ADR-014 statement of expected emitted-contract semantics.
+
+    Both the producer alignment (BaseTransform._align_output_contract) and the
+    engine verifier (verify_schema_config_mode) must derive expected mode/lock
+    from this helper — never re-encode the mapping locally
+    (filigree elspeth-986cfb43e5).
+    """
+
+    @pytest.mark.parametrize(
+        ("config_mode", "expected_mode"),
+        [("fixed", "FIXED"), ("flexible", "FLEXIBLE"), ("observed", "OBSERVED")],
+    )
+    def test_expected_contract_is_mapped_mode_and_locked(self, config_mode: str, expected_mode: str) -> None:
+        raw: dict[str, object] = {"mode": config_mode}
+        if config_mode != "observed":
+            raw["fields"] = ["value: int"]  # explicit modes require declared fields
+        config = SchemaConfig.from_dict(raw)
+        mode, locked = expected_runtime_output_contract(config)
+        assert mode == expected_mode
+        assert locked is True, "an emitted contract is always locked once attached to a row (ADR-014)"
 
 
 class TestMapSchemaMode:
@@ -284,3 +310,24 @@ class TestContractWithFieldResolution:
 
         assert mapped.original_name == "Original Header"
         assert unmapped.original_name == "unmapped_field"  # Falls back to normalized
+
+    def test_field_resolution_collision_raises_source_plugin_bug(self) -> None:
+        """Duplicate normalized names are source plugin bugs, not last-wins defaults."""
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "fixed",
+                "fields": ["amount_usd: int"],
+            }
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"field_resolution collision: normalized name 'amount_usd' maps to both 'Amount USD' and 'Amount_USD'",
+        ):
+            create_contract_from_config(
+                config,
+                field_resolution={
+                    "Amount USD": "amount_usd",
+                    "Amount_USD": "amount_usd",
+                },
+            )

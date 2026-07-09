@@ -16,14 +16,92 @@ AGGREGATE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "aggr
 FINALIZE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "finalize_scenario.sh"
 HARNESS_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "harness.sh"
 POST_MESSAGE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "post_message.sh"
+REPLAY_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "replay.sh"
 SWEEP_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "sweep_simplified.sh"
 LEGACY_BASIC_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "basic" / "finalize_scenario.sh"
 LEGACY_HARDMODE_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "hardmode" / "finalize_scenario.sh"
 
 
+def _requires_local_corpus(*paths: Path) -> pytest.MarkDecorator:
+    """Skip when the untracked internal eval corpus is absent.
+
+    evals/composer-harness and the dated run corpora are kept locally and
+    deliberately not shipped (136f2c703); tracked checkouts carry only
+    ``evals/__init__.py`` and ``evals/lib/``. Tests that exec the corpus
+    scripts can only run on machines that hold the corpus.
+    """
+    missing = sorted(str(path.relative_to(REPO_ROOT)) for path in paths if not path.is_file())
+    return pytest.mark.skipif(
+        bool(missing),
+        reason=f"untracked local eval corpus missing: {', '.join(missing)}",
+    )
+
+
 def _write_valid_jwt(path: Path) -> None:
     payload = base64.urlsafe_b64encode(json.dumps({"exp": 4_102_444_800}).encode()).decode().rstrip("=")
     path.write_text(f"header.{payload}.signature")
+
+
+def _write_argv_logging_curl(bin_dir: Path) -> None:
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CURL_ARGV_LOG:?CURL_ARGV_LOG not set}"
+
+out=""
+url=""
+{
+  printf 'CALL'
+  for arg in "$@"; do
+    printf '\t%s' "$arg"
+  done
+  printf '\n'
+} >> "$CURL_ARGV_LOG"
+
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+write_out() {
+  if [[ -n "$out" ]]; then
+    printf '%s' "$1" > "$out"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+case "$url" in
+  */api/auth/login)
+    printf '{"access_token":"header.eyJleHAiOjQxMDI0NDQ4MDB9.signature"}\n200'
+    ;;
+  *)
+    write_out '{}'
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
 
 
 def _write_fake_curl(bin_dir: Path) -> None:
@@ -371,6 +449,180 @@ esac
     fake_curl.chmod(0o755)
 
 
+def _write_fake_replay_curl(
+    bin_dir: Path,
+    log_path: Path,
+    *,
+    import_http: str = "500",
+    import_body_path: Path | None = None,
+    uploaded_blob_id: str = "98b1357d-5aab-4fb3-85b4-5ad643912e84",
+) -> None:
+    body_path = import_body_path or log_path.with_suffix(".import-body.json")
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+
+out=""
+url=""
+data=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      if [[ "$1" == "--data" || "$1" == "--data-binary" || "$1" == "-d" ]]; then
+        data="$2"
+      fi
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+printf '%s\\n' "$url" >> "{log_path}"
+
+write_body() {{
+  if [[ -n "$out" ]]; then
+    printf '%s' "$1" > "$out"
+  else
+    printf '%s' "$1"
+  fi
+}}
+
+write_data_file() {{
+  if [[ "$data" == @* ]]; then
+    cat "${{data#@}}" > "$1"
+  else
+    printf '%s' "$data" > "$1"
+  fi
+}}
+
+case "$url" in
+  */api/auth/login)
+    write_body '{{"access_token":"header.eyJleHAiOjQxMDI0NDQ4MDB9.signature"}}'
+    printf '\\n200'
+    ;;
+  */api/sessions)
+    write_body '{{"id":"session-1"}}'
+    printf '201'
+    ;;
+  */api/sessions/session-1/blobs/inline)
+    write_body '{{"id":"{uploaded_blob_id}"}}'
+    printf '201'
+    ;;
+  */api/sessions/session-1/state/yaml)
+    write_data_file "{body_path}"
+    write_body '{{"detail":"import rejected"}}'
+    printf '{import_http}'
+    ;;
+  */api/sessions/session-1/import-yaml)
+    write_body '{{"detail":"unexpected fallback"}}'
+    printf '599'
+    ;;
+  */api/sessions/session-1/validate)
+    write_body '{{"is_valid":true,"checks":[]}}'
+    printf '200'
+    ;;
+  */api/sessions/session-1/execute)
+    write_body '{{"run_id":"run-1"}}'
+    printf '202'
+    ;;
+  */api/runs/run-1/diagnostics)
+    write_body '{{}}'
+    printf '200'
+    ;;
+  */api/runs/run-1)
+    write_body '{{"status":"completed"}}'
+    printf '200'
+    ;;
+  *)
+    write_body '{{}}'
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
+
+
+def test_common_login_keeps_password_out_of_curl_argv(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_argv_logging_curl(fake_bin)
+    argv_log = tmp_path / "curl.argv.log"
+    jwt_file = tmp_path / "jwt.txt"
+    password_marker = "argv-leak-marker"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CURL_ARGV_LOG": str(argv_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    script = f"""
+set -euo pipefail
+source {REPO_ROOT / "evals/lib/common.sh"}
+EVALS_JWT_FILE={jwt_file}
+ELSPETH_EVAL_BASE_URL=https://example.invalid
+ELSPETH_EVAL_USER=eval-user
+ELSPETH_EVAL_PASS={password_marker}
+ELSPETH_EVAL_CURL_MAX_TIME=240
+evals_login
+"""
+
+    result = subprocess.run(["bash", "-c", script], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert password_marker not in argv_log.read_text()
+
+
+def test_common_authenticated_get_keeps_jwt_out_of_curl_argv(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_argv_logging_curl(fake_bin)
+    argv_log = tmp_path / "curl.argv.log"
+    jwt_file = tmp_path / "jwt.txt"
+    out_file = tmp_path / "catalog.json"
+    _write_valid_jwt(jwt_file)
+    jwt = jwt_file.read_text()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CURL_ARGV_LOG": str(argv_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    script = f"""
+set -euo pipefail
+source {REPO_ROOT / "evals/lib/common.sh"}
+EVALS_JWT_FILE={jwt_file}
+ELSPETH_EVAL_BASE_URL=https://example.invalid
+ELSPETH_EVAL_CURL_MAX_TIME=240
+ELSPETH_EVAL_JWT_REFRESH_MARGIN_SEC=300
+_evals_http_get "$ELSPETH_EVAL_BASE_URL/api/catalog/sources" {out_file}
+"""
+
+    result = subprocess.run(["bash", "-c", script], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert jwt not in argv_log.read_text()
+
+
+@_requires_local_corpus(HARNESS_SCRIPT)
 def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:
     """Bootstrap should leave machine-readable evidence about the scenario contract."""
 
@@ -412,6 +664,7 @@ def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:
     assert run_manifest["message_budget_user_turns"] == 5
 
 
+@_requires_local_corpus(POST_MESSAGE_SCRIPT)
 def test_post_message_records_turn_manifest_and_non_2xx_status(tmp_path: Path) -> None:
     """A composer POST transport failure must be first-class evidence, not a normal turn."""
 
@@ -464,6 +717,173 @@ def test_post_message_records_turn_manifest_and_non_2xx_status(tmp_path: Path) -
     }
 
 
+@_requires_local_corpus(REPLAY_SCRIPT)
+def test_replay_reports_state_yaml_import_failure_without_import_yaml_fallback(tmp_path: Path) -> None:
+    """A canonical YAML import failure must not be obscured by a dead fallback route."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    _write_fake_replay_curl(fake_bin, curl_log, import_http="500")
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final_yaml.json").write_text(json.dumps({"yaml": "sources: {}\nsinks: {}\n"}))
+    (run_dir / "scenario.json").write_text(json.dumps({"scenario_id": "s1"}))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPLAY_SCRIPT), str(run_dir)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 76
+    assert "YAML import failed (HTTP 500)" in result.stderr
+    urls = curl_log.read_text().splitlines()
+    assert any(url.endswith("/api/sessions/session-1/state/yaml") for url in urls)
+    assert not any(url.endswith("/api/sessions/session-1/import-yaml") for url in urls)
+
+
+@_requires_local_corpus(REPLAY_SCRIPT)
+def test_replay_remaps_source_blob_ids_to_uploaded_blob(tmp_path: Path) -> None:
+    """Captured final_yaml source_blob_ids must be rebound to the replay upload."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    import_body_path = tmp_path / "import-body.json"
+    uploaded_blob_id = "2d33554d-00c8-4620-9bdd-034ec9a3fd28"
+    _write_fake_replay_curl(
+        fake_bin,
+        curl_log,
+        import_http="200",
+        import_body_path=import_body_path,
+        uploaded_blob_id=uploaded_blob_id,
+    )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final_yaml.json").write_text(
+        json.dumps(
+            {
+                "yaml": "sources:\n  source:\n    plugin: csv\n    on_success: out\n    options:\n      path: /old/blob.csv\n      on_validation_failure: discard\nsinks:\n  out:\n    plugin: csv\n    on_write_failure: discard\n",
+                "source_blob_ids": {"source": "98b1357d-5aab-4fb3-85b4-5ad643912e84"},
+            }
+        )
+    )
+    (run_dir / "blob.req.json").write_text(json.dumps({"filename": "input.csv", "mime_type": "text/csv", "content": "id\n1\n"}))
+    (run_dir / "scenario.json").write_text(json.dumps({"scenario_id": "s1"}))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPLAY_SCRIPT), str(run_dir)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    import_body = json.loads(import_body_path.read_text())
+    assert import_body["source_blob_ids"] == {"source": uploaded_blob_id}
+    urls = curl_log.read_text().splitlines()
+    assert any(url.endswith("/api/sessions/session-1/blobs/inline") for url in urls)
+    assert any(url.endswith("/api/sessions/session-1/state/yaml") for url in urls)
+
+
+@_requires_local_corpus(REPLAY_SCRIPT)
+def test_replay_raw_yaml_file_inherits_final_yaml_source_blob_sidecar(tmp_path: Path) -> None:
+    """Edited raw YAML replays must keep the captured source blob custody sidecar."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    import_body_path = tmp_path / "import-body.json"
+    uploaded_blob_id = "2d33554d-00c8-4620-9bdd-034ec9a3fd28"
+    _write_fake_replay_curl(
+        fake_bin,
+        curl_log,
+        import_http="200",
+        import_body_path=import_body_path,
+        uploaded_blob_id=uploaded_blob_id,
+    )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final_yaml.json").write_text(
+        json.dumps(
+            {
+                "yaml": "sources:\n  source:\n    plugin: csv\n    on_success: out\n    options:\n      path: /old/blob.csv\n      on_validation_failure: discard\nsinks:\n  out:\n    plugin: csv\n    on_write_failure: discard\n",
+                "source_blob_ids": {"source": "98b1357d-5aab-4fb3-85b4-5ad643912e84"},
+            }
+        )
+    )
+    edited_yaml = run_dir / "edited.yaml"
+    edited_yaml.write_text(
+        "sources:\n"
+        "  source:\n"
+        "    plugin: csv\n"
+        "    on_success: out\n"
+        "    options:\n"
+        "      path: /old/blob.csv\n"
+        "      on_validation_failure: discard\n"
+        "sinks:\n"
+        "  out:\n"
+        "    plugin: csv\n"
+        "    on_write_failure: discard\n"
+    )
+    (run_dir / "blob.req.json").write_text(json.dumps({"filename": "input.csv", "mime_type": "text/csv", "content": "id\n1\n"}))
+    (run_dir / "scenario.json").write_text(json.dumps({"scenario_id": "s1"}))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPLAY_SCRIPT), str(run_dir), "--yaml-file", str(edited_yaml)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    import_body = json.loads(import_body_path.read_text())
+    assert import_body["source_blob_ids"] == {"source": uploaded_blob_id}
+    assert import_body["yaml"] == edited_yaml.read_text()
+
+
+@_requires_local_corpus(SWEEP_SCRIPT)
 def test_sweep_simplified_help_exits_before_side_effects(tmp_path: Path) -> None:
     """`--help` must not be interpreted as a run label and start a sweep."""
 
@@ -505,6 +925,7 @@ printf '{{"opening_prompt":"hello"}}' > "$ELSPETH_EVAL_RUNS_DIR/$1/scenario.json
     assert not (harness_root / "runs").exists()
 
 
+@_requires_local_corpus(FINALIZE_SCRIPT)
 def test_finalize_scenario_exits_74_when_validate_http_fails(tmp_path: Path) -> None:
     """A validation transport/auth failure is infrastructure failure, not invalid YAML."""
 
@@ -545,6 +966,7 @@ def test_finalize_scenario_exits_74_when_validate_http_fails(tmp_path: Path) -> 
     assert not (scenario_dir / "ledger.json").exists()
 
 
+@_requires_local_corpus(FINALIZE_SCRIPT)
 def test_finalize_writes_ledger_when_invalid_state_yaml_is_unavailable(tmp_path: Path) -> None:
     """Invalid scenarios are data; a missing YAML artifact must not erase the ledger."""
 
@@ -601,6 +1023,7 @@ def test_finalize_writes_ledger_when_invalid_state_yaml_is_unavailable(tmp_path:
     assert json.loads((scenario_dir / "final_yaml.json").read_text()) == {}
 
 
+@_requires_local_corpus(FINALIZE_SCRIPT)
 def test_finalize_preserves_completed_run_when_post_run_yaml_export_fails(tmp_path: Path) -> None:
     """Post-run artifact collection failures are metadata, not run outcome overrides."""
 
@@ -661,6 +1084,7 @@ def test_finalize_preserves_completed_run_when_post_run_yaml_export_fails(tmp_pa
     }
 
 
+@_requires_local_corpus(AGGREGATE_SCRIPT)
 def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     scenario_dir = runs_root / "s1"
@@ -762,6 +1186,7 @@ def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(
     assert "| legacy | tester | limit | 1 | 1.0 | — | — |" in scorecard
 
 
+@_requires_local_corpus(AGGREGATE_SCRIPT)
 def test_aggregate_reports_malformed_ledger_errors(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     good_dir = runs_root / "good"
@@ -810,6 +1235,7 @@ def test_aggregate_reports_malformed_ledger_errors(tmp_path: Path) -> None:
     assert "Aggregate errors" in scorecard
 
 
+@_requires_local_corpus(AGENT_PROMPT)
 def test_agent_prompt_does_not_estimate_provider_cost_from_wall_time() -> None:
     prompt = AGENT_PROMPT.read_text()
 
@@ -818,6 +1244,7 @@ def test_agent_prompt_does_not_estimate_provider_cost_from_wall_time() -> None:
     assert "do not estimate dollars from wall time" in prompt
 
 
+@_requires_local_corpus(LEGACY_BASIC_FINALIZE_SCRIPT, LEGACY_HARDMODE_FINALIZE_SCRIPT)
 @pytest.mark.parametrize(
     ("script_source", "mode"),
     [

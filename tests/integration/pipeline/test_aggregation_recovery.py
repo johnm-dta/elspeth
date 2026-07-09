@@ -49,6 +49,7 @@ from elspeth.plugins.infrastructure.results import TransformResult
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory
 from tests.fixtures.plugins import CollectSink, ListSource
+from tests.helpers.checkpoint import create_checkpoint
 
 
 def _create_test_schema_contract() -> SchemaContract:
@@ -347,7 +348,7 @@ class TestFailedFlushReconcile:
         then a crash strikes before ``_mark_buffered_scheduler_work_terminal``
         releases the durable BLOCKED scheduler rows. On resume the orphaned
         BLOCKED rows partition to the aggregation node, but
-        ``get_live_buffered_outcomes`` excludes completed-witness tokens, so
+        ``list_live_buffered_outcomes`` excludes completed-witness tokens, so
         ``_derive_restored_batch_id`` historically raised
         ``AuditIntegrityError('...no matching BUFFERED token_outcome...')`` on
         EVERY attempt — the run was permanently unresumable.
@@ -538,7 +539,8 @@ class TestAggregationRecoveryIntegration:
 
         # Checkpoint before flush — journal era: scalar-only checkpoint row
         # (buffered payloads live in journal BLOCKED rows, not in a blob).
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -567,7 +569,7 @@ class TestAggregationRecoveryIntegration:
         assert incomplete[0].status == BatchStatus.EXECUTING
 
         # Mark executing as failed (crash interrupted)
-        factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(batch.batch_id, BatchStatus.FAILED)
 
         # Retry the batch
         retry_batch = factory.execution.retry_batch(batch.batch_id)
@@ -635,7 +637,7 @@ class TestAggregationRecoveryIntegration:
         )
         for i, token in enumerate(tokens[:2]):
             factory.execution.add_batch_member(sum_batch.batch_id, token.token_id, ordinal=i)
-        factory.execution.update_batch_status(sum_batch.batch_id, BatchStatus.COMPLETED)
+        factory.execution.complete_batch(sum_batch.batch_id, BatchStatus.COMPLETED)
 
         # Create batch for count_aggregator (crashed during execution)
         count_batch = factory.execution.create_batch(
@@ -647,7 +649,8 @@ class TestAggregationRecoveryIntegration:
         factory.execution.update_batch_status(count_batch.batch_id, BatchStatus.EXECUTING)
 
         # Checkpoint at last processed token — journal era: scalar-only row.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=3,
             barrier_scalars=None,
@@ -703,10 +706,11 @@ class TestAggregationRecoveryIntegration:
             factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
 
         # Mark as failed for retry
-        factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(batch.batch_id, BatchStatus.FAILED)
 
         # Checkpoint (journal era: scalar-only row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run.run_id,
             sequence_number=4,
             barrier_scalars=None,
@@ -763,7 +767,7 @@ class TestAggregationRecoveryIntegration:
             factory.execution.retry_batch(batch.batch_id)
 
         # Test with completed status
-        factory.execution.update_batch_status(batch.batch_id, BatchStatus.COMPLETED)
+        factory.execution.complete_batch(batch.batch_id, BatchStatus.COMPLETED)
         with pytest.raises(AuditIntegrityError, match="can only retry failed batches"):
             factory.execution.retry_batch(batch.batch_id)
 
@@ -886,6 +890,7 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"timeout_seconds": 60}}},
             canonical_version="sha256-rfc8785-v1",
+            leader_worker_id="seeder",
         )
 
         self._register_nodes_raw(db, run.run_id)

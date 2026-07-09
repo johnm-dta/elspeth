@@ -59,7 +59,7 @@ from elspeth.core.landscape.schema import (
 )
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor
-from elspeth.engine.orchestrator.aggregation import run_end_of_input_barrier_flush
+from elspeth.engine.orchestrator.leader_drain import run_end_of_input_barrier_flush
 from elspeth.engine.orchestrator.types import ExecutionCounters, PipelineConfig
 from elspeth.engine.processor import BarrierJournalRestoreContext, _LiveBarrierHold
 from elspeth.engine.spans import SpanFactory
@@ -105,6 +105,7 @@ def _real_coalesce_executor(factory: Any, clock: MockClock, *, policy: str) -> C
         step_resolver=lambda node_id: 2,
         clock=clock,
         data_flow=factory.data_flow,
+        barrier_restore_reads=factory.barrier_restore,
     )
     executor.register_coalesce(
         CoalesceSettings(
@@ -272,6 +273,44 @@ class TestLateBranchRelease:
         assert outcome_row["outcome"] == "failure"
 
         # (4) Run finalize-ready: no stranded BLOCKED row, journal quiesced.
+        _assert_quiescent_and_finalize_ready(processor)
+
+    def test_fresh_leader_releases_follower_blocked_late_branch(self) -> None:
+        """A normal-run leader adopts a follower-blocked row from the journal."""
+        clock = MockClock(start=_T0)
+        db, factory = _make_factory()
+        executor = _real_coalesce_executor(factory, clock, policy="first")
+        processor = _coalesce_processor(factory, executor, clock)
+
+        results = _arrive_via_intake(factory, processor, _branch_token("a"))
+        assert len(results) == 1 and results[0].scheduler_pending_sink is True
+
+        # Branch b is deposited by another live worker. The leader has no
+        # process-local _live_barrier_holds entry and is not a resume leader.
+        clock.advance(2.0)
+        _persist_blocked_scheduler_work(
+            factory,
+            processor,
+            _branch_token("b"),
+            node_id=COALESCE_NODE,
+            barrier_key="merge",
+            adopted=False,
+            ingest_sequence=1,
+            coalesce_name="merge",
+        )
+
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        late_results = processor.run_barrier_intake(ctx)
+
+        assert [(r.outcome, r.path) for r in late_results] == [(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
+        late_row = _work_item_row(db, "tok-branch-b")
+        assert late_row["status"] == TokenWorkStatus.TERMINAL.value
+        assert late_row["barrier_adopted_epoch"] == 1
+        events = _release_events(db, "tok-branch-b")
+        assert len(events) == 1
+        context = json.loads(str(events[0]["context_json"]))
+        assert context["late_arrival"] is True
+        assert context["scope_row_id"] == "row-1"
         _assert_quiescent_and_finalize_ready(processor)
 
     def test_takeover_leader_releases_inherited_late_branch(self) -> None:

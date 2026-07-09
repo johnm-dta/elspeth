@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 import urllib.parse
-from typing import TYPE_CHECKING, Any, Literal, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
 
 import httpx
 from pydantic import BaseModel, field_validator, model_validator
@@ -23,14 +23,23 @@ from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 
 if TYPE_CHECKING:
+    from elspeth.contracts.contexts import LimiterProtocol
     from elspeth.core.landscape.execution_repository import ExecutionRepository
-    from elspeth.core.rate_limit.limiter import RateLimiter
-    from elspeth.core.rate_limit.registry import NoOpLimiter
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 
 _AZURE_SEARCH_MANAGED_IDENTITY_SUFFIX = ".search.windows.net"
 _AZURE_SEARCH_TOKEN_SCOPE = "https://search.azure.com/.default"
+
+
+class _ManagedIdentityCredential(Protocol):
+    def get_token(self, *scopes: str) -> Any:
+        """Return an Azure access token for the requested scopes."""
+        ...
+
+    def close(self) -> None:
+        """Release credential-owned resources."""
+        ...
 
 
 def _is_azure_search_managed_identity_hostname(hostname: str) -> bool:
@@ -148,7 +157,7 @@ class AzureSearchProvider:
         execution: ExecutionRepository,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
-        limiter: RateLimiter | NoOpLimiter | None = None,
+        limiter: LimiterProtocol | None = None,
     ) -> None:
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
@@ -165,6 +174,7 @@ class AzureSearchProvider:
         # skip counts in audit records without changing the protocol.
         self.last_skipped_count: int = 0
         self.last_skipped_reasons: list[dict[str, Any]] = []
+        self._managed_identity_credential: _ManagedIdentityCredential | None = None
 
         # Shared HTTP client for connection pooling. Created once, reused
         # across all search() calls. state_id is updated per-call.
@@ -185,12 +195,31 @@ class AzureSearchProvider:
         if self._config.api_key:
             return {"api-key": self._config.api_key}
         if self._config.use_managed_identity:
-            from azure.identity import DefaultAzureCredential
+            credential = self._get_managed_identity_credential()
+            try:
+                from azure.core.exceptions import AzureError
 
-            credential = DefaultAzureCredential()
-            token = credential.get_token(_AZURE_SEARCH_TOKEN_SCOPE)
+                token = credential.get_token(_AZURE_SEARCH_TOKEN_SCOPE)
+            except AzureError as exc:
+                raise RetrievalError(
+                    f"Azure managed identity token acquisition failed for {self._config.endpoint} index {self._config.index!r}: {exc}",
+                    retryable=False,
+                ) from exc
             return {"Authorization": f"Bearer {token.token}"}
         return {}
+
+    def _get_managed_identity_credential(self) -> _ManagedIdentityCredential:
+        if self._managed_identity_credential is None:
+            try:
+                from azure.identity import DefaultAzureCredential
+            except ImportError as exc:
+                raise RetrievalError(
+                    "Azure managed identity token acquisition failed: azure-identity is not installed. "
+                    "Install elspeth with the 'azure' extra or use api_key authentication.",
+                    retryable=False,
+                ) from exc
+            self._managed_identity_credential = cast(_ManagedIdentityCredential, DefaultAzureCredential())
+        return self._managed_identity_credential
 
     def search(
         self,
@@ -503,4 +532,10 @@ class AzureSearchProvider:
 
     def close(self) -> None:
         """Release the shared HTTP client and its connection pool."""
-        self._http_client.close()
+        try:
+            self._http_client.close()
+        finally:
+            credential = self._managed_identity_credential
+            self._managed_identity_credential = None
+            if credential is not None:
+                credential.close()

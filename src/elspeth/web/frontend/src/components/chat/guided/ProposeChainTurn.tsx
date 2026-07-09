@@ -58,6 +58,10 @@ interface ProposeChainTurnProps {
   payload: ProposeChainPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /** Tutorial passive mode: collapse the raw-config option dump behind a
+   *  <details>, and hide the per-step Edit and the Reject / Ask-advisor escape
+   *  hatches. The passive learner's only action is "Accept all steps". */
+  isTutorial?: boolean;
 }
 
 /**
@@ -80,6 +84,7 @@ export function ProposeChainTurn({
   payload,
   onSubmit,
   disabled = false,
+  isTutorial = false,
 }: ProposeChainTurnProps) {
   // useId scopes DOM IDs per-instance so multiple ProposeChainTurns rendered
   // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
@@ -181,54 +186,76 @@ export function ProposeChainTurn({
                   description/definition relationship -- <dt> for key, <dd> for
                   value.  A <table> would be heavier; a plain div grid would
                   lose the semantic association between keys and their values. */}
-              {optKeys.length > 0 && (
-                <dl id={optionsId(idx)} className="guided-propose-options">
-                  {optKeys.map((key) => (
-                    <div key={key} className="guided-propose-option-row">
-                      <dt className="guided-propose-option-key">{key}</dt>
-                      <dd className="guided-propose-option-val">
-                        {formatOptionValue(
-                          (step.options as Record<string, unknown>)[key],
-                        )}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
+              {optKeys.length > 0 &&
+                (() => {
+                  const optionsList = (
+                    <dl id={optionsId(idx)} className="guided-propose-options">
+                      {optKeys.map((key) => (
+                        <div key={key} className="guided-propose-option-row">
+                          <dt className="guided-propose-option-key">{key}</dt>
+                          <dd className="guided-propose-option-val">
+                            {formatOptionValue(
+                              (step.options as Record<string, unknown>)[key],
+                            )}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  );
+                  // Passive learner: keep the config available for transparency
+                  // (AI-trust legibility) but not as a monospace wall — collapse
+                  // it behind a summary. Full interactive composer shows it inline.
+                  return isTutorial ? (
+                    <details className="guided-propose-options-details">
+                      <summary className="guided-propose-options-summary">
+                        Configuration ({optKeys.length})
+                      </summary>
+                      {optionsList}
+                    </details>
+                  ) : (
+                    optionsList
+                  );
+                })()}
 
               <p className="guided-propose-step-rationale">{step.rationale}</p>
-              <div className="guided-propose-step-actions">
-                <button
-                  type="button"
-                  className="guided-propose-edit-btn"
-                  onClick={() => handleEdit(idx)}
-                  disabled={disabled}
-                >
-                  Edit step {idx + 1}
-                </button>
-              </div>
+              {!isTutorial && (
+                <div className="guided-propose-step-actions">
+                  <button
+                    type="button"
+                    className="guided-propose-edit-btn"
+                    onClick={() => handleEdit(idx)}
+                    disabled={disabled}
+                  >
+                    Edit step {idx + 1}
+                  </button>
+                </div>
+              )}
             </li>
           );
         })}
       </ol>
 
       <div className="guided-propose-actions">
-        <button
-          type="button"
-          className="guided-propose-secondary-btn"
-          onClick={() => setRejectConfirmOpen(true)}
-          disabled={disabled}
-        >
-          Reject
-        </button>
-        <button
-          type="button"
-          className="guided-propose-secondary-btn"
-          onClick={handleAskAdvisor}
-          disabled={disabled}
-        >
-          Ask advisor
-        </button>
+        {!isTutorial && (
+          <>
+            <button
+              type="button"
+              className="guided-propose-secondary-btn"
+              onClick={() => setRejectConfirmOpen(true)}
+              disabled={disabled}
+            >
+              Reject
+            </button>
+            <button
+              type="button"
+              className="guided-propose-secondary-btn"
+              onClick={handleAskAdvisor}
+              disabled={disabled}
+            >
+              Ask advisor
+            </button>
+          </>
+        )}
         <button
           type="button"
           className="guided-propose-accept-btn"

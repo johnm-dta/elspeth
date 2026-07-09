@@ -63,9 +63,9 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import token_work_items_table
 from elspeth.engine.clock import MockClock
-from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.processor import DAGTraversalContext, RowProcessor
 from elspeth.engine.spans import SpanFactory
+from elspeth.engine.work_items import WorkItem
 from tests.fixtures.landscape import RecorderSetup, make_recorder_with_run, register_test_node
 
 NODE_ID = "normalize"
@@ -82,7 +82,11 @@ def _build_processor(*, scheduler_lease_owner: str | None) -> tuple[RowProcessor
     ``scheduler_lease_owner=None`` exercises the unregistered (legacy/test)
     path (``_scheduler_lease_owner_registered=False``).
     """
-    setup = make_recorder_with_run(run_id="run-loosen-guard", source_node_id="source-1")
+    setup = make_recorder_with_run(
+        run_id="run-loosen-guard",
+        source_node_id="source-1",
+        leader_worker_id=scheduler_lease_owner,
+    )
     register_test_node(setup.data_flow, setup.run_id, NODE_ID)
     clock = MockClock(start=1_750_000_000.0)
     processor = RowProcessor(
@@ -308,7 +312,9 @@ def test_n2_peer_claim_handoff_clears_and_breaks_without_raising(caplog: pytest.
     # Must NOT raise; the drain clears the pending set and breaks.
     import logging
 
-    with caplog.at_level(logging.INFO, logger="elspeth.engine.processor"):
+    # The relinquish decision (and its log line) lives in the scheduler-drain
+    # subsystem since the elspeth-c49f33d6e4 component-3 extraction.
+    with caplog.at_level(logging.INFO, logger="elspeth.engine.scheduler_drain"):
         results = processor._drain_scheduler_claims(
             ctx=PluginContext(run_id=setup.run_id, config={}, landscape=None), pending_items=pending, recover_pending_sinks=False
         )

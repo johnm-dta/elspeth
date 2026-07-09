@@ -31,23 +31,48 @@ across multiple workers is deferred to a future release.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import os
+import stat
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import Lock
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, NotRequired, Protocol, TextIO, TypedDict, cast
 
 import structlog
 from sqlalchemy import event
 from sqlalchemy.engine import Connection, Engine
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.payload_store import IntegrityError, PayloadNotFoundError
 from elspeth.core.landscape._helpers import now
-from elspeth.core.landscape.formatters import serialize_datetime
+from elspeth.core.landscape.serialization import serialize_datetime
 from elspeth.core.payload_store import FilesystemPayloadStore
 
 logger = structlog.get_logger(__name__)
 
 _BUFFER_STACK_KEY = "landscape_journal_buffer_stack"
+_JOURNAL_DIRECTORY_MODE = 0o700
+_JOURNAL_FILE_MODE = 0o600
+_NON_OWNER_PERMISSION_BITS = stat.S_IRWXG | stat.S_IRWXO
+_JOURNAL_OPEN_SECURITY_FLAGS = 0 if os.name == "nt" else os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+class _NamedSqlTable(Protocol):
+    name: str
+
+
+class _TableBearingStatement(Protocol):
+    table: _NamedSqlTable
+
+
+class _JournalCompiledContext(Protocol):
+    statement: object
+    positiontup: Sequence[object] | None
+    params: Mapping[str, object]
+
+
+class _JournalExecutionContext(Protocol):
+    compiled: _JournalCompiledContext | None
 
 
 class PayloadInfo(TypedDict, total=False):
@@ -76,6 +101,7 @@ class JournalRecord(TypedDict):
     response_payload: NotRequired[str | None]
     request_payload_error: NotRequired[str]
     response_payload_error: NotRequired[str]
+    _payload_ref_columns: NotRequired[list[str]]
 
 
 class LandscapeJournal:
@@ -114,7 +140,7 @@ class LandscapeJournal:
         self._consecutive_failures = 0
         self._total_dropped = 0
 
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_owner_only_parent(self._path)
 
     def attach(self, engine: Engine) -> None:
         """Attach journal listeners to a SQLAlchemy engine.
@@ -147,7 +173,7 @@ class LandscapeJournal:
         cursor: object,
         statement: str,
         parameters: Any,
-        context: object,
+        context: _JournalExecutionContext,
         executemany: bool,
     ) -> None:
         if not self._is_write_statement(statement):
@@ -160,7 +186,9 @@ class LandscapeJournal:
             "executemany": executemany,
         }
         if self._include_payloads:
-            self._enrich_with_payloads(record, statement, parameters, executemany)
+            payload_ref_columns = self._payload_ref_columns_from_context(context, parameters)
+            if payload_ref_columns is not None:
+                record["_payload_ref_columns"] = payload_ref_columns
 
         stack = self._ensure_buffer_stack(conn)
         stack[-1].append(record)
@@ -197,7 +225,14 @@ class LandscapeJournal:
         stack.append([])  # Reset to single root buffer
 
         if all_records:
+            if self._include_payloads:
+                self._enrich_committed_records(all_records)
             self._append_records(all_records)
+
+    def _enrich_committed_records(self, records: list[JournalRecord]) -> None:
+        for record in records:
+            self._enrich_with_payloads(record)
+            record.pop("_payload_ref_columns", None)
 
     def _after_rollback(self, conn: Connection) -> None:
         if _BUFFER_STACK_KEY in conn.info:
@@ -227,7 +262,7 @@ class LandscapeJournal:
                     return
 
             try:
-                with self._path.open("a", encoding="utf-8") as handle:
+                with self._open_owner_only_append() as handle:
                     handle.write(payload)
                 if self._consecutive_failures > 0:
                     logger.info(
@@ -260,13 +295,81 @@ class LandscapeJournal:
                     self._disabled = True
 
     @staticmethod
+    def _ensure_owner_only_parent(path: Path) -> None:
+        if os.name == "nt":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return
+
+        missing: list[Path] = []
+        current = path.parent
+        while not current.exists():
+            missing.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+        for directory in reversed(missing):
+            try:
+                directory.mkdir(mode=_JOURNAL_DIRECTORY_MODE)
+            except FileExistsError:
+                # Created concurrently between the exists() probe and mkdir.
+                # Fall through: the owner-only invariant is verified below on
+                # the create and race paths alike — a race-created ancestor
+                # with lax permissions would let another user unlink/rename
+                # the open journal file.
+                pass
+            else:
+                directory.chmod(_JOURNAL_DIRECTORY_MODE)
+            LandscapeJournal._verify_owner_only_dir(directory)
+
+    def _open_owner_only_append(self) -> TextIO:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | _JOURNAL_OPEN_SECURITY_FLAGS
+
+        fd = os.open(self._path, flags, _JOURNAL_FILE_MODE)
+        try:
+            self._verify_owner_only_file(fd)
+            return os.fdopen(fd, "a", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def _verify_owner_only_file(fd: int) -> None:
+        if os.name == "nt":
+            return
+
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("Landscape journal path must be a regular file")
+        if info.st_uid != os.getuid():
+            raise PermissionError("Landscape journal file must be owned by the current user")
+        if mode & _NON_OWNER_PERMISSION_BITS:
+            raise PermissionError("Landscape journal file must be owner-only before appending")
+
+    @staticmethod
+    def _verify_owner_only_dir(directory: Path) -> None:
+        if os.name == "nt":
+            return
+
+        # lstat, not stat: a symlink planted at an ancestor position in the
+        # mkdir race window must be rejected outright, never followed.
+        info = os.lstat(directory)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError("Landscape journal parent must be a directory")
+        if info.st_uid != os.getuid():
+            raise PermissionError("Landscape journal parent directory must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) & _NON_OWNER_PERMISSION_BITS:
+            raise PermissionError("Landscape journal parent directory must be owner-only")
+
+    @staticmethod
     def _serialize_record(record: JournalRecord) -> str:
-        safe = serialize_datetime(record)
+        public_record = {key: value for key, value in record.items() if not key.startswith("_")}
+        safe = serialize_datetime(public_record)
         try:
             return json.dumps(safe, allow_nan=False)
         except TypeError as exc:
-            from elspeth.contracts.errors import AuditIntegrityError
-
             raise AuditIntegrityError(
                 f"Journal record failed to serialize — non-JSON-serializable type in "
                 f"SQL parameters (Tier 1 violation). Statement: "
@@ -288,25 +391,41 @@ class LandscapeJournal:
         sql = statement.lstrip().upper()
         return sql.startswith("INSERT") or sql.startswith("UPDATE") or sql.startswith("DELETE") or sql.startswith("REPLACE")
 
-    def _enrich_with_payloads(self, record: JournalRecord, statement: str, parameters: Any, executemany: bool) -> None:
-        table, columns = self._parse_insert_statement(statement)
-        allow_extra_params = False
-        if table is None:
-            table, columns = self._parse_update_statement(statement)
-            allow_extra_params = True
-        base_table = table.split(".")[-1] if table else table
-        if base_table != "calls" or columns is None or self._payload_store is None:
+    def _payload_ref_columns_from_context(self, context: _JournalExecutionContext, parameters: Any) -> list[str] | None:
+        try:
+            compiled = context.compiled
+        except AttributeError as exc:
+            raise AuditIntegrityError("Landscape journal SQLAlchemy execution context is missing compiled metadata") from exc
+        if compiled is None:
+            return None
+        statement = compiled.statement
+        try:
+            table = cast("_TableBearingStatement", statement).table
+        except AttributeError:
+            return None
+        if table.name != "calls":
+            return None
+        positiontup = compiled.positiontup
+        if positiontup:
+            return [str(column) for column in positiontup]
+        if isinstance(parameters, Mapping):
+            return [str(column) for column in parameters]
+        return [str(column) for column in compiled.params]
+
+    def _enrich_with_payloads(self, record: JournalRecord) -> None:
+        columns = record.get("_payload_ref_columns")
+        if columns is None or self._payload_store is None:
             return
         if "request_ref" not in columns and "response_ref" not in columns:
             return
 
-        if executemany:
+        if record["executemany"]:
             enrichments: list[PayloadInfo] = []
-            for param_set in parameters:
-                enrichments.append(self._payloads_for_params(columns, param_set, allow_extra_params=allow_extra_params))
+            for param_set in cast("list[object]", record["parameters"]):
+                enrichments.append(self._payloads_for_params(columns, param_set))
             record["payloads"] = enrichments
         else:
-            payload_dict = self._payloads_for_params(columns, parameters, allow_extra_params=allow_extra_params)
+            payload_dict = self._payloads_for_params(columns, record["parameters"])
             if "request_ref" in payload_dict:
                 record["request_ref"] = payload_dict["request_ref"]
             if "request_payload" in payload_dict:
@@ -320,8 +439,8 @@ class LandscapeJournal:
             if "response_payload_error" in payload_dict:
                 record["response_payload_error"] = payload_dict["response_payload_error"]
 
-    def _payloads_for_params(self, columns: list[str], params: Any, *, allow_extra_params: bool = False) -> PayloadInfo:
-        values = self._update_columns_to_values(columns, params) if allow_extra_params else self._columns_to_values(columns, params)
+    def _payloads_for_params(self, columns: list[str], params: Any) -> PayloadInfo:
+        values = self._columns_to_values(columns, params)
         return self._payloads_for_values(values)
 
     def _payloads_for_values(self, values: Mapping[str, object]) -> PayloadInfo:
@@ -356,8 +475,6 @@ class LandscapeJournal:
             # Hash mismatch = corruption or tampering — Tier 1 violation.
             # Always crash regardless of _fail_on_error: payload integrity
             # failures are not operational issues, they are audit violations.
-            from elspeth.contracts.errors import AuditIntegrityError
-
             raise AuditIntegrityError(
                 f"Payload integrity check failed for ref={ref!r}: {exc}. This indicates data corruption or tampering in the payload store."
             ) from exc
@@ -375,56 +492,7 @@ class LandscapeJournal:
             return None, f"payload_decode_failed: {exc}"
 
     @staticmethod
-    def _parse_insert_statement(statement: str) -> tuple[str | None, list[str] | None]:
-        sql = statement.strip()
-        upper = sql.upper()
-        if not upper.startswith("INSERT INTO "):
-            return None, None
-        after_into = sql[len("INSERT INTO ") :]
-        paren_index = after_into.find("(")
-        if paren_index == -1:
-            return None, None
-        table = after_into[:paren_index].strip().strip('"').strip("'").lower()
-        end_paren = after_into.find(")", paren_index)
-        if end_paren == -1:
-            return table, None
-        columns_part = after_into[paren_index + 1 : end_paren]
-        columns = [col.strip().strip('"').strip("'") for col in columns_part.split(",")]
-        return table, columns
-
-    @staticmethod
-    def _parse_update_statement(statement: str) -> tuple[str | None, list[str] | None]:
-        sql = statement.strip()
-        upper = sql.upper()
-        if not upper.startswith("UPDATE "):
-            return None, None
-        set_index = upper.find(" SET ")
-        if set_index == -1:
-            return None, None
-        table = sql[len("UPDATE ") : set_index].strip().strip('"').strip("'").lower()
-        where_index = upper.find(" WHERE ", set_index + len(" SET "))
-        assignments = sql[set_index + len(" SET ") :] if where_index == -1 else sql[set_index + len(" SET ") : where_index]
-        columns: list[str] = []
-        for assignment in assignments.split(","):
-            lhs, separator, _rhs = assignment.partition("=")
-            if separator == "":
-                return table, None
-            column = lhs.strip().strip('"').strip("'")
-            if "." in column:
-                column = column.rsplit(".", 1)[-1].strip().strip('"').strip("'")
-            columns.append(column)
-        return table, columns
-
-    @staticmethod
     def _columns_to_values(columns: list[str], params: Any) -> dict[str, object]:
         if isinstance(params, dict):
             return {col: params[col] for col in columns}
         return dict(zip(columns, params, strict=True))
-
-    @staticmethod
-    def _update_columns_to_values(columns: list[str], params: Any) -> dict[str, object]:
-        if isinstance(params, dict):
-            return {col: params[col] for col in columns}
-        if len(params) < len(columns):
-            return dict(zip(columns, params, strict=True))
-        return dict(zip(columns, params[: len(columns)], strict=True))

@@ -33,6 +33,8 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field
 
+from elspeth.contracts.identifiers import validate_field_name, validate_field_names
+
 # Supported field types for schema definitions
 SUPPORTED_TYPES = frozenset({"str", "int", "float", "bool", "any"})
 
@@ -64,6 +66,31 @@ FIELD_PATTERN = re.compile(r"^(\w+):\s*(str|int|float|bool|any)(\?)?$")
 # output shape today. Do not extend this set without design review; broader
 # heuristic growth would rebuild runtime validation piecemeal in the composer.
 _TEXT_HEURISTIC_PLUGINS: frozenset[str] = frozenset({"text"})
+
+
+def _field_spec_invalid_identifier_message(name: str, spec: str) -> str:
+    if name and name[0].isdigit():
+        return (
+            f"Invalid field name '{name}' in field spec '{spec}'. Field names must be valid Python identifiers (cannot start with a digit)."
+        )
+    return (
+        f"Invalid field name '{name}' in field spec '{spec}'. "
+        f"Field names must be valid Python identifiers "
+        f"(letters, digits, underscores only). "
+        f"Use '{name.replace('-', '_').replace('.', '_')}' instead."
+    )
+
+
+def _dict_field_spec_invalid_identifier_message(name: str) -> str:
+    if name and name[0].isdigit():
+        return f"Invalid field name '{name}' in dict field spec. Field names must be valid Python identifiers (cannot start with a digit)."
+    suggested = name.replace("-", "_").replace(".", "_")
+    return (
+        f"Invalid field name '{name}' in dict field spec. "
+        f"Field names must be valid Python identifiers "
+        f"(letters, digits, underscores only). "
+        f"Use '{suggested}' instead."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,22 +139,11 @@ class FieldDefinition:
             field_type = spec["type"]
             if not isinstance(name, str) or not isinstance(field_type, str):
                 raise ValueError("Dict field spec 'name' and 'type' must be strings")
-            # Identifier validation: must match string-format rules for Python/Jinja/SQL safety
-            if not name.isidentifier():
-                # Provide helpful suggestion for common fixable cases
-                if name and name[0].isdigit():
-                    raise ValueError(
-                        f"Invalid field name '{name}' in dict field spec. "
-                        f"Field names must be valid Python identifiers "
-                        f"(cannot start with a digit)."
-                    )
-                suggested = name.replace("-", "_").replace(".", "_")
-                raise ValueError(
-                    f"Invalid field name '{name}' in dict field spec. "
-                    f"Field names must be valid Python identifiers "
-                    f"(letters, digits, underscores only). "
-                    f"Use '{suggested}' instead."
-                )
+            validate_field_name(
+                name,
+                "Dict field spec 'name'",
+                invalid_identifier_message=_dict_field_spec_invalid_identifier_message(name),
+            )
             if field_type not in SUPPORTED_TYPES:
                 raise ValueError(f"Unknown type '{field_type}' in dict field spec. Supported types: {', '.join(sorted(SUPPORTED_TYPES))}")
             # Required and nullable are mandatory for round-trip format.
@@ -167,27 +183,21 @@ class FieldDefinition:
                         f"Unknown type '{type_part}' in field spec '{spec}'. Supported types: {', '.join(sorted(SUPPORTED_TYPES))}"
                     )
 
-                # Check for invalid field name (hyphens, dots, etc.)
-                if not name_part.isidentifier():
-                    raise ValueError(
-                        f"Invalid field name '{name_part}' in field spec '{spec}'. "
-                        f"Field names must be valid Python identifiers "
-                        f"(letters, digits, underscores only). "
-                        f"Use '{name_part.replace('-', '_').replace('.', '_')}' instead."
-                    )
+                validate_field_name(
+                    name_part,
+                    f"Field name '{name_part}' in field spec '{spec}'",
+                    invalid_identifier_message=_field_spec_invalid_identifier_message(name_part, spec),
+                )
 
             raise ValueError(f"Invalid field spec '{spec}'. Expected format: 'field_name: type' or 'field_name: type?'")
 
         name, field_type, optional_marker = match.groups()
 
-        # Validate that name is a valid Python identifier
-        # (regex allows numeric-prefixed names like "123field" which aren't valid)
-        if not name.isidentifier():
-            raise ValueError(
-                f"Invalid field name '{name}' in field spec '{spec}'. "
-                f"Field names must be valid Python identifiers "
-                f"(cannot start with a digit)."
-            )
+        validate_field_name(
+            name,
+            f"Field name '{name}' in field spec '{spec}'",
+            invalid_identifier_message=_field_spec_invalid_identifier_message(name, spec),
+        )
 
         # FIELD_PATTERN regex guarantees field_type is one of the supported literals
         # This check is defense-in-depth in case regex is modified incorrectly
@@ -218,12 +228,14 @@ class FieldDefinition:
         }
 
 
-def _parse_field_names_list(value: Any, field_name: str) -> tuple[str, ...] | None:
+def _parse_field_names_list(value: Any, field_name: str, *, empty_as_none: bool = True) -> tuple[str, ...] | None:
     """Parse a list of field names for guaranteed_fields/required_fields.
 
     Args:
         value: Raw value from config (should be None or list of strings)
         field_name: Name of the config field for error messages
+        empty_as_none: Whether an empty list means unspecified instead of an
+            explicit empty tuple.
 
     Returns:
         Tuple of field names, or None if value is None
@@ -238,29 +250,9 @@ def _parse_field_names_list(value: Any, field_name: str) -> tuple[str, ...] | No
         raise ValueError(f"'{field_name}' must be a list of field names, got {type(value).__name__}")
 
     if len(value) == 0:
-        return None  # Empty list is treated as unspecified
+        return None if empty_as_none else ()
 
-    result: list[str] = []
-    for i, name in enumerate(value):
-        if not isinstance(name, str):
-            raise ValueError(f"'{field_name}[{i}]' must be a string, got {type(name).__name__}")
-        name = name.strip()
-        if not name:
-            raise ValueError(f"'{field_name}[{i}]' cannot be empty or whitespace-only")
-        if not name.isidentifier():
-            raise ValueError(
-                f"'{field_name}[{i}]' must be a valid Python identifier, got '{name}'. "
-                f"Field names must contain only letters, digits, and underscores, "
-                f"and cannot start with a digit."
-            )
-        result.append(name)
-
-    # Check for duplicates
-    if len(result) != len(set(result)):
-        duplicates = sorted({n for n in result if result.count(n) > 1})
-        raise ValueError(f"Duplicate field names in '{field_name}': {', '.join(duplicates)}")
-
-    return tuple(result)
+    return validate_field_names(value, field_name, strip=True)
 
 
 def _validate_contract_fields_subset(
@@ -492,7 +484,7 @@ class SchemaConfig:
             raise ValueError(f"Schema config must be a Mapping, got {type(config).__name__}")
 
         # Parse contract fields (valid for all schema modes)
-        guaranteed_fields = _parse_field_names_list(config.get("guaranteed_fields"), "guaranteed_fields")
+        guaranteed_fields = _parse_field_names_list(config.get("guaranteed_fields"), "guaranteed_fields", empty_as_none=False)
         required_fields = _parse_field_names_list(config.get("required_fields"), "required_fields")
         audit_fields = _parse_field_names_list(config.get("audit_fields"), "audit_fields")
 

@@ -12,19 +12,41 @@ from elspeth.core.regex_worker import run_regex_worker
 def test_regex_worker_zero_group_match() -> None:
     pattern = re.compile(r"foo")
 
-    assert run_regex_worker(pattern, "foobar") == (True, "foo", None)
+    result = run_regex_worker(pattern, "foobar")
+
+    assert result.matched is True
+    assert result.full_match == "foo"
+    assert result.groups == ()
 
 
 def test_regex_worker_one_group_match() -> None:
     pattern = re.compile(r"(foo)bar")
 
-    assert run_regex_worker(pattern, "foobar") == (True, "foobar", "foo")
+    result = run_regex_worker(pattern, "foobar")
+
+    assert result.matched is True
+    assert result.full_match == "foobar"
+    assert result.groups == ("foo",)
+
+
+def test_regex_worker_multiple_group_match_is_policy_neutral() -> None:
+    pattern = re.compile(r"([A-Z]+)-(\d+)")
+
+    result = run_regex_worker(pattern, "ABC-123")
+
+    assert result.matched is True
+    assert result.full_match == "ABC-123"
+    assert result.groups == ("ABC", "123")
 
 
 def test_regex_worker_no_match() -> None:
     pattern = re.compile(r"foo")
 
-    assert run_regex_worker(pattern, "qux") == (False, None, None)
+    result = run_regex_worker(pattern, "qux")
+
+    assert result.matched is False
+    assert result.full_match is None
+    assert result.groups == ()
 
 
 def test_regex_worker_round_trip_via_process_pool() -> None:
@@ -33,4 +55,8 @@ def test_regex_worker_round_trip_via_process_pool() -> None:
     with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as pool:
         future = pool.submit(run_regex_worker, pattern, "issue: payment failed")
 
-    assert future.result(timeout=5) == (True, "issue: payment failed", "issue")
+    result = future.result(timeout=5)
+
+    assert result.matched is True
+    assert result.full_match == "issue: payment failed"
+    assert result.groups == ("issue", "payment failed")

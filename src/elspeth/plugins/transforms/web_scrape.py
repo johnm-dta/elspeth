@@ -40,11 +40,12 @@ from elspeth.core.security.web import (
     validate_url_for_ssrf,
 )
 from elspeth.plugins.infrastructure.base import BaseTransform
-from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient, HTTPResponseBodyTooLargeError
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.web_scrape_errors import (
+    BodyTooLargeError,
     ClientError,
     ForbiddenError,
     InvalidURLError,
@@ -132,13 +133,30 @@ class WebScrapeHTTPConfig(BaseModel):
 
     @field_validator("abuse_contact", "scraping_reason")
     @classmethod
-    def _reject_empty(cls, v: str, info: Any) -> str:
+    def _validate_wire_visible_header(cls, v: str, info: Any) -> str:
         if not v.strip():
             raise ValueError(f"{info.field_name} must not be empty")
         if is_wire_visible_placeholder(v):
             raise ValueError(
                 f"{info.field_name} must be supplied by the operator or deployment identity; "
                 "placeholder values are not valid for wire-visible HTTP headers"
+            )
+        # This value is sent verbatim as an X-Abuse-Contact / X-Scraping-Reason
+        # request header. HTTP header values must be ASCII-encodable, so a
+        # typographic character (em dash, curly quote, ellipsis) — the kind an
+        # LLM composer routinely emits — would otherwise raise UnicodeEncodeError
+        # deep inside the HTTP client mid-request, escape on_error row handling,
+        # and abort the whole run. Reject it here so it surfaces as a clean
+        # configuration error at validate() preflight, before any fetch.
+        if not v.isascii():
+            bad_index = next(i for i, ch in enumerate(v) if not ch.isascii())
+            bad_char = v[bad_index]
+            raise ValueError(
+                f"{info.field_name} contains a non-ASCII character {bad_char!r} "
+                f"(U+{ord(bad_char):04X}) at position {bad_index}; this value is sent "
+                f"verbatim as an HTTP request header and must be ASCII-encodable. "
+                f"Replace typographic punctuation (em dashes, curly quotes, ellipses) "
+                f"with plain ASCII equivalents."
             )
         return v
 
@@ -435,7 +453,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2d54e2b6cc87abaf"
+    source_file_hash: str | None = "sha256:33db98243c1da728"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -558,7 +576,8 @@ class WebScrapeTransform(BaseTransform):
                     "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
                     "If the user-facing output should exclude raw scraped content, route the final path through field_mapper with select_only: true before the sink; a sink name or output name is not cleanup.",
                     "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore the final field_mapper before the sink.",
-                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent.",
+                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation.",
+                    "Recommend an available authorized prompt-injection shield; use azure_prompt_shield only when discovery lists it, or use the deployment's equivalent when available.",
                     "Recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
                     "If no prompt shield is authorized, make the direct public-content-to-LLM routing reviewable with a pipeline_decision requirement on the LLM node using user_term prompt_injection_shield_recommendation.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
@@ -722,6 +741,16 @@ class WebScrapeTransform(BaseTransform):
         try:
             response, final_hostname_url, call = self._fetch_url(safe_request, ctx)
             final_resolved_ip = _final_response_ip(response)
+        except BodyTooLargeError as e:
+            return TransformResult.error(
+                {
+                    "reason": "body_too_large",
+                    "error": str(e),
+                    "url": safe_request.original_url,
+                    "body_size": e.body_size,
+                    "max_body_bytes": e.max_body_bytes,
+                }
+            )
         except WebScrapeError as e:
             if e.retryable:
                 # Re-raise retryable errors for engine RetryManager
@@ -754,17 +783,9 @@ class WebScrapeTransform(BaseTransform):
                 }
             )
 
-        # Body-size guard: reject responses that exceed the configured limit (B3.10).
-        #
-        # LIMITATION: this is a POST-buffer guard. AuditedHTTPClient does a
-        # non-streaming GET, so by the time we get here the full body is already
-        # downloaded into response.content AND audit-captured (body_size +
-        # base64 payload). This guard therefore bounds only EXTRACTION and
-        # fingerprinting of a hostile body -- it does NOT bound download time,
-        # peak memory, or audit-payload size. A true pre-buffer cap requires a
-        # streaming byte-cap (early abort) in AuditedHTTPClient, which is a
-        # shared-client change with its own audit-semantics + test surface.
-        # Tracked: filigree elspeth-a6f246d02a (operator-deferred 2026-06-15).
+        # Body-size guard: AuditedHTTPClient enforces this during download.
+        # Keep this post-buffer check as a defensive backstop for tests or
+        # injected clients that bypass the shared HTTP client.
         body_size = len(response.content)
         if body_size > self._max_body_bytes:
             return TransformResult.error(
@@ -877,6 +898,7 @@ class WebScrapeTransform(BaseTransform):
             timeout=self._timeout,
             limiter=limiter,
             token_id=ctx.token.token_id if ctx.token is not None else None,
+            max_response_body_bytes=self._max_body_bytes,
         )
 
         # Add responsible scraping headers
@@ -924,6 +946,8 @@ class WebScrapeTransform(BaseTransform):
             raise NetworkError(f"Timeout fetching {safe_request.original_url}: {e}") from e
         except httpx.ConnectError as e:
             raise NetworkError(f"Connection error fetching {safe_request.original_url}: {e}") from e
+        except HTTPResponseBodyTooLargeError as e:
+            raise BodyTooLargeError(str(e), body_size=e.body_size, max_body_bytes=e.max_body_bytes) from e
         except SSRFBlockedError as e:
             # Redirect hop resolved to a blocked IP — non-retryable security violation
             from elspeth.plugins.transforms.web_scrape_errors import SSRFBlockedError as WSSRFBlockedError

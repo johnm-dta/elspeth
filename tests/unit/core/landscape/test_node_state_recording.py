@@ -23,6 +23,25 @@ from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
+class _RecordingPayloadStore:
+    def __init__(self, content_ref: str = "payload-ref") -> None:
+        self.content_ref = content_ref
+        self.stored_payloads: list[bytes] = []
+
+    def store(self, content: bytes) -> str:
+        self.stored_payloads.append(content)
+        return self.content_ref
+
+    def retrieve(self, content_hash: str) -> bytes:
+        return b"{}"
+
+    def exists(self, content_hash: str) -> bool:
+        return content_hash == self.content_ref
+
+    def delete(self, content_hash: str) -> bool:
+        return False
+
+
 def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory]:
     setup = make_recorder_with_run(run_id=run_id, source_node_id="source-0")
     register_test_node(setup.data_flow, setup.run_id, "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
@@ -1797,8 +1816,6 @@ class TestRecordRoutingEvents:
 
     def test_empty_routes_returns_empty_without_orphaned_payload(self, tmp_path):
         """Bug ut1w: empty routes must return early without storing payload."""
-        from unittest.mock import MagicMock
-
         _db, factory, _row_id, token_id, _edge_id = _setup_with_token_and_edge()
 
         state = factory.execution.begin_node_state(
@@ -1809,12 +1826,13 @@ class TestRecordRoutingEvents:
             input_data={"x": 1},
         )
 
-        # Mock the payload store to detect any store() calls
-        mock_store = MagicMock()
-        factory.execution._payload_store = mock_store
+        payload_store = _RecordingPayloadStore()
+        # Routing events live on the node_states component; injecting on the
+        # facade would no longer reach the recording path.
+        factory.execution.node_states._payload_store = payload_store
 
         reason = {"action": "continue", "match": "default"}
         events = factory.execution.record_routing_events(state.state_id, routes=[], reason=reason)
 
         assert events == []
-        mock_store.store.assert_not_called()
+        assert payload_store.stored_payloads == []

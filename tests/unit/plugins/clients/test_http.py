@@ -9,29 +9,86 @@ Coverage goals:
 """
 
 import base64
-from unittest.mock import Mock, patch
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
 
 from elspeth.contracts import CallStatus, CallType
-from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient, HTTPResponseBodyTooLargeError
+
+
+class _CallArgs:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, index: int) -> tuple[Any, ...] | dict[str, Any]:
+        if index == 0:
+            return self.args
+        if index == 1:
+            return self.kwargs
+        raise IndexError(index)
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None, side_effect: Exception | None = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args: _CallArgs | None = None
+        self.call_args_list: list[_CallArgs] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args = _CallArgs(args, kwargs)
+        self.call_args_list.append(self.call_args)
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _ExecutionRepositoryFake:
+    def __init__(self) -> None:
+        self._next_call_index = 0
+        self.record_call = _CallRecorder(return_value=SimpleNamespace(call_id="call-1"))
+
+    def allocate_call_index(self, _state_id: str) -> int:
+        call_index = self._next_call_index
+        self._next_call_index += 1
+        return call_index
+
+    def allocate_operation_call_index(self, _operation_id: str) -> int:
+        return self.allocate_call_index(_operation_id)
+
+    def record_operation_call(self, **kwargs: Any) -> Any:
+        return self.record_call(**kwargs)
+
+
+class _LimiterFake:
+    def __init__(self) -> None:
+        self.acquire = _CallRecorder()
 
 
 @pytest.fixture
 def mock_execution():
     """Create mock ExecutionRepository."""
-    execution = Mock(spec=ExecutionRepository)
-    execution.record_call = Mock()
-    return execution
+    return _ExecutionRepositoryFake()
 
 
 @pytest.fixture
 def mock_telemetry_emit():
     """Create mock telemetry emit callback."""
-    return Mock()
+    return _CallRecorder()
 
 
 @pytest.fixture
@@ -44,6 +101,19 @@ def http_client(mock_execution, mock_telemetry_emit):
         telemetry_emit=mock_telemetry_emit,
         timeout=30.0,
     )
+
+
+class _CountingByteStream(httpx.SyncByteStream):
+    """Streaming fixture that exposes how many chunks the client consumed."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.yielded: list[bytes] = []
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self._chunks:
+            self.yielded.append(chunk)
+            yield chunk
 
 
 # ============================================================================
@@ -374,6 +444,54 @@ def test_get_telemetry_failure_doesnt_corrupt_audit(http_client, mock_execution,
     mock_execution.record_call.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    "response_headers",
+    [
+        {},
+        {"content-length": "3"},
+        {"transfer-encoding": "chunked"},
+    ],
+)
+@respx.mock
+def test_get_body_cap_streams_and_aborts_without_trusting_response_headers(
+    response_headers: dict[str, str],
+    mock_execution,
+    mock_telemetry_emit,
+) -> None:
+    """Configured body cap aborts during streaming for absent, lying, and chunked lengths."""
+    stream = _CountingByteStream([b"abc", b"def", b"must-not-read"])
+    headers = {"content-type": "text/plain", **response_headers}
+    respx.get("https://api.example.com/huge").mock(return_value=httpx.Response(200, headers=headers, stream=stream))
+    client = AuditedHTTPClient(
+        execution=mock_execution,
+        state_id="test-state-001",
+        run_id="test-run-001",
+        telemetry_emit=mock_telemetry_emit,
+        timeout=30.0,
+        max_response_body_bytes=5,
+    )
+
+    with pytest.raises(HTTPResponseBodyTooLargeError) as exc_info:
+        client.get("https://api.example.com/huge")
+
+    assert exc_info.value.body_size == 6
+    assert exc_info.value.max_body_bytes == 5
+    assert stream.yielded == [b"abc", b"def"]
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args.kwargs
+    assert call_args["status"] is CallStatus.ERROR
+    assert call_args["error"].type == "HTTPResponseBodyTooLargeError"
+    response_data = call_args["response_data"].to_dict()
+    assert response_data["body_size"] == 6
+    assert response_data["body"] == {
+        "_truncated": True,
+        "_reason": "body_too_large",
+        "_captured_body": False,
+        "_observed_body_size": 6,
+        "_max_body_bytes": 5,
+    }
+
+
 # ============================================================================
 # Header Fingerprinting Tests
 # ============================================================================
@@ -527,8 +645,7 @@ def test_response_headers_filter_sensitive(http_client, mock_execution):
 @respx.mock
 def test_rate_limiting_integration(mock_execution, mock_telemetry_emit):
     """Rate limiter should be invoked before HTTP call."""
-    mock_limiter = Mock()
-    mock_limiter.acquire.return_value = None  # acquire() blocks and returns None
+    mock_limiter = _LimiterFake()
 
     client = AuditedHTTPClient(
         execution=mock_execution,

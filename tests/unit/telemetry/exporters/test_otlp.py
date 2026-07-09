@@ -11,7 +11,8 @@ Tests cover:
 """
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 from opentelemetry.sdk.trace.export import SpanExportResult
@@ -28,6 +29,37 @@ from elspeth.telemetry.serialization import derive_trace_id, generate_span_id
 
 # Path to patch OTLPSpanExporter - must be at the source location
 OTLP_EXPORTER_PATCH = "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"
+
+
+class _CallRecorder:
+    def __init__(self, *, return_value: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect: BaseException | None = None
+        self.call_args: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+        self.call_args_list: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_args = (args, kwargs)
+        self.call_args_list.append(self.call_args)
+        if self.side_effect is not None:
+            raise self.side_effect
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _OTLPExporterDouble:
+    def __init__(self) -> None:
+        self.export = _CallRecorder(return_value=SpanExportResult.SUCCESS)
+        self.shutdown = _CallRecorder()
 
 
 class TestTraceIdDerivation:
@@ -96,7 +128,7 @@ class TestOTLPExporterConfiguration:
         # This will fail at SDK level, but our config validation accepts it
         # since OpenTelemetry SDK should validate URLs
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             exporter.configure({"endpoint": ""})
             mock_exporter_class.assert_called_once()
 
@@ -104,7 +136,7 @@ class TestOTLPExporterConfiguration:
         """batch_size < 1 raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": "http://localhost:4317", "batch_size": 0})
             assert "batch_size" in str(exc_info.value)
@@ -113,7 +145,7 @@ class TestOTLPExporterConfiguration:
         """Negative batch_size raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": "http://localhost:4317", "batch_size": -5})
             assert "batch_size" in str(exc_info.value)
@@ -122,7 +154,7 @@ class TestOTLPExporterConfiguration:
         """Non-string endpoint raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": 4317})
             assert "endpoint" in str(exc_info.value)
@@ -131,7 +163,7 @@ class TestOTLPExporterConfiguration:
         """Non-dict headers raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": "http://localhost:4317", "headers": "Authorization: token"})
             assert "headers" in str(exc_info.value)
@@ -140,7 +172,7 @@ class TestOTLPExporterConfiguration:
         """Non-string header key raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": "http://localhost:4317", "headers": {1: "token"}})
             assert "headers" in str(exc_info.value)
@@ -149,7 +181,7 @@ class TestOTLPExporterConfiguration:
         """Non-string header value raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": "http://localhost:4317", "headers": {"Authorization": 123}})
             assert "headers[Authorization]" in str(exc_info.value)
@@ -158,7 +190,7 @@ class TestOTLPExporterConfiguration:
         """Non-integer batch_size raises TelemetryExporterError."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             with pytest.raises(TelemetryExporterError) as exc_info:
                 exporter.configure({"endpoint": "http://localhost:4317", "batch_size": "100"})
             assert "batch_size" in str(exc_info.value)
@@ -167,7 +199,7 @@ class TestOTLPExporterConfiguration:
         """Valid configuration initializes exporter."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_instance = MagicMock()
+            mock_instance = _OTLPExporterDouble()
             mock_exporter_class.return_value = mock_instance
 
             exporter.configure(
@@ -187,7 +219,7 @@ class TestOTLPExporterConfiguration:
         """Default batch_size is 100."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             exporter.configure({"endpoint": "http://localhost:4317"})
             assert exporter._batch_size == 100
 
@@ -195,7 +227,7 @@ class TestOTLPExporterConfiguration:
         """Configuration without headers passes None to SDK."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_exporter_class.return_value = MagicMock()
+            mock_exporter_class.return_value = _OTLPExporterDouble()
             exporter.configure({"endpoint": "http://localhost:4317"})
             mock_exporter_class.assert_called_once_with(
                 endpoint="http://localhost:4317",
@@ -206,11 +238,11 @@ class TestOTLPExporterConfiguration:
 class TestOTLPExporterBuffering:
     """Tests for event buffering and batch export."""
 
-    def _create_configured_exporter(self, batch_size: int = 100) -> tuple[OTLPExporter, MagicMock]:
+    def _create_configured_exporter(self, batch_size: int = 100) -> tuple[OTLPExporter, _OTLPExporterDouble]:
         """Create a configured exporter with mocked OTLP SDK."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_instance = MagicMock()
+            mock_instance = _OTLPExporterDouble()
             mock_exporter_class.return_value = mock_instance
             exporter.configure(
                 {
@@ -301,11 +333,11 @@ class TestOTLPExporterBuffering:
 class TestOTLPExporterSpanConversion:
     """Tests for event-to-span conversion."""
 
-    def _create_configured_exporter(self) -> tuple[OTLPExporter, MagicMock]:
+    def _create_configured_exporter(self) -> tuple[OTLPExporter, _OTLPExporterDouble]:
         """Create a configured exporter with mocked OTLP SDK."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_instance = MagicMock()
+            mock_instance = _OTLPExporterDouble()
             mock_exporter_class.return_value = mock_instance
             exporter.configure(
                 {
@@ -474,11 +506,11 @@ class TestOTLPExporterSpanConversion:
 class TestOTLPExporterLifecycle:
     """Tests for exporter lifecycle (close, error handling)."""
 
-    def _create_configured_exporter(self) -> tuple[OTLPExporter, MagicMock]:
+    def _create_configured_exporter(self) -> tuple[OTLPExporter, _OTLPExporterDouble]:
         """Create a configured exporter with mocked OTLP SDK."""
         exporter = OTLPExporter()
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
-            mock_instance = MagicMock()
+            mock_instance = _OTLPExporterDouble()
             mock_exporter_class.return_value = mock_instance
             exporter.configure(
                 {

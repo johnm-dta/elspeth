@@ -27,11 +27,12 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
-from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.run_lifecycle_repository import (
     RunLifecycleRepository,
     is_valid_sha256_hex,
@@ -134,6 +135,37 @@ class TestBeginRunDirect:
         assert worker.entry_point == "run"
         assert worker.pid is not None
         assert event_types == ["worker_register", "leader_acquire"]
+
+    def test_begin_run_uses_public_leader_registration_composition_surface(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        observed_run_ids: list[str] = []
+
+        def spy_register_run_leader_on(self: RunCoordinationRepository, *args: object, **kwargs: object) -> CoordinationToken:
+            del self, args
+            observed_run_ids.append(str(kwargs["run_id"]))
+            return CoordinationToken(
+                run_id=str(kwargs["run_id"]),
+                worker_id=str(kwargs["worker_id"]),
+                leader_epoch=1,
+            )
+
+        monkeypatch.setattr(
+            RunCoordinationRepository,
+            "register_run_leader_on",
+            spy_register_run_leader_on,
+            raising=False,
+        )
+
+        repo.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="public-composition-run",
+            leader_worker_id="worker:public-composition-run:abc123",
+        )
+
+        assert observed_run_ids == ["public-composition-run"]
 
     def test_begin_run_self_mints_worker_identity_when_omitted(self) -> None:
         """Uniformity-for-free: callers that pass no identity still get a seat."""
@@ -594,7 +626,7 @@ class TestRecordSourceFieldResolutionNonexistentRun:
         The error comes from execute_update() detecting zero affected rows.
         """
         _, repo = _make_repo()
-        with pytest.raises(AuditIntegrityError):
+        with pytest.raises(AuditIntegrityError, match="Cannot record source field resolution for run 'ghost-run'"):
             repo.record_source_field_resolution(
                 "ghost-run",
                 {"header": "field"},
@@ -1257,7 +1289,7 @@ class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
             SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv_file", plugin_version="1.0"),
             SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="json_file", plugin_version="1.0"),
         )
-        with pytest.raises(LandscapeRecordError, match="64 lowercase hex chars"):
+        with pytest.raises(LandscapeRecordError, match="openrouter_catalog_sha256 must be 64 lowercase hex chars"):
             repo.record_synthesised_run(
                 pipeline_yaml="version: 1",
                 rows=(),
@@ -1265,7 +1297,7 @@ class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
                 llm_call_count=0,
                 node_specs=node_specs,
                 started_at=datetime.now(UTC),
-                metadata={"seeded_from_cache": True, "cache_key": "ck"},
+                metadata={"seeded_from_cache": True, "cache_key": "c" * 64},
                 openrouter_catalog_sha256="not-a-sha",
                 openrouter_catalog_source="bundled",
             )

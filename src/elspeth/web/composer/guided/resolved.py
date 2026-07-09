@@ -23,6 +23,10 @@ class SourceResolved:
     options: Mapping[str, Any]
     observed_columns: Sequence[str]
     sample_rows: Sequence[Mapping[str, Any]]
+    # Source NODE's invalid-row routing: a configured sink name, or "discard".
+    # The guided composer sets this when it resolves the source; manual /
+    # schema_form-submission paths keep the "discard" default.
+    on_validation_failure: str = "discard"
 
     def __post_init__(self) -> None:
         freeze_fields(self, "options", "observed_columns", "sample_rows")
@@ -34,6 +38,7 @@ class SourceResolved:
             "options": deep_thaw(self.options),
             "observed_columns": list(deep_thaw(self.observed_columns)),
             "sample_rows": [dict(deep_thaw(r)) for r in self.sample_rows],
+            "on_validation_failure": self.on_validation_failure,
         }
 
     @classmethod
@@ -45,6 +50,7 @@ class SourceResolved:
                 options=d["options"],
                 observed_columns=tuple(d["observed_columns"]),
                 sample_rows=tuple(dict(r) for r in d["sample_rows"]),
+                on_validation_failure=d["on_validation_failure"],
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"SourceResolved.from_dict: malformed record {d!r}") from exc

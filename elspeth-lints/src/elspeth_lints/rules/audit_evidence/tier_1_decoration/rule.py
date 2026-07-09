@@ -16,10 +16,10 @@ from elspeth_lints.core.ast_walker import (
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.shared import (
     allowlist_path_for_root,
+    class_allowlist_governance_findings_for_root,
     display_path,
     load_class_allowlist,
     repo_relative_display_path,
-    tier_1_error_call,
 )
 from elspeth_lints.rules.audit_evidence.tier_1_decoration.metadata import (
     RULE_ID,
@@ -31,6 +31,13 @@ from elspeth_lints.rules.audit_evidence.tier_1_decoration.metadata import (
 )
 
 _CHECKED_SUFFIXES = ("Error", "Violation")
+_TIER_1_ERROR_MODULES = frozenset({"elspeth.contracts.errors", "elspeth.contracts.tier_registry"})
+
+
+@dataclass(frozen=True, slots=True)
+class _Tier1ErrorBindings:
+    direct_names: frozenset[str]
+    module_names: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +82,16 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
             continue
         parsed = _parse_or_raise(path)
         findings.extend(scan_tree(parsed.tree, display_path(path, root), parsed.source.splitlines(), emit_tde1=False))
-    return [finding for finding in findings if finding.rule_id != RULE_TDE1 or allowlist.match_key(finding.fingerprint) is None]
+    active = [finding for finding in findings if finding.rule_id != RULE_TDE1 or allowlist.match_key(finding.fingerprint) is None]
+    return [
+        *active,
+        *class_allowlist_governance_findings_for_root(
+            allowlist,
+            allowlist_dir,
+            root=root,
+            allowlist_dir_override=allowlist_dir_override,
+        ),
+    ]
 
 
 def _parse_or_raise(path: Path) -> ParsedPythonFile:
@@ -98,13 +114,14 @@ def scan_tree(tree: ast.AST, file_path: str, source_lines: list[str], *, emit_td
     class-decoration requirement (TDE1) does not apply.
     """
     findings: list[Finding] = []
+    bindings = _tier_1_error_bindings(tree)
     for node in ast.walk(tree):
         if emit_tde1 and isinstance(node, ast.ClassDef):
-            finding = _tde1_finding(file_path, node, source_lines)
+            finding = _tde1_finding(file_path, node, source_lines, bindings)
             if finding is not None:
                 findings.append(finding)
                 continue
-        if isinstance(node, ast.Call) and tier_1_error_call(node):
+        if isinstance(node, ast.Call) and _canonical_tier_1_error_call(node, bindings):
             detail = _caller_module_violation(node)
             if detail is not None:
                 findings.append(_tde2_finding(file_path, node, detail))
@@ -123,10 +140,10 @@ def _scan_candidates(root: Path) -> list[Path]:
     return list(iter_python_files(root))
 
 
-def _tde1_finding(file_path: str, node: ast.ClassDef, source_lines: list[str]) -> Finding | None:
+def _tde1_finding(file_path: str, node: ast.ClassDef, source_lines: list[str], bindings: _Tier1ErrorBindings) -> Finding | None:
     if not node.name.endswith(_CHECKED_SUFFIXES):
         return None
-    if _has_tier_1_error_decorator(node):
+    if _has_tier_1_error_decorator(node, bindings):
         return None
     if _has_tier_2_comment(node, source_lines):
         return None
@@ -157,11 +174,45 @@ def _tde2_finding(file_path: str, node: ast.Call, detail: str) -> Finding:
     )
 
 
-def _has_tier_1_error_decorator(class_node: ast.ClassDef) -> bool:
+def _has_tier_1_error_decorator(class_node: ast.ClassDef, bindings: _Tier1ErrorBindings) -> bool:
     return any(
-        isinstance(decorator, ast.Call) and tier_1_error_call(decorator) and _has_nonempty_reason(decorator)
+        isinstance(decorator, ast.Call) and _canonical_tier_1_error_call(decorator, bindings) and _has_nonempty_reason(decorator)
         for decorator in class_node.decorator_list
     )
+
+
+def _tier_1_error_bindings(tree: ast.AST) -> _Tier1ErrorBindings:
+    direct_names: set[str] = set()
+    module_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _TIER_1_ERROR_MODULES:
+            for alias in node.names:
+                if alias.name == "tier_1_error":
+                    direct_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _TIER_1_ERROR_MODULES:
+                    module_names.add(alias.asname or alias.name)
+    return _Tier1ErrorBindings(frozenset(direct_names), frozenset(module_names))
+
+
+def _canonical_tier_1_error_call(call: ast.Call, bindings: _Tier1ErrorBindings) -> bool:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id in bindings.direct_names
+    if isinstance(func, ast.Attribute) and func.attr == "tier_1_error":
+        return _dotted_name(func.value) in bindings.module_names
+    return False
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        if base is not None:
+            return f"{base}.{node.attr}"
+    return None
 
 
 def _has_nonempty_reason(call: ast.Call) -> bool:

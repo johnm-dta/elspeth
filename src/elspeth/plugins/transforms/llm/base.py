@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+from jinja2 import TemplateSyntaxError
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.hashing import stable_hash
@@ -161,6 +162,59 @@ class LLMConfig(TransformDataConfig):
                 f"expected {expected_hash!r}, got {self.resolved_prompt_template_hash!r}"
             )
         return self
+
+    def _field_extraction_templates(self) -> tuple[tuple[str, str], ...]:
+        """Return (label, template) for every LLM Jinja2 template that can interpolate row data."""
+        templates = [("prompt_template", self.prompt_template)]
+        if isinstance(self.queries, dict):
+            for name, defn in self.queries.items():
+                if isinstance(defn, dict) and defn.get("template"):
+                    templates.append((f"query {name!r} template", defn["template"]))
+        elif isinstance(self.queries, list):
+            for index, item in enumerate(self.queries):
+                if isinstance(item, dict) and item.get("template"):
+                    label = item.get("name", index)
+                    templates.append((f"query {label!r} template", item["template"]))
+        return tuple(templates)
+
+    @model_validator(mode="after")
+    def _validate_dynamic_row_access_requires_explicit_opt_out(self) -> LLMConfig:
+        """Fail closed when row fields are accessed through parse-time dynamic keys."""
+        if self.required_input_fields == []:
+            return self
+
+        from elspeth.core.templates import extract_jinja2_field_usage
+
+        dynamic_accesses: list[str] = []
+        for label, template in self._field_extraction_templates():
+            try:
+                extraction = extract_jinja2_field_usage(template)
+            except TemplateSyntaxError as e:
+                # An unparseable template cannot be proven free of dynamic row
+                # access, so it must fail here — as the structured TemplateError
+                # the constructor advertises, not a raw jinja2 exception.
+                raise TemplateError(f"Invalid template syntax in {label}: {e}") from e
+            dynamic_accesses.extend(extraction.dynamic_accesses)
+
+        if not dynamic_accesses:
+            return self
+
+        access_kinds = sorted(set(dynamic_accesses))
+        access_examples_by_kind = {
+            "attr": "row|attr(expr)",
+            "get": "row.get(expr)",
+            "item": "row[expr]",
+            "map(attribute)": "map(attribute=expr)",
+            "row-api": "row API",
+        }
+        access_examples = ", ".join(access_examples_by_kind.get(kind, kind) for kind in access_kinds)
+        raise ValueError(
+            "LLM prompt_template uses dynamic row field access "
+            f"({', '.join(access_kinds)} via {access_examples}). "
+            "Dynamic row keys cannot be audited against options.required_input_fields. "
+            "Use static row.field or row['field'] references, or set "
+            "options.required_input_fields: [] to explicitly opt out and accept runtime risk."
+        )
 
     @model_validator(mode="after")
     def _validate_required_input_fields_declared(self) -> LLMConfig:

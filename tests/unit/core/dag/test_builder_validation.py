@@ -8,77 +8,220 @@ union merge.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar
 
 import pytest
 
+from elspeth.contracts import RouteDestination
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
+from elspeth.contracts.types import BranchName, CoalesceName, NodeID
+from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings, TransformSettings
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.dag.wiring import WiredTransform
 
 
-class TestCoalesceUnionMergeObservedShortCircuit:
-    """Union merge must collapse to observed mode when ANY branch is observed.
+class _BuilderValidationMockSource:
+    name = "mock_source"
+    output_schema = None
+    config: ClassVar[dict[str, Any]] = {"schema": {"mode": "observed"}}
+    _on_validation_failure = "discard"
+    on_success = "source_out"
 
-    When a coalesce does union merge and at least one branch has mode=observed,
-    the entire merged schema must become observed — the declared branch's fields
-    cannot be guaranteed because the observed branch's output is unknown.
-    """
 
-    def _build_coalesce_with_schemas(
-        self,
-        branch_schemas: dict[str, SchemaConfig],
-    ) -> SchemaConfig:
-        """Simulate the builder's union merge logic with SchemaConfig objects."""
-        seen_types: dict[str, tuple[Literal["str", "int", "float", "bool", "any"], bool, str]] = {}
-        all_observed = False
-        for branch_name, schema_cfg in branch_schemas.items():
-            if schema_cfg.is_observed:
-                all_observed = True
-                break
-            if schema_cfg.fields is None:
-                continue
-            for fd in schema_cfg.fields:
-                if fd.name in seen_types:
-                    prior_type, _prior_req, prior_branch = seen_types[fd.name]
-                    if prior_type != fd.field_type:
-                        raise GraphValidationError(f"Type mismatch for {fd.name}")
-                    if not fd.required:
-                        seen_types[fd.name] = (prior_type, False, prior_branch)
-                else:
-                    seen_types[fd.name] = (fd.field_type, fd.required, branch_name)
+class _BuilderValidationMockSink:
+    name = "mock_sink"
+    input_schema = None
+    config: ClassVar[dict[str, Any]] = {}
+    _on_write_failure = "discard"
+    declared_required_fields: ClassVar[frozenset[str]] = frozenset()
 
-        if all_observed or not seen_types:
-            return SchemaConfig(mode="observed", fields=None)
-        merged_fields = tuple(FieldDefinition(name=name, field_type=ftype, required=req) for name, (ftype, req, _) in seen_types.items())
-        return SchemaConfig(mode="flexible", fields=merged_fields)
+    def _reset_diversion_log(self) -> None:
+        pass
 
-    def test_observed_branch_collapses_union_to_observed(self) -> None:
-        """One declared + one observed branch → entire merge is observed."""
-        result = self._build_coalesce_with_schemas(
-            {
-                "branch_a": SchemaConfig(
-                    mode="flexible",
-                    fields=(FieldDefinition("id", "int"), FieldDefinition("score", "float")),
-                ),
-                "branch_b": SchemaConfig(mode="observed", fields=None),
-            }
+
+class _BuilderValidationTransform:
+    input_schema = None
+    output_schema = None
+    on_error: str | None = None
+    on_success: str | None = "output"
+    declared_output_fields: ClassVar[frozenset[str]] = frozenset()
+    passes_through_input = False
+
+    def __init__(self, *, name: str, output_schema_config: SchemaConfig) -> None:
+        self.name = name
+        self.config = {"schema": {"mode": "observed"}}
+        self._output_schema_config = output_schema_config
+
+
+class TestCoalesceBranchPlanning:
+    """Builder should store one coherent plan per coalesce branch."""
+
+    def test_builder_freezes_graph_metadata_after_construction(self) -> None:
+        source = _BuilderValidationMockSource()
+
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="output", options={})},
+            transforms=[],
+            sinks={"output": _BuilderValidationMockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[],
+            coalesce_settings=[],
         )
-        assert result.is_observed
-        assert result.fields is None
 
-    def test_observed_first_branch_collapses_union_to_observed(self) -> None:
-        """Observed branch FIRST still collapses — order should not matter."""
-        result = self._build_coalesce_with_schemas(
-            {
-                "branch_a": SchemaConfig(mode="observed", fields=None),
-                "branch_b": SchemaConfig(
-                    mode="flexible",
-                    fields=(FieldDefinition("id", "int"), FieldDefinition("label", "str")),
-                ),
-            }
+        source_node = graph.get_sources()[0]
+        sink_node = graph.get_sinks()[0]
+        node_step_map = graph.get_node_step_map()
+
+        assert node_step_map[source_node] == 0
+        assert graph.build_step_map() == node_step_map
+        assert graph.get_node_step_map() == node_step_map
+
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.add_edge(source_node, sink_node, label="late_route")
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.set_node_output_schema(source_node, SchemaConfig(mode="observed", fields=None))
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.set_sink_id_map({})
+        with pytest.raises(GraphValidationError, match="build metadata is frozen"):
+            graph.add_route_resolution_entry(NodeID("gate"), "true", RouteDestination.discard())
+
+    def test_branch_info_carries_identity_and_transform_branch_plan(self) -> None:
+        source = _BuilderValidationMockSource()
+        transform = _BuilderValidationTransform(
+            name="slow_branch_transform",
+            output_schema_config=SchemaConfig(mode="observed", fields=None),
         )
-        assert result.is_observed
-        assert result.fields is None
+
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
+            transforms=[
+                WiredTransform(
+                    plugin=transform,  # type: ignore[arg-type]
+                    settings=TransformSettings(
+                        name="slow_branch_transform",
+                        plugin=transform.name,
+                        input="slow_branch",
+                        on_success="slow_out",
+                        on_error="discard",
+                        options={},
+                    ),
+                )
+            ],
+            sinks={"output": _BuilderValidationMockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[
+                GateSettings(
+                    name="splitter",
+                    input="source_out",
+                    condition="True",
+                    routes={"true": "fork", "false": "output"},
+                    fork_to=["fast_branch", "slow_branch"],
+                )
+            ],
+            coalesce_settings=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches={"fast_branch": "fast_branch", "slow_branch": "slow_out"},
+                    policy="require_all",
+                    merge="union",
+                    on_success="output",
+                )
+            ],
+        )
+
+        branch_info = graph.get_branch_info_map()
+
+        fast_branch = branch_info[BranchName("fast_branch")]
+        assert fast_branch.input_connection == "fast_branch"
+        assert fast_branch.uses_transform_chain is False
+
+        slow_branch = branch_info[BranchName("slow_branch")]
+        assert slow_branch.input_connection == "slow_out"
+        assert slow_branch.uses_transform_chain is True
+
+        branch_schemas = graph.get_coalesce_branch_schemas(CoalesceName("merge_results"))
+        assert set(branch_schemas) == {"fast_branch", "slow_branch"}
+        assert fast_branch.schema == branch_schemas["fast_branch"]
+        assert slow_branch.schema == branch_schemas["slow_branch"]
+
+
+class TestCoalesceUnionMergeMixedObservedExplicit:
+    """Builder union merge rejects mixed observed and typed explicit branches."""
+
+    def _build_mixed_branch_graph(self, *, observed_first: bool) -> ExecutionGraph:
+        source = _BuilderValidationMockSource()
+        observed = _BuilderValidationTransform(
+            name="observed_branch_transform",
+            output_schema_config=SchemaConfig(mode="observed", fields=None),
+        )
+        explicit = _BuilderValidationTransform(
+            name="explicit_branch_transform",
+            output_schema_config=SchemaConfig(
+                mode="flexible",
+                fields=(FieldDefinition("id", "int"), FieldDefinition("score", "float")),
+            ),
+        )
+
+        if observed_first:
+            branch_order = ("observed_branch", "explicit_branch")
+            branch_plugins = {"observed_branch": observed, "explicit_branch": explicit}
+        else:
+            branch_order = ("explicit_branch", "observed_branch")
+            branch_plugins = {"explicit_branch": explicit, "observed_branch": observed}
+
+        transforms = [
+            WiredTransform(
+                plugin=plugin,  # type: ignore[arg-type]
+                settings=TransformSettings(
+                    name=branch_name,
+                    plugin=plugin.name,
+                    input=branch_name,
+                    on_success=f"{branch_name}_out",
+                    on_error="discard",
+                    options={},
+                ),
+            )
+            for branch_name, plugin in branch_plugins.items()
+        ]
+
+        return ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
+            transforms=transforms,
+            sinks={"output": _BuilderValidationMockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[
+                GateSettings(
+                    name="splitter",
+                    input="source_out",
+                    condition="True",
+                    routes={"true": "fork", "false": "output"},
+                    fork_to=list(branch_order),
+                )
+            ],
+            coalesce_settings=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches={branch_name: f"{branch_name}_out" for branch_name in branch_order},
+                    policy="require_all",
+                    merge="union",
+                    on_success="output",
+                )
+            ],
+        )
+
+    def test_builder_rejects_observed_first_mixed_union_coalesce(self) -> None:
+        """Builder reaches merge_union_fields and rejects observed-first mixed policy."""
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            self._build_mixed_branch_graph(observed_first=True)
+
+    def test_builder_rejects_explicit_first_mixed_union_coalesce(self) -> None:
+        """Builder rejection is independent of branch declaration order."""
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            self._build_mixed_branch_graph(observed_first=False)
 
 
 class TestAmbiguousContinueFallthrough:

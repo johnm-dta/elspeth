@@ -5,6 +5,8 @@ Every decision is traceable to its source through the RecorderFactory API.
 
 Primary API:
     RecorderFactory - Constructs domain repositories from LandscapeDB
+    LandscapeReadRepositories - Explicit read-only repository surface
+    LandscapeWriteRepositories - Explicit writable repository surface
     LandscapeDB - Database connection management
 
 Model Classes:
@@ -55,15 +57,13 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.exporter import LandscapeExporter
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import LandscapeReadRepositories, LandscapeWriteRepositories, RecorderFactory
 from elspeth.core.landscape.formatters import (
     CSVFormatter,
     JSONFormatter,
-    LineageTextFormatter,
-    dataclass_to_dict,
-    serialize_datetime,
 )
 from elspeth.core.landscape.lineage import LineageResult, explain
+from elspeth.core.landscape.lineage_text import LineageTextFormatter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.reproducibility import (
     compute_grade,
@@ -71,30 +71,13 @@ from elspeth.core.landscape.reproducibility import (
 )
 from elspeth.core.landscape.row_data import CallDataResult, CallDataState, RowDataResult, RowDataState
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
-from elspeth.core.landscape.schema import (
-    artifacts_table,
-    auth_events_table,
-    batch_members_table,
-    batch_outputs_table,
-    batches_table,
-    calls_table,
-    edges_table,
-    metadata,
-    node_states_table,
-    nodes_table,
-    routing_events_table,
-    rows_table,
-    run_sources_table,
-    runs_table,
-    scheduler_events_table,
-    token_parents_table,
-    token_work_items_table,
-    tokens_table,
-)
+from elspeth.core.landscape.run_status_projection import AuditRunStatusProjection
+from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
 from elspeth.core.landscape.write_repository import LandscapeWriteRepository
 
 __all__ = [
     "Artifact",
+    "AuditRunStatusProjection",
     "Batch",
     "BatchMember",
     "BatchOutput",
@@ -113,6 +96,8 @@ __all__ = [
     "JSONFormatter",
     "LandscapeDB",
     "LandscapeExporter",
+    "LandscapeReadRepositories",
+    "LandscapeWriteRepositories",
     "LandscapeWriteRepository",
     "LineageResult",
     "LineageTextFormatter",
@@ -138,27 +123,9 @@ __all__ = [
     "Token",
     "TokenParent",
     "ValidationErrorWithContract",
-    "artifacts_table",
-    "auth_events_table",
-    "batch_members_table",
-    "batch_outputs_table",
-    "batches_table",
-    "calls_table",
     "compute_grade",
     "dataclass_to_dict",
-    "edges_table",
     "explain",
-    "metadata",
-    "node_states_table",
-    "nodes_table",
-    "routing_events_table",
-    "rows_table",
-    "run_sources_table",
-    "runs_table",
-    "scheduler_events_table",
     "serialize_datetime",
-    "token_parents_table",
-    "token_work_items_table",
-    "tokens_table",
     "update_grade_after_purge",
 ]

@@ -59,6 +59,31 @@ jobs:
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
+      - name: Check GitHub workflows (actionlint)
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          tarball="$tmp_dir/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          python - <<'PY' "$tarball" "$ACTIONLINT_VERSION"
+          from pathlib import Path
+          import sys
+          import urllib.request
+
+          tarball = Path(sys.argv[1])
+          version = sys.argv[2]
+          url = f"https://github.com/rhysd/actionlint/releases/download/v{version}/actionlint_{version}_linux_amd64.tar.gz"
+          urllib.request.urlretrieve(url, tarball)
+          PY
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" -C "$tmp_dir" actionlint
+          "$tmp_dir/actionlint" -config-file .github/actionlint.yaml .github/workflows/*.yml .github/workflows/*.yaml
+
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
@@ -76,6 +101,22 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
+
+      - name: Reject unverified fork PR signed allowlist edits
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check-judge-coverage \
+            --baseline-ref ${{ github.event.pull_request.base.sha }} \
+            --allowlist-root config/cicd/enforce_tier_model \
+            --repo-root . \
+            --forbid-unverified-judge-metadata
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check-judge-coverage \
+            --baseline-ref ${{ github.event.pull_request.base.sha }} \
+            --allowlist-root config/cicd/enforce_trust_boundary_honesty \
+            --repo-root . \
+            --forbid-unverified-judge-metadata
 
       - name: Check code style (ruff)
         working-directory: ${{ env.CI_CHECKOUT_PATH }}

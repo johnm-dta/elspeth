@@ -15,18 +15,12 @@
 // the gap is CI-visible (skip is reported in the run summary) rather than
 // silently suppressed by `test.fixme`. Per CLAUDE.md No-Legacy: no
 // `// removed for X` placeholder comments — the skip line documents the
-// gap inline. When the bug fixes land, flip the corresponding flag below
-// from `false` to `true` (or delete the flag and the `test.skip` call).
+// gap inline. When the bug fixes land, delete the corresponding flag and
+// the `test.skip` call.
 
 import { expect, test } from "@playwright/test";
 import { authedContext, createSession, deleteSession, tokenFromStorageState } from "./helpers/api";
 import { ComposerPage } from "./page-objects/composer-page";
-
-// Provider-union schema fix flag — flip to `true` when elspeth-dcf12c061b
-// (CatalogServiceImpl.get_schema returning base LLMConfig only) is closed.
-// Until then, the schema preview will not surface Azure deployment_name /
-// OpenRouter api_key, so the assertions cannot pass.
-const hasProviderUnionSchema = false;
 
 // State-seed gap flag — flip to `true` once the add-node-without-LLM
 // affordance lands. PluginCard's "Use in pipeline" button was deleted per
@@ -37,13 +31,6 @@ const hasStateSeed = false;
 
 test.describe("llm-provider-schema — catalog must surface provider-union fields", () => {
   test("llm transform schema enumerates Azure and OpenRouter variants", async ({ page }) => {
-    // Gate first — fail fast and skip with bug-ID before doing UI work that
-    // would otherwise produce a noisy timeout error.
-    test.skip(
-      !hasProviderUnionSchema,
-      "provider-union schema gap — see elspeth-dcf12c061b",
-    );
-
     // Seed a session so the composer mounts (the catalog drawer renders on
     // the composer surface; without a session the empty-state shows instead).
     const token = tokenFromStorageState(await page.context().storageState());
@@ -56,17 +43,21 @@ test.describe("llm-provider-schema — catalog must surface provider-union field
 
       // 1. Open catalog drawer.
       await page.keyboard.press("Control+Shift+P");
-      await expect(page.getByRole("dialog", { name: /plugin catalog/i })).toBeVisible();
+      const catalog = page.getByRole("dialog", { name: /plugin catalog/i });
+      await expect(catalog).toBeVisible();
 
-      // 2. Switch to Transforms tab and click the llm transform card.
-      await page.getByRole("tab", { name: /transforms/i }).click();
-      await page.getByText("llm").first().click();
+      // 2. Switch to Transforms tab and expand the llm transform schema.
+      await catalog.getByRole("tab", { name: /transforms/i }).click();
+      await catalog.getByRole("button", { name: /^schema for llm$/i }).click();
 
       // 3. Assert the schema preview surfaces Azure-specific field (deployment_name)
       //    and OpenRouter-specific field (api_key).
-      //    These fields are only present once elspeth-dcf12c061b is fixed.
-      await expect(page.getByText(/deployment_name/i)).toBeVisible();
-      await expect(page.getByText(/api_key/i)).toBeVisible();
+      const azureVariant = catalog.locator(".plugin-card-variant").filter({ hasText: "provider: azure" });
+      const openRouterVariant = catalog.locator(".plugin-card-variant").filter({ hasText: "provider: openrouter" });
+      await expect(azureVariant).toBeVisible();
+      await expect(openRouterVariant).toBeVisible();
+      await expect(azureVariant.getByText("deployment_name", { exact: true })).toBeVisible();
+      await expect(openRouterVariant.getByText("api_key", { exact: true })).toBeVisible();
     } finally {
       await deleteSession(ctx, session.id);
       await ctx.dispose();

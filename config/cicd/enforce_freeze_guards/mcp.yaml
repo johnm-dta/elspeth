@@ -2,6 +2,6 @@ per_file_rules:
 - pattern: mcp/server.py
   rules:
   - FG1
-  reason: ToolRegistration.schema_properties uses MappingProxyType(dict()) — values are JSON schema dicts (external API contract)
+  reason: _ToolDef.schema_properties uses a direct MappingProxyType wrap over recursively copied JSON schema mappings while preserving JSON Schema list shape.
   expires: null
   max_hits: 1

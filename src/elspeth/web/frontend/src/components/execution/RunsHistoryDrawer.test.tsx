@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
 import { useExecutionStore } from "@/stores/executionStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import type { RunDiagnostics } from "@/types/index";
 
 vi.mock("@/components/inspector/RunOutputsPanel", () => ({
@@ -94,12 +95,38 @@ describe("RunsHistoryDrawer", () => {
       diagnosticsExplanationByRunId: {},
       diagnosticsWorkingViewByRunId: {},
     } as never);
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: [],
+    } as never);
   });
 
   it("lists every run from the store", () => {
     render(<RunsHistoryDrawer onClose={vi.fn()} />);
     expect(screen.getByText(/r1/)).toBeInTheDocument();
     expect(screen.getByText(/r2/)).toBeInTheDocument();
+  });
+
+  // elspeth-e1c5ad0b53: run status renders through ui/StatusBadge so the
+  // completed_with_failures / empty distinction carries the ⚠ / ∅ glyphs
+  // rather than colour alone, and underscores read as spaces.
+  it("renders run status as a StatusBadge with the a11y glyph map", () => {
+    useExecutionStore.setState({
+      runs: [
+        { id: "r1", status: "completed_with_failures" } as never,
+        { id: "r2", status: "empty" } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    const withFailures = screen.getByText("completed with failures");
+    expect(withFailures).toHaveClass("status-badge", "status-badge-completed");
+    expect(withFailures).toHaveTextContent("⚠");
+
+    const empty = screen.getByText("empty");
+    expect(empty).toHaveClass("status-badge", "status-badge-empty");
+    expect(empty).toHaveTextContent("∅");
   });
 
   it("calls onClose when the Close button is clicked", async () => {
@@ -120,6 +147,110 @@ describe("RunsHistoryDrawer", () => {
     useExecutionStore.setState({ runs: [] } as never);
     render(<RunsHistoryDrawer onClose={vi.fn()} />);
     expect(screen.getByText(/no prior runs/i)).toBeInTheDocument();
+  });
+
+  // elspeth-ef8c18a6cb (line-item): the empty state must follow the
+  // title-first convention (HeaderSessionSwitcher), never the raw UUID.
+  it("names the session by title, not UUID, in the empty state", () => {
+    const sessionId = "3f2c9a10-0000-0000-0000-00000000abcd";
+    useExecutionStore.setState({ runs: [] } as never);
+    useSessionStore.setState({
+      activeSessionId: sessionId,
+      sessions: [
+        {
+          id: sessionId,
+          title: "Colour survey",
+          created_at: "",
+          updated_at: "",
+        },
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    expect(screen.getByText(/no prior runs for "Colour survey"/i)).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(sessionId))).not.toBeInTheDocument();
+  });
+
+  it("falls back to 'this session' in the empty state when no title is known", () => {
+    useExecutionStore.setState({ runs: [] } as never);
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    expect(screen.getByText(/no prior runs for this session/i)).toBeInTheDocument();
+  });
+
+  // ── REST-backed cancel (elspeth-90db33baac) ────────────────────────────────
+  //
+  // ProgressView's Cancel needs the in-memory activeRunId + WebSocket; after
+  // a reload those are gone. The drawer offers cancel on live rows via the
+  // REST endpoint, gated by the same ConfirmDialog pattern.
+
+  it("offers Cancel only on non-terminal runs", () => {
+    useExecutionStore.setState({
+      runs: [
+        { id: "r1", status: "completed" } as never,
+        { id: "r2", status: "running" } as never,
+        { id: "r3", status: "pending" } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("button", { name: /cancel run r1/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /cancel run r2/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /cancel run r3/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels a running run through confirm", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      runs: [{ id: "r2", status: "running" } as never],
+      cancel,
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /cancel run r2/i }));
+
+    // Confirm gates the REST call.
+    expect(cancel).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: /^cancel pipeline$/i }),
+    );
+    expect(cancel).toHaveBeenCalledWith("r2");
+  });
+
+  it("does not cancel when the confirm dialog is dismissed", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      runs: [{ id: "r2", status: "running" } as never],
+      cancel,
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /cancel run r2/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("disables the row Cancel while cancellation is draining", () => {
+    useExecutionStore.setState({
+      runs: [
+        { id: "r2", status: "running", cancel_requested: true } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    const button = screen.getByRole("button", { name: /cancel run r2/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent(/cancelling/i);
   });
 
   it("loads and renders diagnostics detail for a selected run", async () => {
@@ -181,5 +312,43 @@ describe("RunsHistoryDrawer", () => {
     expect(firstDetail).toHaveFocus();
     await userEvent.tab({ shift: true });
     expect(closeBtn).toHaveFocus();
+  });
+
+  // M08 (WCAG 2.4.3): the drawer is aria-modal with no backdrop/inerting, so
+  // focus can land on a control behind it (a click or a global shortcut). Tab
+  // must then pull focus back into the drawer rather than walk the page behind.
+  it("recaptures focus that has escaped the drawer on Tab", () => {
+    const outside = document.createElement("button");
+    outside.textContent = "underlying control";
+    document.body.appendChild(outside);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    outside.focus();
+    expect(outside).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Tab" });
+
+    expect(screen.getByRole("button", { name: /close/i })).toHaveFocus();
+
+    outside.remove();
+  });
+
+  // M08 (WCAG 2.4.3): closing the drawer must return focus to the control that
+  // opened it, so keyboard users are not dumped at the top of the document.
+  it("restores focus to the opener when the drawer unmounts", () => {
+    const opener = document.createElement("button");
+    opener.textContent = "Open past runs";
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(opener).toHaveFocus();
+
+    const { unmount } = render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    // Focus moved into the drawer (the Close button) while open.
+    expect(screen.getByRole("button", { name: /close/i })).toHaveFocus();
+
+    unmount();
+    expect(opener).toHaveFocus();
+
+    opener.remove();
   });
 });

@@ -1,56 +1,72 @@
-# Current State — ELSPETH        Checkpoint: 2026-06-14 (bootstrap) · commit e14406436
+# Current State — ELSPETH
 
-> Bootstrapped, not resumed — no prior workspace existed. This brief is inferred
-> from the repo, git history, and the filigree tracker, then reconciled with the
-> owner's two confirmations (authority grant; primary bet = Web hardening to GA).
+**Checkpoint:** 2026-07-08
+**Branch:** `release/0.7.0`
+**Release PR:** #86, `release/0.7.0` → `main`
 
-## The bet right now
+## The Bet Right Now
 
-**Web hardening to GA** — close the five Web-surface assurance clusters so the
-Composer path is safe for real users. Moves the north-star (run assurance
-completeness) and the Web-GA readiness input metric. The 0.6.0 multi-worker +
-plugins-remediation line is in-flight delivery alongside it, not the strategic
-primary.
+**Ship the 0.7.0 line to merge-ready, minus the operator signing stage.**
 
-## In flight
+The 0.7.0 release is the active delivery focus. It packages the LLM-primary
+guided Composer, first-run tutorial recut, document-ingestion plugins, CLI/TUI
+operator refresh, local Composer user/email-verification flow, public website,
+release documentation refresh, and the release hardening body recorded in the
+root changelog.
 
-- **Web hardening clusters** — Now (primary), not yet dispatched. tracker:
-  elspeth-250f698aaf (auth/OIDC/JWKS), elspeth-ef52049338 (sessions/Alembic),
-  elspeth-0fd9dfcb7e (blobs/MIME), elspeth-16ddaa7d02 (secrets), elspeth-248536c9e6
-  (execution service). All open; none scoped into a PRD yet.
-- **0.6.0 / plugins-subsystem remediation** — active branch
-  fix/plugins-subsystem-remediation (off release/0.6.0). Batch 1 criticals
-  C1/C2/C3 fixed in-branch (5190bb016 / 6aaf02b43 / a8f4b531b); B3.6 scanner fix
-  (acf470546). Batches 2–4 outstanding per project memory.
-- **0.6.0 release line** — slices 1–6 landed on release/0.6.0 (ADR-030 accepted).
-  Ship path = PR release/0.6.0 → main; gate reconciliation + signing is
-  operator-owed (escalation, not agent action).
+The longer-running **Web hardening to GA** bet remains on the roadmap, but the
+current checkout is in release-closeout mode: finish PR #86, preserve the
+operator-only signing boundary, and avoid adding new scope that does not move
+the release toward merge.
 
-## Open questions / blocked-on-owner
+## Current Release State
 
-- **Tracker drift (needs reconcile):** plugin criticals elspeth-ebe13515f4 /
-  elspeth-e62478e5db / elspeth-a46c6e361f are listed P0-READY in filigree but are
-  fixed-in-branch and uncommitted-to-closed. Close-on-merge, or close now? (A
-  DECIDE/CHECKPOINT act — not done here; RESUME is read-only.)
-- **Stale claims:** 5 issues carry stale assignees (phase-8 controller, advisor,
-  tool-decl, judge-tools, codex). Re-home or release?
-- **Metrics are uninstrumented:** every north-star/input target is a BASELINE→
-  TARGET placeholder. Owner to set real numbers, or approve an instrumentation
-  bet first.
-- **Landscape MCP is on epoch 11 vs DB epoch 21** — the audit-DB MCP can't open
-  the configured DB; operator-owed DB delete (authorized class) to recreate.
+- Public docs have been refreshed for 0.7.0 across `CHANGELOG.md`, `README.md`,
+  `ARCHITECTURE.md`, `SECURITY.md`, `GOVERNANCE.md`, `SUPPORT.md`, and
+  `docs/release/`.
+- Implemented plans, superseded specs, generated review sidecars, and other
+  work-product docs have been removed from the tracked active docs tree. A
+  maintainer may keep local copies under ignored `docs-archive/`; git history is
+  the public provenance record.
+- `docs-archive/` is intentionally local-only and ignored. It is not sensitive,
+  but it is not part of the public repository.
+- Local release verification is green for the currently exercised lint, type,
+  contract, unit, and frontend E2E checks recorded in PR #86.
+- GitHub CI is green except for the expected operator-owned Static analysis
+  failure caused by signed trust-tier allowlist drift.
 
-## Last checkpoint did
+## In Flight
 
-- Bootstrap only — created the workspace (vision, roadmap, metrics, current-state,
-  decisions/0001) from observed reality. Nothing committed (commit is the job of
-  /product-checkpoint).
-- Owner confirmed the authority grant as proposed, and named Web hardening to GA
-  as the primary bet (over the observed 0.6.0-branch inference).
+- **PR #86 release closeout** — docs are current, PR text records scope,
+  verification, archive policy, CodeQL/E2E fixes, and the remaining
+  operator-only stage.
+- **Signed trust-tier allowlist repair** — tracked as
+  `elspeth-2670a38693`, assigned to `operator`. Agents should diagnose and
+  report drift, but must not mint or rotate signed allowlist metadata.
+- **Final live-judge verification** — owed after the operator signing process,
+  using the real judge-signature key material and live LLM path.
 
-## Next session, start here
+## Open Questions / Blockers
 
-DECIDE on the Now bet: pick the first Web-hardening cluster to spec, then run
-/write-prd against it (north-star + Web-GA input metric as success criteria) and
-route the top item to /axiom-planning. In parallel, reconcile the C1/C2/C3
-tracker drift at the next /product-checkpoint.
+- Operator must repair/sign the trust-tier allowlist with release key material.
+- Operator must rerun Static analysis / aggregate CI after signing.
+- Operator must run the final live-judge end-to-end path before merge.
+- Release approval still needs final provenance in the public release materials.
+- Security disclosure and supply-chain artifact evidence remain publication
+  readiness items unless explicitly deferred in the release record.
+
+## Last Checkpoint Did
+
+- Reviewed the release commit log against the changelog and downstream docs.
+- Refreshed current release docs and removed obsolete pre-0.7 public-facing wording.
+- Preserved the ignored/local-only archive policy for `docs-archive/`.
+- Confirmed the remaining release blocker is the operator-owned signing stage,
+  not an agent-fixable lint or documentation issue.
+
+## Next Session, Start Here
+
+1. Confirm the operator has completed signed allowlist repair for
+   `elspeth-2670a38693`.
+2. Rerun or inspect Static analysis and aggregate CI on the current PR head.
+3. Run the final live-judge verification path.
+4. Update PR #86 and release provenance with the final CI/signing evidence.

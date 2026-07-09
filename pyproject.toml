@@ -1,6 +1,6 @@
 [project]
 name = "elspeth"
-version = "0.6.0"
+version = "0.7.0"
 description = "Auditable Sense/Decide/Act pipelines for high-reliability systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -468,6 +468,7 @@ paths_to_mutate = [
     "src/elspeth/engine/processor.py",
     "src/elspeth/engine/executors/",
     "src/elspeth/engine/coalesce_executor.py",
+    "src/elspeth/engine/coalesce_policy.py",
     "src/elspeth/engine/tokens.py",
 ]
 # Test runner - include engine tests, use short traceback for debugging

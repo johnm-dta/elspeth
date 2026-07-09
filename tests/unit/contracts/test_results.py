@@ -107,7 +107,7 @@ class TestTransformResultMultiRow:
             PipelineRow({"other": "x"}, contract_b),
         ]
         with pytest.raises(PluginContractViolation, match="inconsistent contracts"):
-            TransformResult.success_multi(rows, success_reason={"action": "expand"})
+            TransformResult.success_multi(rows, success_reason={"action": "split"})
 
     def test_success_multi_accepts_same_contract(self) -> None:
         """success_multi accepts rows that all share the same contract instance."""
@@ -116,7 +116,7 @@ class TestTransformResultMultiRow:
             PipelineRow({"value": 1}, contract),
             PipelineRow({"value": 2}, contract),
         ]
-        result = TransformResult.success_multi(rows, success_reason={"action": "expand"})
+        result = TransformResult.success_multi(rows, success_reason={"action": "split"})
         assert result.is_multi_row
 
     def test_transform_result_has_output_data(self) -> None:
@@ -202,6 +202,17 @@ class TestTransformResult:
             # Using the dataclass directly to bypass factory's keyword-only arg
             TransformResult(status="success", row=make_pipeline_row({"x": 1}), reason=None)
 
+    def test_success_factory_requires_mapping_success_reason(self) -> None:
+        """Success metadata must be mapping-like at construction."""
+        with pytest.raises(ValueError, match="MUST provide success_reason as a mapping"):
+            TransformResult.success(make_pipeline_row({"x": 1}), success_reason=["not", "a", "mapping"])  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("success_reason", [{}, {"action": 123}])
+    def test_success_factory_requires_string_action(self, success_reason: Any) -> None:
+        """Success metadata must include a runtime-valid action at construction."""
+        with pytest.raises(ValueError, match=r"MUST include success_reason\['action'\]"):
+            TransformResult.success(make_pipeline_row({"x": 1}), success_reason=success_reason)
+
     def test_error_factory(self) -> None:
         """Error factory creates result with status='error' and reason."""
         reason: TransformErrorReason = {"reason": "validation_failed", "field": "count"}
@@ -269,8 +280,9 @@ class TestTransformResultErrorInvariants:
 
     def test_error_without_reason_key_raises(self) -> None:
         """status='error' payloads must include the required 'reason' key."""
+        reason_without_key: Any = {}
         with pytest.raises(ValueError, match=r"MUST include reason\['reason'\]"):
-            TransformResult.error({})
+            TransformResult.error(reason_without_key)
 
     def test_error_with_row_raises(self) -> None:
         """status='error' with row set raises ValueError."""
@@ -716,6 +728,7 @@ class TestArtifactDescriptorAuditInvariants:
         [
             "webhook://https://user:" + "redacted" + "@example.com/hook",
             "webhook://https://api.example.com/hook?token=redacted",
+            "webhook://https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value",
             "db://results@postgresql://user:" + "redacted" + "@db/app",
             "file:///tmp/output.csv?api_key=redacted",
         ],
@@ -746,6 +759,16 @@ class TestArtifactDescriptorFactories:
         assert descriptor.content_hash == "abc123"
         assert descriptor.size_bytes == 2048
         assert descriptor.metadata is None
+
+    def test_for_file_encodes_uri_delimiters_in_literal_path(self) -> None:
+        """Literal filename delimiters must not become artifact URI query params."""
+        descriptor = ArtifactDescriptor.for_file(
+            path="/output/results?token=literal#fragment.csv",
+            content_hash="abc123",
+            size_bytes=2048,
+        )
+
+        assert descriptor.path_or_uri == "file:///output/results%3Ftoken%3Dliteral%23fragment.csv"
 
     def test_for_database(self) -> None:
         """for_database creates database artifact with db:// URI scheme."""
@@ -784,6 +807,23 @@ class TestArtifactDescriptorFactories:
         assert descriptor.content_hash == "abc789"
         assert descriptor.size_bytes == 512
         assert descriptor.metadata == {"response_code": 200}
+
+    def test_for_webhook_uses_redacted_slack_path_secret(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """for_webhook stores the known-pattern sanitized URL."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        sanitized_url = SanitizedWebhookUrl.from_raw_url("https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value")
+
+        descriptor = ArtifactDescriptor.for_webhook(
+            url=sanitized_url,
+            content_hash="abc789",
+            request_size=512,
+            response_code=200,
+        )
+
+        assert descriptor.path_or_uri == "webhook://https://hooks.slack.com/services/T00000000/B00000000/REDACTED"
+        assert "opaque_path_segment_value" not in descriptor.path_or_uri
+        assert descriptor.metadata is not None
+        assert "url_fingerprint" in descriptor.metadata
 
     def test_for_webhook_with_error_response(self) -> None:
         """for_webhook captures error response codes."""
@@ -960,6 +1000,19 @@ class TestFailureInfo:
         assert info.message == str(exc)
         assert info.attempts == 3
         assert info.last_error == "Connection refused"
+
+    def test_freeform_messages_are_scrubbed_for_audit_storage(self) -> None:
+        """FailureInfo feeds scheduler error messages, so raw secrets are scrubbed."""
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        info = FailureInfo(
+            exception_type="TransformError",
+            message=f"provider returned {raw_secret}",
+            last_error=f"last attempt used {raw_secret}",
+        )
+
+        assert info.message == "<redacted-secret>"
+        assert info.last_error == "<redacted-secret>"
+        assert raw_secret not in repr(info)
 
     def test_is_frozen(self) -> None:
         """FailureInfo is frozen — failure evidence must be immutable."""

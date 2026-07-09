@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required,
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import DeclarationContractViolation
 from elspeth.contracts.freeze import deep_freeze, freeze_fields
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 
 # Re-export FrameworkBugError which lives in tier_registry to break the import
 # cycle between the registry primitive and the public exception module. Apply
@@ -21,6 +22,9 @@ from elspeth.contracts.freeze import deep_freeze, freeze_fields
 from elspeth.contracts.tier_registry import FrameworkBugError as _FrameworkBugError
 from elspeth.contracts.tier_registry import tier_1_error
 
+_REDACTED_SECRET = "<redacted-secret>"
+_TRACEBACK_SECRET_WINDOW_SIZE = 4
+
 FrameworkBugError = tier_1_error(
     reason="ADR-008: framework internal inconsistency — engine bug",
     caller_module=__name__,
@@ -29,6 +33,94 @@ FrameworkBugError = tier_1_error(
 if TYPE_CHECKING:
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
     from elspeth.contracts.coordination import RegisteredWorker
+
+
+def _scrub_traceback_for_audit(traceback_text: str) -> str:
+    """Scrub traceback lines independently so safe frame diagnostics survive."""
+    lines = traceback_text.splitlines(keepends=True)
+    line_parts = [_split_line_ending(line) for line in lines]
+
+    redacted_indexes: set[int] = set()
+    scrubbed_content_by_index: dict[int, str] = {}
+    for index, (content, _line_ending) in enumerate(line_parts):
+        scrubbed_content = scrub_text_for_audit(content)
+        scrubbed_content_by_index[index] = scrubbed_content
+        if scrubbed_content != content:
+            redacted_indexes.add(index)
+
+    nonstructural_runs = _nonstructural_traceback_runs(line_parts)
+    for run_start, run_stop in nonstructural_runs:
+        tail_start = _traceback_exception_tail_start(line_parts, run_start, run_stop)
+        if tail_start is not None:
+            tail_text = _join_line_parts(line_parts[tail_start:run_stop])
+            if scrub_text_for_audit(tail_text) != tail_text:
+                redacted_indexes.update(range(tail_start, run_stop))
+
+    for run_start, run_stop in nonstructural_runs:
+        for start in range(run_start, run_stop):
+            window_stop = min(run_stop, start + _TRACEBACK_SECRET_WINDOW_SIZE)
+            for stop in range(start + 2, window_stop + 1):
+                window_indexes = range(start, stop)
+                if any(index in redacted_indexes for index in window_indexes):
+                    continue
+                window_text = _join_line_parts(line_parts[start:stop])
+                if scrub_text_for_audit(window_text) != window_text:
+                    redacted_indexes.update(window_indexes)
+
+    return "".join(
+        f"{scrubbed_content_by_index[index] if index not in redacted_indexes else _REDACTED_SECRET}{line_ending}"
+        for index, (_content, line_ending) in enumerate(line_parts)
+    )
+
+
+def _split_line_ending(line: str) -> tuple[str, str]:
+    content = line.rstrip("\r\n")
+    return content, line[len(content) :]
+
+
+def _nonstructural_traceback_runs(line_parts: list[tuple[str, str]]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for index, (content, _line_ending) in enumerate(line_parts):
+        if _is_traceback_structure_line(content):
+            if run_start is not None:
+                runs.append((run_start, index))
+                run_start = None
+            continue
+        if run_start is None:
+            run_start = index
+    if run_start is not None:
+        runs.append((run_start, len(line_parts)))
+    return runs
+
+
+def _traceback_exception_tail_start(line_parts: list[tuple[str, str]], run_start: int, run_stop: int) -> int | None:
+    for index in range(run_start, run_stop):
+        content = line_parts[index][0]
+        if _is_traceback_exception_message_line(content):
+            return index
+    return None
+
+
+def _is_traceback_exception_message_line(content: str) -> bool:
+    candidate = content.lstrip(" |")
+    type_name, separator, _message = candidate.partition(":")
+    if not separator:
+        return False
+    return bool(type_name) and all(part.isidentifier() for part in type_name.split("."))
+
+
+def _is_traceback_structure_line(content: str) -> bool:
+    return (
+        content.endswith("Traceback (most recent call last):")
+        or content.lstrip().startswith('File "')
+        or content.startswith("During handling of the above exception")
+        or content.startswith("The above exception was the direct cause")
+    )
+
+
+def _join_line_parts(line_parts: list[tuple[str, str]]) -> str:
+    return "".join(f"{content}{line_ending}" for content, line_ending in line_parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +153,7 @@ class ExecutionError:
     queries can filter on ``json_extract(error_data, '$.context.<field>')``.
     """
 
-    exception: str  # String representation of the exception
+    exception: str  # Secret-scrubbed string representation of the exception
     exception_type: str  # Exception class name (e.g., "ValueError")
     traceback: str | None = None  # Optional full traceback
     phase: str | None = None  # Optional phase indicator (e.g., "flush" for sink flush errors)
@@ -73,6 +165,9 @@ class ExecutionError:
         These fields are recorded in the audit trail. Empty strings would
         produce valid-looking but uninformative error records.
         """
+        object.__setattr__(self, "exception", scrub_text_for_audit(self.exception))
+        if self.traceback is not None:
+            object.__setattr__(self, "traceback", _scrub_traceback_for_audit(self.traceback))
         if not self.exception:
             raise ValueError("ExecutionError.exception must not be empty")
         if not self.exception_type:
@@ -86,6 +181,7 @@ class ExecutionError:
                 raise TypeError(f"ExecutionError.context must be a mapping, got {type(self.context).__name__}") from exc
             if any(type(key) is not str for key in context_keys):
                 raise TypeError("ExecutionError.context keys must be strings")
+            object.__setattr__(self, "context", scrub_payload_for_audit(self.context))
             freeze_fields(self, "context")
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +288,7 @@ TransformActionCategory = Literal[
     "split",  # One input row emitted multiple output rows
     "aggregated",  # Multiple input rows emitted aggregate output
     # Plugin-specific actions
+    "expanded_blob",  # Blob parser emitted rows from stored payload bytes
     "query_completed",  # LLM single-query completion
     "multi_query_enriched",  # LLM multi-query execution completed
     "rag_retrieval",  # RAG retrieval pipeline completed
@@ -336,6 +433,16 @@ TransformErrorCategory = Literal[
     "validation_failed",
     "invalid_input",
     "too_many_lines",  # Line-expanding transform input exceeds configured max_lines
+    "blob_not_found",
+    "blob_too_large",
+    "decode_failed",
+    "empty_csv",
+    "csv_exhausted_during_skip_rows",
+    "csv_parse_error",
+    "csv_header_error",
+    "csv_config_error",
+    "csv_column_count_mismatch",
+    "too_many_rows",
     # Template errors
     "template_rendering_failed",
     "template_context_failed",  # Multi-query template context build failed (missing field)
@@ -369,6 +476,7 @@ TransformErrorCategory = Literal[
     # Content extraction errors (Tier 3 boundary - external HTML/text parsing)
     "content_extraction_failed",
     "non_text_content_type",  # Response content-type is not text/* -- refused before extraction
+    "unsupported_content_type",
     "body_too_large",  # Response body exceeds configured max_body_bytes limit
     # Retrieval errors (RAG retrieval transform)
     "retrieval_failed",
@@ -408,6 +516,11 @@ TransformErrorCategory = Literal[
     "transport_exception",  # HTTP transport error during batch retrieval
     # Replication errors
     "invalid_copies",  # Invalid copies value in batch_replicate transform
+    # Azure Document Intelligence (async analyze long-running operation)
+    "analysis_failed",  # Azure analyze operation reported status=failed
+    "poll_timeout",  # async analyze operation did not reach a terminal status within budget
+    "operation_location_missing",  # 202 response lacked the Operation-Location header
+    "operation_location_untrusted",  # Operation-Location host != configured endpoint (security)
 ]
 
 
@@ -517,9 +630,12 @@ class TransformErrorReason(TypedDict):
     error_type: NotRequired[str]
     message: NotRequired[str]
     url: NotRequired[str]
+    blob_ref: NotRequired[str]
+    encoding: NotRequired[str]
 
     # Field collision context
     collisions: NotRequired[list[str]]  # Field names that would be overwritten
+    fields: NotRequired[list[str]]
 
     # Multi-query/template context
     query: NotRequired[str]
@@ -552,6 +668,14 @@ class TransformErrorReason(TypedDict):
     content_type: NotRequired[str]
     body_size: NotRequired[int]  # Actual response body size in bytes (body_too_large errors)
     max_body_bytes: NotRequired[int]  # Configured limit in bytes (body_too_large errors)
+    max_blob_bytes: NotRequired[int]  # Configured blob parser limit in bytes
+    phase: NotRequired[str]  # Parser phase: skip_rows, header, data, etc.
+    line_number: NotRequired[int]  # Source text line number for parser errors
+    row_number: NotRequired[int]  # Data row number for parser errors
+    row_count: NotRequired[int]  # Observed rows before rejecting expansion
+    max_output_rows: NotRequired[int]  # Configured row-expansion limit
+    skip_rows: NotRequired[int]  # Configured leading rows to skip
+    rows_skipped: NotRequired[int]  # Actual rows skipped before exhaustion
 
     # Type validation context
     expected: NotRequired[str]
@@ -889,8 +1013,8 @@ class FollowerSeatDeadError(Exception):
 # CAS could not even begin (SQLITE_BUSY after the busy_timeout poll). NOT
 # "leadership held": ADR-030 §B.4 requires BUSY to be reported distinctly from a
 # clean CAS loss. The remediation is operator SIGKILL of the wedged holder
-# (locks release on process death); the registered-worker forensics
-# (pid/hostname) carried here make that actionable.
+# (locks release on process death); registered-worker forensics remain structured
+# on the exception for trusted operator surfaces.
 # TIER-2: Operator-actionable environmental refusal — a held WAL write lock surfaced with pid forensics for remediation; the audit DB is intact, not corruption.
 class WriteLockHeldError(Exception):
     """Raised when a coordination write times out on the audit DB write lock.
@@ -898,8 +1022,8 @@ class WriteLockHeldError(Exception):
     Distinct from ``NonResumableRunError`` (clean seat-CAS loss to a live
     leader): a busy timeout means some process — live or frozen — holds the
     WAL write lock. Carries the run's registered workers (pid/hostname/role
-    forensics from ``run_workers``) so the operator knows what to inspect or
-    SIGKILL.
+    forensics from ``run_workers``) as structured data for trusted operator
+    surfaces, while the default string is safe for generic CLI/API error paths.
 
     Attributes:
         run_id: The run whose coordination write was refused.
@@ -911,14 +1035,12 @@ class WriteLockHeldError(Exception):
     def __init__(self, *, run_id: str, workers: tuple["RegisteredWorker", ...]) -> None:
         self.run_id = run_id
         self.workers = workers
-        roster = (
-            "; ".join(f"worker_id={w.worker_id!r} role={w.role} status={w.status} pid={w.pid} hostname={w.hostname!r}" for w in workers)
-            or "<none readable>"
-        )
+        worker_count = len(workers)
+        worker_label = "registered worker" if worker_count == 1 else "registered workers"
         super().__init__(
             f"The audit DB write lock is held by a live or frozen process; the "
             f"coordination write for run {run_id!r} timed out at BEGIN IMMEDIATE. "
-            f"Registered workers: {roster}. If a worker is frozen inside a "
+            f"Registered workers: {worker_count} {worker_label}. If a worker is frozen inside a "
             "transaction, SIGKILL it (SQLite locks release on process death) and retry."
         )
 
@@ -1070,6 +1192,8 @@ class DeclaredOutputFieldRowViolationPayload(TypedDict):
 
     emitted_index: Required[int]
     runtime_observed: Required[list[str]]
+    runtime_observed_count: NotRequired[int]
+    runtime_observed_truncated: NotRequired[bool]
     missing: Required[list[str]]
 
 
@@ -1077,6 +1201,8 @@ class DeclaredOutputFieldsPayload(TypedDict):
     """Audit payload for ADR-011 declared-output-fields mismatches."""
 
     declared: Required[list[str]]
+    violation_count: Required[int]
+    violations_truncated: Required[bool]
     violations: Required[list[DeclaredOutputFieldRowViolationPayload]]
 
 
@@ -1126,6 +1252,11 @@ class SinkRequiredFieldsPayload(TypedDict):
 
     declared: Required[list[str]]
     runtime_observed: Required[list[str]]
+    runtime_observed_count: NotRequired[int]
+    runtime_observed_truncated: NotRequired[bool]
+    runtime_observed_omitted_count: NotRequired[int]
+    runtime_observed_omitted_hashes: NotRequired[list[str]]
+    runtime_observed_omitted_hashes_truncated: NotRequired[bool]
     missing: Required[list[str]]
 
 
@@ -1259,7 +1390,7 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
             "provider": self.provider,
             "cause_type": self.cause_type,
             "retryable": self.retryable,
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
         }
 
 
@@ -1290,7 +1421,7 @@ class PluginContractViolation(AuditEvidenceBase, RuntimeError):
         surface structured fields. Return value must be JSON-serializable —
         the Landscape records it through canonical JSON serialization.
         """
-        return {"exception_type": type(self).__name__, "message": str(self)}
+        return {"exception_type": type(self).__name__, "message": scrub_text_for_audit(str(self))}
 
 
 # TIER-2: Plugin success-empty misuse — row-level contract bug remains fully auditable and does not imply Tier-1 framework or audit-record corruption.
@@ -1327,7 +1458,7 @@ class ZeroEmissionSuccessContractViolation(PluginContractViolation, AuditEvidenc
     def to_audit_dict(self) -> dict[str, Any]:
         return {
             "exception_type": "ZeroEmissionSuccessContractViolation",
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
             "transform": self.transform,
             "transform_node_id": self.transform_node_id,
             "run_id": self.run_id,
@@ -1471,7 +1602,7 @@ class PassThroughContractViolation(DeclarationContractViolation):
         """
         return {
             "exception_type": "PassThroughContractViolation",
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
             "transform": self.transform,
             "transform_node_id": self.transform_node_id,
             "run_id": self.run_id,

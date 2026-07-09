@@ -64,13 +64,23 @@ def _require_visible_content(value: str, *, field_label: str) -> str:
 
 
 class CreateSessionRequest(_RequestModel):
-    """Request body for POST /api/sessions."""
+    """Request body for POST /api/sessions.
 
-    title: str = pydantic.Field(default="New session", min_length=1)
+    ``title`` is optional: when omitted (or explicitly null) the route
+    mints the app-wide default ("Session — 2 Jul 2026", auto-disambiguated
+    per user — see ``elspeth.web.sessions.titles``). The default is minted
+    server-side so every client shares one naming convention
+    (elspeth-ef8c18a6cb killed the frontend's competing "New session" /
+    "Untitled" defaults).
+    """
+
+    title: str | None = pydantic.Field(default=None, min_length=1)
 
     @field_validator("title")
     @classmethod
-    def _validate_title(cls, value: str) -> str:
+    def _validate_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return _require_visible_content(value, field_label="Session title")
 
 
@@ -271,6 +281,22 @@ class RevertStateRequest(_RequestModel):
     state_id: UUID
 
 
+class StartGuidedRequest(_RequestModel):
+    """Request body for POST /api/sessions/{session_id}/guided/start.
+
+    ``profile`` is a raw boundary value whose valid form is a closed-enum
+    discriminator (``WorkflowProfileKind``). The route validates that the
+    value is a short string, maps it to the SERVER-owned WorkflowProfile
+    constant, and rejects anything else with a generic 400. Typing it as
+    ``object`` (not the enum) keeps a stale/hostile client's unknown or
+    object-shaped value out of a Pydantic 422 and away from the response —
+    the handler never echoes the raw value, so an attempted profile object
+    carrying injected fields cannot leak back through the error.
+    """
+
+    profile: object = "live"
+
+
 class RunResponse(_StrictResponse):
     """Response for GET /api/sessions/{id}/runs."""
 
@@ -311,6 +337,13 @@ class ChatTurnResponse(_StrictResponse):
     values are server-emitted (Tier 1) — ``role`` is one of ``"user"`` or
     ``"assistant"``, ``step`` is a :class:`GuidedStep` value, ``ts_iso``
     is the ISO 8601 timestamp the turn was appended to ``chat_history``.
+
+    ``assistant_message_kind`` / ``synthetic_failure_reason`` (fp-review C-2
+    persisted-history closure) mirror the same-named fields on
+    :class:`elspeth.web.composer.guided.protocol.ChatTurn` — ``None`` on
+    every ``USER`` turn, on any turn persisted before this field existed, and
+    on commit-seam rejections whose redaction-safe classifier is carried by
+    the chat-turn audit row instead of this closed user-facing reason set.
     """
 
     role: str
@@ -318,6 +351,22 @@ class ChatTurnResponse(_StrictResponse):
     seq: int
     step: str
     ts_iso: str
+    assistant_message_kind: Literal["assistant", "synthetic_failure"] | None
+    synthetic_failure_reason: Literal["quality_guard", "unavailable"] | None
+
+
+class WorkflowProfileResponse(_StrictResponse):
+    """Wire-visible subset of a server-owned WorkflowProfile.
+
+    Mirrors :class:`elspeth.web.composer.guided.profile.WorkflowProfile`
+    (the four behavior flags). ``None`` at the parent
+    ``GuidedSessionResponse.profile`` level means the empty/live-guided profile.
+    """
+
+    coaching: bool
+    bookends: bool
+    recipe_match: bool
+    advisor_checkpoints: bool
 
 
 class GuidedSessionResponse(_StrictResponse):
@@ -335,6 +384,11 @@ class GuidedSessionResponse(_StrictResponse):
     # standard, that is evidence tampering.
     chat_history: list[ChatTurnResponse]
     chat_turn_seq: int
+    # Server-owned WorkflowProfile (wire-visible subset). ``None`` for the
+    # empty/live-guided profile. Defaulted to ``None`` because most
+    # GuidedSessionResponse construction sites carry the empty profile; the
+    # start/GET path overrides it explicitly.
+    profile: WorkflowProfileResponse | None = None
 
 
 class TurnPayloadResponse(_StrictResponse):
@@ -362,6 +416,21 @@ class GetGuidedResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
+class TutorialSampleResponse(_StrictResponse):
+    """Response for GET /api/sessions/{id}/guided/tutorial-sample.
+
+    Runtime-derived inputs for the tutorial's prefilled worked example: the 3
+    synthetic sample-page URLs (appended to the locked STEP_1 prompt the learner
+    sends verbatim) for the active tutorial session's resolved origin. The URLs
+    are computed from the resolved base at request time (they cannot ride the
+    frozen profile constants). The tutorial's ``web_scrape`` node relies on the
+    plugin default ``allowed_hosts="public_only"`` — the pages are publicly
+    hosted, so the server injects no SSRF allowlist.
+    """
+
+    sample_urls: list[str]
+
+
 class GuidedRespondRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/guided/respond.
 
@@ -382,6 +451,11 @@ class GuidedRespondRequest(_RequestModel):
     accepted_step_index: int | None = None
     edit_step_index: int | None = None
     control_signal: str | None = None
+    # Optimistic-concurrency token (D16): the client's expected current step.
+    # When present, the route 409s if it does not match the session's live
+    # ``guided.step``. A plain ``str`` (not the enum) makes unknown values fail
+    # with a route-handler 400 rather than a Pydantic 422.
+    step_index: str | None = None
 
 
 class GuidedRespondResponse(_StrictResponse):
@@ -428,10 +502,15 @@ class GuidedChatRequest(_RequestModel):
 class GuidedChatResponse(_StrictResponse):
     """Response for POST /api/sessions/{id}/guided/chat.
 
-    ``assistant_message`` is the LLM's reply (or, on transient LLM
-    failure, a synthetic "I'm unavailable" message — Phase A does not yet
-    distinguish the two on the wire; slice 5's ``ComposerChatTurn`` audit
-    record adds that discriminator).
+    ``assistant_message`` is the LLM's reply, or a fallback message on
+    failure. ``assistant_message_kind`` is the wire discriminator that used
+    to be missing (fp-review C-2): ``"assistant"`` for a real LLM reply,
+    ``"synthetic_failure"`` for a fallback message the server generated
+    instead of forwarding a model response. Synthetic-failure causes
+    (scaffold-leak guard rejection, commit-seam rejection, or provider /
+    solver unavailability) render distinct message copy; all surface the same
+    recovery affordance, so this discriminator deliberately stops at kind and
+    does not also carry a reason.
 
     ``guided_session`` always carries the updated chat history. Most chat
     remains advisory, but Step 1 schema-form chat may resolve a complete
@@ -441,6 +520,7 @@ class GuidedChatResponse(_StrictResponse):
     """
 
     assistant_message: str
+    assistant_message_kind: Literal["assistant", "synthetic_failure"]
     guided_session: GuidedSessionResponse
     next_turn: TurnPayloadResponse | None
     terminal: TerminalStateResponse | None

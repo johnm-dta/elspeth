@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import threading
 import time
 from pathlib import Path
@@ -76,6 +77,16 @@ class TestRateLimiterValidation:
         with pytest.raises(ValueError, match="requests_per_minute must be positive"):
             RateLimiter(name="test", requests_per_minute=-5)
 
+    def test_core_rate_limiter_does_not_import_engine_clock_contract(self) -> None:
+        """Core rate limiting must depend on the neutral monotonic clock contract."""
+        import elspeth.core.rate_limit.limiter as limiter_module
+
+        source_path = Path(limiter_module.__file__)
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        imported_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
+
+        assert "elspeth.engine.clock" not in imported_modules
+
 
 class TestRateLimiter:
     """Tests for rate limiting wrapper."""
@@ -114,6 +125,22 @@ class TestRateLimiter:
             # Second (immediate): should fail without blocking
             assert limiter.try_acquire() is False
 
+    def test_underlying_limiter_stays_in_wrapper_nonblocking_mode(self) -> None:
+        """Wrapper polling should not mutate pyrate-limiter mode per acquire."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with RateLimiter(name="nonblocking_mode", requests_per_minute=1) as limiter:
+            assert limiter._limiter.max_delay is None
+            assert limiter._limiter.raise_when_fail is False
+
+            assert limiter.try_acquire() is True
+            assert limiter._limiter.max_delay is None
+            assert limiter._limiter.raise_when_fail is False
+
+            assert limiter.try_acquire() is False
+            assert limiter._limiter.max_delay is None
+            assert limiter._limiter.raise_when_fail is False
+
     def test_limiter_with_sqlite_persistence(self, tmp_path: Path) -> None:
         """Rate limits persist across limiter instances."""
         from elspeth.core.rate_limit import RateLimiter
@@ -139,6 +166,21 @@ class TestRateLimiter:
         # Should fail because quota already used
         assert limiter2.try_acquire() is False
         limiter2.close()
+
+    def test_limiter_creates_persistence_parent_directory(self, tmp_path: Path) -> None:
+        """Nested SQLite persistence paths create their parent directory."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        db_path = tmp_path / "rate_limit" / "limits.db"
+
+        with RateLimiter(
+            name="persistent",
+            requests_per_minute=60,
+            persistence_path=str(db_path),
+        ):
+            pass
+
+        assert db_path.exists()
 
     def test_limiter_context_manager(self) -> None:
         """RateLimiter can be used as context manager."""

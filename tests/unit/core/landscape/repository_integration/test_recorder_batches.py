@@ -159,7 +159,7 @@ class TestRecorderFactoryBatches:
         assert executing.status == "executing"
 
         # Complete with trigger_reason
-        factory.execution.update_batch_status(
+        factory.execution.complete_batch(
             batch_id=batch.batch_id,
             status=BatchStatus.COMPLETED,
             trigger_reason="count=3",
@@ -192,7 +192,7 @@ class TestRecorderFactoryBatches:
             run_id=run.run_id,
             aggregation_node_id=agg.node_id,
         )
-        factory.execution.update_batch_status(batch2.batch_id, BatchStatus.COMPLETED)
+        factory.execution.complete_batch(batch2.batch_id, BatchStatus.COMPLETED)
 
         # Get only draft batches
         drafts = factory.execution.get_batches(run.run_id, status=BatchStatus.DRAFT)
@@ -236,7 +236,7 @@ class TestBatchRecoveryQueries:
             aggregation_node_id="agg_node",
         )
         factory.execution.update_batch_status(completed_batch.batch_id, BatchStatus.EXECUTING)
-        factory.execution.update_batch_status(completed_batch.batch_id, BatchStatus.COMPLETED, trigger_reason="count")
+        factory.execution.complete_batch(completed_batch.batch_id, BatchStatus.COMPLETED, trigger_reason="count")
 
         # Act
         incomplete = factory.execution.get_incomplete_batches(run.run_id)
@@ -268,7 +268,7 @@ class TestBatchRecoveryQueries:
             aggregation_node_id="agg_node",
         )
         factory.execution.update_batch_status(failed_batch.batch_id, BatchStatus.EXECUTING)
-        factory.execution.update_batch_status(failed_batch.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(failed_batch.batch_id, BatchStatus.FAILED)
 
         incomplete = factory.execution.get_incomplete_batches(run.run_id)
 
@@ -328,7 +328,7 @@ class TestBatchRetry:
             aggregation_node_id="agg_node",
         )
         factory.execution.update_batch_status(original.batch_id, BatchStatus.EXECUTING)
-        factory.execution.update_batch_status(original.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(original.batch_id, BatchStatus.FAILED)
 
         # Act: Retry the batch
         retried = factory.execution.retry_batch(original.batch_id)
@@ -385,7 +385,7 @@ class TestBatchRetry:
         factory.execution.add_batch_member(original.batch_id, token1.token_id, ordinal=0)
         factory.execution.add_batch_member(original.batch_id, token2.token_id, ordinal=1)
         factory.execution.update_batch_status(original.batch_id, BatchStatus.EXECUTING)
-        factory.execution.update_batch_status(original.batch_id, BatchStatus.FAILED)
+        factory.execution.complete_batch(original.batch_id, BatchStatus.FAILED)
 
         # Act
         retried = factory.execution.retry_batch(original.batch_id)

@@ -7,6 +7,9 @@ preventing accidental misuse of semantically different string values.
 from collections.abc import Callable
 from typing import NewType
 
+NODE_ID_MAX_LENGTH = 64
+"""Maximum supported node identifier length across DAG and audit storage."""
+
 # Node identifiers - deterministic hash-based IDs for graph nodes
 NodeID = NewType("NodeID", str)
 """Unique node identifier in execution graph (e.g., 'coalesce_merge_abc123')"""

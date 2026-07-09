@@ -22,9 +22,10 @@ This guide covers common errors and their solutions when running ELSPETH pipelin
   - [YAML Parsing Errors](#yaml-parsing-errors)
   - [Schema Validation Failures](#schema-validation-failures)
 - [Web Composer — Guided Mode](#web-composer--guided-mode)
-  - [Auto-dropped to freeform — what happened?](#auto-dropped-to-freeform--what-happened)
-  - [Wizard disagreed with my source schema](#wizard-disagreed-with-my-source-schema)
-  - [Recipe didn't appear for my (CSV, JSONL) pipeline](#recipe-didnt-appear-for-my-csv-jsonl-pipeline)
+  - [Guided chat did not advance the stage](#guided-chat-did-not-advance-the-stage)
+  - [Wiring confirmation failed](#wiring-confirmation-failed)
+  - [Guided source schema or blob interpretation looks wrong](#guided-source-schema-or-blob-interpretation-looks-wrong)
+  - [Recipe or transform suggestion was not offered](#recipe-or-transform-suggestion-was-not-offered)
 
 ---
 
@@ -57,7 +58,7 @@ export ELSPETH_ALLOW_RAW_SECRETS=true
 ```bash
 docker run --rm \
   -e ELSPETH_FINGERPRINT_KEY="your-key" \
-  ghcr.io/johnm-dta/elspeth:v0.5.2 \
+  ghcr.io/johnm-dta/elspeth:v0.7.0 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -301,7 +302,7 @@ uv pip install 'elspeth[tracing-langfuse]'
    ```bash
    docker run --rm \
      -v $(pwd)/input:/app/input:ro \
-     ghcr.io/johnm-dta/elspeth:v0.5.2 \
+     ghcr.io/johnm-dta/elspeth:v0.7.0 \
      ls /app/input
    ```
 
@@ -430,91 +431,81 @@ The readiness probe prevents traffic before the app is ready. The liveness probe
 
 ## Web Composer — Guided Mode
 
-### Auto-dropped to freeform — what happened?
+### Guided chat did not advance the stage
 
-**Cause:** Guided mode dropped you to the freeform composer because the
-wizard could not complete the step you were on. Two paths trigger an
-auto-drop:
-
-- **`solver_exhausted`** — at Step 3, the LLM proposed a transform chain
-  that failed `preview_pipeline`. The wizard tried one repair attempt
-  (feeding the validator's rejection reason back to the LLM) and optionally
-  consulted the advisor. Both came back red, so the wizard handed the
-  partial pipeline state to freeform mode rather than loop forever.
-- **`protocol_violation`** — the LLM emitted a turn type that is not
-  legal at the current step. The wizard granted one retry, the LLM
-  emitted another illegal turn, and the wizard auto-dropped.
+**Cause:** In 0.7.0 guided mode, `/guided/chat` asks the model to propose the
+next source, sink, transform, or wiring change. ELSPETH then validates the
+proposal before committing it. The stage stays put when the proposal fails
+validation, when the request races a stale `step_index`, or when a pending
+interpretation card must be reviewed first.
 
 **Solution:**
 
-1. Scroll up in the chat history. The drop is recorded as a system
-   message with the `drop_reason` field set. For `solver_exhausted`, the
-   validator's rejection reason is also recorded.
-2. Inspect the last `propose_chain` turn (if any) to see the chain the
-   LLM tried and what the validator said about it. The validator usually
-   names the specific edge or required-field constraint that was
-   violated.
-3. Finish the pipeline by hand in freeform mode. The composer carries
-   over the partial pipeline you had at the moment of the drop, so you
-   are not starting from scratch.
-4. If the LLM keeps producing the same broken chain on similar inputs,
-   that is a real bug — open an issue with the chat history attached.
+1. Read the validation summary and the latest guided turn. The rejected field,
+   edge, plugin option, or interpretation card is usually named directly.
+2. If an interpretation card is pending, open it, read the model rationale, and
+   approve or revise it before trying to advance.
+3. If the browser was open in multiple tabs, refresh the stale tab and retry
+   from the current `step_index`.
+4. Rephrase the stage instruction with the missing constraint instead of
+   forcing the same prompt through again.
+5. If the same valid instruction repeatedly fails, open an issue with a
+   sanitized reproduction. Include the guided stage, validation text, ELSPETH
+   version, and minimal pipeline shape. Do not attach raw chat history, blob
+   contents, sample rows, secret references, tokens, PII, URLs, or
+   organization-specific identifiers.
 
 ---
 
-### Wizard disagreed with my source schema
+### Wiring confirmation failed
 
-**Cause:** Step 1 of guided mode runs `inspect_source` on the blob you
-attached and shows you the columns it observed. If the inspector's
-opinion of your data does not match what you expected (wrong column
-names, missing columns, columns that should not be there), one of the
-following is usually true:
-
-- The blob was uploaded with the wrong `mime_type`, so the inspector
-  picked the wrong parser (for example, JSONL parsed as plain text).
-- The CSV has a non-standard delimiter, encoding, or header row that
-  the inspector's default heuristics missed.
-- The data actually does have the columns the inspector reported, and
-  your expectation was based on a different file.
+**Cause:** The final guided stage (`STEP_4_WIRE`) accepts only a valid
+`CONFIRM_WIRING` payload. The wire turn is re-emitted when connection labels do
+not map to valid edges, when required/nested keys are missing, or when the
+advisor sign-off path returns `REQUEST_ADVISOR`.
 
 **Solution:**
 
-1. Read the column list and sample values the `inspect_and_confirm` turn
-   is showing you. The truth is in the bytes of the blob, not in your
-   memory of the file.
-2. If the columns are wrong, edit the column list directly on the
-   `inspect_and_confirm` turn before continuing. Your edits are recorded
-   as the schema-of-record for the rest of the wizard.
-3. If the underlying problem is the parser choice, exit to freeform,
-   re-upload the blob with the correct `mime_type`, and use the
-   freeform composer's `inspect_source` tool to get an authoritative
-   reading before retrying guided mode.
+1. Review the graph overlay and the listed source/sink/transform contracts.
+2. Correct the connection labels or ask the guided chat to revise the wiring
+   using the exact node names shown in the overlay.
+3. If the response asks for advisor review, keep the pipeline in the wire stage
+   and follow the advisor guidance; do not treat the request as completion.
 
 ---
 
-### Recipe didn't appear for my (CSV, JSONL) pipeline
+### Guided source schema or blob interpretation looks wrong
 
-**Cause:** The recipe pre-match step (Step 2.5) matches on the pipeline
-**topology** (source plugin, sink plugin, and sink count) **plus a
-discriminator** — usually a required output field that names the recipe's
-purpose. For example, the `classify-rows-llm-jsonl` recipe requires a
-`classifier_keyword`-style field in the output. A bare (CSV, JSONL)
-shape is not enough; the discriminator has to match too.
+**Cause:** Guided mode uses the same blob/source inspection and schema-contract
+machinery as the rest of Composer. A mismatch usually means the uploaded blob
+has the wrong MIME type, the file has unusual CSV/JSON structure, or the model
+interpreted the source intent too broadly.
 
 **Solution:**
 
-1. Switch to freeform mode briefly and call `list_recipes`. The response
-   names every registered recipe, its required slots, and the
-   discriminator field(s) it matches on.
-2. If a recipe exists but its discriminator did not match your output
-   fields, go back to guided Step 2 and add the discriminator field to
-   the required-output list. The recipe will then match on the next
-   pass through Step 2.5.
-3. If no registered recipe matches your (source, sink) shape at all,
-   that is expected: the wizard will skip Step 2.5 and let the LLM
-   propose a chain in Step 3. You can also pre-apply a recipe manually
-   from freeform mode with `list_recipes` + the recipe-application tool,
-   then return to guided mode to finish the rest.
+1. Inspect the displayed columns, sample values, and validation summary.
+2. Revise the source stage with the concrete correction: delimiter, header row,
+   expected fields, URL/source type, or blob reference.
+3. If the source is actually a remote document workflow, model it as a manifest
+   source followed by `blob_fetch` and a parser transform such as
+   `blob_csv_expand`, not as a new source plugin.
+
+---
+
+### Recipe or transform suggestion was not offered
+
+**Cause:** Guided mode may apply a registered recipe, but the recipe must match
+the actual source, sink, required fields, and safety constraints. A bare
+"CSV to JSON" shape is not enough.
+
+**Solution:**
+
+1. State the desired output fields and safety constraints explicitly in the
+   sink or transform stage.
+2. Use the plugin catalog to confirm the transform exists and that its required
+   options are available.
+3. If no recipe matches, ask guided chat for a direct transform-stage proposal
+   or switch to the YAML/freeform path for custom topology.
 
 ---
 
@@ -541,7 +532,9 @@ If you're still stuck:
    - ELSPETH version (`elspeth --version`)
    - Python version (`python --version`)
    - Full error message and stack trace
-   - Sanitized configuration (remove secrets)
+   - Sanitized configuration or reproduction steps
+   - Do not attach raw composer chat history; remove secrets, tokens, PII,
+     blob contents, sample rows, URLs, and organization-specific identifiers
 
 ---
 

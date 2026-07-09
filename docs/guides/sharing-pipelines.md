@@ -67,30 +67,20 @@ accept this trade-off.
 
 ## First-deploy operator action
 
-Phase 6A is a **schema-change cohort**: it adds the
-`composer_completion_events_table` to the sessions database and bumps
-`SESSION_SCHEMA_EPOCH` from `3` to `4`. The startup validator
-(`_assert_schema_sentinels` at `web/sessions/schema.py:121`) refuses to
-start the service against any DB whose `PRAGMA user_version` is not
-`4`.
+For 0.7.0, shareable-review state is part of the broader web session database
+contract. The release expects `SESSION_SCHEMA_EPOCH=26` and
+`SQLITE_SCHEMA_EPOCH=22`. Before first start on 0.7.0, stop the web service,
+archive and remove both the configured session DB and the configured Landscape
+audit DB, then restart so fresh databases are created with the current schema
+sentinels.
 
-**Before deploying Phase 6A:**
+Use [the staging session DB recreation runbook](../runbooks/staging-session-db-recreation.md)
+as the operational source of truth. It covers the matched SQLite sidecars,
+Landscape reset, `data/auth.db` preservation, archive handling, and
+`settings.secret_key` rotation decision.
 
-1. **Stop the web service.**
-2. **Back up the sessions DB** (the file at the path the deployment
-   resolves to — typically `data/sessions.db` or as configured by
-   `web.session_db_url`).
-3. **Delete the existing sessions DB.** Pre-release ELSPETH has no
-   migration pathway; this is the canonical mechanism per
-   `project_db_migration_policy`.
-4. **Generate and configure the signing key** (see above).
-5. **Deploy and start the service.** A fresh sessions DB will be
-   created at the configured `SESSION_SCHEMA_EPOCH = 4` and the service
-   will accept requests.
-
-User state lost on this deploy: any composer sessions saved since the
-Phase 18 deploy (commit `3dee19f8d` and prior). This is acknowledged
-cost; the structural fix is Phase 9's migration runner.
+The shareable-link signing key is still required. Generate and configure it
+before returning the service to users.
 
 ## Lifecycle of a shareable link
 
@@ -234,10 +224,10 @@ with `openssl rand -base64 32` and add it to the configuration.
 The configured key is shorter than 32 bytes (utf-8 encoded). Regenerate
 with `openssl rand -base64 32` and replace.
 
-### Service refuses to start with "Session DB schema version 3 does not match SESSION_SCHEMA_EPOCH=4"
+### Service refuses to start with a `SESSION_SCHEMA_EPOCH` mismatch
 
-The sessions DB predates the Phase 6A deploy. Delete it (see "First-deploy
-operator action" above) and restart.
+The sessions DB predates the running code. For 0.7.0, follow the two-database
+reset procedure above rather than deleting only `sessions.db`.
 
 ### `POST /mark-ready-for-review` returns 409 with "composition validation failed"
 
@@ -303,5 +293,5 @@ workspace" link) returns control to the regular session router.
 ## References
 
 * ADR: [docs/architecture/adr/022-shareable-reviews.md](../architecture/adr/022-shareable-reviews.md)
-* Phase 6A plan: [docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md](../composer/ux-redesign-2026-05/19a-phase-6a-backend.md)
-* Phase 6B plan (frontend): [docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md](../composer/ux-redesign-2026-05/19b-phase-6b-frontend.md)
+* Historical Phase 6A/6B implementation plans are preserved in git history or
+  maintainer-local archives.

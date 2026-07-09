@@ -1,8 +1,8 @@
 # tests/plugins/clients/test_audited_client_base.py
 """Tests for AuditedClientBase thread safety."""
 
+import itertools
 import threading
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,6 +13,16 @@ class ConcreteAuditedClient(AuditedClientBase):
     """Concrete implementation for testing."""
 
     pass
+
+
+class _ExecutionCounterFake:
+    """Execution repository fake with monotonic call-index allocation."""
+
+    def __init__(self) -> None:
+        self._counter = itertools.count()
+
+    def allocate_call_index(self, _state_id: str) -> int:
+        return next(self._counter)
 
 
 class TestCallIndexThreadSafety:
@@ -26,14 +36,9 @@ class TestCallIndexThreadSafety:
 
     def test_concurrent_call_index_no_duplicates(self) -> None:
         """Multiple threads should get unique call indices."""
-        mock_execution = MagicMock()
-        # Simulate ExecutionRepository's thread-safe counter with itertools.count()
-        import itertools
-
-        counter = itertools.count()
-        mock_execution.allocate_call_index.side_effect = lambda _: next(counter)
+        execution = _ExecutionCounterFake()
         client = ConcreteAuditedClient(
-            execution=mock_execution,
+            execution=execution,
             state_id="test-state",
             run_id="test-run",
             telemetry_emit=lambda event: None,
@@ -67,13 +72,9 @@ class TestCallIndexThreadSafety:
     @pytest.mark.parametrize("iteration", range(10))
     def test_concurrent_call_index_repeated(self, iteration: int) -> None:
         """Repeated test to increase chance of catching race conditions."""
-        import itertools
-
-        mock_execution = MagicMock()
-        counter = itertools.count()
-        mock_execution.allocate_call_index.side_effect = lambda _: next(counter)
+        execution = _ExecutionCounterFake()
         client = ConcreteAuditedClient(
-            execution=mock_execution,
+            execution=execution,
             state_id=f"test-state-{iteration}",
             run_id=f"test-run-{iteration}",
             telemetry_emit=lambda event: None,

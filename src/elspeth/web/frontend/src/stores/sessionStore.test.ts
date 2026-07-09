@@ -43,6 +43,10 @@ vi.mock("@/api/client", () => ({
     default_mode: "freeform",
     banner_dismissed_at: null,
     tutorial_completed_at: null,
+    tutorial_stage: null,
+    tutorial_session_id: null,
+    tutorial_run_id: null,
+    tutorial_source_data_hash: null,
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),
@@ -175,6 +179,10 @@ describe("sessionStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
     // Phase 5b — sessionStore.selectSession fires a fire-and-forget
@@ -194,6 +202,78 @@ describe("sessionStore", () => {
       expect(state.compositionState).toBeNull();
       expect(state.isComposing).toBe(false);
       expect(state.error).toBeNull();
+      // Loaded-ness flags: an unfetched list must be distinguishable from a
+      // genuinely empty account / pipeline (auto-resume, empty landing, and
+      // the #/{id}/yaml gate all depend on this).
+      expect(state.sessionsLoaded).toBe(false);
+      expect(state.compositionStateLoaded).toBe(false);
+    });
+  });
+
+  describe("loaded-ness flags", () => {
+    it("loadSessions marks sessionsLoaded on success", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      await useSessionStore.getState().loadSessions();
+
+      expect(useSessionStore.getState().sessionsLoaded).toBe(true);
+    });
+
+    it("loadSessions leaves sessionsLoaded false on failure", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.fetchSessions as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("network"),
+      );
+
+      await useSessionStore.getState().loadSessions();
+
+      expect(useSessionStore.getState().sessionsLoaded).toBe(false);
+      expect(useSessionStore.getState().error).toMatch(/failed to load sessions/i);
+    });
+
+    it("selectSession clears compositionStateLoaded while fetching, sets it once settled", async () => {
+      const apiMod = await import("@/api/client");
+      let resolveState!: (value: null) => void;
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiMod.fetchCompositionState as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveState = resolve;
+        }),
+      );
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+      (
+        apiMod.fetchComposerPreferences as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(null);
+      useSessionStore.setState({ compositionStateLoaded: true } as never);
+
+      const selecting = useSessionStore.getState().selectSession("sess-1");
+      expect(useSessionStore.getState().compositionStateLoaded).toBe(false);
+
+      resolveState(null);
+      await selecting;
+
+      // Loaded-and-empty is a KNOWN state, distinct from still-fetching.
+      expect(useSessionStore.getState().compositionStateLoaded).toBe(true);
+      expect(useSessionStore.getState().compositionState).toBeNull();
+    });
+
+    it("createSession marks the fresh session's composition as known-empty", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "new-1",
+        title: "Session — 2 Jul 2026",
+        created_at: "2026-07-02T00:00:00Z",
+        updated_at: "2026-07-02T00:00:00Z",
+      });
+
+      await useSessionStore.getState().createSession();
+
+      expect(useSessionStore.getState().activeSessionId).toBe("new-1");
+      expect(useSessionStore.getState().compositionStateLoaded).toBe(true);
+      expect(useSessionStore.getState().compositionState).toBeNull();
     });
   });
 
@@ -1056,6 +1136,29 @@ describe("sessionStore", () => {
       expect(clearValidationMock).toHaveBeenCalledTimes(1);
     });
 
+    it("refuses to apply a recovered state that was not saved server-side", () => {
+      const current = makeCompositionState(1, ["current"]);
+      const recovered = { ...makeCompositionState(2, ["recovered"]), id: "" };
+      const recoveryError: ComposerRecoveryError = {
+        ...makeRecoveryError(recovered),
+        partial_state_save_failed: true,
+      };
+      useSessionStore.setState({
+        compositionState: current,
+        recoveryError,
+        recoveryStartedCompositionVersion: 1,
+      });
+
+      const result = useSessionStore.getState().applyRecoveredState();
+
+      const state = useSessionStore.getState();
+      expect(result).toEqual({ applied: false, needsConfirmation: false });
+      expect(state.compositionState).toBe(current);
+      expect(state.recoveryError).toBe(recoveryError);
+      expect(state.error).toMatch(/not saved on the server/i);
+      expect(clearValidationMock).not.toHaveBeenCalled();
+    });
+
     it("requires confirmation when current version differs from compose-start version", () => {
       const recovered = makeCompositionState(3, ["next"]);
       useSessionStore.setState({
@@ -1489,6 +1592,124 @@ describe("sessionStore", () => {
     });
   });
 
+  describe("resetForTutorialSession", () => {
+    it("binds activeSessionId and hydrates every field a stale session could leave behind", () => {
+      // Dirty every field resetForTutorialSession is responsible for
+      // clearing, mirroring a completed guided session left over from a
+      // previously active (non-tutorial) session — the exact scenario
+      // TutorialGuidedShell's mount effect must recover from.
+      useSessionStore.setState({
+        activeSessionId: "old-session",
+        messages: [{ id: "old-message" } as unknown as ChatMessage],
+        compositionState: makeCompositionState(1),
+        compositionProposals: [makeCompositionProposal()],
+        composerPreferences: {
+          session_id: "old-session",
+          trust_mode: "explicit_approve",
+          density_default: "medium",
+          interpretation_review_disabled: false,
+          updated_at: "2026-05-15T00:00:00Z",
+        },
+        staleProposalIds: ["proposal-1"],
+        proposalActionPendingIds: ["proposal-1"],
+        composerProgress: {} as ComposerProgressSnapshot,
+        stateVersions: [{ id: "state-1", version: 1 } as never],
+        isComposing: true,
+        error: "some stale error",
+        selectedNodeId: "old-node",
+        guidedSession: {
+          step: "step_4_wire",
+          history: [],
+          terminal: { kind: "completed", reason: null },
+          chat_history: [],
+          chat_turn_seq: 0,
+          profile: null,
+        } as never,
+        guidedNextTurn: {} as never,
+        guidedTerminal: { kind: "completed", reason: null } as never,
+        guidedChatPending: true,
+        guidedResponsePending: true,
+        recoveryError: makeRecoveryError(),
+        recoveryStartedCompositionVersion: 3,
+      });
+
+      useSessionStore.getState().resetForTutorialSession("tutorial-session-1");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("tutorial-session-1");
+      expect(state.messages).toEqual([]);
+      expect(state.compositionState).toBeNull();
+      expect(state.compositionProposals).toEqual([]);
+      expect(state.composerPreferences).toBeNull();
+      expect(state.staleProposalIds).toEqual([]);
+      expect(state.proposalActionPendingIds).toEqual([]);
+      expect(state.composerProgress).toBeNull();
+      expect(state.stateVersions).toEqual([]);
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toBeNull();
+      expect(state.selectedNodeId).toBeNull();
+      expect(state.guidedSession).toBeNull();
+      expect(state.guidedNextTurn).toBeNull();
+      expect(state.guidedTerminal).toBeNull();
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.guidedResponsePending).toBe(false);
+      expect(state.recoveryError).toBeNull();
+      expect(state.recoveryStartedCompositionVersion).toBeNull();
+    });
+
+    it("does not touch fields it is not responsible for (sessions list)", () => {
+      const sessions = [
+        {
+          id: "session-1",
+          title: "Existing",
+          created_at: "2026-05-14T00:00:00Z",
+          updated_at: "2026-05-14T00:00:00Z",
+        },
+      ];
+      useSessionStore.setState({ sessions });
+
+      useSessionStore.getState().resetForTutorialSession("tutorial-session-2");
+
+      expect(useSessionStore.getState().sessions).toBe(sessions);
+    });
+  });
+
+  describe("unbindMissingSession", () => {
+    it("releases the binding and session-scoped fields when the dead id is still active", () => {
+      // The dead-resume recovery path: resetForTutorialSession bound the
+      // (dead) resume id before the server 404'd it. Consumers keyed on
+      // activeSessionId (InlineRunResults' run list) would keep polling the
+      // corpse unless recovery releases the binding.
+      useSessionStore.setState({
+        activeSessionId: "dead-session",
+        messages: [{ id: "stale-message" } as unknown as ChatMessage],
+        isComposing: true,
+        error: "stale error",
+      });
+
+      useSessionStore.getState().unbindMissingSession("dead-session");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBeNull();
+      expect(state.messages).toEqual([]);
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toBeNull();
+    });
+
+    it("is a no-op when a different session has since been bound (recovery races a re-bind)", () => {
+      useSessionStore.setState({
+        activeSessionId: "fresh-session",
+        messages: [{ id: "fresh-message" } as unknown as ChatMessage],
+      });
+
+      useSessionStore.getState().unbindMissingSession("dead-session");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("fresh-session");
+      expect(state.messages).toHaveLength(1);
+    });
+  });
+
   // ── Phase 1B: createSession honours composer default-mode preference ──
   describe("createSession honours default mode", () => {
     it("leaves guidedSession null when default mode is freeform", async () => {
@@ -1600,6 +1821,10 @@ describe("sessionStore", () => {
         default_mode: "guided",
         banner_dismissed_at: null,
         tutorial_completed_at: null,
+        tutorial_stage: null,
+        tutorial_session_id: null,
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
         updated_at: "2026-05-15T00:00:00Z",
       });
       (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -1617,6 +1842,46 @@ describe("sessionStore", () => {
       expect(apiClient.fetchUserComposerPreferences).toHaveBeenCalled();
       expect(enterGuided).toHaveBeenCalledTimes(1);
       expect(usePreferencesStore.getState().loaded).toBe(true);
+    });
+
+    it("drops delayed guided default when active session changes before prefs resolve", async () => {
+      const apiClient = await import("@/api/client");
+      const { usePreferencesStore } = await import("@/stores/preferencesStore");
+      const prefs = deferred<"guided" | "freeform">();
+      vi.spyOn(usePreferencesStore.getState(), "resolveDefaultMode").mockReturnValue(prefs.promise);
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "sess-delayed-default",
+        title: "untitled",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      const enterGuided = vi
+        .spyOn(useSessionStore.getState(), "enterGuided")
+        .mockResolvedValue();
+
+      const createPromise = useSessionStore.getState().createSession();
+      await vi.waitFor(() => {
+        expect(useSessionStore.getState().activeSessionId).toBe("sess-delayed-default");
+      });
+
+      useSessionStore.setState({
+        activeSessionId: "sess-existing",
+        sessions: [
+          {
+            id: "sess-existing",
+            title: "existing",
+            created_at: "2026-05-13T00:00:00Z",
+            updated_at: "2026-05-13T00:00:00Z",
+          },
+          ...useSessionStore.getState().sessions,
+        ],
+      });
+      prefs.resolve("guided");
+      await createPromise;
+
+      expect(enterGuided).not.toHaveBeenCalled();
+      expect(useSessionStore.getState().activeSessionId).toBe("sess-existing");
+      expect(useSessionStore.getState().error).toBeNull();
     });
   });
 });

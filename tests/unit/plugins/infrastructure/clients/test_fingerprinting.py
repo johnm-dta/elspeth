@@ -20,6 +20,8 @@ from elspeth.plugins.infrastructure.clients.fingerprinting import (
     SENSITIVE_HEADERS_EXACT,
     filter_response_headers,
     fingerprint_headers,
+    fingerprint_params,
+    fingerprint_url,
     is_sensitive_header,
 )
 
@@ -196,3 +198,58 @@ class TestFilterResponseHeaders:
         }
         result = filter_response_headers(headers)
         assert result == headers
+
+
+class TestFingerprintQueryBounds:
+    """Bounds for query redaction at external URL/params boundaries."""
+
+    def test_fingerprint_url_redacts_oversized_query_without_per_value_fingerprints(self) -> None:
+        """Oversized URL queries are redacted wholesale before expensive fingerprinting."""
+        env = dict(os.environ)
+        env["ELSPETH_FINGERPRINT_KEY"] = "test-key-for-fingerprinting"
+        env.pop("ELSPETH_ALLOW_RAW_SECRETS", None)
+        query = "&".join(f"token=SECRET-{idx}" for idx in range(600))
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("elspeth.core.security.secret_fingerprint", side_effect=AssertionError("per-value fingerprint should be skipped")) as fp,
+        ):
+            result = fingerprint_url(f"https://api.example.com/search?{query}")
+
+        assert result == "https://api.example.com/search?__elspeth_query_redacted=too_many_fields"
+        fp.assert_not_called()
+        assert "SECRET" not in result
+        assert "token" not in result
+
+    def test_fingerprint_params_redacts_oversized_mapping_without_per_value_fingerprints(self) -> None:
+        """Oversized explicit query params are redacted wholesale before expensive fingerprinting."""
+        env = dict(os.environ)
+        env["ELSPETH_FINGERPRINT_KEY"] = "test-key-for-fingerprinting"
+        env.pop("ELSPETH_ALLOW_RAW_SECRETS", None)
+        params = {f"token-{idx}": f"SECRET-{idx}" for idx in range(600)}
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("elspeth.core.security.secret_fingerprint", side_effect=AssertionError("per-value fingerprint should be skipped")) as fp,
+        ):
+            result = fingerprint_params(params)
+
+        assert result == {"__elspeth_query_redacted": "too_many_fields"}
+        fp.assert_not_called()
+
+    def test_fingerprint_url_redacts_overlong_query_value_without_fingerprinting(self) -> None:
+        """One giant sensitive query value is still over the audit-redaction budget."""
+        env = dict(os.environ)
+        env["ELSPETH_FINGERPRINT_KEY"] = "test-key-for-fingerprinting"
+        env.pop("ELSPETH_ALLOW_RAW_SECRETS", None)
+        query = "token=" + ("S" * 10_000)
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("elspeth.core.security.secret_fingerprint", side_effect=AssertionError("overlong value should be skipped")) as fp,
+        ):
+            result = fingerprint_url(f"https://api.example.com/search?{query}")
+
+        assert result == "https://api.example.com/search?__elspeth_query_redacted=too_many_fields"
+        fp.assert_not_called()
+        assert "S" * 128 not in result

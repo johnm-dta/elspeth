@@ -4,8 +4,42 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+
+_SHARED_EXECUTOR: ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_shared_executor() -> ThreadPoolExecutor:
+    """Return the process-wide bounded worker pool, constructing it once.
+
+    ``run_sync_in_worker`` previously built a fresh ``ThreadPoolExecutor`` on
+    every call, so N concurrent callers spawned N unbounded threads. A single
+    bounded pool caps that at ``max_workers``. It is safe against re-entrant
+    deadlock because ``run_sync_in_worker`` requires a running event loop and
+    therefore cannot be called from inside a worker thread.
+    """
+    global _SHARED_EXECUTOR
+    if _SHARED_EXECUTOR is None:
+        with _EXECUTOR_LOCK:
+            if _SHARED_EXECUTOR is None:
+                _SHARED_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=16,
+                    thread_name_prefix="async-worker",
+                )
+    return _SHARED_EXECUTOR
+
+
+async def shutdown_async_workers() -> None:
+    """Shut down the shared worker pool (called at app lifespan shutdown)."""
+    global _SHARED_EXECUTOR
+    if _SHARED_EXECUTOR is not None:
+        loop = asyncio.get_running_loop()
+        executor = _SHARED_EXECUTOR
+        _SHARED_EXECUTOR = None
+        await loop.run_in_executor(None, executor.shutdown, True)
 
 
 def _drain_future_exception[T](future: asyncio.Future[T]) -> None:
@@ -46,7 +80,7 @@ def _drain_future_exception[T](future: asyncio.Future[T]) -> None:
 
 
 async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
-    """Run synchronous work in a one-call worker without blocking the loop.
+    """Run synchronous work on the shared bounded worker pool without blocking the loop.
 
     The short wait loop keeps an explicit event-loop timer active while the
     worker runs.  This preserves the normal async-over-sync contract even in
@@ -54,7 +88,7 @@ async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwar
     promptly.
     """
     loop = asyncio.get_running_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
+    executor = _get_shared_executor()
     future = loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
     try:
         # ``asyncio.wait`` returns ``(done, pending)`` on each 0.1s tick rather
@@ -76,7 +110,8 @@ async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwar
         # outer timeout), the future may still be running. Make sure any
         # exception it eventually raises is retrieved so the misleading
         # request_id-middleware traceback never reaches the journal — see
-        # ``_drain_future_exception``'s docstring.
+        # ``_drain_future_exception``'s docstring. The executor is the
+        # process-wide shared pool, so it is intentionally NOT shut down
+        # here — teardown happens once via shutdown_async_workers().
         if not future.done():
             future.add_done_callback(_drain_future_exception)
-        executor.shutdown(wait=future.done(), cancel_futures=True)

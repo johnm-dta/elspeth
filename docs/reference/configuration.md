@@ -441,6 +441,9 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 
 | Plugin | Purpose |
 |--------|---------|
+| `azure_document_intelligence` | Enrich rows with Azure AI Document Intelligence extraction |
+| `blob_fetch` | Fetch an operator-authorised remote document into the run payload store |
+| `blob_csv_expand` | Expand a payload-store CSV blob into output rows |
 | `passthrough` | Pass rows unchanged |
 | `field_mapper` | Rename, compute, drop fields |
 | `truncate` | Limit string field lengths |
@@ -1271,7 +1274,6 @@ checkpoint:
   enabled: true
   frequency: every_n
   checkpoint_interval: 100
-  aggregation_boundaries: true
 ```
 
 | Field | Type | Default | Description |
@@ -1279,7 +1281,6 @@ checkpoint:
 | `enabled` | bool | `true` | Enable checkpointing |
 | `frequency` | string | `every_row` | Checkpoint frequency |
 | `checkpoint_interval` | int | - | Row interval (required for `every_n`) |
-| `aggregation_boundaries` | bool | `true` | Always checkpoint at aggregation flush |
 
 The defaults above are the programmatic fallback for omitted settings. Checked-in
 pipeline configs that make durability or performance claims should declare

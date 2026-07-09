@@ -5,37 +5,36 @@ Covers: _FlushContext coalesce pairing, TriggerEvaluator.restore_from_checkpoint
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
 
 import pytest
 
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.types import CoalesceName, NodeID
+from elspeth.core.config import AggregationSettings
+from elspeth.testing import make_pipeline_row
 
 if TYPE_CHECKING:
     from elspeth.engine.triggers import TriggerEvaluator
 
 
+@dataclass(frozen=True, slots=True)
+class _TransformFake:
+    name: str = "test_transform"
+
+
 class TestFlushContextPostInit:
     """Tests for _FlushContext.__post_init__ validation."""
 
-    def _make_token(self) -> MagicMock:
-        """Create a mock TokenInfo to avoid PipelineRow/contract construction."""
-        token = MagicMock(spec=TokenInfo)
-        token.row_id = "r1"
-        token.token_id = "t1"
-        return token
+    def _make_token(self) -> TokenInfo:
+        return TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}))
 
-    def _make_transform(self) -> MagicMock:
-        """Create a minimal mock transform for _FlushContext."""
-        transform = MagicMock()
-        transform.name = "test_transform"
-        return transform
+    def _make_transform(self) -> _TransformFake:
+        return _TransformFake()
 
-    def _make_settings(self) -> MagicMock:
-        """Create a mock AggregationSettings."""
-        return MagicMock()
+    def _make_settings(self) -> AggregationSettings:
+        return AggregationSettings(name="agg", plugin="test_transform", input="source", on_error="discard")
 
     def test_rejects_empty_node_id(self) -> None:
         from elspeth.engine.processor import _FlushContext

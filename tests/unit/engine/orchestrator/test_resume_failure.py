@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,9 +20,11 @@ from pydantic import BaseModel
 
 from elspeth.contracts import Checkpoint, NodeID, ResumedRow, ResumePoint, RoutingMode, RunStatus
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
+from elspeth.contracts.checkpoint import ResumeCheck
 from elspeth.contracts.coordination import CoordinationSnapshot, CoordinationToken
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.events import RunSummary
 from elspeth.contracts.payload_store import PayloadStore
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
@@ -31,16 +34,19 @@ from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import SinkName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.checkpoint.manager import CheckpointManager
-from elspeth.core.checkpoint.recovery import RecoveryManager
-from elspeth.core.config import ElspethSettings
+from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager, ResumeWorkSet
+from elspeth.core.config import AggregationSettings, ElspethSettings
 from elspeth.core.dag import ExecutionGraph
+from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.resume import run_resume_processing_loop, setup_resume_context
-from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, LoopResult, ResumeState
+from elspeth.engine.orchestrator.run_state import LoopContext, LoopResult, ResumeState, _RunFailedWithPartialResultError
+from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.engine.processor import RowProcessor
 from elspeth.testing import make_row_result, make_source_row
 from tests.fixtures.landscape import make_landscape_db
@@ -101,16 +107,40 @@ def _insert_failed_run(db: LandscapeDB, run_id: str) -> None:
         )
 
 
+def _admit_resume_point(orch: Orchestrator, resume_point: ResumePoint) -> Any:
+    """Satisfy the resume() entry guard's read-only checkpoint checks.
+
+    elspeth-5129406607: resume() refuses a resume point that is not the run's
+    LATEST checkpoint or whose recorded topology diverges from the supplied
+    graph. These tests pin DOWNSTREAM finalization behavior (the guard has
+    its own pins in test_resume_entry_guard.py), so the guard is satisfied,
+    not exercised: the stub manager serves the test's own checkpoint as the
+    latest, and the returned context manager patches the compatibility
+    validator to report compatible (the tests' graphs are mocks with no
+    hashable topology).
+    """
+    manager = MagicMock(spec=CheckpointManager)
+    manager.get_latest_checkpoint.return_value = resume_point.checkpoint
+    orch._checkpoint_manager = manager
+    orch._resume_coordinator._checkpoint_manager = manager
+    return patch(
+        "elspeth.engine.orchestrator.resume.CheckpointCompatibilityValidator.validate",
+        return_value=ResumeCheck(can_resume=True),
+    )
+
+
 # Protocol-specced plugin doubles. ``SourceProtocol``/``SinkProtocol``/
-# ``TransformProtocol`` declare ``name``/``on_success``/``config`` only by
-# annotation, so they are absent from ``dir()`` and a bare ``MagicMock(spec=...)``
-# rejects reads of them — and ``name`` cannot be seeded via the ``MagicMock``
-# constructor (it is the reserved repr-name kwarg). These factories spec against
-# the real protocol (so ``isinstance`` holds and method typos are caught) and
-# seed the ``name`` the orchestrator's cleanup hooks read back.
+# ``TransformProtocol`` declare ``name``/``node_id``/``on_success``/``config``
+# only by annotation, so they are absent from ``dir()`` and a bare
+# ``MagicMock(spec=...)`` rejects reads of them — and ``name`` cannot be seeded
+# via the ``MagicMock`` constructor (it is the reserved repr-name kwarg). These
+# factories spec against the real protocol (so ``isinstance`` holds and method
+# typos are caught) and seed the ``name`` and ``node_id`` the orchestrator's
+# cleanup hooks read back (lifecycle attribution requires ``node_id``).
 def _specced_source(*, name: str = "source", **attrs: object) -> MagicMock:
     mock = MagicMock(spec=SourceProtocol)
     mock.name = name
+    mock.node_id = name
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock
@@ -119,6 +149,7 @@ def _specced_source(*, name: str = "source", **attrs: object) -> MagicMock:
 def _specced_sink(*, name: str = "sink", **attrs: object) -> MagicMock:
     mock = MagicMock(spec=SinkProtocol)
     mock.name = name
+    mock.node_id = name
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock
@@ -127,6 +158,7 @@ def _specced_sink(*, name: str = "sink", **attrs: object) -> MagicMock:
 def _specced_transform(*, name: str = "transform", **attrs: object) -> MagicMock:
     mock = MagicMock(spec=TransformProtocol)
     mock.name = name
+    mock.node_id = name
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock
@@ -191,20 +223,45 @@ class TestResumeFinalizesAsFailed:
     recorder.finalize_run(run_id, status=RunStatus.FAILED).
     """
 
+    def test_reconstruct_resume_state_refuses_incompatible_checkpoint_before_snapshot_work(self) -> None:
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-direct-reconstruct-incompatible-format"
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-direct-reconstruct-incompatible-format",
+            run_id=run_id,
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=None,
+        )
+        resume_point = ResumePoint(checkpoint=checkpoint, sequence_number=checkpoint.sequence_number)
+
+        with (
+            patch("elspeth.engine.orchestrator.resume.RecorderFactory") as recorder_factory,
+            pytest.raises(NonResumableRunError, match="missing format_version"),
+        ):
+            orch._resume_coordinator.reconstruct_resume_state(resume_point, MagicMock(spec=PayloadStore))
+
+        recorder_factory.assert_not_called()
+
     def test_resume_failure_finalizes_run_as_failed(self) -> None:
         """When _process_resumed_rows raises, run status becomes FAILED."""
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         _insert_failed_run(db, "test-run-123")
 
-        # Mock the checkpoint manager requirement
-        orch._checkpoint_manager = MagicMock(spec=CheckpointManager)
-        orch._resume_coordinator._checkpoint_manager = orch._checkpoint_manager
-
-        # Create a mock resume_point
-        resume_point = MagicMock(spec=ResumePoint)
-        resume_point.checkpoint.run_id = "test-run-123"
-        resume_point.aggregation_state = None
+        # Real resume point anchored to the run's (stubbed) latest checkpoint
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-test-run-123",
+            run_id="test-run-123",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(checkpoint=checkpoint, sequence_number=checkpoint.sequence_number)
+        admit_guard = _admit_resume_point(orch, resume_point)
 
         # Create mock config and graph
         config = MagicMock(spec=PipelineConfig)
@@ -233,13 +290,24 @@ class TestResumeFinalizesAsFailed:
             NodeID("source-node"): SimpleNamespace(source_name="source", lifecycle_state="loaded"),
         }
         mock_factory.execution.get_incomplete_batches.return_value = []
+        # FAILED finalization derives its counter baseline from the audit
+        # projections; stub them with real zeros (mirroring the sibling tests
+        # below) — the derive no longer swallows arbitrary mock errors, so an
+        # unstubbed projection would propagate instead of degrading to None.
+        mock_factory.query.get_all_token_outcomes_for_run.return_value = []
+        mock_factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        mock_factory.run_status_projection.count_failed_coalesce_barrier_rows.return_value = 0
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
 
         # Mock RecoveryManager. The unprocessed row keeps the resume on the
         # processing path (non-quiescent), where the injected RuntimeError fires.
         mock_recovery = MagicMock(spec=RecoveryManager)
-        mock_recovery.get_incomplete_tokens_by_row.return_value = {}
+        mock_recovery.get_resume_workset.return_value = ResumeWorkSet(
+            row_ids=("row-1",),
+            incomplete_by_row={},
+            buffered_token_ids=frozenset(),
+        )
         mock_recovery.count_blocked_barrier_items.return_value = 0
         mock_recovery.get_unprocessed_row_data_by_source.return_value = [
             ResumedRow(
@@ -252,6 +320,7 @@ class TestResumeFinalizesAsFailed:
 
         # Make _process_resumed_rows raise a RuntimeError (non-shutdown)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=RuntimeError("test failure")),
             patch("elspeth.engine.orchestrator.resume.RecorderFactory", return_value=mock_factory),
             patch("elspeth.engine.orchestrator.resume.reconstruct_schema_from_json", return_value=MagicMock(spec=SchemaContract)),
@@ -280,6 +349,100 @@ class TestResumeFinalizesAsFailed:
         assert found_failed, (
             f"Run should be finalized as FAILED when resume fails with non-shutdown exception. finalize_run calls: {finalize_calls}"
         )
+
+    def test_resume_partial_failure_ceremony_reports_cumulative_audit_counters(self) -> None:
+        """Partial-result resume failures must not emit resume-local-only counters."""
+        db = make_landscape_db()
+        event_bus = MagicMock(spec_set=["emit"])
+        emitted_events: list[object] = []
+        event_bus.emit.side_effect = emitted_events.append
+        orch = Orchestrator(db, event_bus=event_bus)
+        run_id = "run-resume-partial-audit-counters"
+        _insert_failed_run(db, run_id)
+
+        mock_factory = MagicMock(spec=RecorderFactory)
+        coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-resume-partial-audit-counters",
+            run_id=run_id,
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(checkpoint=checkpoint, sequence_number=checkpoint.sequence_number)
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            unprocessed_rows=(
+                ResumedRow(
+                    row_id="row-resumed",
+                    row_index=1,
+                    source_node_id=NodeID("source"),
+                    row_data={"value": "resumed"},
+                ),
+            ),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
+            schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
+            source_names_by_source={NodeID("source"): "source"},
+            source_lifecycle_by_source={NodeID("source"): "exhausted"},
+            has_restored_barrier_work=False,
+            coordination_token=coordination_token,
+        )
+        resume_only_result = RunResult(
+            run_id=run_id,
+            status=RunStatus.FAILED,
+            rows_processed=1,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=1,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            routed_destinations={"default": 1},
+        )
+        baseline_counters = ExecutionCounters(
+            rows_processed=3,
+            rows_succeeded=2,
+            rows_failed=1,
+            rows_routed_success=2,
+            rows_routed_failure=1,
+        )
+        baseline_counters.routed_destinations.update({"default": 2, "failsink": 1})
+        failure = RuntimeError("resume sweep failed")
+
+        admit_guard = _admit_resume_point(orch, resume_point)
+        with (
+            admit_guard,
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(
+                orch._resume_coordinator,
+                "process_resumed_rows",
+                side_effect=_RunFailedWithPartialResultError(failure, resume_only_result),
+            ),
+            patch(
+                "elspeth.engine.orchestrator.resume.derive_resume_terminal_status_from_audit",
+                return_value=(RunStatus.COMPLETED_WITH_FAILURES, baseline_counters),
+            ),
+            pytest.raises(RuntimeError, match="resume sweep failed"),
+        ):
+            orch.resume(
+                resume_point,
+                MagicMock(spec=PipelineConfig),
+                MagicMock(spec=ExecutionGraph),
+                payload_store=MockPayloadStore(),
+            )
+
+        summaries = [event for event in emitted_events if isinstance(event, RunSummary)]
+        assert len(summaries) == 1
+        summary = summaries[0]
+        assert summary.status.value == "failed"
+        assert summary.total_rows == 4
+        assert summary.succeeded == 3
+        assert summary.failed == 1
+        assert summary.routed_success == 3
+        assert summary.routed_failure == 1
+        assert dict(summary.routed_destinations) == {"default": 3, "failsink": 1}
 
     def test_resume_loop_drains_scheduler_work_before_replaying_rows(self) -> None:
         """Persisted scheduler work supersedes the old unprocessed-row replay path."""
@@ -417,9 +580,9 @@ class TestResumeFinalizesAsFailed:
 
         with (
             patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
-            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
+            patch.object(orch._context_factory, "initialize_run_context", return_value=run_ctx),
             patch("elspeth.engine.orchestrator.resume.run_transform_runtime_preflights"),
-            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
+            patch.object(orch._sink_flush, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(Exception, match="left non-terminal scheduler work after end-of-source flush") as exc_info,
         ):
             orch._resume_coordinator.process_resumed_rows(
@@ -446,6 +609,68 @@ class TestResumeFinalizesAsFailed:
         assert isinstance(exc_info.value.__cause__, OrchestrationInvariantError)
         processor.drain_scheduled_work.assert_called_once_with(run_ctx.ctx)
         processor.process_existing_row.assert_not_called()
+        flush_sinks.assert_not_called()
+
+    def test_resume_runtime_preflight_failure_cleans_initialized_plugins(self) -> None:
+        """Resume preflight failure must tear down transform/sink resources opened by on_start."""
+        orch = _make_orchestrator(make_landscape_db())
+        source = _specced_source()
+        source.on_success = "default"
+        transform = _specced_transform()
+        sink = _specced_sink()
+        config = PipelineConfig(
+            sources={"source": source},
+            transforms=(transform,),
+            sinks={"default": sink},
+        )
+        processor = MagicMock(spec=RowProcessor)
+        processor.run_id = "run-resume-runtime-preflight-fails"
+        artifacts = SimpleNamespace(
+            source_id_map={"source": NodeID("source")},
+            edge_map={},
+            sink_id_map={"default": NodeID("sink")},
+            source_id=NodeID("source"),
+        )
+        run_ctx = SimpleNamespace(
+            processor=processor,
+            ctx=MagicMock(spec=PluginContext),
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+        graph = MagicMock(spec=ExecutionGraph)
+
+        with (
+            patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
+            patch.object(orch._context_factory, "initialize_run_context", return_value=run_ctx),
+            patch(
+                "elspeth.engine.orchestrator.resume.run_transform_runtime_preflights",
+                side_effect=RuntimeError("resume runtime preflight exploded"),
+            ),
+            patch.object(orch._sink_flush, "flush_and_write_sinks") as flush_sinks,
+            pytest.raises(RuntimeError, match="resume runtime preflight exploded"),
+        ):
+            orch._resume_coordinator.process_resumed_rows(
+                MagicMock(spec=RecorderFactory),
+                "run-resume-runtime-preflight-fails",
+                config,
+                graph,
+                unprocessed_rows=(),
+                barrier_restore=None,
+                payload_store=MagicMock(spec=PayloadStore),
+                incomplete_by_row={},
+                recovery_manager=MagicMock(spec=RecoveryManager),
+                resume_checkpoint_id="checkpoint-runtime-preflight-fails",
+                schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
+            )
+
+        source.on_complete.assert_not_called()
+        source.close.assert_not_called()
+        assert orch._checkpoints._active_graph is None
+        transform.on_complete.assert_called_once_with(run_ctx.ctx)
+        transform.close.assert_called_once_with()
+        sink.on_complete.assert_called_once_with(run_ctx.ctx)
+        sink.close.assert_called_once_with()
         flush_sinks.assert_not_called()
 
     def test_setup_resume_context_uses_all_source_roots(self) -> None:
@@ -534,7 +759,7 @@ class TestResumeFinalizesAsFailed:
                 ),
             ),
             incomplete_by_row={},
-            recovery_manager=MagicMock(),
+            recovery_manager=MagicMock(spec=RecoveryManager),
             payload_store=MockPayloadStore(),
             run_id="run-source-scoped-contracts",
             resume_checkpoint_id="checkpoint-source-scoped-contracts",
@@ -646,7 +871,14 @@ class TestResumeFinalizesAsFailed:
             sources={"refunds": source},
             transforms=(),
             sinks={"refunds_sink": _specced_sink()},
-            aggregation_settings={NodeID("agg-refunds"): MagicMock()},
+            aggregation_settings={
+                NodeID("agg-refunds"): AggregationSettings(
+                    name="agg-refunds",
+                    plugin="refund_batcher",
+                    input="refunds_sink",
+                    on_error="discard",
+                )
+            },
         )
         factory = MagicMock(spec=RecorderFactory)
         events: list[str] = []
@@ -687,8 +919,8 @@ class TestResumeFinalizesAsFailed:
             patch("elspeth.engine.orchestrator.source_iteration.track_operation", _source_operation),
             patch.object(orch._source_driver, "load_source_with_events", side_effect=_load_source),
             # Slice 3 re-pin: the EOF flush seam moved into the
-            # run_end_of_input_barrier_flush helper (orchestrator/aggregation.py).
-            patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
+            # run_end_of_input_barrier_flush helper (orchestrator/leader_drain.py).
+            patch("elspeth.engine.orchestrator.leader_drain.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
             pytest.raises(RuntimeError, match="boom during EOF flush"),
         ):
             orch._source_driver.run_main_processing_loop(
@@ -807,14 +1039,14 @@ class TestResumeFinalizesAsFailed:
 
         with (
             patch.object(orch, "_register_graph_nodes_and_edges", return_value=artifacts),
-            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
-            patch("elspeth.engine.orchestrator.core.run_transform_runtime_preflights"),
+            patch.object(orch._context_factory, "initialize_run_context", return_value=run_ctx),
+            patch("elspeth.engine.orchestrator.leader_drain.run_transform_runtime_preflights"),
             patch.object(
                 orch._source_driver,
                 "run_main_processing_loop",
                 return_value=LoopResult(interrupted=False, start_time=0.0, phase_start=0.0, last_progress_time=0.0),
             ),
-            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
+            patch.object(orch._sink_flush, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(Exception, match="left non-terminal scheduler work after final source flush") as exc_info,
         ):
             orch._execute_run(
@@ -868,6 +1100,11 @@ class TestResumeFinalizesAsFailed:
             ),
         }
         mock_recovery = MagicMock(spec=RecoveryManager)
+        mock_recovery.get_resume_workset.return_value = ResumeWorkSet(
+            row_ids=("row-orders", "row-refunds"),
+            incomplete_by_row={},
+            buffered_token_ids=frozenset(),
+        )
         mock_recovery.count_blocked_barrier_items.return_value = 0
         mock_recovery.get_unprocessed_row_data_by_source.return_value = (
             ResumedRow(
@@ -916,6 +1153,10 @@ class TestResumeFinalizesAsFailed:
             NodeID("source-orders"): orders_schema,
             NodeID("source-refunds"): refunds_schema,
         }
+        assert mock_recovery.get_unprocessed_row_data_by_source.call_args.kwargs["row_ids"] == (
+            "row-orders",
+            "row-refunds",
+        )
 
     def test_reconstruct_resume_state_accepts_exhausted_source_lifecycle(self) -> None:
         """Exhausted sources are complete enough for engine-only EOF work resume."""
@@ -952,6 +1193,11 @@ class TestResumeFinalizesAsFailed:
             )
         }
         mock_recovery = MagicMock(spec=RecoveryManager)
+        mock_recovery.get_resume_workset.return_value = ResumeWorkSet(
+            row_ids=(),
+            incomplete_by_row={},
+            buffered_token_ids=frozenset(),
+        )
         # F1: a non-zero journal BLOCKED barrier count must surface on the
         # ResumeState as has_restored_barrier_work=True (quiescence-gate input).
         mock_recovery.count_blocked_barrier_items.return_value = 3
@@ -1017,7 +1263,9 @@ class TestResumeFinalizesAsFailed:
             coordination_token=coordination_token,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("empty journal should early-exit")),
             patch(
@@ -1058,8 +1306,8 @@ class TestResumeFinalizesAsFailed:
         _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
-        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
-        mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
+        mock_factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        mock_factory.run_status_projection.count_failed_coalesce_barrier_rows.return_value = 0
         # ADR-030 §A.3 (slice 4): provide a valid token + healthy heartbeat snapshot.
         coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
         scalars = BarrierScalars(
@@ -1104,7 +1352,9 @@ class TestResumeFinalizesAsFailed:
             rows_quarantined=0,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(orch._resume_coordinator, "process_resumed_rows", return_value=resumed_result) as process_resumed,
             patch.object(orch._ceremony, "emit_telemetry"),
@@ -1136,8 +1386,8 @@ class TestResumeFinalizesAsFailed:
         run_id = "run-structural-counter-resume"
         _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
-        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
-        mock_factory.run_lifecycle.finalize_run = MagicMock()
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=DataFlowRepository.sweep_deferred_invariants_or_crash)
+        mock_factory.run_lifecycle.finalize_run = MagicMock(spec=RunLifecycleRepository.finalize_run)
         # F2 (resume-fork-reemit): rows_processed is now sourced from a dedicated
         # distinct-source-row query, not a per-leaf tally over the outcome list.
         # This synthetic scenario represents 3 source rows reaching a terminal
@@ -1146,10 +1396,10 @@ class TestResumeFinalizesAsFailed:
         # and do not add new source rows.  Mock the query to return that count —
         # the real QueryRepository computes it via COUNT(DISTINCT row_id) over a
         # tokens-table JOIN, which a pure-outcome-list mock cannot reproduce.
-        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 3
+        mock_factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome.return_value = 3
         # rows_coalesce_failed likewise derives from a dedicated query (DISTINCT
         # failed-barrier pairs over node_states); no coalesce failures here.
-        mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
+        mock_factory.run_status_projection.count_failed_coalesce_barrier_rows.return_value = 0
         # ADR-030 §A.3 (slice 4): provide a valid token + healthy heartbeat snapshot.
         coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
         mock_factory.query.get_all_token_outcomes_for_run.return_value = [
@@ -1232,7 +1482,9 @@ class TestResumeFinalizesAsFailed:
             coordination_token=coordination_token,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(
                 orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")
@@ -1268,8 +1520,8 @@ class TestResumeFinalizesAsFailed:
         run_id = "run-exhausted-source-engine-work"
         _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
-        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
-        mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
+        mock_factory.run_status_projection.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        mock_factory.run_status_projection.count_failed_coalesce_barrier_rows.return_value = 0
         # ADR-030 §A.3 (slice 4): provide a valid token + healthy heartbeat snapshot.
         coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
 
@@ -1308,7 +1560,9 @@ class TestResumeFinalizesAsFailed:
             rows_quarantined=0,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(orch._resume_coordinator, "process_resumed_rows", return_value=resumed_result) as process_resumed,
             patch.object(orch._ceremony, "emit_telemetry"),
@@ -1345,11 +1599,11 @@ class TestBuildProcessorCallsCleanupOnFailure:
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         config = MagicMock(spec=PipelineConfig)
-        tracked_transform = _specced_transform()
+        tracked_transform = _specced_transform(node_id="transform-1")
         tracked_transform.name = "tracked"
         config.transforms = [tracked_transform]
         config.sinks = {}
-        primary_source = _specced_source()
+        primary_source = _specced_source(node_id="source-1")
         config.sources = {"primary": primary_source}
 
         cleanup_plugins(config, ctx)
@@ -1359,17 +1613,18 @@ class TestBuildProcessorCallsCleanupOnFailure:
         primary_source.close.assert_called_once()
 
     def test_build_processor_failure_path_cleans_up_with_source(self) -> None:
-        """When _build_processor raises inside _initialize_run_context,
-        _cleanup_plugins must be called with include_source matching the
+        """When build_processor raises inside initialize_run_context,
+        cleanup_plugins must be called with include_source matching the
         run path.
 
-        This test exercises the actual except handler in _initialize_run_context
-        (line 1665-1667), not just _cleanup_plugins in isolation. The original
+        This test exercises the actual except handler in
+        RunContextFactory.initialize_run_context, not just cleanup_plugins
+        in isolation. The original
         bug leaked already-started plugins — especially the source — because
         the except block didn't exist. A regression to include_source=False
         or removal of the except block will cause this test to fail.
         """
-        from elspeth.engine.orchestrator.types import GraphArtifacts
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
 
         db = make_landscape_db()
         orch = _make_orchestrator(db)
@@ -1404,13 +1659,14 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
         # build_processor fails after on_start has been called on all plugins
         with (
-            patch.object(orch._run_core, "build_processor", side_effect=RuntimeError("processor build failed")),
-            # cleanup_plugins is now a module function; patch it where run_core.py looks
-            # it up (the imported name in run_core's namespace), not on the instance.
-            patch("elspeth.engine.orchestrator.run_core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
+            patch.object(orch._processor_factory, "build_processor", side_effect=RuntimeError("processor build failed")),
+            # cleanup_plugins is now a module function; patch it where
+            # run_context_factory.py looks it up (the imported name in that
+            # module's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.run_context_factory.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
-            orch._run_core.initialize_run_context(
+            orch._context_factory.initialize_run_context(
                 mock_factory,
                 "test-run",
                 config,
@@ -1431,6 +1687,274 @@ class TestBuildProcessorCallsCleanupOnFailure:
         )
         # The config passed must be the same config object
         assert call_kwargs.args[0] is config
+
+    def test_transform_start_failure_cleans_only_successfully_started_plugins(self) -> None:
+        """A transform whose on_start fails must not receive teardown hooks."""
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        config = MagicMock(spec=PipelineConfig)
+        started_source = _specced_source(name="source")
+        started_transform = _specced_transform(name="started-transform", node_id=None)
+        failing_transform = _specced_transform(name="failing-transform", node_id=None)
+        failing_transform.on_start.side_effect = RuntimeError("transform startup failed")
+        unstarted_sink = _specced_sink(name="unstarted-sink")
+        config.sources = {"source": started_source}
+        config.transforms = [started_transform, failing_transform]
+        config.sinks = {"sink": unstarted_sink}
+        config.config = {}
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"sink": NodeID("sink-1")},
+            transform_id_map={0: NodeID("transform-1"), 1: NodeID("transform-2")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        with (
+            patch.object(orch._processor_factory, "build_processor") as build_processor,
+            pytest.raises(RuntimeError, match="transform startup failed"),
+        ):
+            orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        build_processor.assert_not_called()
+        started_source.on_complete.assert_called_once()
+        started_source.close.assert_called_once()
+        started_transform.on_complete.assert_called_once()
+        started_transform.close.assert_called_once()
+        failing_transform.on_complete.assert_not_called()
+        failing_transform.close.assert_not_called()
+        unstarted_sink.on_start.assert_not_called()
+        unstarted_sink.on_complete.assert_not_called()
+        unstarted_sink.close.assert_not_called()
+
+    def test_source_start_failure_skips_failing_source_and_unstarted_plugins(self) -> None:
+        """A source whose on_start fails is not considered started for cleanup."""
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        config = MagicMock(spec=PipelineConfig)
+        failing_source = _specced_source(name="failing-source")
+        failing_source.on_start.side_effect = RuntimeError("source startup failed")
+        unstarted_transform = _specced_transform(name="unstarted-transform", node_id=None)
+        unstarted_sink = _specced_sink(name="unstarted-sink")
+        config.sources = {"source": failing_source}
+        config.transforms = [unstarted_transform]
+        config.sinks = {"sink": unstarted_sink}
+        config.config = {}
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"sink": NodeID("sink-1")},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        with (
+            patch.object(orch._processor_factory, "build_processor") as build_processor,
+            pytest.raises(RuntimeError, match="source startup failed"),
+        ):
+            orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        build_processor.assert_not_called()
+        failing_source.on_complete.assert_not_called()
+        failing_source.close.assert_not_called()
+        unstarted_transform.on_start.assert_not_called()
+        unstarted_transform.on_complete.assert_not_called()
+        unstarted_transform.close.assert_not_called()
+        unstarted_sink.on_start.assert_not_called()
+        unstarted_sink.on_complete.assert_not_called()
+        unstarted_sink.close.assert_not_called()
+
+    def test_sink_start_failure_cleans_only_successfully_started_sinks(self) -> None:
+        """A sink whose on_start fails must not receive teardown hooks."""
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        config = MagicMock(spec=PipelineConfig)
+        started_source = _specced_source(name="source")
+        started_transform = _specced_transform(name="started-transform", node_id=None)
+        started_sink = _specced_sink(name="started-sink")
+        failing_sink = _specced_sink(name="failing-sink")
+        failing_sink.on_start.side_effect = RuntimeError("sink startup failed")
+        config.sources = {"source": started_source}
+        config.transforms = [started_transform]
+        config.sinks = {"started": started_sink, "failing": failing_sink}
+        config.config = {}
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"started": NodeID("sink-1"), "failing": NodeID("sink-2")},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        with (
+            patch.object(orch._processor_factory, "build_processor") as build_processor,
+            pytest.raises(RuntimeError, match="sink startup failed"),
+        ):
+            orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        build_processor.assert_not_called()
+        started_source.on_complete.assert_called_once()
+        started_source.close.assert_called_once()
+        started_transform.on_complete.assert_called_once()
+        started_transform.close.assert_called_once()
+        started_sink.on_complete.assert_called_once()
+        started_sink.close.assert_called_once()
+        failing_sink.on_complete.assert_not_called()
+        failing_sink.close.assert_not_called()
+
+    def test_startup_hooks_receive_their_plugin_node_id(self) -> None:
+        """Each plugin on_start hook must see its own orchestrator-assigned node id."""
+        from elspeth.engine.orchestrator.run_state import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        observed: list[tuple[str, str | None]] = []
+
+        config = MagicMock(spec=PipelineConfig)
+        source = _specced_source(name="source")
+        transform = _specced_transform(name="transform", node_id=None)
+        sink = _specced_sink(name="sink")
+        source.on_start.side_effect = lambda ctx: observed.append(("source", ctx.node_id))
+        transform.on_start.side_effect = lambda ctx: observed.append(("transform", ctx.node_id))
+        sink.on_start.side_effect = lambda ctx: observed.append(("sink", ctx.node_id))
+        config.sources = {"source": source}
+        config.transforms = [transform]
+        config.sinks = {"sink": sink}
+        config.config = {}
+        config.aggregation_settings = None
+
+        graph = MagicMock(spec=ExecutionGraph)
+        graph.get_route_resolution_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
+            sink_id_map={"sink": NodeID("sink-1")},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+        processor = MagicMock(spec=RowProcessor)
+
+        with patch.object(orch._processor_factory, "build_processor", return_value=(processor, {}, None)):
+            run_ctx = orch._context_factory.initialize_run_context(
+                MagicMock(spec=RecorderFactory),
+                "test-run",
+                config,
+                graph,
+                MagicMock(spec=ElspethSettings),
+                artifacts,
+                MagicMock(spec=PayloadStore),
+                include_source_on_start=True,
+            )
+
+        assert observed == [
+            ("source", "source-1"),
+            ("transform", "transform-1"),
+            ("sink", "sink-1"),
+        ]
+        assert run_ctx.ctx.node_id == "source-1"
+
+    def test_cleanup_hooks_receive_their_plugin_node_id(self) -> None:
+        """Each plugin on_complete hook must run under its own node id."""
+        from elspeth.contracts.plugin_context import PluginContext
+
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+        ctx.node_id = "source-1"
+        observed: list[tuple[str, str | None]] = []
+
+        source = _specced_source(name="source", node_id="source-1")
+        transform = _specced_transform(name="transform", node_id="transform-1")
+        sink = _specced_sink(name="sink", node_id="sink-1")
+        source.on_complete.side_effect = lambda hook_ctx: observed.append(("source", hook_ctx.node_id))
+        transform.on_complete.side_effect = lambda hook_ctx: observed.append(("transform", hook_ctx.node_id))
+        sink.on_complete.side_effect = lambda hook_ctx: observed.append(("sink", hook_ctx.node_id))
+
+        config = MagicMock(spec=PipelineConfig)
+        config.sources = {"source": source}
+        config.transforms = [transform]
+        config.sinks = {"sink": sink}
+
+        cleanup_plugins(config, ctx)
+
+        assert observed == [
+            ("transform", "transform-1"),
+            ("sink", "sink-1"),
+            ("source", "source-1"),
+        ]
+        assert ctx.node_id == "source-1"
+
+    def test_cleanup_requires_protocol_node_id_attribute_for_lifecycle_scope(self) -> None:
+        """Cleanup must fail loudly when a plugin lacks the protocol node_id attribute."""
+        from elspeth.contracts.plugin_context import PluginContext
+
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+        sink_without_node_id = _specced_sink(name="sink-without-node-id")
+        # The factory seeds node_id (lifecycle attribution requires it); this
+        # test pins the missing-attribute invariant, so remove it explicitly.
+        del sink_without_node_id.node_id
+        config = MagicMock(spec=PipelineConfig)
+        config.sources = {}
+        config.transforms = []
+        config.sinks = {"sink": sink_without_node_id}
+
+        with pytest.raises(OrchestrationInvariantError, match="node_id"):
+            cleanup_plugins(config, ctx, include_source=False)
 
 
 class TestCleanupPluginsReRaisesSystemExceptions:
@@ -1488,12 +2012,12 @@ class TestCleanupPluginsReRaisesSystemExceptions:
 
         # Create a mock config with a transform that raises FrameworkBugError
         config = MagicMock(spec=PipelineConfig)
-        bad_transform = _specced_transform()
+        bad_transform = _specced_transform(node_id="transform-1")
         bad_transform.on_complete.side_effect = FrameworkBugError("internal corruption")
         bad_transform.name = "bad_transform"
         config.transforms = [bad_transform]
         config.sinks = {}
-        config.sources["primary"] = _specced_source()
+        config.sources["primary"] = _specced_source(node_id="source-1")
 
         with pytest.raises(FrameworkBugError, match="internal corruption"):
             cleanup_plugins(config, ctx)
@@ -1508,11 +2032,11 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         # Create a mock config with a sink that raises AuditIntegrityError on close
         config = MagicMock(spec=PipelineConfig)
         config.transforms = []
-        bad_sink = _specced_sink()
+        bad_sink = _specced_sink(node_id="sink-1")
         bad_sink.close.side_effect = AuditIntegrityError("audit DB corrupted")
         bad_sink.name = "bad_sink"
         config.sinks = {"output": bad_sink}
-        config.sources["primary"] = _specced_source()
+        config.sources["primary"] = _specced_source(node_id="source-1")
 
         with pytest.raises(AuditIntegrityError, match="audit DB corrupted"):
             cleanup_plugins(config, ctx)
@@ -1525,12 +2049,12 @@ class TestCleanupPluginsReRaisesSystemExceptions:
 
         # Create a mock config with a transform that raises a regular error
         config = MagicMock(spec=PipelineConfig)
-        bad_transform = _specced_transform()
+        bad_transform = _specced_transform(node_id="transform-1")
         bad_transform.on_complete.side_effect = RuntimeError("connection refused")
         bad_transform.name = "flaky_transform"
         config.transforms = [bad_transform]
         config.sinks = {}
-        config.sources["primary"] = _specced_source()
+        config.sources["primary"] = _specced_source(node_id="source-1")
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
             cleanup_plugins(config, ctx)

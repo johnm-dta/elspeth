@@ -234,6 +234,16 @@ class BaseTransform(ABC):
     additionally rejects bare-string members that pass mypy under
     StrEnum/str inference."""
 
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {}
+    """Credential-bearing config fields that must have a configured secret ref
+    before composer discovery advertises the plugin.
+
+    Keys are config field names such as ``api_key``. Values are browser-safe
+    candidate secret-reference names, never secret values. An empty tuple means
+    the field requires some available secret, but the plugin has no canonical
+    inventory name.
+    """
+
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
     # (e.g. provider-based LLM config selection).
@@ -445,16 +455,16 @@ class BaseTransform(ABC):
             return contract
 
         from elspeth.contracts.schema_contract import SchemaContract
-        from elspeth.contracts.schema_contract_factory import map_schema_mode
+        from elspeth.contracts.schema_contract_factory import expected_runtime_output_contract
 
-        expected_mode = map_schema_mode(output_schema_config.mode)
-        if contract.mode == expected_mode and contract.locked:
+        expected_mode, expected_locked = expected_runtime_output_contract(output_schema_config)
+        if contract.mode == expected_mode and contract.locked == expected_locked:
             return contract
 
         return SchemaContract(
             mode=expected_mode,
             fields=contract.fields,
-            locked=True,
+            locked=expected_locked,
         )
 
     def _apply_declared_output_field_contracts(self, contract: SchemaContract) -> SchemaContract:
@@ -968,6 +978,10 @@ class BaseSink(ABC):
     declaration site rather than disappearing silently from the rendered
     catalog card."""
 
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {}
+    """Credential-bearing config fields that must have a configured secret ref
+    before composer discovery advertises the plugin. See BaseTransform."""
+
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
 
@@ -1365,6 +1379,10 @@ class BaseSource(ABC):
     declaration site rather than disappearing silently from the rendered
     catalog card."""
 
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {}
+    """Credential-bearing config fields that must have a configured secret ref
+    before composer discovery advertises the plugin. See BaseTransform."""
+
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).
     config_model: ClassVar[type[PluginConfig] | None] = None
@@ -1394,9 +1412,11 @@ class BaseSource(ABC):
     # All sources must set this - config-based sources get it from SourceDataConfig
     _on_validation_failure: str
 
-    # Success routing: sink name for rows that pass source validation
-    # All sources must set this - config-based sources get it from SourceDataConfig
-    on_success: str
+    # Success routing: sink name for rows that pass source validation.
+    # Always non-None at runtime (SourceSettings requires on_success).
+    # Base class default is None because injection happens post-construction
+    # via runtime_factory bridge (set from SourceSettings.on_success).
+    on_success: str | None = None
 
     # Guaranteed-field enforcement (centralized in the source boundary contract).
     # Sources set this from schema_config.get_effective_guaranteed_fields() at init.

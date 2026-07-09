@@ -55,7 +55,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BatchFlushInputs,
@@ -92,14 +91,24 @@ def _serialize_plugin_name(plugin: Any) -> str:
     return "".join((name,))
 
 
-def _build_aggregate_message(violations: Sequence[AuditEvidenceBase]) -> str:
-    """Compose the aggregate's human-readable message from child messages.
+def _violation_message_label(violation: DeclarationContractViolation) -> str:
+    """Return a non-secret child label for aggregate error text."""
+    contract_name = violation.contract_name
+    if contract_name:
+        return f"{type(violation).__name__}:{contract_name}"
+    return type(violation).__name__
+
+
+def _build_aggregate_message(violations: Sequence[DeclarationContractViolation]) -> str:
+    """Compose the aggregate's human-readable message without child text.
 
     Structured per-child data travels in ``to_audit_dict()``'s ``violations``
-    list; the message is for triage read-ability.
+    list. The message is for triage readability and must not interpolate
+    raw child exception strings because those can carry plugin/row secrets
+    before audit DTO scrubbing runs.
     """
     exception_types = "/".join(type(v).__name__ for v in violations)
-    child_preview = "; ".join(str(v) for v in violations[:3])
+    child_preview = "; ".join(_violation_message_label(v) for v in violations[:3])
     if len(violations) > 3:
         child_preview += f"; ... [{len(violations) - 3} more]"
     return f"{len(violations)} declaration contracts fired on a single (row, call-site) tuple ({exception_types}): {child_preview}"
@@ -122,7 +131,7 @@ def _dispatch(
     been invoked exactly once (or skipped via ``applies_to=False``). A
     raised exception from one contract does NOT short-circuit the loop.
     """
-    violations: list[AuditEvidenceBase] = []
+    violations: list[DeclarationContractViolation] = []
     for contract in registered_declaration_contracts_for_site(site):
         if not contract.applies_to(plugin):
             continue
@@ -142,10 +151,7 @@ def _dispatch(
         # id(raised) == id(violations[0]) — i.e. no aggregation-of-one
         # wrapper that would break triage SQL filtering by exception_type.
         #
-        # AuditEvidenceBase is an ABC that DCV children mix with RuntimeError.
-        # Every collected violation is a BaseException subclass by construction;
-        # mypy cannot narrow this through the ABC, so annotate at the raise site.
-        raise violations[0]  # type: ignore[misc]  # AuditEvidenceBase children are RuntimeError subclasses
+        raise violations[0]
 
     aggregate = AggregateDeclarationContractViolation(
         plugin=_serialize_plugin_name(plugin),

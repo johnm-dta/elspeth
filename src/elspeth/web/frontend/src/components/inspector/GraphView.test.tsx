@@ -10,6 +10,12 @@ import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
 // Render nodes and edges as simple divs so we can assert on their presence.
 vi.mock("@xyflow/react", () => ({
+  // Provider shares the flow store so Controls/MiniMap can render OUTSIDE
+  // <ReactFlow> (they are siblings of the role="img" diagram scope —
+  // elspeth-37f6f13132). The mock just passes children through.
+  ReactFlowProvider: ({ children }: any) => (
+    <div data-testid="react-flow-provider">{children}</div>
+  ),
   ReactFlow: ({
     nodes,
     edges,
@@ -239,6 +245,10 @@ describe("GraphView", () => {
     expect(
       within(panel).getByRole("heading", { name: /colour_lookup config/i }),
     ).toBeInTheDocument();
+    // elspeth-e1c5ad0b53: the panel's type chip is the ui/TypeBadge primitive
+    // composing the shared .type-badge-* token classes.
+    const typeChip = within(panel).getByText("transform");
+    expect(typeChip).toHaveClass("type-badge", "type-badge-transform");
     expect(within(panel).getByText("llm")).toBeInTheDocument();
     expect(within(panel).getByText("prompt")).toBeInTheDocument();
     expect(within(panel).getByText("Find colours")).toBeInTheDocument();
@@ -664,6 +674,112 @@ describe("GraphView", () => {
       expect(flow.dataset.fitViewOptions).not.toBe("");
       const opts = JSON.parse(flow.dataset.fitViewOptions ?? "{}");
       expect(opts).toEqual({ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 });
+    });
+  });
+
+  describe("accessible node list (C2/C3, elspeth-ef897110dd / elspeth-d37b7217c9)", () => {
+    it("exposes every component as a keyboard-operable item with type + validity", () => {
+      useSessionStore.setState({
+        compositionState: makeState({
+          sources: { in: { plugin: "csv", on_success: "t1", options: {} } } as never,
+          nodes: [
+            makeNode({
+              id: "classify",
+              node_type: "transform",
+              plugin: "llm_transform",
+              input: "t1",
+              on_success: "out",
+            }),
+          ],
+          outputs: [{ name: "out", plugin: "jsonl", options: {} }] as never,
+        }),
+      });
+      render(<GraphView />);
+      const list = screen.getByRole("list", {
+        name: /pipeline components in source-to-sink order/i,
+      });
+      const items = within(list).getAllByRole("button");
+      // source + 1 transform + sink = 3 accessible entries.
+      expect(items).toHaveLength(3);
+      const text = items.map((b) => b.textContent ?? "");
+      expect(text.some((t) => /source:.*csv/i.test(t))).toBe(true);
+      expect(text.some((t) => /transform: classify \(llm_transform\)/i.test(t))).toBe(true);
+      expect(text.some((t) => /sink:.*jsonl/i.test(t))).toBe(true);
+      // Validity is announced, not colour-only.
+      expect(text.every((t) => /valid|warning|error|not yet validated/i.test(t))).toBe(true);
+    });
+
+    it("selects a node via keyboard activation (drives the inspector path)", async () => {
+      const selectNode = vi.fn();
+      useSessionStore.setState({
+        selectNode,
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+      } as never);
+      render(<GraphView />);
+      const list = screen.getByRole("list", { name: /pipeline components/i });
+      await userEvent.click(within(list).getByRole("button", { name: /classify/i }));
+      expect(selectNode).toHaveBeenCalledWith("classify");
+    });
+
+    it("moves focus to the NodeConfigPanel when a node is selected from the keyboard list (elspeth-37f6f13132)", async () => {
+      // Real selection semantics: selectNode drives selectedNodeId so the
+      // panel actually opens (previous tests stub selectNode as a spy).
+      useSessionStore.setState({
+        selectedNodeId: null,
+        selectNode: (nodeId: string | null) =>
+          useSessionStore.setState({ selectedNodeId: nodeId } as never),
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+      } as never);
+      render(<GraphView />);
+      const list = screen.getByRole("list", { name: /pipeline components/i });
+      await userEvent.click(
+        within(list).getByRole("button", { name: /classify/i }),
+      );
+      const panel = screen.getByRole("complementary", {
+        name: /classify configuration/i,
+      });
+      expect(panel).toHaveFocus();
+    });
+  });
+
+  // role="img" is children-presentational: descendants are pruned from the
+  // accessibility tree. It must therefore scope the diagram ONLY; the live
+  // "pending #N" pill and the interactive zoom Controls (and MiniMap) are
+  // siblings (WCAG 4.1.3 / 1.3.1, elspeth-37f6f13132).
+  describe("role=img scoping (elspeth-37f6f13132)", () => {
+    it("scopes role='img' to the diagram element with the pipeline label", () => {
+      useSessionStore.setState({
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+        compositionProposals: [makeProposal()],
+      });
+      render(<GraphView />);
+      const img = screen.getByRole("img", { name: /pipeline graph with/i });
+      expect(img).toHaveClass("graph-view-diagram");
+      // The diagram itself lives inside the img scope.
+      expect(within(img).getByTestId("react-flow")).toBeInTheDocument();
+    });
+
+    it("keeps the live pending pill and Controls OUTSIDE the img scope", () => {
+      useSessionStore.setState({
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+        compositionProposals: [makeProposal()],
+      });
+      render(<GraphView />);
+      const img = screen.getByRole("img", { name: /pipeline graph with/i });
+      const pill = screen.getByRole("status", { name: /pending graph proposal/i });
+      const controls = screen.getByTestId("react-flow-controls");
+      expect(img.contains(pill)).toBe(false);
+      expect(img.contains(controls)).toBe(false);
+    });
+
+    it("keeps the MiniMap outside the img scope on large graphs", () => {
+      const nodes = Array.from({ length: 9 }, (_, i) =>
+        makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
+      );
+      useSessionStore.setState({ compositionState: makeState({ nodes }) });
+      render(<GraphView />);
+      const img = screen.getByRole("img", { name: /pipeline graph with/i });
+      expect(img.contains(screen.getByTestId("minimap"))).toBe(false);
     });
   });
 });

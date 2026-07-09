@@ -10,10 +10,12 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import event
 
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape._database_ops import DatabaseOps
+from elspeth.core.landscape._database_ops import DatabaseOps, ReadOnlyDatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordNotFoundError
 
 
 @pytest.fixture
@@ -107,6 +109,116 @@ class TestExecuteFetchall:
         assert row.value == "before"
         db.close()
 
+    def test_fetchall_many_read_only_handle_uses_one_sqlite_snapshot(self, tmp_path: Path) -> None:
+        """Multi-query reads on file-backed read-only handles must be snapshot-consistent."""
+        db_path = tmp_path / "test.db"
+        writable = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        metadata = sa.MetaData()
+        table = sa.Table(
+            "snapshot_rows",
+            metadata,
+            sa.Column("id", sa.String, primary_key=True),
+            sa.Column("value", sa.String),
+        )
+        metadata.create_all(writable.engine)
+        with writable.write_connection() as conn:
+            conn.execute(
+                table.insert(),
+                [
+                    {"id": "first", "value": "first"},
+                    {"id": "second", "value": "before"},
+                ],
+            )
+
+        read_only = LandscapeDB.from_url(f"sqlite:///{db_path}", read_only=True, create_tables=False)
+        mutation_count = 0
+
+        @event.listens_for(read_only.engine, "after_cursor_execute")
+        def _mutate_after_first_select(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+            nonlocal mutation_count
+            if mutation_count or "snapshot_rows" not in statement:
+                return
+            mutation_count += 1
+            with writable.write_connection() as write_conn:
+                write_conn.execute(table.update().where(table.c.id == "second").values(value="after"))
+
+        try:
+            rows_by_query = ReadOnlyDatabaseOps(read_only).execute_fetchall_many(
+                [
+                    table.select().where(table.c.id == "first"),
+                    table.select().where(table.c.id == "second"),
+                ]
+            )
+        finally:
+            event.remove(read_only.engine, "after_cursor_execute", _mutate_after_first_select)
+            read_only.close()
+
+        assert mutation_count == 1
+        assert rows_by_query[0][0].value == "first"
+        assert rows_by_query[1][0].value == "before"
+        with writable.read_only_connection() as conn:
+            assert conn.execute(table.select().where(table.c.id == "second")).one().value == "after"
+        writable.close()
+
+    def test_fetchall_many_requires_read_only_flag_on_provider(self, ldb: LandscapeDB, test_table: sa.Table) -> None:
+        """Snapshot setup must not default a malformed provider to writable semantics."""
+
+        class _MissingReadOnlyFlagProvider:
+            def read_only_connection(self):  # type: ignore[no-untyped-def]
+                return ldb.read_only_connection()
+
+            def write_connection(self):  # type: ignore[no-untyped-def]
+                return ldb.write_connection()
+
+        with pytest.raises(AttributeError, match="is_read_only"):
+            ReadOnlyDatabaseOps(_MissingReadOnlyFlagProvider()).execute_fetchall_many([test_table.select()])
+
+
+class TestDatabaseOpsErrorScrubbing:
+    """DatabaseOps errors must not echo SQLAlchemy statement text or bound values."""
+
+    SENTINEL = "SECRET_BOUND_VALUE_SHOULD_NOT_LEAK"
+
+    def _assert_safe_message(self, exc: BaseException, *, operation: str, context: str | None = None) -> None:
+        message = str(exc)
+        assert operation in message
+        assert "OperationalError" in message
+        if context is not None:
+            assert context in message
+        assert self.SENTINEL not in message
+        assert "parameters" not in message
+        assert "missing_table" not in message
+
+    def test_fetchone_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_fetchone(sa.text("SELECT * FROM missing_table WHERE value = :value").bindparams(value=self.SENTINEL))
+
+        self._assert_safe_message(exc_info.value, operation="execute_fetchone")
+
+    def test_fetchall_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_fetchall(sa.text("SELECT * FROM missing_table WHERE value = :value").bindparams(value=self.SENTINEL))
+
+        self._assert_safe_message(exc_info.value, operation="execute_fetchall")
+
+    def test_insert_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_insert(
+                sa.text("INSERT INTO missing_table (value) VALUES (:value)").bindparams(value=self.SENTINEL),
+                context="insert sensitive audit row",
+            )
+
+        self._assert_safe_message(exc_info.value, operation="execute_insert", context="insert sensitive audit row")
+
+    def test_update_error_message_omits_sqlalchemy_statement_and_bound_values(self, ops: DatabaseOps) -> None:
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            ops.execute_update(
+                sa.text("UPDATE missing_table SET value = :value").bindparams(value=self.SENTINEL),
+                context="update sensitive audit row",
+            )
+
+        self._assert_safe_message(exc_info.value, operation="execute_update", context="update sensitive audit row")
+
 
 class TestExecuteInsert:
     """execute_insert succeeds normally; raises AuditIntegrityError on rowcount==0."""
@@ -165,7 +277,7 @@ class TestExecuteUpdate:
         assert row.value == "after"
 
     def test_update_nonexistent_raises(self, ops: DatabaseOps, test_table: sa.Table) -> None:
-        with pytest.raises(AuditIntegrityError, match="zero rows affected"):
+        with pytest.raises(LandscapeRecordNotFoundError, match="zero rows affected"):
             ops.execute_update(
                 test_table.update().where(test_table.c.id == "nonexistent").values(value="new"),
             )

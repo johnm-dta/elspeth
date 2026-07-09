@@ -8,6 +8,23 @@
       "command": "/home/john/elspeth/.venv/bin/elspeth-composer",
       "type": "stdio"
     },
+    "elspeth-judge": {
+      "args": [
+        "-m",
+        "elspeth_lints.mcp",
+        "--root",
+        "src/elspeth",
+        "--allowlist-dir",
+        "config/cicd/enforce_tier_model",
+        "--staged-dir",
+        ".elspeth/staged-reviews"
+      ],
+      "command": "/home/john/elspeth/.venv/bin/python",
+      "env": {
+        "PYTHONPATH": "/home/john/elspeth/elspeth-lints/src"
+      },
+      "type": "stdio"
+    },
     "elspeth-landscape": {
       "args": [
         "--database",
@@ -19,6 +36,16 @@
     "filigree": {
       "args": [],
       "command": "/home/john/.local/bin/filigree-mcp",
+      "type": "stdio"
+    },
+    "legis": {
+      "args": [
+        "mcp",
+        "--agent-id",
+        "claude-code"
+      ],
+      "command": "/home/john/.local/bin/legis",
+      "env": {},
       "type": "stdio"
     },
     "loomweave": {

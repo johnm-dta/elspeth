@@ -11,7 +11,7 @@ anchoring frames are pinned against the SAME MockClock schedule:
   coalesce ``first_arrival`` anchor to the clamped wall→monotonic transform
   of T_b (the durable ``barrier_blocked_at``), NOT to adoption time.
 * **Frame B (takeover restore path):** the seat is usurped mid-window and a
-  new leader restores via ``_restore_barriers_from_journal``; the restored
+  new leader restores via ``BarrierRecoveryCoordinator.restore_from_journal``; the restored
   anchor is the SAME transform of the SAME durable stamp.
 
 In both frames the trigger must NOT fire at T_b+timeout-ε and MUST fire at
@@ -105,6 +105,7 @@ def _real_coalesce_executor(factory: Any, clock: MockClock, *, policy: str = "be
         step_resolver=lambda node_id: 2,
         clock=clock,
         data_flow=factory.data_flow,
+        barrier_restore_reads=factory.barrier_restore,
     )
     executor.register_coalesce(
         CoalesceSettings(

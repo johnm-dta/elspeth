@@ -1,8 +1,8 @@
 # tests/unit/engine/test_coalesce_pipeline_row.py
 """Tests for CoalesceExecutor with PipelineRow support (Task 6)."""
 
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -13,6 +13,85 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.config import CoalesceSettings
 from elspeth.testing import make_field, make_row
 from tests.unit.engine.conftest import MockCoalesceExecutor
+
+
+class _CallRecord:
+    def __init__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _CallRecorder:
+    def __init__(self, return_value: Any = None, side_effect: Any = None) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self.call_args: _CallRecord | None = None
+        self.call_args_list: list[_CallRecord] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        record = _CallRecord(args, kwargs)
+        self.call_args = record
+        self.call_args_list.append(record)
+        if self.side_effect is not None:
+            if isinstance(self.side_effect, BaseException):
+                raise self.side_effect
+            return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self.call_args_list)
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1
+
+
+class _RecorderDouble:
+    def __init__(self) -> None:
+        self.create_row = _CallRecorder(SimpleNamespace(row_id="row_001"))
+        self.create_token = _CallRecorder(SimpleNamespace(token_id="token_001"))
+        self.coalesce_tokens = _CallRecorder(SimpleNamespace(token_id="merged_001", join_group_id="join_001"))
+        self.has_completed_row_for_node = _CallRecorder(False)
+        self.get_completed_row_ids_for_nodes = _CallRecorder([])
+        self.begin_node_state = _CallRecorder(SimpleNamespace(state_id="state_001"))
+        self.complete_node_state = _CallRecorder()
+
+
+class _DataFlowDouble:
+    def __init__(self) -> None:
+        self.record_token_outcome = _CallRecorder()
+
+
+class _SpanFactorySentinel:
+    pass
+
+
+class _TokenManagerDouble:
+    def __init__(self) -> None:
+        self.coalesce_tokens = _CallRecorder(side_effect=_coalesce_tokens_impl)
+
+
+class _BadPipelineRow:
+    contract = None
+
+    def to_dict(self) -> dict[str, int]:
+        return {"amount": 100}
+
+
+def _coalesce_tokens_impl(parents: list[TokenInfo], merged_data: PipelineRow, node_id: NodeID, run_id: str) -> TokenInfo:
+    return TokenInfo(
+        row_id=parents[0].row_id,
+        token_id="merged_001",
+        row_data=merged_data,
+        join_group_id="join_001",
+    )
+
+
+def _restore_reads_from_execution_double(execution: _RecorderDouble) -> SimpleNamespace:
+    return SimpleNamespace(
+        get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+        has_completed_row_for_node=execution.has_completed_row_for_node,
+    )
 
 
 def _make_contract(fields: list[Any] | None = None) -> SchemaContract:
@@ -30,39 +109,19 @@ def _make_contract(fields: list[Any] | None = None) -> SchemaContract:
     return SchemaContract(fields=tuple(fields), mode="OBSERVED", locked=True)
 
 
-def _make_mock_recorder() -> MagicMock:
-    """Create a mock ExecutionRepository."""
-    recorder = MagicMock()
-    recorder.create_row.return_value = Mock(row_id="row_001")
-    recorder.create_token.return_value = Mock(token_id="token_001")
-    recorder.coalesce_tokens.return_value = Mock(
-        token_id="merged_001",
-        join_group_id="join_001",
-    )
-    # Mock begin_node_state to return state with state_id
-    recorder.begin_node_state.return_value = Mock(state_id="state_001")
-    return recorder
+def _make_recorder() -> _RecorderDouble:
+    """Create an ExecutionRepository double."""
+    return _RecorderDouble()
 
 
-def _make_mock_span_factory() -> MagicMock:
-    """Create a mock SpanFactory."""
-    return MagicMock()
+def _make_span_factory() -> _SpanFactorySentinel:
+    """Create a SpanFactory placeholder."""
+    return _SpanFactorySentinel()
 
 
-def _make_mock_token_manager(recorder: MagicMock) -> MagicMock:
-    """Create a mock TokenManager."""
-    token_manager = MagicMock()
-
-    def coalesce_tokens_impl(parents, merged_data, node_id, run_id):
-        return TokenInfo(
-            row_id=parents[0].row_id,
-            token_id="merged_001",
-            row_data=merged_data,
-            join_group_id="join_001",
-        )
-
-    token_manager.coalesce_tokens.side_effect = coalesce_tokens_impl
-    return token_manager
+def _make_token_manager() -> _TokenManagerDouble:
+    """Create a TokenManager double."""
+    return _TokenManagerDouble()
 
 
 class TestCoalesceExecutorPipelineRow:
@@ -108,10 +167,10 @@ class TestCoalesceExecutorPipelineRow:
             ]
         )
 
-        execution = _make_mock_recorder()
-        data_flow = MagicMock()
-        span_factory = _make_mock_span_factory()
-        token_manager = _make_mock_token_manager(execution)
+        execution = _make_recorder()
+        data_flow = _DataFlowDouble()
+        span_factory = _make_span_factory()
+        token_manager = _make_token_manager()
 
         executor = MockCoalesceExecutor(
             execution=execution,
@@ -120,6 +179,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         # Register coalesce point
@@ -175,10 +235,10 @@ class TestCoalesceExecutorPipelineRow:
         A token with None contract is a bug in upstream code.
         """
         contract = _make_contract()
-        execution = _make_mock_recorder()
-        data_flow = MagicMock()
-        span_factory = _make_mock_span_factory()
-        token_manager = _make_mock_token_manager(execution)
+        execution = _make_recorder()
+        data_flow = _DataFlowDouble()
+        span_factory = _make_span_factory()
+        token_manager = _make_token_manager()
 
         executor = MockCoalesceExecutor(
             execution=execution,
@@ -187,6 +247,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         settings = CoalesceSettings(
@@ -206,16 +267,10 @@ class TestCoalesceExecutorPipelineRow:
             fork_group_id="fork_001",
         )
 
-        # Create row_data without contract - simulate bug
-        # PipelineRow requires contract, so we use a mock to simulate the bug
-        bad_row_data = MagicMock(spec=PipelineRow)
-        bad_row_data.contract = None  # Bug: no contract
-        bad_row_data.to_dict.return_value = {"amount": 100}
-
         token_b = TokenInfo(
             row_id="row_001",
             token_id="token_b",
-            row_data=bad_row_data,
+            row_data=_BadPipelineRow(),
             branch_name="branch_b",
             fork_group_id="fork_001",
         )
@@ -259,10 +314,10 @@ class TestCoalesceExecutorPipelineRow:
             ]
         )
 
-        execution = _make_mock_recorder()
-        data_flow = MagicMock()
-        span_factory = _make_mock_span_factory()
-        token_manager = _make_mock_token_manager(execution)
+        execution = _make_recorder()
+        data_flow = _DataFlowDouble()
+        span_factory = _make_span_factory()
+        token_manager = _make_token_manager()
 
         executor = MockCoalesceExecutor(
             execution=execution,
@@ -271,6 +326,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         settings = CoalesceSettings(
@@ -316,10 +372,10 @@ class TestCoalesceExecutorPipelineRow:
         allows merge as soon as any single branch arrives.
         """
         contract = _make_contract()
-        execution = _make_mock_recorder()
-        data_flow = MagicMock()
-        span_factory = _make_mock_span_factory()
-        token_manager = _make_mock_token_manager(execution)
+        execution = _make_recorder()
+        data_flow = _DataFlowDouble()
+        span_factory = _make_span_factory()
+        token_manager = _make_token_manager()
 
         executor = MockCoalesceExecutor(
             execution=execution,
@@ -328,6 +384,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         # Two branches with "first" policy - merge on first arrival
@@ -360,10 +417,10 @@ class TestCoalesceExecutorPipelineRow:
     def test_coalesce_preserves_row_data_correctly(self) -> None:
         """Coalesce should preserve row data according to merge strategy."""
         contract = _make_contract()
-        execution = _make_mock_recorder()
-        data_flow = MagicMock()
-        span_factory = _make_mock_span_factory()
-        token_manager = _make_mock_token_manager(execution)
+        execution = _make_recorder()
+        data_flow = _DataFlowDouble()
+        span_factory = _make_span_factory()
+        token_manager = _make_token_manager()
 
         executor = MockCoalesceExecutor(
             execution=execution,
@@ -372,6 +429,7 @@ class TestCoalesceExecutorPipelineRow:
             run_id="run_001",
             step_resolver=lambda node_id: 3,
             data_flow=data_flow,
+            barrier_restore_reads=_restore_reads_from_execution_double(execution),
         )
 
         settings = CoalesceSettings(

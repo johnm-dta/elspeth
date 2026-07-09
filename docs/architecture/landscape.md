@@ -1,6 +1,6 @@
 # Landscape System Architecture
 
-Current as of 2026-05-24.
+Current as of 2026-07-08 for the 0.7.0 release line.
 
 Landscape is ELSPETH's audit database and lineage read model. It records run
 configuration, source rows, DAG nodes and edges, token lineage, node execution
@@ -13,15 +13,15 @@ Landscape subsystem.
 
 ## Current Inventory
 
-Measured from this checkout on 2026-05-24:
+Measured from this checkout on 2026-07-08:
 
 | Metric | Value |
 |--------|-------|
-| Python files in `src/elspeth/core/landscape/` | 20 |
-| Python lines in `src/elspeth/core/landscape/` | 10,287 |
-| SQLAlchemy Core tables | 24 |
+| Python files in `src/elspeth/core/landscape/` | 53 |
+| Python lines in `src/elspeth/core/landscape/` | 22,078 |
+| SQLAlchemy Core tables | 29 |
 | MCP Landscape analysis tools | 27 |
-| Schema epoch | 14 |
+| Schema epoch | 22 |
 
 The inventory above is intentionally date-stamped. Re-run these checks before
 using the numbers in release material:
@@ -67,6 +67,10 @@ Important consequences:
   Mismatched `expected_lease_owner` on a state-changing call raises
   `AuditIntegrityError`; scheduler row tampering is a crash-on-anomaly
   scenario, not a recoverable one.
+- Routing events are run-scoped as of schema epoch 22. `routing_events.run_id`
+  participates in composite foreign keys to `node_states(state_id, run_id)` and
+  `edges(edge_id, run_id)`, so a stored gate decision cannot accidentally bind
+  to a state or edge from another run.
 
 ## Module Layout
 
@@ -95,7 +99,7 @@ that refer to that file are historical snapshots.
 
 ## Table Groups
 
-The current schema defines 24 tables:
+The current schema defines 29 tables:
 
 | Group | Tables |
 |-------|--------|
@@ -103,11 +107,12 @@ The current schema defines 24 tables:
 | Multi-source ingestion (ADR-025) | `run_sources` |
 | Static graph | `nodes`, `edges` |
 | Data flow | `rows`, `tokens`, `token_parents`, `token_outcomes` |
-| Durable scheduler (ADR-026) | `token_work_items` |
+| Durable scheduler (ADR-026) | `token_work_items`, `scheduler_events` |
+| Run coordination (ADR-030) | `run_coordination`, `run_coordination_events`, `run_workers` |
 | Execution | `node_states`, `operations`, `calls`, `routing_events` |
 | Batching | `batches`, `batch_members`, `batch_outputs` |
 | Errors | `validation_errors`, `transform_errors` |
-| Recovery and outputs | `checkpoints`, `artifacts` |
+| Recovery and outputs | `checkpoints`, `artifacts`, `coalesce_branch_losses` |
 
 ### Multi-source ingestion (ADR-025)
 
@@ -245,7 +250,8 @@ interfaces rather than raw SQL:
 - Rows, tokens, token outcomes, and errors: `DataFlowRepository`.
 - Node states, routing, calls, operations, batches, and artifacts:
   `ExecutionRepository`.
-- Plugin-facing audit writes: `_PluginAuditWriterAdapter` in `factory.py`.
+- Plugin-facing audit writes: `PluginAuditWriterAdapter` in `plugin_audit_writer.py`,
+  constructed by `RecorderFactory.plugin_audit_writer()`.
 
 Direct SQL belongs in schema migrations, diagnostics, or read-only operator
 investigation where a maintained read API is not enough.

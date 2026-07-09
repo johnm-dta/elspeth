@@ -1,6 +1,6 @@
 # Environment Variables Reference
 
-Complete reference for ELSPETH environment variables and .env configuration.
+Reference for ELSPETH environment variables and `.env` configuration.
 
 ---
 
@@ -65,13 +65,38 @@ Used to HMAC-sign exported audit records for integrity verification. Only requir
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `ELSPETH_ALLOW_RAW_SECRETS` | Skip fingerprinting (development only) | `false` |
-| `DATABASE_URL` | Audit database connection | `sqlite:///./runs/audit.db` |
+| `ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS` | Pin `secrets.vault_url` to exact vaults | unset (approved-suffix check only) |
+| `DATABASE_URL` | CLI/MCP audit database connection | `sqlite:///./data/audit.db` |
+| `ELSPETH_WEB__REGISTRATION_MODE` | Local-auth registration mode: `open`, `email_verified`, or `closed` | `open` |
+| `ELSPETH_WEB__PUBLIC_BASE_URL` | Public origin used to generate email-verification links on non-local hosts | unset |
 
 ### ELSPETH_ALLOW_RAW_SECRETS
 
 **Development only.** When set to `true`, allows running pipelines without `ELSPETH_FINGERPRINT_KEY` even when configs contain secrets. Secrets will be stored in plain text in the audit trail.
 
 **Never use in production.** This is intended only for local development and testing.
+
+### ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS
+
+**Deployment-owned Key Vault allowlist.** A comma- or whitespace-separated list of exact Key Vault URLs. When set, a `secrets.vault_url` that is not an exact match is refused before any Key Vault call — closing the residual risk that a settings file points ELSPETH's Azure credentials at a real but foreign vault (e.g. one in another tenant).
+
+Set this at the deployment/host level, **never** in pipeline YAML. When unset, `vault_url` is still restricted to approved Azure Key Vault host suffixes (`.vault.azure.net` and its sovereign-cloud variants). See the [Key Vault runbook](../runbooks/configure-keyvault-secrets.md) for details.
+
+```bash
+export ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS="https://elspeth-prod-vault.vault.azure.net"
+```
+
+### ELSPETH_WEB__REGISTRATION_MODE
+
+Controls local Composer registration. `open` creates active local users
+immediately, `email_verified` creates pending users and writes one-use
+verification links to `data/email-verifications.jsonl`, and `closed` disables
+self-registration.
+
+Non-local `email_verified` deployments must also set
+`ELSPETH_WEB__PUBLIC_BASE_URL` to a public origin, for example
+`https://elspeth.example.gov.au`. The value must be an origin only: no path,
+query, or fragment.
 
 ---
 
@@ -117,6 +142,17 @@ Used by the `azure_content_safety` transform plugin.
 | `AZURE_PROMPT_SHIELD_ENDPOINT` | Prompt Shield resource endpoint URL |
 
 Used by the `azure_prompt_shield` transform plugin.
+
+### Azure Document Intelligence
+
+| Variable | Purpose |
+|----------|---------|
+| `AZURE_DOCUMENT_INTELLIGENCE_KEY` | API key for Azure AI Document Intelligence |
+
+Used by the `azure_document_intelligence` transform plugin when the plugin
+option references `${AZURE_DOCUMENT_INTELLIGENCE_KEY}`. Configure the Document
+Intelligence endpoint in the transform's `options.endpoint`; there is no
+implicit endpoint environment variable.
 
 ### Azure Blob Storage
 
@@ -215,12 +251,25 @@ AZURE_CONTENT_SAFETY_ENDPOINT=https://your-resource.cognitiveservices.azure.com
 AZURE_PROMPT_SHIELD_KEY=your-prompt-shield-key
 AZURE_PROMPT_SHIELD_ENDPOINT=https://your-resource.cognitiveservices.azure.com
 
+# Azure Document Intelligence (for azure_document_intelligence transform)
+AZURE_DOCUMENT_INTELLIGENCE_KEY=your-document-intelligence-key
+
 # =====================================================================
 # Azure Storage
 # =====================================================================
 
 # Azure Blob Storage (for azure_blob source/sink)
 AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...
+
+# =====================================================================
+# Web Composer Local Registration
+# =====================================================================
+
+# Set to closed for managed deployments, or email_verified when an operator or
+# mailer will deliver links from data/email-verifications.jsonl.
+ELSPETH_WEB__REGISTRATION_MODE=closed
+# Required for non-local email_verified deployments.
+# ELSPETH_WEB__PUBLIC_BASE_URL=https://elspeth.example.gov.au
 
 # =====================================================================
 # Telemetry (secrets only)
@@ -301,9 +350,10 @@ When running ELSPETH in containers, pass environment variables directly:
 docker run --rm \
   -e ELSPETH_FINGERPRINT_KEY="${ELSPETH_FINGERPRINT_KEY}" \
   -e OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
-  -e DATABASE_URL="sqlite:////app/state/landscape.db" \
+  -e DATABASE_URL="sqlite:////app/data/audit.db" \
+  -v elspeth-data:/app/data \
   -v $(pwd)/config:/app/config:ro \
-  ghcr.io/johnm-dta/elspeth:v0.5.2 \
+  ghcr.io/johnm-dta/elspeth:v0.7.0 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -316,7 +366,9 @@ services:
     environment:
       - ELSPETH_FINGERPRINT_KEY=${ELSPETH_FINGERPRINT_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/state/landscape.db}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/data/audit.db}
+    volumes:
+      - elspeth-data:/app/data
 ```
 
 See the [Docker Deployment Guide](../guides/docker.md) for complete container usage instructions.

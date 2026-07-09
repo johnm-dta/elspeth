@@ -1,24 +1,8 @@
-// E2E spec: guided-mode wizard recipe-match happy path.
-//
-// Targets the demo SLA defined in §10.3 of the implementation plan
-// (2026-05-11-composer-guided-mode.md):
-//   ≤9 user clicks to reach CompletionSummary via the recipe-match path.
-//   <30s wall-clock (recipe match is deterministic — zero LLM calls).
-//
-// ── Gap 6 RESOLVED in this dispatch (Task 10.0) ──────────────────────────────
-//
-// RecipeOfferPayload now carries `unsatisfied_slots` — the schema for each
-// required slot the resolver could not pre-fill (slot_type, description,
-// required).  RecipeOfferTurn renders an inline editable form for these
-// entries; the Apply button is disabled until every required slot has a
-// non-empty value, and the typed values are merged into edited_values.slots
-// before submission.  Filling those inputs is typing, not clicks — the SLA
-// click budget is unchanged.
-//
-// For prior gap history (Gap 1 startGuided wiring, Gap 2 S2 path allowlist,
-// Gap 3 on_validation_failure, Gap 4 collision_policy, Gap 5 blob_ref
-// resolver) see git log on this file plus elspeth-obs-d3d0d7fa70 /
-// elspeth-obs-a8a9bc010a / elspeth-obs-f626607b13.
+// E2E spec: guided-mode wizard source/output walk against the live local
+// backend. The local Playwright backend intentionally has no LLM provider, so
+// this stops at the transform step before any provider-dependent guided chat.
+// Wire-stage behavior is covered by tutorial.spec.ts with a deterministic
+// guided protocol fixture.
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,8 +20,9 @@ import { ComposerPage } from "./page-objects/composer-page";
 
 const BLOB_FILENAME = "playwright-orders.csv";
 
-// Minimal CSV content: header + one data row.
-const SAMPLE_CSV = "id,name,value\n1,widget,42\n";
+// Minimal CSV content: header + one data row. The "category" column lets us
+// satisfy the classify recipe's classifier-keyword required-field predicate.
+const SAMPLE_CSV = "id,name,category\n1,widget,a\n";
 
 // Frontend root: playwright.config.ts passes an absolute .e2e-data path
 // anchored to the frontend directory, and the backend stores uploaded blobs
@@ -57,7 +42,7 @@ function blobStoragePath(sessionId: string, blobId: string): string {
 }
 
 // Sink output path — must be under data_dir/outputs/ (paths.py:44).
-const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.json");
+const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.jsonl");
 
 async function isolateAuditReadinessSideRail(
   page: Page,
@@ -145,16 +130,12 @@ async function isolateAuditReadinessSideRail(
   });
 }
 
-test.describe("composer-guided — recipe-match happy path", () => {
+test.describe("composer-guided — source/output live walk", () => {
   test(
-    "guided demo path: CSV → classify-rows-llm-jsonl (≤9 clicks, <30s)",
+    "guided demo: CSV source → JSONL output → transform chat step",
     async ({ page }) => {
-      const start = Date.now();
-      let clicks = 0;
-
       // ── Out-of-band setup ──────────────────────────────────────────────────
       // Create session + upload CSV blob via REST before navigating the SPA.
-      // These REST calls are NOT counted as user clicks.
       const storageState = await page.context().storageState();
       const token = tokenFromStorageState(storageState);
       const ctx = await authedContext(token);
@@ -165,126 +146,80 @@ test.describe("composer-guided — recipe-match happy path", () => {
         sessionId = session.id;
         await isolateAuditReadinessSideRail(page, sessionId);
 
-        // Upload the seed CSV. We keep blob.id to construct the storage path
-        // used in the source SchemaForm (Gap 2: S2 path allowlist).
         const blob = await uploadBlob(ctx, sessionId, BLOB_FILENAME, SAMPLE_CSV);
 
-        // ── Navigate to the session ──────────────────────────────────────────
-        // The default-freeform contract renders the chat composer after
-        // selectSession(); enter guided mode explicitly so this test is not
-        // affected by account-level default-mode preference changes in other
-        // Playwright specs.
+        // ── Navigate + enter guided mode ─────────────────────────────────────
+        // "Switch to guided" resolves to the live/empty profile
+        // (advisor_checkpoints=false) via GET /guided — the D13 opt-out path.
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();
         await page.getByRole("button", { name: "Switch to guided" }).click();
-        clicks++;
         await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
         // ── Step 1 source: SINGLE_SELECT — pick "csv" ──────────────────────
-        // Chip label = plugin.name verbatim (emitters.py:127).
         await expect(
-          page.getByRole("button", { name: "csv", exact: true }),
+          page.getByRole("button", { name: "CSV", exact: true }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "csv", exact: true }).click();
-        clicks++;
+        await page.getByRole("button", { name: "CSV", exact: true }).click();
 
-        // ── Step 1 source: SCHEMA_FORM — fill required fields, Continue ──
-        // CSV source has THREE required fields (config_base.py):
-        //   schema:                json-fallback (prefilled {"mode":"observed"})
-        //   path:                  text, no default (PathConfig:319)
-        //   on_validation_failure: text, no default (SourceDataConfig:358-361) [Gap 3]
-        //
-        // Path must be under data_dir/blobs/ (S2, tools.py:2086-2108) [Gap 2].
-        // We construct the blob storage path from session_id + blob.id.
+        // ── Step 1 source: SCHEMA_FORM — schema, path, on_validation_failure
         const sourcePath = blobStoragePath(sessionId, blob.id);
-        await expect(page.getByLabel(/^schema$/i)).toBeVisible();
-        await page.getByLabel(/^schema$/i).fill('{"mode":"observed"}');
-        await expect(page.getByLabel(/^path$/i)).toBeVisible();
-        await page.getByLabel(/^path$/i).fill(sourcePath);
-        await expect(page.getByLabel(/on\s+validation\s+failure/i)).toBeVisible();
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await expect(page.getByLabel(/^schema/i)).toBeVisible();
+        await page.getByLabel(/^schema/i).fill('{"mode":"observed"}');
+        await page.getByLabel(/^path/i).fill(sourcePath);
         await page.getByLabel(/on\s+validation\s+failure/i).fill("discard");
-
         await expect(
           page.getByRole("button", { name: "Continue", exact: true }),
         ).toBeEnabled();
         await page.getByRole("button", { name: "Continue", exact: true }).click();
-        clicks++;
 
         // ── Step 2 sink: SINGLE_SELECT — pick "json" ───────────────────────
-        // _classify_predicate requires sink.outputs[0].plugin == "json"
-        // (recipe_match.py:88-89); "jsonl" would fail the recipe match.
         await expect(
-          page.getByRole("button", { name: "json", exact: true }),
+          page.getByRole("button", { name: "JSON", exact: true }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "json", exact: true }).click();
-        clicks++;
+        await page.getByRole("button", { name: "JSON", exact: true }).click();
 
-        // ── Step 2 sink: SCHEMA_FORM — fill path + collision_policy, Continue
-        // JSON sink: REQUIRED path, OPTIONAL collision_policy.
-        // collision_policy is REQUIRED in composer mode [Gap 4].
-        await expect(page.getByLabel(/^schema$/i)).toBeVisible();
-        await page.getByLabel(/^schema$/i).fill('{"mode":"observed"}');
-        await expect(page.getByLabel(/^path$/i)).toBeVisible();
-        await page.getByLabel(/^path$/i).fill(SINK_OUTPUT_PATH);
+        // ── Step 2 sink: SCHEMA_FORM — path + collision_policy + format + mode
+        // The file sink requires `mode` set explicitly (write|append).
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await expect(page.getByLabel(/^schema/i)).toBeVisible();
+        await page.getByLabel(/^schema/i).fill('{"mode":"observed"}');
+        await page.getByLabel(/^path/i).fill(SINK_OUTPUT_PATH);
         await page.getByLabel(/collision.?policy/i).selectOption("auto_increment");
-        await page.getByLabel(/^format$/i).selectOption("json");
+        await page.getByLabel(/^format$/i).selectOption("jsonl");
+        await page.getByLabel(/^mode$/i).selectOption("write");
         await expect(
           page.getByRole("button", { name: "Continue", exact: true }),
         ).toBeEnabled();
         await page.getByRole("button", { name: "Continue", exact: true }).click();
-        clicks++;
 
         // ── Step 2 required fields: MULTI_SELECT_WITH_CUSTOM ──────────────
-        // Add "category" as a custom required field — satisfies
-        // _classify_predicate (recipe_match.py:100, _CLASSIFY_KEYWORDS).
-        const customInput = page.getByLabel("Custom field", { exact: true });
-        await expect(customInput).toBeVisible();
-        await customInput.fill("category");
-        await expect(
-          page.getByRole("button", { name: "Add", exact: true }),
-        ).toBeEnabled();
-        await page.getByRole("button", { name: "Add", exact: true }).click();
-        clicks++;
+        // "category" is already selected by default — enough to satisfy
+        // _classify_predicate (recipe_match.py).
         await expect(page.getByText("category")).toBeVisible();
         await page.getByRole("button", { name: "Continue", exact: true }).click();
-        clicks++;
 
-        // ── Step 2.5 RECIPE_OFFER — fill unsatisfied slots, Apply recipe ──
-        // The classify-rows-llm-jsonl recipe declares three required slots
-        // that the resolver cannot pre-fill: classifier_template, model,
-        // api_key_secret.  RecipeOfferTurn (Task 10.0 / Gap 6) renders an
-        // inline editable form for these; Apply is disabled until every
-        // required value is filled.  Typing into inputs is NOT counted as
-        // clicks in the SLA budget.
+        // ── Step 3 transform chat: no provider call yet, controls visible ──
         await expect(
-          page.getByRole("button", { name: "Apply recipe", exact: true }),
+          page.getByRole("heading", {
+            name: "Review the transform chain that turns source data into the output.",
+          }),
         ).toBeVisible();
-        await expect(page.getByLabel(/classifier_template/i)).toBeVisible();
-        await page
-          .getByLabel(/classifier_template/i)
-          .fill("Classify {{ row['name'] }} as widget or gadget.");
-        await page.getByLabel(/^model\b/i).fill("anthropic/claude-sonnet-4.6");
-        // api_key_secret carries the NAME of an inventory secret_ref, not a
-        // raw credential.  The input is type="text" (not password) by design.
-        await page.getByLabel(/api_key_secret/i).fill("openrouter-api-key");
+        await expect(page.getByRole("textbox", { name: "Message input" })).toBeEnabled();
         await expect(
-          page.getByRole("button", { name: "Apply recipe", exact: true }),
-        ).toBeEnabled();
-        await page.getByRole("button", { name: "Apply recipe", exact: true }).click();
-        clicks++;
-
-        // ── CompletionSummary terminal ─────────────────────────────────────
-        await expect(
-          page.getByRole("button", { name: "Open freeform editor", exact: true }),
+          page.getByRole("button", { name: "Exit to freeform", exact: true }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "Open freeform editor", exact: true }).click();
-        clicks++;
-
-        // ── Demo SLA assertions ────────────────────────────────────────────
-        // ≤9 clicks (9 in this revised path due to Gap 4 adding Show advanced).
-        expect(clicks).toBeLessThanOrEqual(9);
-        expect(Date.now() - start).toBeLessThan(30_000);
+        await expect(
+          page.getByText("This pipeline will read your CSV and write a JSON file."),
+        ).toBeVisible();
+        await expect(
+          page.getByText("Required fields: id, name, category"),
+        ).toBeVisible();
+        await expect(
+          page.getByText(/Source commit failed|Chat panel encountered an error/i),
+        ).toHaveCount(0);
       } finally {
         if (sessionId !== undefined) {
           await deleteSession(ctx, sessionId);

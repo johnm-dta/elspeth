@@ -15,9 +15,9 @@ UUIDs that wouldn't match stored checkpoints, breaking the resume flow.
 """
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -49,6 +49,7 @@ from elspeth.plugins.transforms.passthrough import PassThrough
 from elspeth.testing import make_contract, make_row
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.landscape import insert_crashed_leader_seat, make_factory
+from tests.helpers.checkpoint import create_checkpoint
 
 
 def _null_source(on_success: str = "default") -> NullSource:
@@ -64,9 +65,23 @@ def _runtime_val_manifest_json() -> str:
     return canonical_json(build_runtime_val_manifest())
 
 
+def _finalize_manual_graph(graph: ExecutionGraph, *, pipeline_nodes: list[NodeID] | None = None) -> None:
+    """Populate traversal metadata that production graph construction derives."""
+    graph.set_pipeline_nodes(list(pipeline_nodes or ()))
+    graph.set_node_step_map(graph.build_step_map())
+
+
 def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
     """Build a FIXED SchemaContract; return (audit_record_json, version_hash)."""
     from elspeth.contracts.contract_records import ContractAuditRecord
+
+    contract = _make_fixed_schema_contract(fields)
+    audit_record = ContractAuditRecord.from_contract(contract)
+    return audit_record.to_json(), contract.version_hash()
+
+
+def _make_fixed_schema_contract(fields: list[tuple[str, type]]) -> Any:
+    """Build a real FIXED SchemaContract object for direct resume-loop tests."""
     from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
     field_contracts = tuple(
@@ -79,9 +94,7 @@ def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
         )
         for name, py_type in fields
     )
-    contract = SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
-    audit_record = ContractAuditRecord.from_contract(contract)
-    return audit_record.to_json(), contract.version_hash()
+    return SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
 
 
 def _build_two_source_failed_run(
@@ -137,6 +150,7 @@ def _build_two_source_failed_run(
     graph.add_edge("source-refunds", "sink", label="continue")
     graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
     graph.set_transform_id_map({})
+    _finalize_manual_graph(graph)
 
     with db.engine.begin() as conn:
         conn.execute(
@@ -233,7 +247,8 @@ def _build_two_source_failed_run(
             )
         )
 
-    checkpoint_mgr.create_checkpoint(
+    create_checkpoint(
+        checkpoint_mgr,
         run_id=run_id,
         sequence_number=1,
         barrier_scalars=None,
@@ -257,6 +272,47 @@ def _two_source_resume_pipeline(tmp_path: Any, name: str) -> tuple[PipelineConfi
         sinks={"default": inject_write_failure(sink)},
     )
     return config, output_path
+
+
+@dataclass(frozen=True, slots=True)
+class _PipelinePluginFake:
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _UnusedResumeDependencyFake:
+    name: str
+
+
+@dataclass(slots=True)
+class _ResumeLoopContextFake:
+    contract: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumeLoopProcessorFake:
+    run_id: str
+
+    def has_scheduled_work(self) -> bool:
+        return False
+
+    def process_existing_row(
+        self,
+        *,
+        row_id: str,
+        row_data: Any,
+        transforms: Any,
+        ctx: Any,
+        source_node_id: NodeID,
+        source_on_success: str,
+    ) -> list[Any]:
+        assert row_id
+        assert row_data["order_id"] == 1
+        assert ctx.contract is not None
+        assert transforms == ()
+        assert source_node_id == NodeID("source-orders")
+        assert source_on_success == "default"
+        return []
 
 
 class TestResumeComprehensive:
@@ -517,7 +573,8 @@ class TestResumeComprehensive:
             )
 
         # Create checkpoint at row 2
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -548,7 +605,9 @@ class TestResumeComprehensive:
 
         # Build graph manually
         resume_graph = ExecutionGraph()
-        schema_config = {"schema": strict_schema}
+        schema_config = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
@@ -556,6 +615,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -602,7 +662,8 @@ class TestResumeComprehensive:
         output_path = tmp_path / "scheduler_resume_output.csv"
         run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=1, checkpoint_at=0)
 
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -640,7 +701,9 @@ class TestResumeComprehensive:
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
         resume_graph = ExecutionGraph()
-        schema_config = {"schema": strict_schema}
+        schema_config = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
@@ -648,6 +711,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -763,7 +827,8 @@ class TestResumeComprehensive:
             )
 
         # Create checkpoint
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=2,
             barrier_scalars=None,
@@ -793,7 +858,9 @@ class TestResumeComprehensive:
         )
 
         resume_graph = ExecutionGraph()
-        schema_config = {"schema": strict_schema}
+        schema_config = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
@@ -801,6 +868,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -1003,7 +1071,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1039,7 +1108,9 @@ class TestResumeComprehensive:
         )
 
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -1049,6 +1120,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1246,7 +1318,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1272,7 +1345,9 @@ class TestResumeComprehensive:
         )
 
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -1282,6 +1357,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1474,7 +1550,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1511,6 +1588,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1702,7 +1780,8 @@ class TestResumeComprehensive:
         )
 
         # Create checkpoint at row 0 (last completed row)
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1739,6 +1818,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1910,7 +1990,8 @@ class TestResumeComprehensive:
             )
 
         # Create checkpoint
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
@@ -1940,11 +2021,12 @@ class TestResumeComprehensive:
         schema_config = {"schema": {"mode": "observed"}}
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
-        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config=schema_config)
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # CRITICAL: Must crash with clear error, not silently degrade to str
         with pytest.raises(AuditIntegrityError, match=r"unsupported type 'geo-point'"):
@@ -2021,7 +2103,8 @@ class TestResumeComprehensive:
 
         # Create checkpoint at the last row so resume's recovery path is
         # exercised even though no rows remain to process.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=4,
             barrier_scalars=None,
@@ -2061,7 +2144,9 @@ class TestResumeComprehensive:
             },
         )
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -2076,6 +2161,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Pre-write the output file header so any append-mode interaction
         # is consistent (no remaining rows will actually be written; this
@@ -2205,7 +2291,8 @@ class TestResumeComprehensive:
         # Create checkpoint at the last row so resume's recovery path is
         # exercised even though no rows remain to process.  Mirrors the
         # gate-MOVE test setup.
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=4,
             barrier_scalars=None,
@@ -2241,7 +2328,9 @@ class TestResumeComprehensive:
             },
         )
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -2256,6 +2345,7 @@ class TestResumeComprehensive:
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         resume_graph.set_transform_id_map({0: NodeID("xform")})
+        _finalize_manual_graph(resume_graph, pipeline_nodes=[NodeID("xform")])
 
         # Pre-write the output file header so any append-mode interaction
         # is consistent (no remaining rows will be processed; this is the
@@ -2465,29 +2555,31 @@ class TestMultiSourceResumeContractDispatch:
         from elspeth.contracts import ResumedRow
         from elspeth.contracts.errors import OrchestrationInvariantError
         from elspeth.engine.orchestrator.resume import run_resume_processing_loop
-        from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext
+        from elspeth.engine.orchestrator.run_state import LoopContext
+        from elspeth.engine.orchestrator.types import ExecutionCounters
 
-        processor = MagicMock()
-        processor.has_scheduled_work.return_value = False
-        processor.process_existing_row.return_value = []
+        processor = _ResumeLoopProcessorFake(run_id="run-missing-source-contract")
 
         config = PipelineConfig(
-            sources={"orders": MagicMock(), "refunds": MagicMock()},
+            sources={
+                "orders": _PipelinePluginFake("orders-source"),
+                "refunds": _PipelinePluginFake("refunds-source"),
+            },
             transforms=(),
-            sinks={"default": MagicMock()},
+            sinks={"default": _PipelinePluginFake("default-sink")},
         )
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
             pending_tokens={"default": []},
             processor=processor,
-            ctx=MagicMock(),
+            ctx=_ResumeLoopContextFake(),
             config=config,
             agg_transform_lookup={},
             coalesce_executor=None,
             coalesce_node_map={},
         )
 
-        orders_contract = MagicMock(name="orders-contract")
+        orders_contract = _make_fixed_schema_contract([("order_id", int)])
         rows = (
             ResumedRow(
                 row_id="row-orders",
@@ -2511,8 +2603,8 @@ class TestMultiSourceResumeContractDispatch:
                 loop_ctx,
                 rows,
                 incomplete_by_row={},
-                recovery_manager=MagicMock(),
-                payload_store=MagicMock(),
+                recovery_manager=_UnusedResumeDependencyFake("recovery-manager"),
+                payload_store=_UnusedResumeDependencyFake("payload-store"),
                 run_id="run-missing-source-contract",
                 resume_checkpoint_id="checkpoint-missing-source-contract",
                 schema_contracts_by_source={NodeID("source-orders"): orders_contract},
@@ -2565,6 +2657,7 @@ class TestMultiSourceResumeContractDispatch:
         graph.add_edge("source-only", "sink", label="continue")
         graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
         graph.set_transform_id_map({})
+        _finalize_manual_graph(graph)
 
         source_schema_json = json.dumps({"properties": {"id": {"type": "integer"}}, "required": ["id"]})
 
@@ -2652,7 +2745,8 @@ class TestMultiSourceResumeContractDispatch:
                 )
             )
 
-        checkpoint_mgr.create_checkpoint(
+        create_checkpoint(
+            checkpoint_mgr,
             run_id=run_id,
             sequence_number=1,
             barrier_scalars=None,
@@ -2711,7 +2805,7 @@ class TestMultiSourceResumeContractDispatch:
         """
         import dataclasses
 
-        from elspeth.engine.orchestrator.types import ResumeState
+        from elspeth.engine.orchestrator.run_state import ResumeState
 
         field_names = {f.name for f in dataclasses.fields(ResumeState)}
         assert "schema_contract" not in field_names, (

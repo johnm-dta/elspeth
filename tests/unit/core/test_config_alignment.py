@@ -24,6 +24,7 @@ If a test fails after adding a new field to a Settings class:
 3. If the field is internal-only: Add it to internal_fields with explanation
 """
 
+from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
 
@@ -250,7 +251,9 @@ class TestLandscapeSettingsAlignment:
         from elspeth.core.config import LandscapeExportSettings
 
         # These are all accessed in orchestrator export logic
-        expected_fields = {"enabled", "sink", "format", "sign"}
+        # (include_raw_error_rows: read by export_landscape and threaded into
+        # LandscapeExporter — elspeth-384184c6ab).
+        expected_fields = {"enabled", "sink", "format", "sign", "include_raw_error_rows"}
         actual_fields = set(LandscapeExportSettings.model_fields.keys())
 
         assert actual_fields == expected_fields, (
@@ -272,7 +275,6 @@ class TestCheckpointSettingsAlignment:
         "enabled",
         "frequency",
         "checkpoint_interval",
-        "aggregation_boundaries",
     }
 
     def test_field_categorization_complete(self) -> None:
@@ -643,7 +645,7 @@ class TestExplicitFieldMappings:
         settings = RateLimitSettings(
             enabled=True,
             default_requests_per_minute=500,
-            persistence_path="/tmp/limits.db",
+            persistence_path="limits.db",
             services={},
         )
         config = RuntimeRateLimitConfig.from_settings(settings)
@@ -658,7 +660,7 @@ class TestExplicitFieldMappings:
         assert config.default_requests_per_minute == float(settings.default_requests_per_minute), (
             "default_requests_per_minute: direct mapping (int->float)"
         )
-        assert config.persistence_path == settings.persistence_path, "persistence_path: direct mapping"
+        assert config.persistence_path == str((Path("data") / "limits.db").resolve()), "persistence_path: resolved under state dir"
         # RuntimeServiceRateLimit vs ServiceRateLimit: different types compared for value equality
         # to verify settings-to-runtime mapping produces equivalent values.
         assert config.services == dict(settings.services), "services: direct mapping"  # type: ignore[comparison-overlap]
@@ -686,12 +688,10 @@ class TestExplicitFieldMappings:
         settings_every = CheckpointSettings(
             enabled=True,
             frequency="every_row",
-            aggregation_boundaries=True,
         )
         config_every = RuntimeCheckpointConfig.from_settings(settings_every)
         assert config_every.enabled == settings_every.enabled, "enabled: direct mapping"
         assert config_every.frequency == 1, "frequency: 'every_row' -> 1"
-        assert config_every.aggregation_boundaries == settings_every.aggregation_boundaries, "aggregation_boundaries: direct mapping"
         assert config_every.checkpoint_interval is None, "checkpoint_interval: None when not every_n"
 
         # Test "every_n" frequency
@@ -699,7 +699,6 @@ class TestExplicitFieldMappings:
             enabled=True,
             frequency="every_n",
             checkpoint_interval=100,
-            aggregation_boundaries=False,
         )
         config_n = RuntimeCheckpointConfig.from_settings(settings_n)
         assert config_n.frequency == 100, "frequency: 'every_n' -> checkpoint_interval value"
@@ -709,7 +708,6 @@ class TestExplicitFieldMappings:
         settings_agg = CheckpointSettings(
             enabled=False,
             frequency="aggregation_only",
-            aggregation_boundaries=True,
         )
         config_agg = RuntimeCheckpointConfig.from_settings(settings_agg)
         assert config_agg.frequency == 0, "frequency: 'aggregation_only' -> 0"
@@ -882,7 +880,14 @@ class TestPropertyBasedRoundtrip:
         @given(
             enabled=st.booleans(),
             rpm=st.integers(min_value=1, max_value=100000),
-            path=st.one_of(st.none(), st.text(min_size=1, max_size=50).filter(lambda s: "/" not in s or s.startswith("/"))),
+            path=st.one_of(
+                st.none(),
+                st.text(
+                    alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="_.-"),
+                    min_size=1,
+                    max_size=50,
+                ).filter(lambda s: s not in {".", ".."} and not s.lower().startswith("file")),
+            ),
         )
         @settings(max_examples=100)
         def check_roundtrip(
@@ -899,7 +904,8 @@ class TestPropertyBasedRoundtrip:
 
             assert config.enabled == enabled
             assert config.default_requests_per_minute == rpm
-            assert config.persistence_path == path
+            expected_path = None if path is None else str((Path("data") / path).resolve())
+            assert config.persistence_path == expected_path
 
         check_roundtrip()
 
@@ -932,14 +938,12 @@ class TestPropertyBasedRoundtrip:
             enabled=st.booleans(),
             frequency=st.sampled_from(["every_row", "every_n", "aggregation_only"]),
             interval=st.integers(min_value=1, max_value=10000),
-            agg_boundaries=st.booleans(),
         )
         @settings(max_examples=100)
         def check_roundtrip(
             enabled: bool,
             frequency: str,
             interval: int,
-            agg_boundaries: bool,
         ) -> None:
             # Build settings based on frequency type
             if frequency == "every_n":
@@ -947,19 +951,16 @@ class TestPropertyBasedRoundtrip:
                     enabled=enabled,
                     frequency=frequency,
                     checkpoint_interval=interval,
-                    aggregation_boundaries=agg_boundaries,
                 )
             else:
                 settings_obj = CheckpointSettings(
                     enabled=enabled,
                     frequency=frequency,
-                    aggregation_boundaries=agg_boundaries,
                 )
 
             config = RuntimeCheckpointConfig.from_settings(settings_obj)
 
             assert config.enabled == enabled
-            assert config.aggregation_boundaries == agg_boundaries
 
             # Verify frequency transformation
             if frequency == "every_row":

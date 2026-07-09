@@ -23,8 +23,8 @@ from typing import Any
 def shutdown_handler_context() -> Iterator[threading.Event]:
     """Install SIGINT/SIGTERM handlers that set a shutdown event.
 
-    On first signal: sets the event, restores default SIGINT handler
-    (so second Ctrl-C force-kills via KeyboardInterrupt).
+    On first signal: sets the event, restores default SIGINT/SIGTERM handlers
+    (so a second signal force-kills instead of re-entering graceful handling).
 
     When called from a non-main thread (e.g., programmatic/embedded usage),
     signal registration is skipped — Python raises ValueError if
@@ -48,8 +48,10 @@ def shutdown_handler_context() -> Iterator[threading.Event]:
 
     def _handler(signum: int, frame: Any) -> None:
         shutdown_event.set()
-        # Restore default SIGINT so second Ctrl-C force-kills
+        # Restore explicit second-signal policies so repeated SIGINT/SIGTERM
+        # escalates instead of re-entering graceful handling while draining.
         signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)

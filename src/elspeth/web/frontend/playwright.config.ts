@@ -51,6 +51,7 @@ const composerSettingsEnv: Record<string, string> = {
   ELSPETH_WEB__composer_timeout_seconds: "180.0",
   ELSPETH_WEB__composer_rate_limit_per_minute: "60",
   ELSPETH_WEB__auth_rate_limit_per_minute: "120",
+  ELSPETH_WEB__e2e_state_seed_enabled: "true",
   // Placeholder JWT signing key for the local webServer instance. The
   // backend refuses startup if cors_origins contains a non-loopback host
   // and secret_key is left at its default; here we set it explicitly so

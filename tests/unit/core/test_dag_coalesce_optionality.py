@@ -20,8 +20,10 @@ from elspeth.core.config import (
     SourceSettings,
     TransformSettings,
 )
-from elspeth.core.dag import ExecutionGraph, WiredTransform, merge_union_fields
+from elspeth.core.dag import ExecutionGraph
+from elspeth.core.dag.coalesce_merge import merge_coalesce_schema, merge_union_fields
 from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.dag.wiring import WiredTransform
 from tests.helpers.coalesce import _add_coalesce_with_computed_schema
 
 
@@ -800,6 +802,7 @@ class TestCoalesceSinkRequiredFieldValidation:
         from unittest.mock import patch
 
         from elspeth.contracts import RoutingMode
+        from elspeth.core.dag import schema_validation
         from elspeth.core.dag.graph import ExecutionGraph
 
         gate_output_schema = SchemaConfig(
@@ -836,16 +839,20 @@ class TestCoalesceSinkRequiredFieldValidation:
         # state, so it goes through the vote helper rather than the older
         # fields-only helper. Patching the vote helper covers both the
         # deduplication test and the cache-sharing behavior.
+        # The sink validator lives in dag.schema_validation and calls the
+        # module-level walk helper directly (elspeth-b2c6ab6db8), so the
+        # interception seam is the schema_validation module attribute, not
+        # the ExecutionGraph delegator method.
         call_counts: dict[str, int] = {}
-        original = ExecutionGraph._walk_effective_guarantee_vote
+        original = schema_validation.walk_effective_guarantee_vote
 
         def counting_walk(
-            self_inner: ExecutionGraph, node_id: str, cache: dict[str, object], field_cache: dict[str, frozenset[str]] | None = None
+            graph_inner: ExecutionGraph, node_id: str, cache: dict[str, object], field_cache: dict[str, frozenset[str]] | None = None
         ) -> object:
             call_counts[node_id] = call_counts.get(node_id, 0) + 1
-            return original(self_inner, node_id, cache, field_cache)
+            return original(graph_inner, node_id, cache, field_cache)
 
-        with patch.object(ExecutionGraph, "_walk_effective_guarantee_vote", new=counting_walk):
+        with patch.object(schema_validation, "walk_effective_guarantee_vote", new=counting_walk):
             graph._validate_sink_required_fields()  # Should not raise
 
         assert call_counts.get("gate", 0) == 1, (
@@ -2256,47 +2263,22 @@ class TestBuildCoalesceSchemaHandlesNullable:
 
 
 class TestMixedObservedExplicitBranches:
-    """Tests for D1 fix: mixed observed/explicit branches must not silently discard fields.
+    """Mixed observed/explicit union branches are rejected at the merge boundary."""
 
-    Bug: The loop in merge_union_fields() used `all_observed = True; break` on the
-    FIRST observed branch, silently discarding typed fields from subsequent branches.
-
-    Fix: Check `all(schema_cfg.is_observed for ...)` BEFORE the loop, then `continue`
-    (not break) for observed branches during processing.
-    """
-
-    def test_mixed_observed_explicit_preserves_explicit_fields(self) -> None:
-        """When one branch is observed and another has fields, fields must be preserved.
-
-        Prior bug: breaks on first observed branch, returns observed schema, silently
-        discarding branch B's typed fields.
-        """
-        # Branch A: observed (no fields)
+    def test_mixed_observed_explicit_rejected(self) -> None:
+        """When one branch is observed and another has fields, reject the split policy."""
         branch_a = SchemaConfig(mode="observed", fields=None)
-
-        # Branch B: flexible with typed fields
         branch_b = SchemaConfig(
             mode="flexible",
             fields=(FieldDefinition(name="x", field_type="int", required=True),),
         )
 
-        result = merge_union_fields(
-            {"a": branch_a, "b": branch_b},
-            require_all=True,
-        )
-
-        # Per docstring: "If all branches are observed-mode or no branches contribute
-        # fields, returns an observed-mode schema."
-        # Since NOT all branches are observed (branch_b is flexible), result should
-        # preserve branch_b's fields.
-        assert not result.is_observed, (
-            f"Only branch_a is observed, branch_b has fields. "
-            f"Result should preserve branch_b's fields, not return observed. "
-            f"Got mode={result.mode}"
-        )
-        assert result.fields is not None, "Should have fields from branch_b"
-        field_names = {fd.name for fd in result.fields}
-        assert "x" in field_names, "Field 'x' from branch_b should be preserved"
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            merge_union_fields(
+                {"a": branch_a, "b": branch_b},
+                require_all=True,
+                coalesce_id="mixed_coalesce",
+            )
 
     def test_all_observed_returns_observed(self) -> None:
         """When ALL branches are observed, result should be observed."""
@@ -2310,10 +2292,8 @@ class TestMixedObservedExplicitBranches:
 
         assert result.is_observed, "All branches observed -> result should be observed"
 
-    def test_observed_first_explicit_second_preserves_fields(self) -> None:
+    def test_observed_first_explicit_second_rejected(self) -> None:
         """Order independence: observed branch first, explicit branch second."""
-        # Explicitly test dict ordering to ensure the fix works regardless of
-        # iteration order (which caused the original bug when observed was first)
         from collections import OrderedDict
 
         branches: dict[str, SchemaConfig] = OrderedDict()
@@ -2323,14 +2303,10 @@ class TestMixedObservedExplicitBranches:
             fields=(FieldDefinition(name="y", field_type="str", required=False),),
         )
 
-        result = merge_union_fields(branches, require_all=True)
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            merge_union_fields(branches, require_all=True, coalesce_id="mixed_coalesce")
 
-        assert not result.is_observed, "Mixed branches should not return observed"
-        assert result.fields is not None
-        field_names = {fd.name for fd in result.fields}
-        assert "y" in field_names, "Field 'y' from explicit branch should be preserved"
-
-    def test_explicit_first_observed_second_preserves_fields(self) -> None:
+    def test_explicit_first_observed_second_rejected(self) -> None:
         """Order independence: explicit branch first, observed branch second."""
         from collections import OrderedDict
 
@@ -2341,12 +2317,8 @@ class TestMixedObservedExplicitBranches:
         )
         branches["observed_second"] = SchemaConfig(mode="observed", fields=None)
 
-        result = merge_union_fields(branches, require_all=True)
-
-        assert not result.is_observed, "Mixed branches should not return observed"
-        assert result.fields is not None
-        field_names = {fd.name for fd in result.fields}
-        assert "z" in field_names, "Field 'z' from explicit branch should be preserved"
+        with pytest.raises(GraphValidationError, match="mixed observed/explicit schemas"):
+            merge_union_fields(branches, require_all=True, coalesce_id="mixed_coalesce")
 
 
 class TestPartialArrivalNullableSoundness:
@@ -2457,3 +2429,86 @@ class TestPartialArrivalNullableSoundness:
         assert merged.fields is not None
         x_field = next(f for f in merged.fields if f.name == "x")
         assert x_field.nullable is False, "Under require_all with last_wins, last branch always wins"
+
+
+class TestCoalesceSchemaBoundary:
+    """The coalesce schema helper owns the full build-time schema decision."""
+
+    def _get_field(self, schema: SchemaConfig, name: str) -> FieldDefinition:
+        assert schema.fields is not None
+        for field in schema.fields:
+            if field.name == name:
+                return field
+        raise AssertionError(f"Field {name!r} not found in schema")
+
+    def test_union_boundary_merges_audit_and_guaranteed_fields(self) -> None:
+        merged = merge_coalesce_schema(
+            {
+                "left": SchemaConfig(
+                    mode="flexible",
+                    fields=(FieldDefinition("id", "str"), FieldDefinition("left_only", "int")),
+                    guaranteed_fields=("id", "left_only"),
+                    audit_fields=("audit_left",),
+                ),
+                "right": SchemaConfig(
+                    mode="flexible",
+                    fields=(FieldDefinition("id", "str"), FieldDefinition("right_only", "bool")),
+                    guaranteed_fields=("id", "right_only"),
+                    audit_fields=("audit_right", "audit_left"),
+                ),
+            },
+            merge_strategy="union",
+            require_all=False,
+            collision_policy="last_wins",
+            branch_order=("left", "right"),
+            coalesce_id="merge_results",
+        )
+
+        assert merged.guaranteed_fields == ("id",)
+        assert merged.audit_fields == ("audit_left", "audit_right")
+        assert self._get_field(merged, "left_only").required is False
+        assert self._get_field(merged, "right_only").required is False
+
+    def test_select_boundary_returns_selected_branch_schema(self) -> None:
+        left = SchemaConfig(
+            mode="flexible",
+            fields=(FieldDefinition("left_only", "int"),),
+            guaranteed_fields=("left_only",),
+            audit_fields=("audit_left",),
+        )
+        right = SchemaConfig(
+            mode="flexible",
+            fields=(FieldDefinition("right_only", "str"),),
+            guaranteed_fields=("right_only",),
+            audit_fields=("audit_right",),
+        )
+
+        merged = merge_coalesce_schema(
+            {"left": left, "right": right},
+            merge_strategy="select",
+            require_all=True,
+            select_branch="right",
+            coalesce_id="merge_results",
+        )
+
+        assert merged == right
+
+    def test_nested_boundary_materializes_branch_fields_in_declaration_order(self) -> None:
+        merged = merge_coalesce_schema(
+            {
+                "late": SchemaConfig(mode="flexible", fields=(FieldDefinition("id", "str"),)),
+                "early": SchemaConfig(mode="flexible", fields=(FieldDefinition("score", "float"),)),
+            },
+            merge_strategy="nested",
+            require_all=False,
+            branch_order=("early", "late"),
+            coalesce_id="merge_results",
+        )
+
+        assert merged.mode == "flexible"
+        assert merged.guaranteed_fields is None
+        assert merged.audit_fields is None
+        assert [(field.name, field.field_type, field.required) for field in (merged.fields or ())] == [
+            ("early", "any", False),
+            ("late", "any", False),
+        ]

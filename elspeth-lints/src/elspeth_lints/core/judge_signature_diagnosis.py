@@ -49,6 +49,19 @@ VerificationMode = Literal["shape-only", "authoritative"]
 
 _OPERATOR_KEY_PLACEHOLDER = f"{_JUDGE_METADATA_SIGNATURE_ENV_VAR}=<operator-held-key>"
 _OK_STATUSES = frozenset({"OK_SHAPE_ONLY", "OK_AUTHORITATIVE", "PRE_JUDGE"})
+# Diagnosis statuses a resign lane can repair by re-running ``justify`` (the
+# re-judge ceremony). Lives here, beside ``_OK_STATUSES``, so non-private
+# consumers (``cli._signing_specs_from_diagnosis``, ``bundle_verify``) read it
+# from a shared home rather than importing a ``cli.py``-private constant.
+_SIGNABLE_DIAGNOSIS_STATUSES = frozenset(
+    {
+        "MISSING_SIGNATURE",
+        "INVALID_SIGNATURE",
+        "AST_PATH_BINDING_DRIFT",
+        "SCOPE_BINDING_DRIFT",
+        "BINDING_DRIFT",
+    }
+)
 _DIAGNOSIS_ENV_FILE_KEYS = frozenset(
     {
         _JUDGE_METADATA_SIGNATURE_ENV_VAR,

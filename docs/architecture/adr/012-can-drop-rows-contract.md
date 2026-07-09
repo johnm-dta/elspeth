@@ -177,4 +177,5 @@ All values are bools or ints. Forbidden payload keys for this contract include
 - `src/elspeth/engine/executors/pass_through.py`
 - `src/elspeth/contracts/errors.py`
 - `src/elspeth/engine/processor.py`
-- `docs/plans/2026-04-20-phase-2b-declaration-trust.md`
+- Historical Phase 2B declaration-trust plan: preserved in git history or
+  maintainer-local archives

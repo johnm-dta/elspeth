@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from elspeth.contracts import CheckpointDraft
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
@@ -121,9 +122,13 @@ class TestRunStartCheckpoint:
             assert result.status == "completed"
             # Run-start baseline + one every_row post-sink checkpoint.
             assert len(checkpoint_calls) == 2
-            assert checkpoint_calls[0]["sequence_number"] == 0
-            assert checkpoint_calls[0]["barrier_scalars"] is None
-            assert checkpoint_calls[1]["sequence_number"] == 1
+            assert set(checkpoint_calls[0]) == {"draft", "coordination_token"}
+            baseline_draft = checkpoint_calls[0]["draft"]
+            assert isinstance(baseline_draft, CheckpointDraft)
+            assert baseline_draft.sequence_number == 0
+            assert baseline_draft.barrier_scalars is None
+            assert baseline_draft.upstream_topology_hash == compute_full_topology_hash(graph)
+            assert checkpoint_calls[1]["draft"].sequence_number == 1
             # Success deletes ALL checkpoints for the run, baseline included.
             assert _select_checkpoints(db, result.run_id) == []
         finally:

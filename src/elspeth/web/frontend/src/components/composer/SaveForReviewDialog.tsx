@@ -22,6 +22,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { useShareableReviewStore } from "@/stores/shareableReviewStore";
 
 const COPY_FEEDBACK_TIMEOUT_MS = 2000;
@@ -46,6 +47,14 @@ export function SaveForReviewDialog(): JSX.Element | null {
 
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copyTimeoutRef = useRef<number | null>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+
+  // Real modal behaviour consistent with GraphModal / ConfirmDialog: trap Tab
+  // focus inside the dialog, move initial focus to the always-present Close
+  // button, and restore focus to the opener on unmount. `dialogOpen` gates the
+  // trap; the component unmounts (returns null) when it closes, so the trap's
+  // restore-on-cleanup runs.
+  useFocusTrap(dialogRef, dialogOpen, ".save-for-review-close");
 
   useEffect(() => {
     return () => {
@@ -57,10 +66,10 @@ export function SaveForReviewDialog(): JSX.Element | null {
 
   // WAI-ARIA Authoring Practices require role="dialog" + aria-modal="true"
   // modals to close on Escape. The listener is attached to `document` rather
-  // than the dialog element because the dialog does not auto-focus on mount
-  // and would otherwise not receive keydown events when focus is elsewhere
-  // (the canonical React modal pattern). Effect re-runs when `dialogOpen`
-  // or `close` change so the handler only listens while the dialog is open.
+  // than the dialog element — the canonical React modal pattern, matching
+  // GraphModal / ConfirmDialog — so Escape closes regardless of which trapped
+  // control currently holds focus. Effect re-runs when `dialogOpen` or `close`
+  // change so the handler only listens while the dialog is open.
   useEffect(() => {
     if (!dialogOpen) return undefined;
     function _onKeyDown(event: KeyboardEvent) {
@@ -107,96 +116,105 @@ export function SaveForReviewDialog(): JSX.Element | null {
   }
 
   return (
-    <section
-      role="dialog"
-      aria-modal="true"
-      className="save-for-review-dialog"
-      aria-labelledby="save-for-review-dialog-title"
-      data-testid="save-for-review-dialog"
-    >
-      <div className="save-for-review-dialog-content">
-        <header>
-          <h2 id="save-for-review-dialog-title">Share for review</h2>
-        </header>
+    <>
+      <div
+        className="save-for-review-dialog-backdrop"
+        data-testid="save-for-review-dialog-backdrop"
+        onClick={close}
+        aria-hidden="true"
+      />
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        className="save-for-review-dialog"
+        aria-labelledby="save-for-review-dialog-title"
+        data-testid="save-for-review-dialog"
+      >
+        <div className="save-for-review-dialog-content">
+          <header>
+            <h2 id="save-for-review-dialog-title">Share for review</h2>
+          </header>
 
-        {inFlight && (
-          <div role="status" data-testid="save-for-review-spinner">
-            Minting share link...
-          </div>
-        )}
+          {inFlight && (
+            <div role="status" data-testid="save-for-review-spinner">
+              Minting share link...
+            </div>
+          )}
 
-        {!inFlight && error !== null && (
-          <div role="alert" className="save-for-review-error" data-testid="save-for-review-error">
-            <p>{error}</p>
-            <button
-              type="button"
-              className="btn btn-compact"
-              onClick={_onRetry}
-              data-testid="save-for-review-retry"
-            >
-              Try again
-            </button>
-          </div>
-        )}
-
-        {!inFlight && error === null && latestResponse !== null && absoluteShareUrl !== null && (
-          <div className="save-for-review-success" data-testid="save-for-review-success">
-            <p>
-              Share this link with your reviewer. It expires on{" "}
-              <time dateTime={latestResponse.expires_at}>
-                {new Date(latestResponse.expires_at).toLocaleString()}
-              </time>
-              .
-            </p>
-            <div className="save-for-review-url-row">
-              <label htmlFor="save-for-review-url">Share URL</label>
-              <input
-                id="save-for-review-url"
-                type="text"
-                readOnly
-                value={absoluteShareUrl}
-                onFocus={(e) => e.currentTarget.select()}
-                data-testid="save-for-review-url-input"
-              />
+          {!inFlight && error !== null && (
+            <div role="alert" className="save-for-review-error" data-testid="save-for-review-error">
+              <p>{error}</p>
               <button
                 type="button"
                 className="btn btn-compact"
-                onClick={() => void _onCopy()}
-                data-testid="save-for-review-copy"
-                aria-label="Copy share URL to clipboard"
+                onClick={_onRetry}
+                data-testid="save-for-review-retry"
               >
-                {copyState === "idle" && "Copy"}
-                {copyState === "copied" && "Copied!"}
-                {copyState === "failed" && "Copy failed — select & copy manually"}
+                Try again
               </button>
-              <a
-                href={absoluteShareUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-testid="save-for-review-open-link"
-              >
-                Open in new tab
-              </a>
             </div>
-            <p className="save-for-review-tip">
-              The link grants a different authenticated user read-only access
-              to a frozen snapshot of this pipeline. Recipients must have an
-              account on this deployment.
-            </p>
-          </div>
-        )}
+          )}
 
-        <footer>
-          <button
-            type="button"
-            className="btn"
-            onClick={close}
-            data-testid="save-for-review-close"
-          >
-            Close
-          </button>
-        </footer>
-      </div>
-    </section>
+          {!inFlight && error === null && latestResponse !== null && absoluteShareUrl !== null && (
+            <div className="save-for-review-success" data-testid="save-for-review-success">
+              <p>
+                Share this link with your reviewer. It expires on{" "}
+                <time dateTime={latestResponse.expires_at}>
+                  {new Date(latestResponse.expires_at).toLocaleString()}
+                </time>
+                .
+              </p>
+              <div className="save-for-review-url-row">
+                <label htmlFor="save-for-review-url">Share URL</label>
+                <input
+                  id="save-for-review-url"
+                  type="text"
+                  readOnly
+                  value={absoluteShareUrl}
+                  onFocus={(e) => e.currentTarget.select()}
+                  data-testid="save-for-review-url-input"
+                />
+                <button
+                  type="button"
+                  className="btn btn-compact"
+                  onClick={() => void _onCopy()}
+                  data-testid="save-for-review-copy"
+                  aria-label="Copy share URL to clipboard"
+                >
+                  {copyState === "idle" && "Copy"}
+                  {copyState === "copied" && "Copied!"}
+                  {copyState === "failed" && "Copy failed — select & copy manually"}
+                </button>
+                <a
+                  href={absoluteShareUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="save-for-review-open-link"
+                >
+                  Open in new tab
+                </a>
+              </div>
+              <p className="save-for-review-tip">
+                The link grants a different authenticated user read-only access
+                to a frozen snapshot of this pipeline. Recipients must have an
+                account on this deployment.
+              </p>
+            </div>
+          )}
+
+          <footer>
+            <button
+              type="button"
+              className="btn save-for-review-close"
+              onClick={close}
+              data-testid="save-for-review-close"
+            >
+              Close
+            </button>
+          </footer>
+        </div>
+      </section>
+    </>
   );
 }

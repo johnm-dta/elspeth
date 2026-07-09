@@ -465,9 +465,10 @@ bumps for D2 anyway; adding one nullable column is negligible cost.
 
 ### Plan
 
-- `docs/superpowers/plans/2026-06-11-f1-durability-unification.md` —
-  implementation plan whose Part I (I.1–I.4) this ADR records as an
-  architecture decision. Part II contains the task-level implementation guide.
+- Historical F1 durability-unification implementation plan — preserved in git
+  history or maintainer-local archives. Part I (I.1–I.4) is recorded here as
+  the architecture decision; Part II contained the task-level implementation
+  guide.
 
 ### Code (pre-F1 state, cited as reference for what changes)
 

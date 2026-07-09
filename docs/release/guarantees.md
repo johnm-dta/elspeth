@@ -1,11 +1,11 @@
 # What ELSPETH Guarantees
 
-> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2 and RC-6 additions.**
-> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. §15 documents RC-6 guarantees for multi-source execution and durable token scheduling; §7.1's "single-threaded in RC-3" statement is amended to scope it to RC-3 history. Read this as a versioned assurance appendix, not as marketing copy.
+> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2, RC-6, and 0.7.0 context.**
+> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. §15 documents RC-6 guarantees for multi-source execution and durable token scheduling; §7.1's "single-threaded in RC-3" statement is amended to scope it to RC-3 history. The 0.7.0 release keeps this appendix as the current assurance baseline while adding LLM-primary guided authoring and document-ingestion surfaces documented in the changelog and Composer guide. Read this as a versioned assurance appendix, not as marketing copy.
 
-**Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14) + RC-6 additions (§15)
+**Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14) + RC-6 additions (§15) + 0.7.0 context
 **Original date:** 3 March 2026 (§1–§10)
-**Refreshed:** 19 May 2026 (§7 amendment; §11–§14 additions); 10 June 2026 (§7.1 amendment; §15 addition)
+**Refreshed:** 19 May 2026 (§7 amendment; §11–§14 additions); 10 June 2026 (§7.1 amendment; §15 addition); 8 July 2026 (0.7.0 context refresh)
 **Audience:** Users, integrators, auditors, and assurance staff evaluating contractual claims
 **Register:** Technical / contractual
 
@@ -13,7 +13,10 @@
 
 This document defines the promises ELSPETH makes to its users and to anyone evaluating the audit trail. These are not aspirational features — they are assurance guarantees that the system must uphold. A violation of any clause here is a release-blocking bug.
 
-This document is **not** a roadmap, a feature list, or a marketing surface. For the inventory of what has shipped, see [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md). For the high-level capability and assurance posture, see [`executive-summary.md`](executive-summary.md).
+This document is **not** a roadmap, a feature list, or a marketing surface. For
+the inventory of what has shipped, see the root [`CHANGELOG.md`](../../CHANGELOG.md).
+For the high-level capability and assurance posture, see
+[`executive-summary.md`](executive-summary.md).
 
 ---
 

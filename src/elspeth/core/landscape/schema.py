@@ -24,12 +24,35 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    or_,
     select,
     text,
 )
 
+from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+from elspeth.contracts.types import NODE_ID_MAX_LENGTH
+
 # Shared metadata for all tables
 metadata = MetaData()
+
+
+def _sql_string_literal(value: str) -> str:
+    """Render one deterministic SQL string literal for generated CHECK clauses."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _enum_value_list(enum_type: type[StrEnum]) -> str:
+    return ", ".join(_sql_string_literal(member.value) for member in enum_type)
+
+
+def _enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
+    """Render a SQL IN fragment from a StrEnum's persisted values."""
+    return f"{column_name} IN ({_enum_value_list(enum_type)})"
+
+
+def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
+    return f"{column_name} IS NULL OR {_enum_in_check(column_name, enum_type)}"
+
 
 # Explicit SQLite schema epoch for pre-1.0 compatibility policy.
 # Stored in PRAGMA user_version so future releases can distinguish
@@ -107,11 +130,14 @@ metadata = MetaData()
 #        coalesce_branch_losses tables; token_work_items gains
 #        barrier_adopted_epoch (adoption CAS marker, written only by the
 #        slice-3 fenced adoption verb; NULL = intake-pending).
-SQLITE_SCHEMA_EPOCH = 21
+#   22 → Routing events are run-scoped: routing_events carries run_id and
+#        composite FKs to node_states(state_id, run_id) and edges(edge_id, run_id)
+#        so state/edge route decisions cannot cross audit-run boundaries.
+SQLITE_SCHEMA_EPOCH = 22
 
-# Column width for node_id across all tables. Referenced by dag.py
-# for validation — changing this value requires an Alembic migration.
-NODE_ID_COLUMN_LENGTH = 64
+# Column width for node_id across all tables. The cross-layer identifier limit
+# lives in contracts.types; changing this value requires an Alembic migration.
+NODE_ID_COLUMN_LENGTH = NODE_ID_MAX_LENGTH
 
 
 class RunSourceLifecycleState(StrEnum):
@@ -201,7 +227,7 @@ run_sources_table = Table(
     "run_sources",
     metadata,
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("source_node_id", String(64), nullable=False),
+    Column("source_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("source_name", String(64), nullable=False),
     Column("plugin_name", String(128), nullable=False),
     Column("lifecycle_state", String(32), nullable=False),
@@ -214,7 +240,7 @@ run_sources_table = Table(
     PrimaryKeyConstraint("run_id", "source_node_id"),
     UniqueConstraint("run_id", "source_name"),
     CheckConstraint(
-        "lifecycle_state IN ('ready', 'loading', 'exhausted', 'loaded', 'interrupted')",
+        _enum_in_check("lifecycle_state", RunSourceLifecycleState),
         name="ck_run_sources_lifecycle_state",
     ),
     ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
@@ -227,7 +253,7 @@ Index("ix_run_sources_source_name", run_sources_table.c.run_id, run_sources_tabl
 nodes_table = Table(
     "nodes",
     metadata,
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("plugin_name", String(128), nullable=False),
     Column("node_type", String(32), nullable=False),
@@ -259,11 +285,13 @@ edges_table = Table(
     metadata,
     Column("edge_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("from_node_id", String(64), nullable=False),
-    Column("to_node_id", String(64), nullable=False),
+    Column("from_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
+    Column("to_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("label", String(64), nullable=False),
     Column("default_mode", String(16), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # Composite unique target for run-scoped FKs to edges.
+    UniqueConstraint("edge_id", "run_id"),
     UniqueConstraint("run_id", "from_node_id", "label"),
     # Composite FKs to nodes (node_id, run_id)
     ForeignKeyConstraint(["from_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
@@ -304,10 +332,12 @@ edges_table = Table(
 #    source_row_index or ingest_sequence from row_index"), but the
 #    prohibition lives in an exception string at one write boundary. The
 #    cache-replay write path (``write_repository.record_synthesised_run``)
-#    intentionally sets all three equal because there is exactly one source;
-#    a future contributor adding a multi-source synthesised-run path could
-#    silently drift. Tracked under filigree elspeth-92afea0d23 (elspeth-lints
-#    rule with the same enforcement status as ``trust_tier.tier_model``).
+#    uses the row-index fallback only for single-source runs; multi-source
+#    synthesised rows must provide explicit source_node_index,
+#    source_row_index, ingest_sequence, and source_data_hash before the
+#    writer inserts them. Tracked under filigree elspeth-92afea0d23
+#    (elspeth-lints rule with the same enforcement status as
+#    ``trust_tier.tier_model``).
 #
 # B. Scheduler lease-ownership transitions (G29). ``token_work_items``
 #    carries the current lease state but not its transition history; a
@@ -320,7 +350,7 @@ rows_table = Table(
     metadata,
     Column("row_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("source_node_id", String(64), nullable=False),
+    Column("source_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("row_index", Integer),
     Column("source_row_index", Integer, nullable=False),
     Column("ingest_sequence", Integer, nullable=False),
@@ -412,7 +442,7 @@ token_work_items_table = Table(
     Column("run_id", String(64), nullable=False, index=True),
     Column("token_id", String(64), nullable=False),
     Column("row_id", String(64), nullable=False),
-    Column("node_id", String(64)),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH)),
     Column("step_index", Integer, nullable=False),
     Column("ingest_sequence", Integer, nullable=False),
     Column("row_payload_json", Text, nullable=False),
@@ -456,7 +486,8 @@ token_work_items_table = Table(
     # and silently nullify the Tier-1 invariant (elspeth-36d5635402).
     # The constraint runs independently of ``PRAGMA foreign_keys`` in SQLite.
     CheckConstraint(
-        "(status = 'leased' AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != 'leased'",
+        f"(status = {_sql_string_literal(TokenWorkStatus.LEASED.value)} "
+        f"AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != {_sql_string_literal(TokenWorkStatus.LEASED.value)}",
         name="ck_token_work_items_lease_owner_required_when_leased",
     ),
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
@@ -552,18 +583,15 @@ scheduler_events_table = Table(
     Column("caller_owner", String(128)),
     Column("context_json", Text, nullable=False, server_default=text("'{}'")),
     CheckConstraint(
-        "event_type IN ('enqueue', 'claim_ready', 'claim_pending_sink', "
-        "'recover_expired_lease', 'lease_lost', 'mark_blocked', "
-        "'mark_terminal', 'mark_failed', 'mark_pending_sink', 'mark_pending_sink_terminal', "
-        "'mark_blocked_barrier_terminal')",
+        _enum_in_check("event_type", SchedulerEventType),
         name="ck_scheduler_events_event_type",
     ),
     CheckConstraint(
-        "from_status IS NULL OR from_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        _optional_enum_in_check("from_status", TokenWorkStatus),
         name="ck_scheduler_events_from_status",
     ),
     CheckConstraint(
-        "to_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        _enum_in_check("to_status", TokenWorkStatus),
         name="ck_scheduler_events_to_status",
     ),
     CheckConstraint("from_attempt IS NULL OR from_attempt >= 0", name="ck_scheduler_events_from_attempt_non_negative"),
@@ -745,40 +773,32 @@ def active_worker_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: C
 def claim_verb_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: ColumnElement[str] | str) -> ColumnElement[bool]:
     """Lenient membership fence for claim_ready / claim_pending_sink CAS UPDATEs.
 
-    Passes when the acting worker does NOT hold a non-active (evicted/departed)
-    run_workers row — expressed as:
+    Passes when either:
 
-        NOT EXISTS (
-          SELECT 1 FROM run_workers
-          WHERE worker_id = :wid AND run_id = :rid AND status != 'active'
-        )
+    * the acting worker holds an ACTIVE run_workers row for this run, or
+    * the run has no registered workers at all (N=0 unit-test compatibility).
 
     Semantics by case:
-    (a) ABSENT (no run_workers row for this worker): NOT EXISTS → True → pass.
-        Backward-compat for unit tests that call claim_ready with fictional
-        lease_owner IDs without populating run_workers.  In production, the
-        processor always registers before claiming, so this branch only fires
-        in unit tests.
-    (b) ACTIVE run_workers row: the evicted-row check is False → NOT EXISTS →
-        True → pass.
-    (c) EVICTED or DEPARTED row: the evicted-row check is True → NOT EXISTS →
-        False → UPDATE matches 0 rows → re-probe raises RunWorkerEvictedError.
+    (a) ABSENT worker and N=0 run registry: no registered workers exist for the
+        run → pass. Backward-compat for unit tests that call claim_ready with
+        fictional lease_owner IDs without populating run_workers.
+    (b) ABSENT worker and N>0 run registry: registered workers exist for the run
+        but this caller is not one of them → fail closed with zero mutation.
+    (c) ACTIVE run_workers row for this worker and run → pass.
+    (d) EVICTED or DEPARTED row for this worker and run → fail; the claim verb
+        re-probe raises RunWorkerEvictedError.
 
     This is strictly weaker than ``active_worker_fence_clause`` (strict):
-    ABSENT passes here but is refused there.  Use the strict variant for
-    ``enqueue_ready``'s explicit-worker_id guard where ABSENT is definitively
-    wrong (caller supplied worker_id, registration is mandatory).
+    ABSENT passes here only when the run has no registry at all, and is refused
+    once any worker has registered for the run. Use the strict variant for
+    ``enqueue_ready``'s explicit-worker_id guard where ABSENT is always wrong
+    (caller supplied worker_id, registration is mandatory).
     """
-    this_worker_is_non_active = (
-        select(run_workers_table.c.worker_id)
-        .where(
-            run_workers_table.c.worker_id == worker_id,
-            run_workers_table.c.run_id == run_id,
-            run_workers_table.c.status != "active",
-        )
-        .exists()
+    run_has_no_registered_workers = ~select(run_workers_table.c.worker_id).where(run_workers_table.c.run_id == run_id).exists()
+    return or_(
+        active_worker_fence_clause(worker_id=worker_id, run_id=run_id),
+        run_has_no_registered_workers,
     )
-    return ~this_worker_is_non_active
 
 
 # === Token Parents (for multi-parent joins) ===
@@ -805,7 +825,7 @@ node_states_table = Table(
     Column("state_id", String(64), primary_key=True),
     Column("token_id", String(64), nullable=False),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("step_index", Integer, nullable=False),
     Column("attempt", Integer, nullable=False, default=0),
     Column("status", String(32), nullable=False),
@@ -854,7 +874,7 @@ operations_table = Table(
     metadata,
     Column("operation_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False, index=True),
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("operation_type", String(32), nullable=False),  # 'source_load' | 'sink_write' | 'runtime_preflight'
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
@@ -951,7 +971,7 @@ artifacts_table = Table(
         String(64),
         nullable=False,
     ),
-    Column("sink_node_id", String(64), nullable=False),
+    Column("sink_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("artifact_type", String(64), nullable=False),
     Column("path_or_uri", String(512), nullable=False),
     Column("content_hash", String(64), nullable=False),
@@ -970,8 +990,9 @@ routing_events_table = Table(
     "routing_events",
     metadata,
     Column("event_id", String(64), primary_key=True),
-    Column("state_id", String(64), ForeignKey("node_states.state_id"), nullable=False),
-    Column("edge_id", String(64), ForeignKey("edges.edge_id"), nullable=False),
+    Column("state_id", String(64), nullable=False),
+    Column("edge_id", String(64), nullable=False),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("routing_group_id", String(64), nullable=False),
     Column("ordinal", Integer, nullable=False),
     Column("mode", String(16), nullable=False),  # move, copy
@@ -979,6 +1000,9 @@ routing_events_table = Table(
     Column("reason_ref", String(256)),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("routing_group_id", "ordinal"),
+    # Composite FKs: routed state and edge must belong to the same run.
+    ForeignKeyConstraint(["state_id", "run_id"], ["node_states.state_id", "node_states.run_id"]),
+    ForeignKeyConstraint(["edge_id", "run_id"], ["edges.edge_id", "edges.run_id"]),
 )
 
 # === Batches (Aggregation) ===
@@ -988,7 +1012,7 @@ batches_table = Table(
     metadata,
     Column("batch_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("aggregation_node_id", String(64), nullable=False),
+    Column("aggregation_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("aggregation_state_id", String(64)),
     Column("retry_of_batch_id", String(64)),
     Column("trigger_reason", String(128)),
@@ -1035,6 +1059,7 @@ batch_outputs_table = Table(
 # === Indexes for Query Performance ===
 
 Index("ix_routing_events_state", routing_events_table.c.state_id)
+Index("ix_routing_events_run_state", routing_events_table.c.run_id, routing_events_table.c.state_id)
 Index("ix_routing_events_group", routing_events_table.c.routing_group_id)
 Index("ix_batches_run_status", batches_table.c.run_id, batches_table.c.status)
 Index("ix_batch_members_batch", batch_members_table.c.batch_id)
@@ -1075,7 +1100,7 @@ validation_errors_table = Table(
     metadata,
     Column("error_id", String(32), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("node_id", String(64)),  # Source node where validation failed (nullable)
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH)),  # Source node where validation failed (nullable)
     Column("row_id", String(64), ForeignKey("rows.row_id")),  # Persisted quarantine row when one exists
     Column("row_hash", String(64), nullable=False),
     Column("row_data_json", Text),  # Store the row for debugging
@@ -1110,7 +1135,7 @@ transform_errors_table = Table(
     Column("error_id", String(32), primary_key=True),
     Column("run_id", String(64), nullable=False),
     Column("token_id", String(64), nullable=False),
-    Column("transform_id", String(64), nullable=False),  # Part of composite FK to nodes
+    Column("transform_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),  # Part of composite FK to nodes
     Column("row_hash", String(64), nullable=False),
     Column("row_data_json", Text),
     Column("error_details_json", Text),  # From TransformResult.error()

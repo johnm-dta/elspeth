@@ -19,6 +19,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.guarantee_propagation import compose_propagation
+from elspeth.contracts.plugin_protocols import TransformProtocol
 from elspeth.contracts.plugin_semantics import SemanticEdgeContract
 from elspeth.contracts.schema import (
     SchemaConfig,
@@ -29,6 +30,13 @@ from elspeth.contracts.schema import (
     get_raw_sink_required_fields,
     raw_options_have_schema,
 )
+from elspeth.contracts.sink import (
+    FAILSINK_ELIGIBLE_PLUGIN_TEXT,
+    FAILSINK_ELIGIBLE_SINK_PLUGINS,
+    FILE_SINK_PLUGINS,
+    LOCAL_RECOVERY_SINK_PLUGINS,
+)
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.config import (
     _MAX_NODE_NAME_LENGTH,
@@ -39,9 +47,6 @@ from elspeth.core.config import (
     _validate_node_name_chars,
 )
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
-from elspeth.engine.orchestrator.validation import (
-    _ALLOWED_FAILSINK_PLUGINS,
-)
 from elspeth.web.composer.guided.state_machine import GuidedSession
 
 NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
@@ -53,13 +58,6 @@ COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gat
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
 _DISCARD_ROUTE_TARGET = "discard"
-
-# Sink plugin names whose configuration requires a `path` option (W6 warning).
-# MUST be a subset of the runtime sink registry — drift here means composer
-# pre-validation either misses required-path warnings (false negative) or
-# advertises plugins that don't exist (false positive). Enforced by
-# tests/unit/web/composer/test_skill_drift.py::test_file_sinks_subset_of_registered_sinks.
-_FILE_SINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
 
 
 def validate_composer_source_name(source_name: str) -> None:
@@ -854,6 +852,18 @@ _RFC_RESERVED_DOMAIN_LABELS: tuple[str, ...] = (
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpec carrying web-authored web_scrape options (untrusted abuse_contact value)",
+    source_param="node",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "returns a high-severity ValidationEntry only for a well-formed abuse_contact at an "
+        "RFC-reserved domain; absent, mistyped, or malformed values yield None (sibling "
+        "plugin-schema rules report those) and never raise"
+    ),
+    non_raising=True,
+)
 def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> ValidationEntry | None:
     """Reject web_scrape.http.abuse_contact values at RFC-reserved domains.
 
@@ -897,6 +907,18 @@ def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> Validatio
     return None
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpec carrying web-authored web_scrape options (untrusted http identity fields)",
+    source_param="node",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "emits a high-severity ValidationEntry per placeholder-valued wire-visible HTTP "
+        "identity field; missing or mistyped options/http/field values are skipped "
+        "(no entry) and never raised on"
+    ),
+    non_raising=True,
+)
 def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[ValidationEntry, ...]:
     """Reject placeholder values in web_scrape's wire-visible HTTP identity fields."""
     if node.plugin != "web_scrape":
@@ -988,6 +1010,18 @@ def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
     return _locked_input_field_set(output.options, owner=f"output:{output.name}")
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpecs carrying composer/LLM/user-authored options re-read from session state",
+    source_param="nodes",
+    suppresses=("R1",),
+    invariant=(
+        "optional node option flags (e.g. select_only) default at the read site; malformed "
+        "node config surfaces as blocking ValidationEntry results, never a raise (genuine "
+        "engine defects crash through via the config-probe re-raise guards)"
+    ),
+    non_raising=True,
+)
 def _check_schema_contracts(
     sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
@@ -1007,6 +1041,12 @@ def _check_schema_contracts(
     contract_probe_failed_producers: set[str] = set()
     sink_names = {output.name for output in outputs}
     sink_names_frozen = frozenset(sink_names)
+    coalesce_branch_names = {
+        branch_name
+        for node in nodes
+        if node.node_type == "coalesce" and node.branches is not None
+        for branch_name in _coalesce_branch_names(node.branches)
+    }
     internal_connection_names: set[str] = set()
     source_map = sources
 
@@ -1157,6 +1197,10 @@ def _check_schema_contracts(
         )
 
     internal_connection_names.update(connection_name for connection_name, _node_id, _desc in consumer_claims)
+    # Runtime fork routing resolves coalesce branch names before sink names.
+    # A branch identity that also names a sink would make composer preview treat
+    # the branch as direct-to-sink while execution sends it to coalesce.
+    internal_connection_names.update(coalesce_branch_names)
     overlap = sorted(internal_connection_names & sink_names)
     if overlap:
         errors.append(
@@ -1279,6 +1323,25 @@ def _check_schema_contracts(
         if isinstance(exc, (PluginConfigError, PluginNotFoundError, TemplateError, UnknownPluginTypeError)):
             return True
         return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
+
+    def _probe_transform_construction(plugin: str, options: Mapping[str, Any]) -> TransformProtocol | None:
+        """Construct ``plugin``'s transform, or None on an expected config failure.
+
+        Genuine engine defects (non-config-probe exceptions) crash through —
+        that re-raise is this helper's contract, keeping the enclosing
+        non_raising boundary free of raises guarded by nodes-derived data.
+        """
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        try:
+            return get_shared_plugin_manager().create_transform(
+                plugin,
+                deep_thaw(options),
+            )
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
+            return None
 
     def _effective_producer_vote(producer: ProducerEntry) -> tuple[bool, frozenset[str]]:
         """Return (participates, guarantees) for preview propagation.
@@ -1919,16 +1982,8 @@ def _check_schema_contracts(
             # default and falls into the additive/loose-bound regime that we
             # cannot adjudicate without knowing the upstream emit set.
             continue
-        try:
-            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-
-            transform = get_shared_plugin_manager().create_transform(
-                node.plugin,
-                deep_thaw(node.options),
-            )
-        except Exception as exc:
-            if not _is_config_probe_exception(exc):
-                raise
+        transform = _probe_transform_construction(node.plugin, node.options)
+        if transform is None:
             continue
 
         output_config = transform._output_schema_config
@@ -2534,7 +2589,7 @@ class CompositionState:
 
         # W6: File sink missing required path
         for output in self.outputs:
-            if output.plugin in _FILE_SINK_PLUGINS:
+            if output.plugin in FILE_SINK_PLUGINS:
                 if not output.options or "path" not in output.options:
                     warnings.append(
                         _warn(
@@ -2555,7 +2610,7 @@ class CompositionState:
         # W7: on_write_failure reference validation
         # Mirrors rules from engine/orchestrator/validation.py so LLMs get
         # early feedback instead of failing at pipeline build time.
-        _failsink_eligible = _ALLOWED_FAILSINK_PLUGINS
+        _failsink_eligible = FAILSINK_ELIGIBLE_SINK_PLUGINS
         output_name_set = {o.name for o in self.outputs}
         output_by_name = {o.name: o for o in self.outputs}
         for output in self.outputs:
@@ -2588,7 +2643,7 @@ class CompositionState:
                 warnings.append(
                     _warn(
                         f"output:{output.name}",
-                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use csv or json.",
+                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use {FAILSINK_ELIGIBLE_PLUGIN_TEXT}.",
                         "medium",
                     )
                 )
@@ -2640,18 +2695,13 @@ class CompositionState:
             )
 
         # S2: Single output to external sink — suggest a local fallback
-        # Local file sinks (csv, json) don't benefit from a backup:
+        # Local file sinks don't benefit from a backup:
         # if the filesystem is failing, a second file will fail too.
         # External sinks (database, azure_blob, dataverse, http) benefit from a
         # local recovery file when the external system is unavailable.
-        # MUST be a subset of the runtime sink registry — phantoms are
-        # behaviour-neutral here (the check fires for non-members, so a phantom
-        # plugin name can never appear in a valid pipeline anyway), but kept
-        # consistent with _FILE_SINK_PLUGINS / _ALLOWED_FAILSINK_PLUGINS.
-        _local_file_sinks = {"csv", "json"}
         if len(self.outputs) == 1:
             output = self.outputs[0]
-            if output.plugin not in _local_file_sinks:
+            if output.plugin not in LOCAL_RECOVERY_SINK_PLUGINS:
                 suggestions.append(
                     _sug(
                         "pipeline",

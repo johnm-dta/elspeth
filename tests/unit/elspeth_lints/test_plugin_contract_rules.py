@@ -11,8 +11,8 @@ from pathlib import Path
 
 from elspeth_lints.core.protocols import RuleContext
 from elspeth_lints.rules.plugin_contract.component_type import RULE as COMPONENT_TYPE_RULE
-from elspeth_lints.rules.plugin_contract.plugin_hashes import RULE as PLUGIN_HASHES_RULE
 from elspeth_lints.rules.plugin_contract.plugin_hashes.rule import (
+    EXPECTED_PLUGIN_COUNT,
     PluginHashesRule,
     compute_source_file_hash,
 )
@@ -247,6 +247,47 @@ def test_component_type_aliased_base_with_declared_type_is_clean() -> None:
     assert findings == []
 
 
+def test_component_type_known_literal_base_not_suppressed_by_alias_target() -> None:
+    # elspeth-81fb854e58: a literal known untyped base keeps the CT1 reporting
+    # decision even if the import alias map also has a stale typed target for
+    # the same local name.
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import SourceDataConfig as DataPluginConfig
+
+            class DataPluginConfig:
+                pass
+
+            class AliasTargetShouldNotSuppress(DataPluginConfig):
+                path: str
+            """),
+            Path("bad.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["CT1"]
+    assert "AliasTargetShouldNotSuppress" in findings[0].message
+
+
+def test_component_type_accepts_non_known_alias_to_typed_base() -> None:
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import SourceDataConfig as SourceBase
+
+            class AliasInheritedType(SourceBase):
+                path: str
+            """),
+            Path("good.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
 def test_component_type_flags_invalid_component_type_value() -> None:
     # elspeth-a2b240c29b: an out-of-contract string label must be flagged, not
     # silently accepted. The documented contract allows only source/sink/transform.
@@ -289,14 +330,14 @@ def test_plugin_hashes_reports_missing_source_file_hash(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "missing_hash.py",
         """
-        class MissingHashSource:
+        class MissingHashSource(BaseSource):
             name = "missing-hash"
             plugin_version = "1.0.0"
         """,
     )
 
     findings = list(
-        PLUGIN_HASHES_RULE.analyze(
+        PluginHashesRule(min_plugins=0).analyze(
             ast.Module(body=[], type_ignores=[]),
             tmp_path,
             RuleContext(root=tmp_path),
@@ -313,30 +354,51 @@ def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: P
         """
         PLUGIN_NAME = "dynamic"
 
-        class DynamicSource:
+        class DynamicSource(BaseSource):
             name = PLUGIN_NAME
             plugin_version = "1.0.0"
             source_file_hash = None
         """,
     )
 
-    findings = scan_plugin_hashes_root(tmp_path)
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
 
     assert [finding.rule_id for finding in findings] == ["PH2"]
     assert "DynamicSource" in findings[0].message
 
 
+def test_plugin_hashes_resolves_module_constants_for_version_and_hash(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "plugins" / "sources" / "constant_metadata.py",
+        """
+        PLUGIN_VERSION = "1.2.3"
+        PLUGIN_HASH = "sha256:1111222233334444"
+
+        class ConstantMetadataSource(BaseSource):
+            name = "constant-metadata"
+            plugin_version = PLUGIN_VERSION
+            source_file_hash = PLUGIN_HASH
+        """,
+    )
+
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
+
+    assert [finding.rule_id for finding in findings] == ["PH3"]
+    assert "stale source_file_hash" in findings[0].message
+    assert "ConstantMetadataSource" in findings[0].message
+
+
 def test_plugin_hashes_passes_on_correct_hashes(tmp_path: Path) -> None:
     _write_hashed_plugin(tmp_path, class_name="GoodSource", name="good", version="1.0.0")
 
-    assert scan_plugin_hashes_root(tmp_path) == []
+    assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
 
 
 def test_plugin_hashes_reports_stale_hash(tmp_path: Path) -> None:
     plugin = _write_hashed_plugin(tmp_path, class_name="GoodSource", name="good", version="1.0.0")
     plugin.write_text(plugin.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
 
-    findings = scan_plugin_hashes_root(tmp_path)
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
 
     assert [finding.rule_id for finding in findings] == ["PH3"]
     assert "stale source_file_hash" in findings[0].message
@@ -346,13 +408,13 @@ def test_plugin_hashes_reports_missing_plugin_version(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "missing_version.py",
         """
-        class MissingVersionSource:
+        class MissingVersionSource(BaseSource):
             name = "missing-version"
             source_file_hash = "sha256:0000000000000000"
         """,
     )
 
-    findings = scan_plugin_hashes_root(tmp_path)
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
 
     assert [finding.rule_id for finding in findings] == ["PH1", "PH3"]
     assert "no version declaration" in findings[0].message
@@ -373,6 +435,26 @@ def test_plugin_hashes_enforces_minimum_discovery_count(tmp_path: Path) -> None:
     assert "DISCOVERY ERROR" in findings[0].message
 
 
+def test_plugin_hashes_default_rule_enforces_expected_discovery_count(tmp_path: Path) -> None:
+    findings = list(
+        PluginHashesRule().analyze(
+            ast.Module(body=[], type_ignores=[]),
+            tmp_path,
+            RuleContext(root=tmp_path),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["plugin_contract.plugin_hashes"]
+    assert f"expected at least {EXPECTED_PLUGIN_COUNT}" in findings[0].message
+
+
+def test_plugin_hashes_default_scan_enforces_expected_discovery_count(tmp_path: Path) -> None:
+    findings = scan_plugin_hashes_root(tmp_path)
+
+    assert [finding.rule_id for finding in findings] == ["plugin_contract.plugin_hashes"]
+    assert f"expected at least {EXPECTED_PLUGIN_COUNT}" in findings[0].message
+
+
 def test_plugin_hashes_ignores_excluded_helper_files(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "base.py",
@@ -382,7 +464,19 @@ def test_plugin_hashes_ignores_excluded_helper_files(tmp_path: Path) -> None:
         """,
     )
 
-    assert scan_plugin_hashes_root(tmp_path) == []
+    assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
+
+
+def test_plugin_hashes_ignores_named_helper_classes(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "plugins" / "sources" / "helper.py",
+        """
+        class HelperSpec:
+            name = "not-a-plugin"
+        """,
+    )
+
+    assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
 
 
 def test_plugin_hashes_json_mode_succeeds_on_current_codebase(
@@ -435,7 +529,7 @@ def _write_hashed_plugin(tmp_path: Path, *, class_name: str, name: str, version:
     _write(
         plugin,
         f'''
-        class {class_name}:
+        class {class_name}(BaseSource):
             name = "{name}"
             plugin_version = "{version}"
             source_file_hash = "sha256:0000000000000000"

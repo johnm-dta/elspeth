@@ -1,10 +1,16 @@
 from pathlib import Path
 
-HARNESS_PLAN = Path("docs/superpowers/plans/2026-06-06-tutorial-reliability-harness.md")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+STAGING_CREDENTIAL_PLACEHOLDERS = ("dta_user", "dta_pass")
 
 
-def test_tutorial_reliability_harness_plan_does_not_embed_staging_credentials() -> None:
-    text = HARNESS_PLAN.read_text(encoding="utf-8")
+def test_public_docs_do_not_embed_staging_credential_placeholders() -> None:
+    offenders: list[str] = []
 
-    assert "dta_user" not in text
-    assert "dta_pass" not in text
+    for path in [*REPO_ROOT.glob("*.md"), *REPO_ROOT.glob("docs/**/*.md")]:
+        text = path.read_text(encoding="utf-8")
+        for placeholder in STAGING_CREDENTIAL_PLACEHOLDERS:
+            if placeholder in text:
+                offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {placeholder}")
+
+    assert offenders == []

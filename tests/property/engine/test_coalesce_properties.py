@@ -24,8 +24,9 @@ or produce incorrect audit trails.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from hypothesis import assume, given, settings
@@ -63,6 +64,58 @@ class _TestCoalesceExecutor(CoalesceExecutor):
         if output_schema is None and settings.merge == "union":
             output_schema = SchemaContract(mode="OBSERVED", fields=(), locked=False)
         super().register_coalesce(settings, node_id, branch_schemas, output_schema)
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordedNodeState:
+    state_id: str
+
+
+class _FakeExecutionRepository:
+    def __init__(self) -> None:
+        self._next_state_id = 1
+
+    def begin_node_state(self, **_: Any) -> _RecordedNodeState:
+        state = _RecordedNodeState(state_id=f"state-{self._next_state_id:03d}")
+        self._next_state_id += 1
+        return state
+
+    def complete_node_state(self, **_: Any) -> None:
+        return None
+
+    def get_completed_row_ids_for_nodes(self, **_: Any) -> list[str]:
+        return []
+
+    def has_completed_row_for_node(self, **_: Any) -> bool:
+        return False
+
+
+class _FakeDataFlowRepository:
+    def __init__(self) -> None:
+        self.record_token_outcome_error: Exception | None = None
+
+    def record_token_outcome(self, **_: Any) -> None:
+        if self.record_token_outcome_error is not None:
+            raise self.record_token_outcome_error
+
+
+class _FakeTokenManager:
+    def coalesce_tokens(
+        self,
+        parents: tuple[TokenInfo, ...],
+        merged_data: Any,
+        node_id: NodeID,
+        run_id: str,
+    ) -> TokenInfo:
+        # Production CoalesceExecutor._execute_merge() passes merged_data as a
+        # PipelineRow (already wrapped with contract). Match TokenManager.coalesce_tokens
+        # behavior: use merged_data directly as row_data, don't re-wrap.
+        return TokenInfo(
+            token_id=f"merged-{parents[0].row_id}",
+            row_id=parents[0].row_id,
+            row_data=merged_data,
+            join_group_id=f"join-{parents[0].row_id}",
+        )
 
 
 # =============================================================================
@@ -121,42 +174,27 @@ def make_token(
 
 
 def make_mock_executor(clock: MockClock | None = None) -> _TestCoalesceExecutor:
-    """Create a CoalesceExecutor with mocked dependencies."""
-    mock_execution = MagicMock()
-    mock_execution.begin_node_state.return_value = MagicMock(state_id="state-001")
-    mock_execution.complete_node_state.return_value = None
-    mock_execution.get_completed_row_ids_for_nodes.return_value = []
-
-    mock_data_flow = MagicMock()
-    mock_data_flow.record_token_outcome.return_value = None
+    """Create a CoalesceExecutor with test fakes for audit dependencies."""
+    execution = _FakeExecutionRepository()
+    data_flow = _FakeDataFlowRepository()
 
     span_factory = SpanFactory()
-    mock_token_manager = MagicMock()
-
-    # Make coalesce_tokens return a merged token.
-    # Production CoalesceExecutor._execute_merge() passes merged_data as a
-    # PipelineRow (already wrapped with contract). Match TokenManager.coalesce_tokens
-    # behavior: use merged_data directly as row_data, don't re-wrap.
-    def mock_coalesce_tokens(parents, merged_data, node_id, run_id):
-        return TokenInfo(
-            token_id=f"merged-{parents[0].row_id}",
-            row_id=parents[0].row_id,
-            row_data=merged_data,
-            join_group_id=f"join-{parents[0].row_id}",
-        )
-
-    mock_token_manager.coalesce_tokens.side_effect = mock_coalesce_tokens
+    token_manager = _FakeTokenManager()
 
     step_resolver = lambda node_id: 0  # noqa: E731
 
     return _TestCoalesceExecutor(
-        mock_execution,
+        execution,
         span_factory=span_factory,
-        token_manager=mock_token_manager,
+        token_manager=token_manager,
         run_id="test-run",
         step_resolver=step_resolver,
         clock=clock or MockClock(start=0.0),
-        data_flow=mock_data_flow,
+        data_flow=data_flow,
+        barrier_restore_reads=SimpleNamespace(
+            get_completed_row_ids_for_nodes=execution.get_completed_row_ids_for_nodes,
+            has_completed_row_for_node=execution.has_completed_row_for_node,
+        ),
     )
 
 
@@ -164,7 +202,8 @@ class TestCoalesceAuditCleanupFailures:
     def test_merge_failure_cleanup_audit_error_leaves_pending_for_recovery(self) -> None:
         executor = make_mock_executor()
         assert executor._data_flow is not None
-        executor._data_flow.record_token_outcome.side_effect = AuditIntegrityError("token outcome write failed")
+        assert isinstance(executor._data_flow, _FakeDataFlowRepository)
+        executor._data_flow.record_token_outcome_error = AuditIntegrityError("token outcome write failed")
         settings = CoalesceSettings(
             name="test_coalesce",
             branches=["branch_a", "branch_b"],

@@ -15,9 +15,11 @@ from typing import Any, cast
 
 from elspeth.contracts import NodeStateStatus
 from elspeth.contracts.coalesce_metadata import collision_value_fingerprint as _fingerprint_collision_value
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.formatters import dataclass_to_dict, serialize_datetime
+from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
+from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
+from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
     OPERATION_STATUS_VALUES,
     OPERATION_TYPE_VALUES,
@@ -38,9 +40,10 @@ from elspeth.mcp.types import (
 
 _serialize_datetime = serialize_datetime
 _dataclass_to_dict = dataclass_to_dict
+AnalyzerRepositories = LandscapeReadRepositories | RecorderFactory
 
 
-def list_runs(db: LandscapeDB, factory: RecorderFactory, limit: int = 50, status: str | None = None) -> list[RunRecord]:
+def list_runs(db: LandscapeDB, factory: AnalyzerRepositories, limit: int = 50, status: str | None = None) -> list[RunRecord]:
     """List pipeline runs.
 
     Args:
@@ -84,7 +87,7 @@ def list_runs(db: LandscapeDB, factory: RecorderFactory, limit: int = 50, status
     ]
 
 
-def get_run(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunDetail | None:
+def get_run(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> RunDetail | None:
     """Get details of a specific run.
 
     Args:
@@ -101,7 +104,7 @@ def get_run(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunDetail
     return cast(RunDetail, _dataclass_to_dict(run))
 
 
-def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int = 100, offset: int = 0) -> list[RowRecord]:
+def list_rows(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str, limit: int = 100, offset: int = 0) -> list[RowRecord]:
     """List source rows for a run.
 
     Args:
@@ -144,7 +147,7 @@ def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int
     ]
 
 
-def list_nodes(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> list[NodeDetail]:
+def list_nodes(db: LandscapeDB, factory: AnalyzerRepositories, run_id: str) -> list[NodeDetail]:
     """List all nodes (plugin instances) for a run.
 
     Args:
@@ -161,7 +164,7 @@ def list_nodes(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> list[N
 
 def list_tokens(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     row_id: str | None = None,
     limit: int = 100,
@@ -207,7 +210,7 @@ def list_tokens(
 
 def get_token_children(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     parent_token_id: str,
 ) -> list[TokenChildRecord]:
     """Get child tokens created from a parent (forward lineage).
@@ -238,7 +241,7 @@ def get_token_children(
 
 def list_operations(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     operation_type: str | None = None,
     status: str | None = None,
@@ -319,7 +322,7 @@ def list_operations(
     ]
 
 
-def get_operation_calls(db: LandscapeDB, factory: RecorderFactory, operation_id: str) -> list[OperationCallRecord]:
+def get_operation_calls(db: LandscapeDB, factory: AnalyzerRepositories, operation_id: str) -> list[OperationCallRecord]:
     """Get external calls for a source/sink operation.
 
     Unlike get_calls() which takes a state_id for transform calls, this
@@ -360,7 +363,7 @@ def get_operation_calls(db: LandscapeDB, factory: RecorderFactory, operation_id:
 
 def explain_token(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     token_id: str | None = None,
     row_id: str | None = None,
@@ -413,7 +416,7 @@ def explain_token(
 
 def get_errors(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     error_type: str = "all",
     limit: int = 100,
@@ -489,7 +492,7 @@ def get_errors(
 
 def get_node_states(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     node_id: str | None = None,
     status: str | None = None,
@@ -589,7 +592,7 @@ def get_node_states(
     return results
 
 
-def get_calls(db: LandscapeDB, factory: RecorderFactory, state_id: str) -> list[CallDetail]:
+def get_calls(db: LandscapeDB, factory: AnalyzerRepositories, state_id: str) -> list[CallDetail]:
     """Get external calls for a node state.
 
     Args:
@@ -607,6 +610,17 @@ def get_calls(db: LandscapeDB, factory: RecorderFactory, state_id: str) -> list[
 _VALUE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+@trust_boundary(
+    tier=3,
+    source="stored coalesce collision values re-read from audit context JSON (heterogeneous persisted shapes)",
+    source_param="value",
+    suppresses=("R5",),
+    invariant=(
+        "total boolean classifier: returns False for any value not matching the exact "
+        "redacted {value_hash, value_type} envelope; never raises"
+    ),
+    non_raising=True,
+)
 def _is_collision_value_fingerprint(value: Any) -> bool:
     """Return True when a stored collision value is already an audit-safe fingerprint."""
     return (
@@ -630,7 +644,7 @@ def _collision_value_fingerprint(value: Any) -> CollisionValueFingerprint:
 
 def list_collisions(
     db: LandscapeDB,
-    factory: RecorderFactory,
+    factory: AnalyzerRepositories,
     run_id: str,
     limit: int = 100,
 ) -> list[CollisionRecord]:
@@ -1032,7 +1046,22 @@ def _validate_readonly_sql(sql: str) -> None:
             raise ValueError(f"Query contains forbidden keyword: {keyword}")
 
 
-def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+@trust_boundary(
+    tier=3,
+    source="MCP tool-call query arguments (caller-controlled limit)",
+    source_param="limit",
+    suppresses=("R5",),
+    invariant="rejects non-integer and bool limit with TypeError before range checks and fetchmany",
+    test_ref="tests/unit/mcp/test_analyzer_queries.py::TestQueryResultLimit::test_query_rejects_non_integer_limit",
+    test_fingerprint="a90ca8148b413c565391f57c3acc53219d7fd5000768564c5f2e098bdf7696f4",
+)
+def query(
+    db: LandscapeDB,
+    factory: AnalyzerRepositories,
+    sql: str,
+    params: dict[str, Any] | None = None,
+    limit: int = MCP_QUERY_DEFAULT_LIMIT,
+) -> list[dict[str, Any]]:
     """Execute a read-only SQL query.
 
     Args:
@@ -1040,6 +1069,7 @@ def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str,
         factory: Recorder factory
         sql: SQL query (must be a single SELECT or WITH...SELECT)
         params: Optional query parameters
+        limit: Maximum rows to return
 
     Returns:
         Query results as list of dicts
@@ -1047,6 +1077,12 @@ def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str,
     Raises:
         ValueError: If query fails read-only validation
     """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise TypeError(f"query limit must be integer, got {type(limit).__name__}")
+    if limit < 1:
+        raise ValueError(f"query limit must be >= 1, got {limit}")
+    if limit > MCP_RESULT_LIMIT_MAX:
+        raise ValueError(f"query limit must be <= {MCP_RESULT_LIMIT_MAX}, got {limit}")
     _validate_readonly_sql(sql)
 
     from sqlalchemy import text
@@ -1054,7 +1090,7 @@ def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str,
     with db.read_only_connection() as conn:
         result = conn.execute(text(sql), params or {})
         columns = list(result.keys())
-        rows = result.fetchall()
+        rows = result.fetchmany(limit)
 
     if len(columns) != len(set(columns)):
         from collections import Counter

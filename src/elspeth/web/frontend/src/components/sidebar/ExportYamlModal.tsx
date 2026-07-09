@@ -58,7 +58,7 @@ export function ExportYamlModal(): JSX.Element | null {
             onClick={() => setIsOpen(false)}
             aria-label="Close export YAML"
           >
-            x
+            ×
           </button>
         </header>
         <div className="yaml-modal-body">

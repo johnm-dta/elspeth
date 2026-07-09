@@ -14,7 +14,7 @@ from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.app import create_app
 from elspeth.web.config import WebSettings
 from elspeth.web.preferences.service import CorruptPreferencesError
-from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryNotRecordedError
 from elspeth.web.sessions.protocol import AuditAccessLogWriteError, StaleComposeStateError
 
 
@@ -148,8 +148,10 @@ async def test_audit_story_integrity_error_handler_returns_structured_500(tmp_pa
     # The audit-story route in ``sessions/routes.py`` raises
     # ``AuditStoryIntegrityError`` (a sibling of ``AuditIntegrityError``)
     # when either (a) the session-runs row never got a landscape_run_id,
-    # or (b) the Landscape projection itself is incomplete (missing rows,
-    # NULL llm_call_count, non-bool seeded_from_cache, etc.). The named
+    # or (b) the Landscape projection itself is corrupt (missing rows,
+    # non-bool seeded_from_cache, cache replay without a cache_key). A
+    # NULL llm_call_count is NOT integrity — that is the never-recorded
+    # absent state, mapped to 404 via AuditStoryNotRecordedError. The named
     # type carries the discriminator that lets the handler return a
     # structured ``error_type`` body — without it, incident-response code
     # would have to string-grep the message. This test guards two
@@ -161,11 +163,33 @@ async def test_audit_story_integrity_error_handler_returns_structured_500(tmp_pa
 
     response = await handler(
         cast(Request, object()),
-        AuditStoryIntegrityError("Landscape run 'abc-123' has NULL llm_call_count"),
+        AuditStoryIntegrityError("Landscape run 'abc-123' has non-bool seeded_from_cache=None"),
     )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 500
     body = json.loads(response.body)
     assert body["error_type"] == "audit_story_integrity_error"
-    assert body["detail"] == "Landscape run 'abc-123' has NULL llm_call_count"
+    assert body["detail"] == "Landscape run 'abc-123' has non-bool seeded_from_cache=None"
+
+
+@pytest.mark.asyncio
+async def test_audit_story_not_recorded_error_handler_returns_structured_404(tmp_path: Path) -> None:
+    # ``AuditStoryNotRecordedError`` is the ABSENT state: the run exists but
+    # its audit-story columns were never written (normal for every
+    # non-tutorial run today). It maps to a structured 404 with a stable
+    # machine code — never the integrity 500 — and the detail is fixed
+    # plain language, not the internal exception text.
+    app = create_app(_settings(tmp_path))
+    handler = app.exception_handlers[AuditStoryNotRecordedError]
+
+    response = await handler(
+        cast(Request, object()),
+        AuditStoryNotRecordedError("Landscape run 'abc-123' has NULL llm_call_count"),
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 404
+    body = json.loads(response.body)
+    assert body["error_type"] == "audit_story_not_recorded"
+    assert "abc-123" not in response.body.decode()

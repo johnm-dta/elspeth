@@ -22,21 +22,31 @@ export type TurnType =
   | "schema_form"
   | "propose_chain"
   | "recipe_offer"
-  // Phase 5b: guided-mode interpretation-review widget.  Dispatched from
-  // GuidedTurn.tsx (the freeform variant uses InterpretationReviewInlineMessage
-  // — different file, different component, no shared widget).
-  | "interpretation_review";
+  | "confirm_wiring";
 
+/**
+ * Mirrors protocol.py ControlSignal (source-of-truth enum). "back" and
+ * "passthrough" were missing here — pre-existing drift from the backend
+ * enum, not a deliberate narrowing — surfaced and fixed alongside the C-3
+ * passthrough wiring (composer first-principles review 2026-07-04, C-3).
+ * "back" has no frontend caller yet (no Back-nav widget exists — reframe
+ * epic elspeth-e7757e5c58 slices D/E/F remain open); it is typed here so
+ * the union tracks the backend's closed enum rather than only the signals
+ * some widget happens to send today.
+ */
 export type ControlSignal =
   | "exit_to_freeform"
   | "request_advisor"
-  | "reject";
+  | "reject"
+  | "back"
+  | "passthrough";
 
 export type GuidedStep =
   | "step_1_source"
   | "step_2_sink"
   | "step_2_5_recipe_match"
-  | "step_3_transforms";
+  | "step_3_transforms"
+  | "step_4_wire";
 
 export type TerminalKind = "completed" | "exited_to_freeform";
 
@@ -70,6 +80,23 @@ export interface TerminalState {
  * entry in GuidedSession.chat_history.  Server-emitted; all values are
  * authoritative (Tier 1).  Ordering is driven by `seq`, not `ts_iso` —
  * two turns produced in the same request share a wall-clock second.
+ *
+ * `assistant_message_kind` (composer first-principles review 2026-07-04,
+ * C-2) discriminates a real LLM reply from a synthetic failure message
+ * (scaffold-guard rejection or provider unavailability) — before this
+ * field, both looked like an ordinary assistant turn and a synthetic
+ * failure could become the "Current decision" headline (guidedRationale.ts)
+ * or render with the normal "ELSPETH said:" bubble treatment
+ * (GuidedChatHistory.tsx). Only meaningful on `role: "assistant"` entries.
+ * The backend always emits this key (ChatTurnResponse declares it required
+ * with a `| null` domain — schemas.py), so on the wire the value is one of
+ * "assistant", "synthetic_failure", or null; the key is never absent. null
+ * is what a user turn, and any turn persisted before this field existed,
+ * carries. Treat null (and, defensively, an absent key on a client-built
+ * turn) as a normal assistant turn — this is documented legacy/user
+ * behaviour, not a fabricated default. Detect a real failure with
+ * `=== "synthetic_failure"`, never with an absence/`in` check (the wire
+ * never omits the key, so an absence check would never fire).
  */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -77,6 +104,19 @@ export interface ChatTurn {
   seq: number;
   step: GuidedStep;
   ts_iso: string;
+  assistant_message_kind?: "assistant" | "synthetic_failure" | null;
+}
+
+/**
+ * Wire: WorkflowProfileResponse (schemas.py — WorkflowProfileResponse).
+ * Server-owned workflow profile (the four behavior flags).
+ * A `null` `GuidedSession.profile` is the empty/live-guided profile.
+ */
+export interface WorkflowProfile {
+  coaching: boolean;
+  bookends: boolean;
+  recipe_match: boolean;
+  advisor_checkpoints: boolean;
 }
 
 /**
@@ -92,6 +132,8 @@ export interface GuidedSession {
   terminal: TerminalState | null;
   chat_history: ChatTurn[];
   chat_turn_seq: number;
+  /** Server-owned WorkflowProfile, or `null` for the empty/live-guided profile. */
+  profile: WorkflowProfile | null;
 }
 
 /** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */
@@ -120,6 +162,12 @@ export interface GuidedRespondRequest {
   edit_step_index: number | null;
   /** Typed as closed enum client-side; server validates and accepts str for graceful stale-client failure. */
   control_signal: ControlSignal | null;
+  /**
+   * Optimistic-concurrency token: the client's expected current step. When
+   * present the server 409s on mismatch (the wizard advanced under the
+   * client). Optional — omit for non-wire turns that don't carry a step.
+   */
+  step_index?: GuidedStep | null;
 }
 
 /** Response for POST /api/sessions/{id}/guided/respond (schemas.py:286-296). */
@@ -128,6 +176,23 @@ export interface GuidedRespondResponse {
   next_turn: TurnPayload | null;
   terminal: TerminalState | null;
   composition_state: CompositionState | null;
+}
+
+/**
+ * Response for GET /api/sessions/{id}/guided/tutorial-sample
+ * (sessions/schemas.py — TutorialSampleResponse, p4 Task 8a).
+ *
+ * Runtime-derived inputs for the tutorial worked example: the 3 synthetic
+ * sample-page URLs (`sample_urls`) computed from the active tutorial session's
+ * resolved origin and appended to the locked STEP_1 prompt so the source driver
+ * can parse the runtime-served addresses.
+ *
+ * No `allowed_hosts` is carried: the synthetic pages are publicly hosted, so the
+ * tutorial's web_scrape node relies on the plugin default
+ * `allowed_hosts="public_only"` — the client never sets an SSRF allowlist.
+ */
+export interface TutorialSampleResponse {
+  sample_urls: string[];
 }
 
 /**
@@ -148,9 +213,20 @@ export interface GuidedChatRequest {
  * Response for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatResponse).
  *
  * `assistant_message` is the LLM's advisory reply, or the synthetic "I'm
- * unavailable" message on transient LLM failure (Phase A does not yet
- * distinguish the two on the wire; slice 5's ComposerChatTurn audit shape
- * adds that discriminator).
+ * unavailable" message on transient LLM failure. `assistant_message_kind`
+ * (C-2) is the top-level discriminator for THIS response's reply —
+ * `"synthetic_failure"` covers both a scaffold-guard rejection and provider
+ * unavailability; the same value is mirrored onto the tail entry of
+ * `guided_session.chat_history` (ChatTurn.assistant_message_kind), which is
+ * what the UI actually renders from (GuidedChatHistory reads
+ * `guidedSession.chat_history`, not this envelope field directly).
+ *
+ * Typed optional rather than required: the backend field is landing in the
+ * same wave as this frontend change, and existing fixtures/tests construct
+ * `GuidedChatResponse` literals without it. Absent ⇒ treat as `"assistant"`
+ * — the same documented legacy convention as ChatTurn's field, not a
+ * fabricated default (a POST response with the discriminator omitted has
+ * no failure information to hide; the omission just predates the wave).
  *
  * Most chat is advisory and returns null for the turn/state fields. Step 1
  * source chat may resolve a complete inline source request; then these fields
@@ -158,6 +234,7 @@ export interface GuidedChatRequest {
  */
 export interface GuidedChatResponse {
   assistant_message: string;
+  assistant_message_kind?: "assistant" | "synthetic_failure";
   guided_session: GuidedSession;
   next_turn: TurnPayload | null;
   terminal: TerminalState | null;
@@ -298,6 +375,63 @@ export interface ProposeChainPayload {
   steps: ProposedStep[];
   why: string;
   blockers: string[];
+}
+
+/**
+ * Wire data for the step-4 wiring review: topology describes source/node/output
+ * connection labels, while contracts overlay producer/consumer compatibility.
+ * Source ids use `source` or `source:<name>` and output ids use
+ * `output:<sink_name>`. Warnings and advisor/signoff fields are optional
+ * advisory metadata emitted when the backend has something to report.
+ */
+export interface WireStageData {
+  topology: {
+    sources: Record<
+      string,
+      {
+        id: string;
+        plugin: string;
+        on_success: string | null;
+        on_validation_failure: string;
+      }
+    >;
+    nodes: Array<{
+      id: string;
+      node_type: string;
+      plugin: string | null;
+      input: string | null;
+      on_success: string | null;
+      on_error: string | null;
+      routes: Record<string, string> | null;
+      fork_to: string[] | null;
+      branches: string[] | Record<string, string> | null;
+    }>;
+    outputs: Array<{
+      id: string;
+      sink_name: string;
+      plugin: string;
+      on_write_failure: string;
+    }>;
+  };
+  edge_contracts: Array<{
+    from: string;
+    to: string;
+    producer_guarantees: string[];
+    consumer_requires: string[];
+    missing_fields: string[];
+    satisfied: boolean;
+  }>;
+  semantic_contracts: Array<Record<string, unknown>>;
+  warnings: Array<Record<string, unknown>>;
+  advisor_findings?: string;
+  signoff_outcome?: string;
+  /**
+   * Advisor sign-off passes left AFTER the pass that produced this turn. Present
+   * only on a RE-EMITTED wire turn (the two sites where the pass budget is in
+   * scope); ABSENT on the initial turn and the advisor-off tutorial, so the
+   * wire-stage cost copy gates on `passes_remaining !== undefined`.
+   */
+  passes_remaining?: number;
 }
 
 /**

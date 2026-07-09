@@ -197,6 +197,7 @@ class TestDiscoverAllPlugins:
         assert "null" in source_names
         # Azure blob source lives in plugins/azure/
         assert "azure_blob" in source_names
+        assert "web_source" not in source_names
 
     def test_discover_all_transforms(self) -> None:
         """Verify all transforms are discovered including llm/ and transforms/azure/."""
@@ -205,6 +206,8 @@ class TestDiscoverAllPlugins:
         discovered = discover_all_plugins()
 
         transform_names = [cls.name for cls in discovered["transforms"]]  # type: ignore[attr-defined]
+        assert "blob_csv_expand" in transform_names
+        assert "blob_fetch" in transform_names
         assert "passthrough" in transform_names
         assert "field_mapper" in transform_names
         # LLM transforms live in plugins/llm/ - verify unified is discovered
@@ -247,7 +250,9 @@ class TestDiscoverAllPlugins:
 
         # Expected counts verified during migration from hookimpl files
         EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
-        EXPECTED_TRANSFORM_COUNT = 26  # 22 standard transforms + 2 azure safety + llm + rag_retrieval
+        EXPECTED_TRANSFORM_COUNT = (
+            29  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval + blob_fetch + blob_csv_expand
+        )
         EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()
@@ -589,6 +594,21 @@ class TestDiscoveryOptionalDependency:
 
         # Should not raise — skips the file with a warning
         result = discover_plugins_in_directory(tmp_path, BaseSource)
+        assert result == []
+
+    def test_jinja2_optional_dependency_skips_file_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """LLM template support imports jinja2, which belongs to optional plugin extras."""
+        from elspeth.plugins.infrastructure import discovery
+
+        plugin_file = tmp_path / "llm_plugin.py"
+        plugin_file.write_text("raise AssertionError('patched discovery should not execute this file')\n")
+
+        def missing_jinja2(_py_file: Path, _base_class: type) -> list[type]:
+            raise ModuleNotFoundError("No module named 'jinja2'", name="jinja2")
+
+        monkeypatch.setattr(discovery, "_discover_in_file", missing_jinja2)
+
+        result = discover_plugins_in_directory(tmp_path, BaseTransform)
         assert result == []
 
     def test_missing_internal_import_in_concrete_plugin_crashes(self, tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Tests for dependency, commencement gate, and collection probe config models."""
+"""Tests for dependency config declarations and preflight result contracts."""
 
 from __future__ import annotations
 
@@ -7,14 +7,42 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
+from elspeth.core.config import ElspethSettings
 from elspeth.core.dependency_config import (
     CollectionProbeConfig,
     CommencementGateConfig,
-    CommencementGateResult,
     DependencyConfig,
-    DependencyRunResult,
-    PreflightResult,
 )
+from elspeth.core.expression_parser import ExpressionSecurityError
+from elspeth.engine.commencement import validate_gate_expressions
+
+
+def _minimal_settings_payload() -> dict[str, object]:
+    return {
+        "sources": {
+            "source": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {
+                    "path": "input.csv",
+                    "schema": {"mode": "observed"},
+                    "on_validation_failure": "discard",
+                },
+            }
+        },
+        "sinks": {
+            "output": {
+                "plugin": "json",
+                "on_write_failure": "discard",
+                "options": {
+                    "path": "output.json",
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                },
+            }
+        },
+    }
 
 
 class TestDependencyConfig:
@@ -41,6 +69,18 @@ class TestDependencyConfig:
             DependencyConfig(name="x", settings="")
 
 
+class TestElspethSettingsDependencies:
+    def test_rejects_duplicate_dependency_names_at_config_boundary(self) -> None:
+        payload = _minimal_settings_payload()
+        payload["depends_on"] = [
+            {"name": "indexer", "settings": "./index-a.yaml"},
+            {"name": "indexer", "settings": "./index-b.yaml"},
+        ]
+
+        with pytest.raises(ValidationError, match="duplicate depends_on dependency name"):
+            ElspethSettings.model_validate(payload)
+
+
 class TestCommencementGateConfig:
     def test_valid_config(self) -> None:
         config = CommencementGateConfig(
@@ -56,6 +96,23 @@ class TestCommencementGateConfig:
     def test_rejects_empty_condition(self) -> None:
         with pytest.raises(ValidationError):
             CommencementGateConfig(name="x", condition="")
+
+    def test_expression_contract_is_shared_by_config_and_engine(self) -> None:
+        from elspeth.core.commencement_gate_expression import (
+            COMMENCEMENT_GATE_ALLOWED_NAMES,
+            validate_commencement_gate_condition,
+        )
+
+        assert COMMENCEMENT_GATE_ALLOWED_NAMES == ("collections", "dependency_runs", "env")
+        validate_commencement_gate_condition("collections['test']['count'] > 0 and env['READY'] == '1'")
+        validate_commencement_gate_condition("dependency_runs['index']['run_id'] == 'run-1'")
+        with pytest.raises(ExpressionSecurityError, match="Forbidden name: 'row'"):
+            validate_commencement_gate_condition("row['status'] == 'ready'")
+        with pytest.raises(ExpressionSecurityError, match="Forbidden name: 'row'"):
+            CommencementGateConfig(name="bad", condition="row['status'] == 'ready'")
+        gate = CommencementGateConfig.model_construct(name="bad", condition="row['status'] == 'ready'")
+        with pytest.raises(ExpressionSecurityError, match="Forbidden name: 'row'"):
+            validate_gate_expressions([gate])
 
 
 class TestCollectionProbeConfig:

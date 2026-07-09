@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
-import type { CompositionProposal, ToolCall } from "@/types/api";
+import type { CompositionProposal, CompositionState, ToolCall } from "@/types/api";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { ArgumentFields, buildProposalDiff, ProposalChanges } from "./ProposalDiff";
 import { describeToolCall } from "./toolCallDescriptions";
 
 /**
@@ -43,6 +44,13 @@ function ToolCallInfo({
 interface ToolCallCardProps {
   toolCall: ToolCall;
   proposal: CompositionProposal | null;
+  /**
+   * Current composition state — the "before" side of the proposal diff
+   * (elspeth-10f76f9250). Only consulted for pending, non-stale proposals;
+   * for anything else the current state is no longer the state the proposal
+   * targeted and the card falls back to structured argument fields.
+   */
+  currentState?: CompositionState | null;
   isStale?: boolean;
   isBusy?: boolean;
   onAccept: (proposalId: string) => void;
@@ -52,12 +60,27 @@ interface ToolCallCardProps {
 export function ToolCallCard({
   toolCall,
   proposal,
+  currentState = null,
   isStale = false,
   isBusy = false,
   onAccept,
   onReject,
 }: ToolCallCardProps) {
   const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
+  // Fragment-level before/after projection of the proposal against the
+  // current pipeline. null = not derivable (unknown tool, malformed args, no
+  // state) → structured argument fields render instead. Computed before the
+  // no-proposal early return to keep hooks unconditional.
+  const diffEntries = useMemo(() => {
+    if (proposal === null || proposal.status !== "pending" || isStale) {
+      return null;
+    }
+    return buildProposalDiff(
+      proposal.tool_name,
+      proposal.arguments_redacted_json,
+      currentState,
+    );
+  }, [proposal, isStale, currentState]);
   if (!proposal) {
     return (
       <div className="tool-call-ribbon">
@@ -100,6 +123,15 @@ export function ToolCallCard({
         <p className="tool-call-affects">
           <strong>Affects:</strong> {proposal.affects.join(", ")}
         </p>
+      )}
+      {/* Primary change surface (elspeth-10f76f9250): a before/after diff of
+          the affected pipeline fragment when derivable, otherwise structured
+          per-argument fields. The raw JSON stays available behind the
+          details expander below in both cases. */}
+      {diffEntries !== null ? (
+        <ProposalChanges entries={diffEntries} />
+      ) : (
+        <ArgumentFields args={proposal.arguments_redacted_json} />
       )}
       <details className="tool-call-details">
         <summary>View arguments (JSON)</summary>

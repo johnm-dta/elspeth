@@ -5,10 +5,10 @@
 snapshot (`tests/unit/web/composer/redaction_policy_snapshot.json`).
 
 **Status.** Current as of spec rev-5 rev-2 iteration (2026-05-12).
-See `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`
-§4.4.5 for the authoritative control definition. The review findings that
-shaped this guide are summarized in that spec; generated reviewer sidecars are
-not required for day-to-day policy changes.
+The authoritative control definition now lives in the redaction `MANIFEST` and
+its policy snapshot tests. Historical spec and review context are preserved in
+git history or maintainer-local archives; generated reviewer sidecars are not
+required for day-to-day policy changes.
 
 ---
 
@@ -23,8 +23,11 @@ Any PR that modifies:
 - `tests/unit/web/composer/test_adequacy_guard.py`
 - `tests/unit/web/composer/test_walk_model_schema.py`
 
-...will trigger the `composer-redaction-gate` CI workflow at
-`.github/workflows/composer-redaction-gate.yml`.
+...will make the `composer-redaction-gate` CI workflow at
+`.github/workflows/composer-redaction-gate.yml` enforce the redaction policy
+direction check. The workflow itself starts on every pull request to the
+protected branch set and exits successfully as not applicable when no
+redaction-sensitive files changed.
 
 ---
 
@@ -41,16 +44,22 @@ declarative key set narrowed, summarizer replaced, structured reason
 rewritten — flips the entry's hash. This change must be committed to
 the snapshot file before CI goes green.
 
-To regenerate the snapshot after editing the manifest:
+Preview the snapshot after editing the manifest:
 
 ```bash
 .venv/bin/python scripts/cicd/bootstrap_redaction_snapshot.py
 ```
 
+Regenerate the snapshot after reviewing the dry-run output:
+
+```bash
+.venv/bin/python scripts/cicd/bootstrap_redaction_snapshot.py --write
+```
+
 ### 2. Direction-aware label-gate CI step
 
-The `composer-redaction-gate` CI workflow fires when the snapshot file
-changes on a PR. It performs a **direction-aware** check:
+The `composer-redaction-gate` CI workflow performs its **direction-aware** check
+when the snapshot file changes on a PR:
 
 - Computes the `sensitive_path_count` per manifest entry (the number of
   `Sensitive`-annotated field paths as enumerated by `walk_model_schema`)

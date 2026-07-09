@@ -16,8 +16,8 @@ SDK wrappers. The helpers:
 
 Tier 3 boundary discipline (per ELSPETH CLAUDE.md):
 
-- ``getattr(...)`` and ``dict.get(...)`` are appropriate at this boundary —
-  LiteLLM response objects are external data, not internal contracts.
+- Provider values are read from Mapping keys or object-owned fields only.
+  Hidden/dynamic provider properties are treated as absent rather than invoked.
 - ``isinstance(...)`` guards distinguish provider-Mapping shapes from
   attribute-style provider response objects.
 - Missing fields surface as ``None`` (absence), not as fabricated zeros.
@@ -29,6 +29,7 @@ from ``service.py`` — that would create a cycle.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -56,6 +57,32 @@ __all__ = [
     "token_usage_from_response",
 ]
 
+_LLM_ERROR_MESSAGE_MAX_CHARS = 512
+_LLM_ERROR_HASH_CHARS = 16
+_LLM_ERROR_REDACTED_DETAIL = "provider error detail redacted"
+_LLM_ERROR_HASH_LABEL = "raw_error_hash"
+
+_LLM_ERROR_SENSITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("authorization_header", re.compile(r"\bAuthorization\s*[:=]\s*[^\s,;}]+(?:\s+[^\s,;}]+)?", re.IGNORECASE)),
+    ("bearer_token", re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE)),
+    ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("github_pat", re.compile(r"ghp_[A-Za-z0-9]{36}")),
+    ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{40,}")),
+    ("openai_key", re.compile(r"sk-[A-Za-z0-9]{40,}")),
+    ("jwt", re.compile(r"\b[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b")),
+    ("url", re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)),
+    ("email", re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b")),
+    ("ssn", re.compile(r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b")),
+)
+
+_LLM_ERROR_HIGH_RISK_FIELD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:headers?|authorization|api[_-]?key|access[_-]?token|prompt(?:_template)?|messages|sample_rows?|rows?)"
+        r"['\"]?\s*[:=]",
+        re.IGNORECASE,
+    ),
+)
+
 
 class _ReasoningMetadata(TypedDict):
     reasoning_content: str | None
@@ -63,12 +90,55 @@ class _ReasoningMetadata(TypedDict):
     thinking_blocks: Any | None
 
 
-def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping[str, Any] | None:
+def _provider_field_map(value: Any) -> Mapping[str, Any] | None:
     if isinstance(value, Mapping):
         return value
     if value is None:
         return None
-    return {field: getattr(value, field, None) for field in fields}
+    try:
+        fields = vars(value)
+    except TypeError:
+        return None
+    if not isinstance(fields, Mapping):
+        return None
+    # Pydantic v2 models with ``extra="allow"`` (LiteLLM response objects)
+    # store undeclared provider fields in the ``__pydantic_extra__`` slot,
+    # not ``__dict__`` — ``usage`` on a real ModelResponse lives there.
+    # Reading the slot is still a data-only read: no provider-named
+    # property is ever invoked.
+    try:
+        extra = object.__getattribute__(value, "__pydantic_extra__")
+    except AttributeError:
+        return fields
+    if isinstance(extra, dict) and extra:
+        return {**extra, **fields}
+    return fields
+
+
+def _provider_field(value: Any, field: str) -> Any:
+    fields = _provider_field_map(value)
+    if fields is None or field not in fields:
+        return None
+    return fields[field]
+
+
+def _provider_method(value: Any, method_name: str) -> Any | None:
+    try:
+        method = object.__getattribute__(value, method_name)
+    except AttributeError:
+        return None
+    if callable(method):
+        return method
+    return None
+
+
+def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping[str, Any] | None:
+    value_fields = _provider_field_map(value)
+    if value_fields is None:
+        return None
+    if isinstance(value, Mapping):
+        return value
+    return {field: value_fields[field] if field in value_fields else None for field in fields}
 
 
 def token_usage_from_response(response: Any | None) -> TokenUsage:
@@ -108,7 +178,7 @@ def token_usage_from_response(response: Any | None) -> TokenUsage:
     """
     if response is None:
         return TokenUsage.unknown()
-    usage = getattr(response, "usage", None)
+    usage = _provider_field(response, "usage")
     if isinstance(usage, Mapping):
         details = usage.get("prompt_tokens_details")
         completion_details = usage.get("completion_tokens_details")
@@ -125,26 +195,26 @@ def token_usage_from_response(response: Any | None) -> TokenUsage:
             "reasoning_tokens": usage.get("reasoning_tokens"),
         }
     else:
-        details_attr = getattr(usage, "prompt_tokens_details", None)
+        details_attr = _provider_field(usage, "prompt_tokens_details")
         details_payload = _provider_details_payload(details_attr, fields=("cached_tokens",))
         completion_details_payload = _provider_details_payload(
-            getattr(usage, "completion_tokens_details", None),
+            _provider_field(usage, "completion_tokens_details"),
             fields=("reasoning_tokens",),
         )
         output_details_payload = _provider_details_payload(
-            getattr(usage, "output_tokens_details", None),
+            _provider_field(usage, "output_tokens_details"),
             fields=("reasoning_tokens",),
         )
         usage_data = {
-            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "completion_tokens", None),
-            "total_tokens": getattr(usage, "total_tokens", None),
+            "prompt_tokens": _provider_field(usage, "prompt_tokens"),
+            "completion_tokens": _provider_field(usage, "completion_tokens"),
+            "total_tokens": _provider_field(usage, "total_tokens"),
             "prompt_tokens_details": details_payload,
             "completion_tokens_details": completion_details_payload,
             "output_tokens_details": output_details_payload,
-            "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
-            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
-            "reasoning_tokens": getattr(usage, "reasoning_tokens", None),
+            "cache_creation_input_tokens": _provider_field(usage, "cache_creation_input_tokens"),
+            "cache_read_input_tokens": _provider_field(usage, "cache_read_input_tokens"),
+            "reasoning_tokens": _provider_field(usage, "reasoning_tokens"),
         }
     if usage_data["cache_read_input_tokens"] is not None or usage_data["cache_creation_input_tokens"] is not None:
         usage_data["prompt_tokens_details"] = None
@@ -161,11 +231,11 @@ def _provider_cost_from_response(response: Any | None) -> tuple[float | None, Co
     """
     if response is None:
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
-    usage = getattr(response, "usage", None)
+    usage = _provider_field(response, "usage")
     if isinstance(usage, Mapping):
         raw_cost = usage["cost"] if "cost" in usage else None
     else:
-        raw_cost = getattr(usage, "cost", None)
+        raw_cost = _provider_field(usage, "cost")
     if type(raw_cost) is bool or type(raw_cost) not in (int, float):
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
     cost = float(cast(int | float, raw_cost))
@@ -177,7 +247,7 @@ def _provider_cost_from_response(response: Any | None) -> tuple[float | None, Co
 def safe_response_model(response: Any | None) -> str | None:
     if response is None:
         return None
-    model = getattr(response, "model", None)
+    model = _provider_field(response, "model")
     if isinstance(model, str) and model.strip():
         return model
     return None
@@ -187,16 +257,14 @@ def _safe_provider_request_id(response: Any | None) -> str | None:
     if response is None:
         return None
     for attr in ("id", "request_id"):
-        value = getattr(response, attr, None)
+        value = _provider_field(response, attr)
         if isinstance(value, str) and value and len(value) <= 256:
             return value
     return None
 
 
 def _response_field(value: Any, field: str) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(field)
-    return getattr(value, field, None)
+    return _provider_field(value, field)
 
 
 def _first_response_message(response: Any | None) -> Any | None:
@@ -217,16 +285,16 @@ def _json_safe_provider_artifact(value: Any) -> Any:
         return [_json_safe_provider_artifact(item) for item in value]
     if isinstance(value, set | frozenset):
         return [_json_safe_provider_artifact(item) for item in value]
-    model_dump = getattr(value, "model_dump", None)
+    model_dump = _provider_method(value, "model_dump")
     if callable(model_dump):
         try:
             return _json_safe_provider_artifact(model_dump(mode="json"))
         except TypeError:
             return _json_safe_provider_artifact(model_dump())
-    to_dict = getattr(value, "to_dict", None)
+    to_dict = _provider_method(value, "to_dict")
     if callable(to_dict):
         return _json_safe_provider_artifact(to_dict())
-    dict_method = getattr(value, "dict", None)
+    dict_method = _provider_method(value, "dict")
     if callable(dict_method):
         return _json_safe_provider_artifact(dict_method())
     return repr(value)
@@ -256,6 +324,51 @@ def _reasoning_metadata_from_response(response: Any | None) -> _ReasoningMetadat
         "reasoning_details": _json_safe_provider_artifact(reasoning_details),
         "thinking_blocks": _json_safe_provider_artifact(_response_field(message, "thinking_blocks")),
     }
+
+
+def _llm_error_hash(raw_message: str) -> str:
+    return stable_hash({"error_message": raw_message})[:_LLM_ERROR_HASH_CHARS]
+
+
+def _append_llm_error_hash(message: str, *, raw_message: str) -> str:
+    suffix = f" [{_LLM_ERROR_HASH_LABEL}={_llm_error_hash(raw_message)}]"
+    if len(message) + len(suffix) <= _LLM_ERROR_MESSAGE_MAX_CHARS:
+        return f"{message}{suffix}"
+
+    ellipsis = "..."
+    budget = _LLM_ERROR_MESSAGE_MAX_CHARS - len(suffix) - len(ellipsis)
+    if budget <= 0:
+        return suffix.strip()[:_LLM_ERROR_MESSAGE_MAX_CHARS]
+    return f"{message[:budget].rstrip()}{ellipsis}{suffix}"
+
+
+def _safe_llm_error_message(error_message: str | None) -> str | None:
+    """Return the audit-safe provider error detail for ``ComposerLLMCall``.
+
+    Provider SDK exception strings can embed request bodies, prompts, headers,
+    URLs, and credentials. The durable audit row keeps class-level detail in
+    ``error_class``; free-form provider text is stored only after redaction and
+    length capping, with a short stable hash for operator correlation.
+    """
+
+    if error_message is None:
+        return None
+
+    raw_message = error_message.strip()
+    if not raw_message:
+        return error_message
+
+    redacted_message = raw_message
+    for name, pattern in _LLM_ERROR_SENSITIVE_PATTERNS:
+        redacted_message = pattern.sub(f"<redacted-sensitive:{name}>", redacted_message)
+
+    if any(pattern.search(raw_message) for pattern in _LLM_ERROR_HIGH_RISK_FIELD_PATTERNS):
+        return _append_llm_error_hash(_LLM_ERROR_REDACTED_DETAIL, raw_message=raw_message)
+
+    if redacted_message != raw_message or len(redacted_message) > _LLM_ERROR_MESSAGE_MAX_CHARS:
+        return _append_llm_error_hash(redacted_message, raw_message=raw_message)
+
+    return raw_message
 
 
 def build_llm_call_record(
@@ -298,7 +411,7 @@ def build_llm_call_record(
         started_at=started_at,
         finished_at=datetime.now(UTC),
         error_class=error_class,
-        error_message=error_message,
+        error_message=_safe_llm_error_message(error_message),
         temperature=temperature,
         seed=seed,
     )
@@ -370,10 +483,10 @@ def apply_anthropic_cache_markers(
     - The first message with ``role == "system"`` receives a top-level
       ``cache_control: {"type": "ephemeral"}`` field. ``build_messages()``
       keeps this first system message to the stable skill/deployment prompt;
-      the dynamic current-state JSON is emitted as a later system message.
-      LiteLLM's Anthropic transform recognizes this marker and propagates it
-      onto the corresponding ``AnthropicSystemMessageContent`` block on the
-      wire.
+      the dynamic current-state JSON is emitted as a later ``role: "user"``
+      message, not a second system message. LiteLLM's Anthropic transform
+      recognizes this marker and propagates it onto the corresponding
+      ``AnthropicSystemMessageContent`` block on the wire.
     - The LAST tool in ``tools`` receives the same marker at the tool
       level. Anthropic caches all tools up to and including the marker,
       so marking the trailing tool covers the full tools array.

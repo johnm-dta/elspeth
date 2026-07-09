@@ -8,6 +8,7 @@ Tests for:
 """
 
 import dataclasses
+from collections.abc import Mapping
 
 import pytest
 
@@ -69,6 +70,186 @@ class TestExecutionError:
             "traceback": "Traceback (most recent call last):\n  File ...",
         }
         assert "exception_type" not in payload
+
+    def test_execution_error_scrubs_exception_text_for_audit(self) -> None:
+        """Freeform exception text must not persist secret-bearing messages."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        error = ExecutionError(
+            exception=f"provider failed with Authorization: Bearer {secret}",
+            exception_type="RuntimeError",
+        )
+
+        assert error.exception == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_scrubs_context_payload_for_audit(self) -> None:
+        """Structured context must be self-scrubbed by the DTO."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            context={
+                "password": secret,
+                "nested": {"api_key": secret},
+                "tokens": [secret],
+                "safe": "operator diagnostic",
+            },
+        )
+
+        assert error.context is not None
+        nested = error.context["nested"]
+        assert isinstance(nested, Mapping)
+        assert error.context["password"] == "<redacted-secret>"
+        assert nested["api_key"] == "<redacted-secret>"
+        assert error.context["tokens"] == ("<redacted-secret>",)
+        assert error.context["safe"] == "operator diagnostic"
+        assert secret not in repr(error.context)
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_traceback_redacts_only_secret_lines(self) -> None:
+        """Traceback scrubbing preserves safe frame diagnostics around a secret line."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        traceback = (
+            "Traceback (most recent call last):\n"
+            '  File "worker.py", line 10, in run\n'
+            "    run_step()\n"
+            '  File "plugin.py", line 20, in run_step\n'
+            f"    raise RuntimeError('Authorization: Bearer {secret}')\n"
+            "RuntimeError: failed\n"
+        )
+
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=traceback,
+        )
+
+        assert error.traceback == (
+            "Traceback (most recent call last):\n"
+            '  File "worker.py", line 10, in run\n'
+            "    run_step()\n"
+            '  File "plugin.py", line 20, in run_step\n'
+            "<redacted-secret>\n"
+            "RuntimeError: failed\n"
+        )
+        assert secret not in error.traceback
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_traceback_scrubs_embedded_secret_for_audit(self) -> None:
+        """Traceback text must not persist secret-bearing messages in audit payloads."""
+        from elspeth.contracts import ExecutionError
+
+        secret = "sk-" + ("a" * 32)
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=f"RuntimeError: Authorization: Bearer {secret}",
+        )
+
+        assert error.traceback == "<redacted-secret>"
+        assert error.to_dict()["traceback"] == "<redacted-secret>"
+        assert secret not in str(error.to_dict())
+
+    def test_execution_error_traceback_scrubs_secret_split_across_message_lines(self) -> None:
+        """Traceback scrubbing does not treat newlines as secret-evasion boundaries."""
+        from elspeth.contracts import ExecutionError
+
+        traceback = (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\nRuntimeError: Authorization:\nBearer opaque-token\n'
+        )
+
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=traceback,
+        )
+
+        assert error.traceback == (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\n<redacted-secret>\n<redacted-secret>\n'
+        )
+        assert "Authorization" not in error.traceback
+        assert "opaque-token" not in error.traceback
+        assert "opaque-token" not in str(error.to_dict())
+
+    def test_execution_error_traceback_scrubs_secret_continuation_after_redacted_message_line(self) -> None:
+        """Continuation lines after a redacted exception message tail are redacted."""
+        from elspeth.contracts import ExecutionError
+
+        traceback = (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\nRuntimeError: Authorization: Bearer\nopaque-token\n'
+        )
+
+        error = ExecutionError(
+            exception="boom",
+            exception_type="RuntimeError",
+            traceback=traceback,
+        )
+
+        assert error.traceback == (
+            'Traceback (most recent call last):\n  File "worker.py", line 10, in run\n<redacted-secret>\n<redacted-secret>\n'
+        )
+        assert "Authorization" not in error.traceback
+        assert "opaque-token" not in error.traceback
+        assert "opaque-token" not in str(error.to_dict())
+
+
+class TestRuntimePreflightFailedError:
+    """Tests for runtime-preflight audit payloads."""
+
+    def test_to_audit_dict_scrubs_external_provider_exception_message(self) -> None:
+        from elspeth.contracts.errors import RuntimePreflightFailedError
+
+        secret = "sk-" + ("a" * 32)
+        err = RuntimePreflightFailedError(
+            plugin_name="llm_transform",
+            provider="openrouter",
+            cause=RuntimeError(f"provider rejected request with bearer {secret}"),
+        )
+
+        assert secret in str(err), "live exception text remains useful for local debugging"
+        audit = err.to_audit_dict()
+
+        assert audit["message"] == "<redacted-secret>"
+        assert secret not in audit["message"]
+        assert audit["plugin_name"] == "llm_transform"
+        assert audit["provider"] == "openrouter"
+        assert audit["cause_type"] == "RuntimeError"
+
+
+class TestWriteLockHeldError:
+    """Tests for write-lock contention diagnostics."""
+
+    def test_default_message_omits_worker_forensics(self) -> None:
+        from elspeth.contracts.coordination import RegisteredWorker
+        from elspeth.contracts.errors import WriteLockHeldError
+
+        err = WriteLockHeldError(
+            run_id="run-sensitive",
+            workers=(
+                RegisteredWorker(
+                    worker_id="worker-secret",
+                    role="leader",
+                    status="active",
+                    pid=4242,
+                    hostname="build-host.internal",
+                ),
+            ),
+        )
+
+        message = str(err)
+        assert err.workers[0].worker_id == "worker-secret"
+        assert "1 registered worker" in message
+        assert "worker-secret" not in message
+        assert "leader" not in message
+        assert "active" not in message
+        assert "4242" not in message
+        assert "build-host.internal" not in message
 
 
 class TestRoutingReasonSchema:
@@ -164,7 +345,8 @@ class TestCoalesceFailureReasonSchema:
             branches_arrived=("a",),
             merge_policy="union",
         )
-        assert not hasattr(instance, "__dict__"), "Slots dataclass should not have __dict__"
+        with pytest.raises(TypeError, match="vars\\(\\) argument must have __dict__ attribute"):
+            vars(instance)
 
     def test_to_dict_required_only(self) -> None:
         """to_dict() omits None-valued optional fields."""
@@ -290,7 +472,7 @@ class TestExecutionErrorPostInit:
             ExecutionError(
                 exception="boom",
                 exception_type="RuntimeError",
-                context={1: "bad"},  # type: ignore[arg-type]
+                context={1: "bad"},  # type: ignore[dict-item]
             )
 
 

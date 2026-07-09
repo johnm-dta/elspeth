@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts.errors import CommencementGateFailedError
+from elspeth.contracts.errors import CommencementGateFailedError, GracefulShutdownError
 from elspeth.core.dependency_config import CommencementGateConfig
 from elspeth.engine.commencement import (
     build_preflight_context,
@@ -98,6 +98,29 @@ class TestEvaluateCommencementGates:
         assert secret not in (err.reason or "")
         # The diagnostic type is still present.
         assert "str" in (err.reason or "")
+
+    def test_expression_exception_does_not_echo_env_secret(self) -> None:
+        """Expression exception reasons must not include raw env-derived values."""
+        secret = "sk-SUPERSECRET-9f3a"
+        gates = [
+            CommencementGateConfig(
+                name="lookup",
+                condition="collections[env['API_KEY']]['count'] > 0",
+            )
+        ]
+        context = {
+            "dependency_runs": {},
+            "collections": {"known": {"count": 1}},
+            "env": {"API_KEY": secret},
+        }
+
+        with pytest.raises(CommencementGateFailedError) as exc_info:
+            evaluate_commencement_gates(gates, context)
+
+        err = exc_info.value
+        assert secret not in str(err)
+        assert secret not in (err.reason or "")
+        assert "ExpressionEvaluationError" in (err.reason or "")
 
     def test_snapshot_is_deep_frozen(self) -> None:
         gates = [
@@ -237,6 +260,20 @@ class TestCommencementGateCrashThrough:
             mock_cls.return_value.evaluate.side_effect = NameError("undefined")
             evaluate_commencement_gates([gate], context)
 
+    def test_graceful_shutdown_crashes_through(self) -> None:
+        from unittest.mock import patch
+
+        gate = CommencementGateConfig(name="g", condition="True")
+        context = self._make_context()
+        shutdown = GracefulShutdownError(rows_processed=0, run_id="run-1")
+
+        with (
+            patch("elspeth.engine.commencement.ExpressionParser") as mock_cls,
+            pytest.raises(GracefulShutdownError),
+        ):
+            mock_cls.return_value.evaluate.side_effect = shutdown
+            evaluate_commencement_gates([gate], context)
+
 
 class TestBuildPreflightContext:
     def test_includes_all_sections(self) -> None:
@@ -249,13 +286,13 @@ class TestBuildPreflightContext:
         assert "collections" in context
         assert "env" in context
 
-    def test_env_defaults_to_os_environ(self) -> None:
+    def test_env_defaults_to_empty_mapping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ELSPETH_SECRET_ORACLE", "sk-hidden")
         context = build_preflight_context(
             dependency_results={},
             collection_probes={},
         )
-        assert "env" in context
-        assert isinstance(context["env"], dict)
+        assert context["env"] == {}
 
 
 class TestCommencementGateTypeEnforcement:

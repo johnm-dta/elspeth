@@ -65,7 +65,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: var(--space-2xs);
   width: 100%;
   padding: var(--space-sm) var(--space-md);
   background: transparent;
@@ -106,6 +106,13 @@
   font-size: var(--font-size-md);
   font-weight: 600;
   color: var(--color-text);
+}
+
+/* Panel name outside the expanded header (loading / error / collapsed states)
+   — the destination the graduation copy points at must exist by name in every
+   state (elspeth-4f69b267dd). */
+.audit-readiness-title--standalone {
+  margin-bottom: var(--space-2xs);
 }
 
 .audit-readiness-freshness {
@@ -209,6 +216,30 @@
   font-weight: 600;
 }
 
+/* Gate legibility (elspeth-088bf83922 T-2): "Blocks Run" / "Advisory" text
+   badge next to each row heading, classified by isRunGatingReadinessRow
+   (ExecuteButton.tsx). Plain text, not colour-coded — the row's existing
+   status-glyph/left-edge-stripe treatment already carries the ok/warning/
+   error signal; this badge answers a different question ("does this row's
+   status affect Run at all") that colour alone cannot distinguish from the
+   status rows already surface. --color-text-muted is the same token
+   .audit-readiness-row-summary already renders on every row background
+   (including the warning/error tints), so no new contrast surface is
+   introduced. */
+.audit-readiness-row-gate {
+  display: inline-block;
+  padding: 0 var(--space-2xs);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.audit-readiness-row-gate--blocks {
+  border: 1px solid var(--color-border-strong);
+}
+
 .audit-readiness-row-summary {
   grid-column: 2 / -1;
   color: var(--color-text-muted);
@@ -239,7 +270,7 @@
   background-color: var(--color-surface-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 
@@ -327,7 +358,7 @@
   background-color: var(--color-surface-paper);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 

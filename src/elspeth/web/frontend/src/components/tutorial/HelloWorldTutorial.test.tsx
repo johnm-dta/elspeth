@@ -5,7 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HelloWorldTutorial } from "./HelloWorldTutorial";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
 import { usePreferencesStore } from "@/stores/preferencesStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
+import type { GuidedSession } from "@/types/guided";
 
 vi.mock("@/api/client", () => ({
   deleteTutorialOrphans: vi.fn().mockResolvedValue({ deleted_count: 0 }),
@@ -43,6 +45,9 @@ vi.mock("@/api/client", () => ({
     },
   }),
   sendTutorialAbandonBeacon: vi.fn(),
+  // The chrome "Exit tutorial" control abandons an in-flight run via
+  // TutorialTurn4Run's abandonTutorialRun, which fires this.
+  cancelTutorialRun: vi.fn().mockResolvedValue({ cancelled: true }),
   // The tutorial-persistence slice (elspeth-918f4434b3): the component
   // persists stage transitions through preferencesStore, which calls this.
   // Body-aware echo mirroring the backend upsert (supplied fields land in
@@ -82,6 +87,11 @@ vi.mock("@/api/client", () => ({
 // id — simulating the live race where the shell's guided/start 404 handler
 // and the mount-time membership check both detect the same dead resume.
 let stubShellReportsSessionMissing = false;
+// Per-test session id the stub hands to onCompleted/onExited. The run turn's
+// StrictMode dedupe cache is module-level and keyed by sessionId, so tests
+// that exercise the run step with a bespoke runTutorialPipeline mock must use
+// a distinct id or they replay a previous test's cached run.
+let stubGuidedSessionId = "sess-new";
 vi.mock("./TutorialGuidedShell", async () => {
   const { useEffect } = await import("react");
   return {
@@ -106,10 +116,10 @@ vi.mock("./TutorialGuidedShell", async () => {
       }, []);
       return (
         <>
-          <button type="button" onClick={() => onCompleted("sess-new")}>
+          <button type="button" onClick={() => onCompleted(stubGuidedSessionId)}>
             finish-guided
           </button>
-          <button type="button" onClick={() => onExited?.("sess-new")}>
+          <button type="button" onClick={() => onExited?.(stubGuidedSessionId)}>
             exit-guided
           </button>
         </>
@@ -123,6 +133,7 @@ describe("HelloWorldTutorial staged flow", () => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
     stubShellReportsSessionMissing = false;
+    stubGuidedSessionId = "sess-new";
   });
 
   it("renders the welcome bookend first", () => {
@@ -274,6 +285,7 @@ describe("HelloWorldTutorial — abandon beacon (F4)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
+    stubGuidedSessionId = "sess-new";
   });
 
   it("does not fire the abandon beacon on pagehide while still on the welcome bookend", async () => {
@@ -341,6 +353,7 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
+    stubGuidedSessionId = "sess-new";
   });
 
   it("persists the exit opt-out with the exit discriminator when guided exits to freeform", async () => {
@@ -436,12 +449,104 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Exit tutorial" })).toBeNull();
   });
+
+  it("Exit tutorial during Build terminates the live guided session", async () => {
+    // Without this hand-off the non-terminal guidedSession survives the
+    // shell unmount inside sessionStore, and the freeform ChatPanel's
+    // discriminator re-renders the guided workspace — the learner has to
+    // exit guided a second time instead of landing in freeform as promised.
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    const originalExit = useSessionStore.getState().exitToFreeform;
+    useSessionStore.setState({
+      guidedSession: { terminal: null } as unknown as GuidedSession,
+      exitToFreeform,
+    });
+    try {
+      const user = userEvent.setup();
+      render(<HelloWorldTutorial />);
+      await user.click(screen.getByRole("button", { name: "Let's go" }));
+      await user.click(
+        await screen.findByRole("button", { name: "Exit tutorial" }),
+      );
+      expect(exitToFreeform).toHaveBeenCalledTimes(1);
+    } finally {
+      useSessionStore.setState({
+        exitToFreeform: originalExit,
+        guidedSession: null,
+      });
+    }
+  });
+
+  it("Exit tutorial leaves an already-terminal guided session alone", async () => {
+    // The wizard-path hand-off (onExited) reaches the same handler with the
+    // terminal already set — firing the control signal again would be a
+    // duplicate respond POST against a terminal session.
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    const originalExit = useSessionStore.getState().exitToFreeform;
+    useSessionStore.setState({
+      guidedSession: {
+        terminal: { kind: "exited_to_freeform", reason: "user_pressed_exit" },
+      } as unknown as GuidedSession,
+      exitToFreeform,
+    });
+    try {
+      const user = userEvent.setup();
+      render(<HelloWorldTutorial />);
+      await user.click(screen.getByRole("button", { name: "Let's go" }));
+      await user.click(
+        await screen.findByRole("button", { name: "Exit tutorial" }),
+      );
+      expect(exitToFreeform).not.toHaveBeenCalled();
+    } finally {
+      useSessionStore.setState({
+        exitToFreeform: originalExit,
+        guidedSession: null,
+      });
+    }
+  });
+
+  it("Exit tutorial during an in-flight run aborts the fetch and fires the server-side cancel", async () => {
+    const api = await import("@/api/client");
+    // Distinct session id: the run cache is module-level (see the stub note).
+    stubGuidedSessionId = "sess-exit-mid-run";
+    // A run that never settles — the exit must not depend on it finishing.
+    vi.mocked(api.runTutorialPipeline).mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Exit tutorial" }));
+
+    const [, signal] = vi.mocked(api.runTutorialPipeline).mock.calls[0];
+    expect((signal as AbortSignal).aborted).toBe(true);
+    expect(api.cancelTutorialRun).toHaveBeenCalledWith("sess-exit-mid-run");
+  });
+
+  it("Exit tutorial after the run completes does not cancel the finished run", async () => {
+    const api = await import("@/api/client");
+    stubGuidedSessionId = "sess-exit-after-run";
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    expect(await screen.findByText("bold")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Exit tutorial" }));
+
+    expect(api.cancelTutorialRun).not.toHaveBeenCalled();
+  });
 });
 
 describe("HelloWorldTutorial — server-persisted resume (elspeth-918f4434b3)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
+    stubGuidedSessionId = "sess-new";
   });
 
   it("persists the guided stage + session on Start", async () => {

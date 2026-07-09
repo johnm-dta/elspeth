@@ -10,7 +10,7 @@ import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { TutorialTurn1Welcome } from "./TutorialTurn1Welcome";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
-import { TutorialTurn4Run } from "./TutorialTurn4Run";
+import { abandonTutorialRun, TutorialTurn4Run } from "./TutorialTurn4Run";
 import { TutorialTurn5AuditStory } from "./TutorialTurn5AuditStory";
 import { TutorialTurn7Graduation } from "./TutorialTurn7Graduation";
 import {
@@ -243,13 +243,41 @@ export function HelloWorldTutorial({
   // store's writeError, which ALSO flips showTutorial false — the exit can
   // never strand the learner in the shell.
   const onExitTutorial = useCallback((): void => {
+    // A live (non-terminal) guided build survives the shell unmount inside
+    // sessionStore, and the freeform ChatPanel's discriminator would render
+    // the guided workspace again — the exit would not land in freeform.
+    // Terminate it through the sanctioned wizard exit (backend-recorded as
+    // user_pressed_exit, so guided stays re-enterable). Best-effort like the
+    // persist below. The wizard-path onExited arrives here with the terminal
+    // already set, so this never double-fires the control signal; the
+    // duplicate markTutorialGraduated it can trigger (the shell observes the
+    // terminal and hands off) is absorbed by the store's landed-completion
+    // guard.
+    const { guidedSession, exitToFreeform } = useSessionStore.getState();
+    if (guidedSession !== null && guidedSession.terminal == null) {
+      void exitToFreeform().catch((err) => {
+        console.error("[tutorial] exit-to-freeform hand-off failed:", err);
+      });
+    }
+    // Exit during an in-flight run: the run turn's effect cleanup
+    // deliberately never aborts (StrictMode), and its Cancel button is the
+    // only other abort path — without this the backend run (LLM spend, sink
+    // writes) outlives the tutorial. runId stays null until the run's result
+    // lands, so this fires only while the run is genuinely still executing.
+    if (
+      state.step === "run" &&
+      state.runId === null &&
+      state.sessionId !== null
+    ) {
+      abandonTutorialRun(state.sessionId);
+    }
     void usePreferencesStore
       .getState()
       .markTutorialGraduated({ via: "exit" })
       .catch((err) => {
         console.error("[tutorial] exit opt-out persist failed:", err);
       });
-  }, []);
+  }, [state.step, state.runId, state.sessionId]);
   const stepLabels = TUTORIAL_STEP_LABELS;
   const currentIndex = stepIndex(state.step);
   const totalSteps = stepLabels.length;

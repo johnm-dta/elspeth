@@ -326,6 +326,18 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     for (let waitedMs = 0; get().writing && waitedMs < 5000; waitedMs += 50) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // Re-read AFTER the wait: the write just waited out may itself have been
+    // this same graduation (a double-clicked Exit, or the chrome exit racing
+    // the wizard's onExited hand-off). Proceeding unconditionally would stamp
+    // a second completion PATCH and double-count completion_path telemetry —
+    // the backend counts every via=exit write, not null→set transitions
+    // (preferences/service.py). publishLocally=false writes (skip) never set
+    // tutorialCompleted, so the graduation card's deliberate re-persist
+    // still goes through.
+    const settled = get();
+    if (settled.tutorialCompleted && settled.tutorialCompletedAt !== null) {
+      return settled.tutorialCompletedAt;
+    }
     const publishLocally = options.publishLocally ?? true;
     const stamp = new Date().toISOString();
     const previous = {

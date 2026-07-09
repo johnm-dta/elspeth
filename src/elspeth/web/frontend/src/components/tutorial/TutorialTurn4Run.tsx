@@ -81,6 +81,29 @@ function clearTutorialRunCache(sessionId: string): void {
   tutorialRunCache.delete(sessionId);
 }
 
+/**
+ * Abort the cached in-flight run fetch (if any) and fire the best-effort
+ * server-side cancel. Shared by the run turn's Cancel button and the
+ * tutorial chrome's "Exit tutorial" control: the effect cleanup above
+ * deliberately never aborts (StrictMode), so without an explicit call here
+ * an exit mid-run leaves the backend run executing (LLM spend, sink
+ * writes) after the learner has left the tutorial.
+ */
+export function abandonTutorialRun(sessionId: string): void {
+  const cached = tutorialRunCache.get(sessionId);
+  if (cached !== undefined) {
+    cached.controller.abort();
+    tutorialRunCache.delete(sessionId);
+  }
+  // Not awaited, so the caller's UI moves on immediately rather than
+  // blocking on network latency. Aborting only the browser fetch left the
+  // backend run executing; this call is what makes cancel/exit honest.
+  void cancelTutorialRun(sessionId).catch(() => {
+    // Nothing to surface: the caller has already moved on, and the
+    // endpoint is itself idempotent/best-effort.
+  });
+}
+
 function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
@@ -196,20 +219,7 @@ export function TutorialTurn4Run({
   }, [sessionId, retryNonce]);
 
   const onCancelClick = (): void => {
-    const cached = tutorialRunCache.get(sessionId);
-    if (cached !== undefined) {
-      cached.controller.abort();
-      tutorialRunCache.delete(sessionId);
-    }
-    // Best-effort server-side cancel, fired alongside the local abort — not
-    // awaited, so the UI moves to the cancelled state immediately rather
-    // than blocking on network latency. Aborting only the browser fetch
-    // left the backend run executing (LLM spend, sink writes continuing);
-    // this call is what makes "Cancel run" honest.
-    void cancelTutorialRun(sessionId).catch(() => {
-      // Nothing to surface: the UI has already moved on via onCancelled()
-      // below, and the endpoint is itself idempotent/best-effort.
-    });
+    abandonTutorialRun(sessionId);
     onCancelled();
   };
 

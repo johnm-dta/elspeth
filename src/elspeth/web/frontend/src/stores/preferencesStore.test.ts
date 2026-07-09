@@ -249,6 +249,76 @@ describe("preferencesStore", () => {
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
+  it("markTutorialGraduated does not re-PATCH a completion that landed while it waited", async () => {
+    // Double-clicked Exit (or the chrome exit racing the wizard's onExited
+    // hand-off): the write this call waits out IS the same graduation. The
+    // backend counts every via=exit PATCH (no prior-state check), so an
+    // unconditional second PATCH double-counts completion_path telemetry.
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      writing: true,
+    });
+    // Simulate the first exit click's PATCH landing while this one waits.
+    setTimeout(() => {
+      usePreferencesStore.setState({
+        writing: false,
+        tutorialCompletedAt: "2026-07-09T00:00:00Z",
+        tutorialCompleted: true,
+      });
+    }, 120);
+
+    const completedAt = await usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" });
+
+    expect(completedAt).toBe("2026-07-09T00:00:00Z");
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("two rapid exit clicks send exactly one completion PATCH", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    let resolveFirst!: (payload: {
+      default_mode: "guided";
+      banner_dismissed_at: null;
+      tutorial_completed_at: string;
+      tutorial_stage: null;
+      tutorial_session_id: null;
+      tutorial_run_id: null;
+      tutorial_source_data_hash: null;
+      updated_at: string;
+    }) => void;
+    mockUpdate.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+
+    const first = usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" });
+    const second = usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" });
+    resolveFirst({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: "2026-07-09T00:00:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-09T00:00:00Z",
+    });
+
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(a).toBe("2026-07-09T00:00:00Z");
+    expect(b).toBe("2026-07-09T00:00:00Z");
+  });
+
   it("markTutorialGraduated sends the exit discriminator when asked", async () => {
     // The backend infers first_time/skip from payload shape; an explicit
     // exit must carry tutorial_completed_via so it is not bucketed as

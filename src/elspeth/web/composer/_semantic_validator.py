@@ -88,6 +88,7 @@ def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
     """
     from elspeth.contracts.freeze import deep_thaw
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.interpretation_state import strip_authoring_options
 
     if node.plugin is None:
         return None
@@ -96,7 +97,7 @@ def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
             "BaseTransform",
             get_shared_plugin_manager().create_transform(
                 node.plugin,
-                deep_thaw(node.options),
+                strip_authoring_options(deep_thaw(node.options)),
             ),
         )
     except Exception as exc:
@@ -109,6 +110,7 @@ def _instantiate_producer(producer: ProducerEntry) -> BaseTransform | None:
     """Construct a producer transform/source instance to read its facts."""
     from elspeth.contracts.freeze import deep_thaw
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.interpretation_state import strip_authoring_options
 
     if producer.plugin_name is None or producer.producer_id == "source":
         # Sources don't expose output_semantics() in Phase 1 — return None.
@@ -118,7 +120,7 @@ def _instantiate_producer(producer: ProducerEntry) -> BaseTransform | None:
         "BaseTransform",
         get_shared_plugin_manager().create_transform(
             producer.plugin_name,
-            deep_thaw(producer.options),
+            strip_authoring_options(deep_thaw(producer.options)),
         ),
     )
 

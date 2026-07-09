@@ -3005,12 +3005,14 @@ class TestSchemaContractValidation:
 
         result = state.validate()
 
-        assert not result.is_valid
+        # The probe failure surfaces as a warning, never a crash. The raw
+        # fallback for this mapper abstains (observed schema, no guarantees,
+        # no participation), so the sink required-fields check defers to
+        # runtime per-row validation — no error, no edge-contract verdict —
+        # mirroring validate_sink_required_fields' abstention clause.
+        assert result.is_valid, result.errors
         assert any("computed contract probe" in warning.message.lower() for warning in result.warnings)
-        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
-        assert sink_contract.producer_guarantees == ()
-        assert sink_contract.consumer_requires == ("body",)
-        assert sink_contract.satisfied is False
+        assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
 
     def test_contract_probe_unexpected_constructor_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Framework bugs in transform constructors must not be certified by raw fallback."""
@@ -3498,6 +3500,158 @@ class TestSchemaContractValidation:
         sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
         assert sink_contract.satisfied is False
         assert "text" in sink_contract.missing_fields
+
+    def test_sink_required_fields_abstaining_producer_defers_to_runtime(self) -> None:
+        """An abstaining producer must not fail the sink required-fields check.
+
+        Mirror of the runtime abstention clause in
+        ``core/dag/schema_validation.py::validate_sink_required_fields``:
+        when the producer's guarantee vote is (no fields, did not participate),
+        the static check defers to per-row runtime validation instead of
+        rejecting. A select_only field_mapper with an observed schema and no
+        local guaranteed_fields abstains exactly this way — the tutorial's
+        accepted transform chain (elspeth-3283f2eaec) was permanently blocked
+        because the composer hard-failed where the runtime would build and run.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": ["url", "summary"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"url": "url", "summary": "summary"},
+                    "schema": {"mode": "observed"},
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["url"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert result.is_valid, result.errors
+        # No static claim either way: the edge renders as "not yet checked",
+        # not as a satisfied contract the composer cannot actually vouch for.
+        assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
+
+    def test_sink_required_fields_inherited_participation_still_fails(self) -> None:
+        """A pass-through downstream of a participating producer cannot abstain.
+
+        Runtime parity (``walk_effective_guarantee_vote``): a pass-through
+        transform's participation is its OWN vote OR any predecessor's. Here
+        the source participates with explicit zero guarantees
+        (``guaranteed_fields: []``) and feeds an own-abstaining passthrough,
+        so the runtime marks the sink's upstream as participated-with-empty
+        and ``validate_sink_required_fields`` rejects the missing field. The
+        composer must reject too — treating this as abstention would pass
+        preview for a pipeline the runtime refuses to build.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": []}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="passthrough",
+                options={"schema": {"mode": "observed"}},
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["text"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert not result.is_valid
+        assert any("text" in e.message and "output:main" in e.message for e in result.errors)
+        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
+        assert sink_contract.satisfied is False
+        assert "text" in sink_contract.missing_fields
+
+    def test_contract_probe_ignores_authoring_metadata(self) -> None:
+        """Composer-only authoring keys must not break the contract probe.
+
+        The guided flow stages ``interpretation_requirements`` inside node
+        options; every plugin config rejects unknown keys, so probing with
+        unstripped options is a guaranteed ValueError -> a spurious
+        "Computed contract probe ... failed" warning surfaced to the user
+        (and a fail-closed Stage-1 rejection for pass-through plugins).
+        The probe must strip authoring metadata the same way YAML export does.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": ["url", "summary"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"url": "url", "summary": "summary"},
+                    "schema": {"mode": "observed"},
+                    "interpretation_requirements": [
+                        {
+                            "id": "drop_raw_html_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "drop_raw_html_fields",
+                            "status": "resolved",
+                            "draft": "Drop the scraped raw HTML fields.",
+                            "event_id": "e831b8ee-2c3e-449b-975e-d213fb7eecad",
+                            "accepted_value": "Drop the scraped raw HTML fields.",
+                            "accepted_artifact_hash": "871d0cf160b91d8dadc0f58504a86bbed14b9fe28d05bdd0a7c918b1e5b07aa9",
+                        }
+                    ],
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["url"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert result.is_valid, result.errors
+        assert not any("contract probe" in w.message.lower() for w in result.warnings), [w.message for w in result.warnings]
 
     def test_consumer_schema_required_fields_violation_fails(self) -> None:
         state = self._empty_state()

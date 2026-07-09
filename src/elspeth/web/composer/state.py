@@ -529,10 +529,11 @@ def _producer_declared_field_type(
 
     try:
         from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from elspeth.web.interpretation_state import strip_authoring_options
 
         transform = get_shared_plugin_manager().create_transform(
             producer_node.plugin,
-            deep_thaw(producer_node.options),
+            strip_authoring_options(deep_thaw(producer_node.options)),
         )
     except Exception as exc:
         if _is_static_contract_probe_exception(exc):
@@ -1387,10 +1388,11 @@ def _check_schema_contracts(
 
         try:
             from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+            from elspeth.web.interpretation_state import strip_authoring_options
 
             transform = get_shared_plugin_manager().create_transform(
                 producer_node.plugin,
-                deep_thaw(producer_node.options),
+                strip_authoring_options(deep_thaw(producer_node.options)),
             )
             is_pass_through_instance = transform.passes_through_input
             output_schema_config = transform._output_schema_config
@@ -1443,13 +1445,24 @@ def _check_schema_contracts(
 
         if is_pass_through_instance:
             base = output_schema_config.get_effective_guaranteed_fields() if output_schema_config is not None else frozenset()
-            inherited = _intersect_predecessor_guarantees(producer_node)
+            inherited_participates, inherited_fields = _connection_propagation_vote(producer_node.input)
             # ADR-009 §Clause 1: share the aggregation rule with graph.py.
             # Composer's producer-graph is single-upstream at this level
             # (coalesce absorbs fan-in via pre-computed output), so we pass a
             # one-element predecessor_guarantees list to compose_propagation.
-            participates = output_schema_config.participates_in_propagation if output_schema_config is not None else raw_participates
-            return participates, compose_propagation(base, [inherited])
+            # An abstaining predecessor contributes None (skipped), not an
+            # explicit empty set — same distinction the runtime walker makes.
+            own_participates = output_schema_config.participates_in_propagation if output_schema_config is not None else raw_participates
+            # Mirror walk_effective_guarantee_vote: a pass-through inherits
+            # participation from its predecessors — own vote OR any upstream
+            # vote. Dropping the inherited flag would let an own-abstaining
+            # pass-through downstream of a participating producer read as
+            # abstained here while the runtime marks it participated (and
+            # validate_sink_required_fields rejects accordingly).
+            return (
+                own_participates or inherited_participates,
+                compose_propagation(base, [inherited_fields if inherited_participates else None]),
+            )
 
         if output_schema_config is None:
             return raw_participates, raw_guaranteed
@@ -1468,6 +1481,14 @@ def _check_schema_contracts(
         Unlike ``_walk_to_real_producer()``, this helper is only used for
         pass-through inheritance and therefore follows structural fan-out/fan-in
         nodes instead of treating them as preview-stopping boundaries.
+
+        Per ADR-009 §Clause 1, the aggregation rule (``compose_propagation``)
+        and the participation predicate (``SchemaConfig.participates_in_propagation``)
+        are shared with the runtime walker (``core/dag/guarantees.py``). The
+        traversal logic remains separate — the composer walks a producer-graph
+        (L3, connection-by-connection) while the runtime walks the DAG (L1,
+        multi-predecessor). The two views legitimately differ; unifying
+        traversal would pollute layers without eliminating duplication.
         """
         producer = resolver.find_producer_for(connection_name)
         if producer is None:
@@ -1510,29 +1531,6 @@ def _check_schema_contracts(
 
         return _effective_producer_vote(producer)
 
-    def _intersect_predecessor_guarantees(node: NodeSpec) -> frozenset[str]:
-        """Mirror the runtime propagation walk in the composer's producer graph.
-
-        Per ADR-009 §Clause 1, the aggregation rule (``compose_propagation``)
-        and the participation predicate (``SchemaConfig.participates_in_propagation``)
-        are shared with ``graph.py::_walk_effective_guaranteed_fields``. The
-        traversal logic remains separate — the composer walks a
-        producer-graph (L3, connection-by-connection via
-        ``_connection_propagation_vote``)
-        while graph.py walks the runtime DAG (L1, multi-predecessor). The
-        two views legitimately differ; unifying traversal would pollute
-        layers without eliminating duplication.
-
-        For pass-through inheritance, the composer must preserve structural
-        guarantee semantics across fork gates and coalesce nodes instead of
-        treating them as preview-stopping boundaries. The recursive
-        connection vote helper follows those structural nodes and returns the
-        effective guarantee set the downstream pass-through transform should
-        intersect with its own declarations.
-        """
-        _participates, guarantees = _connection_propagation_vote(node.input)
-        return guarantees
-
     def _format_fields(fields: frozenset[str]) -> str:
         return ", ".join(sorted(fields)) if fields else "(none)"
 
@@ -1571,10 +1569,11 @@ def _check_schema_contracts(
 
         try:
             from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+            from elspeth.web.interpretation_state import strip_authoring_options
 
             transform = get_shared_plugin_manager().create_transform(
                 producer_node.plugin,
-                deep_thaw(producer_node.options),
+                strip_authoring_options(deep_thaw(producer_node.options)),
             )
         except Exception as exc:
             if not _is_config_probe_exception(exc):
@@ -1641,6 +1640,21 @@ def _check_schema_contracts(
     ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
         try:
             return _effective_producer_guarantees(producer), None
+        except ValueError as exc:
+            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
+
+    def _parse_producer_vote(
+        producer: ProducerEntry,
+    ) -> tuple[tuple[bool, frozenset[str]] | None, ValidationEntry | None]:
+        """Like ``_parse_producer_guarantees`` but preserves participation.
+
+        The sink required-fields check needs to distinguish "abstained" from
+        "participated and guarantees collapsed to empty" — the runtime twin
+        (``validate_sink_required_fields``) skips abstaining producers and
+        defers to per-row validation, and the composer must mirror that.
+        """
+        try:
+            return _effective_producer_vote(producer), None
         except ValueError as exc:
             return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
 
@@ -1881,14 +1895,23 @@ def _check_schema_contracts(
             if actual_producer.producer_id in parse_failed_producers:
                 continue
 
-            producer_guaranteed, producer_error = _parse_producer_guarantees(actual_producer)
+            producer_vote, producer_error = _parse_producer_vote(actual_producer)
             if producer_error is not None:
                 errors.append(producer_error)
                 parse_failed_producers.add(actual_producer.producer_id)
                 continue
-            assert producer_guaranteed is not None  # No error => guarantees resolved.
+            assert producer_vote is not None  # No error => guarantees resolved.
+            producer_participates, producer_guaranteed = producer_vote
 
-            if sink_required:
+            # ADR-007 parity: mirror the runtime abstention clause in
+            # validate_sink_required_fields (core/dag/schema_validation.py).
+            # An abstaining producer — no guarantees AND no participation, e.g.
+            # a select_only field_mapper with an observed schema — makes no
+            # static claim; the runtime builds the pipeline and enforces the
+            # sink's required fields per-row. Emitting no EdgeContract renders
+            # the edge as "not yet checked" rather than asserting a
+            # satisfaction verdict the composer cannot support.
+            if sink_required and (producer_guaranteed or producer_participates):
                 missing_fields = sink_required - producer_guaranteed
                 edge_contracts.append(
                     EdgeContract(

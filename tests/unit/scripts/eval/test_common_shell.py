@@ -22,6 +22,21 @@ LEGACY_BASIC_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "ba
 LEGACY_HARDMODE_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "hardmode" / "finalize_scenario.sh"
 
 
+def _requires_local_corpus(*paths: Path) -> pytest.MarkDecorator:
+    """Skip when the untracked internal eval corpus is absent.
+
+    evals/composer-harness and the dated run corpora are kept locally and
+    deliberately not shipped (136f2c703); tracked checkouts carry only
+    ``evals/__init__.py`` and ``evals/lib/``. Tests that exec the corpus
+    scripts can only run on machines that hold the corpus.
+    """
+    missing = sorted(str(path.relative_to(REPO_ROOT)) for path in paths if not path.is_file())
+    return pytest.mark.skipif(
+        bool(missing),
+        reason=f"untracked local eval corpus missing: {', '.join(missing)}",
+    )
+
+
 def _write_valid_jwt(path: Path) -> None:
     payload = base64.urlsafe_b64encode(json.dumps({"exp": 4_102_444_800}).encode()).decode().rstrip("=")
     path.write_text(f"header.{payload}.signature")
@@ -607,6 +622,7 @@ _evals_http_get "$ELSPETH_EVAL_BASE_URL/api/catalog/sources" {out_file}
     assert jwt not in argv_log.read_text()
 
 
+@_requires_local_corpus(HARNESS_SCRIPT)
 def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:
     """Bootstrap should leave machine-readable evidence about the scenario contract."""
 
@@ -648,6 +664,7 @@ def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:
     assert run_manifest["message_budget_user_turns"] == 5
 
 
+@_requires_local_corpus(POST_MESSAGE_SCRIPT)
 def test_post_message_records_turn_manifest_and_non_2xx_status(tmp_path: Path) -> None:
     """A composer POST transport failure must be first-class evidence, not a normal turn."""
 
@@ -700,6 +717,7 @@ def test_post_message_records_turn_manifest_and_non_2xx_status(tmp_path: Path) -
     }
 
 
+@_requires_local_corpus(REPLAY_SCRIPT)
 def test_replay_reports_state_yaml_import_failure_without_import_yaml_fallback(tmp_path: Path) -> None:
     """A canonical YAML import failure must not be obscured by a dead fallback route."""
 
@@ -739,6 +757,7 @@ def test_replay_reports_state_yaml_import_failure_without_import_yaml_fallback(t
     assert not any(url.endswith("/api/sessions/session-1/import-yaml") for url in urls)
 
 
+@_requires_local_corpus(REPLAY_SCRIPT)
 def test_replay_remaps_source_blob_ids_to_uploaded_blob(tmp_path: Path) -> None:
     """Captured final_yaml source_blob_ids must be rebound to the replay upload."""
 
@@ -795,6 +814,7 @@ def test_replay_remaps_source_blob_ids_to_uploaded_blob(tmp_path: Path) -> None:
     assert any(url.endswith("/api/sessions/session-1/state/yaml") for url in urls)
 
 
+@_requires_local_corpus(REPLAY_SCRIPT)
 def test_replay_raw_yaml_file_inherits_final_yaml_source_blob_sidecar(tmp_path: Path) -> None:
     """Edited raw YAML replays must keep the captured source blob custody sidecar."""
 
@@ -863,6 +883,7 @@ def test_replay_raw_yaml_file_inherits_final_yaml_source_blob_sidecar(tmp_path: 
     assert import_body["yaml"] == edited_yaml.read_text()
 
 
+@_requires_local_corpus(SWEEP_SCRIPT)
 def test_sweep_simplified_help_exits_before_side_effects(tmp_path: Path) -> None:
     """`--help` must not be interpreted as a run label and start a sweep."""
 
@@ -904,6 +925,7 @@ printf '{{"opening_prompt":"hello"}}' > "$ELSPETH_EVAL_RUNS_DIR/$1/scenario.json
     assert not (harness_root / "runs").exists()
 
 
+@_requires_local_corpus(FINALIZE_SCRIPT)
 def test_finalize_scenario_exits_74_when_validate_http_fails(tmp_path: Path) -> None:
     """A validation transport/auth failure is infrastructure failure, not invalid YAML."""
 
@@ -944,6 +966,7 @@ def test_finalize_scenario_exits_74_when_validate_http_fails(tmp_path: Path) -> 
     assert not (scenario_dir / "ledger.json").exists()
 
 
+@_requires_local_corpus(FINALIZE_SCRIPT)
 def test_finalize_writes_ledger_when_invalid_state_yaml_is_unavailable(tmp_path: Path) -> None:
     """Invalid scenarios are data; a missing YAML artifact must not erase the ledger."""
 
@@ -1000,6 +1023,7 @@ def test_finalize_writes_ledger_when_invalid_state_yaml_is_unavailable(tmp_path:
     assert json.loads((scenario_dir / "final_yaml.json").read_text()) == {}
 
 
+@_requires_local_corpus(FINALIZE_SCRIPT)
 def test_finalize_preserves_completed_run_when_post_run_yaml_export_fails(tmp_path: Path) -> None:
     """Post-run artifact collection failures are metadata, not run outcome overrides."""
 
@@ -1060,6 +1084,7 @@ def test_finalize_preserves_completed_run_when_post_run_yaml_export_fails(tmp_pa
     }
 
 
+@_requires_local_corpus(AGGREGATE_SCRIPT)
 def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     scenario_dir = runs_root / "s1"
@@ -1161,6 +1186,7 @@ def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(
     assert "| legacy | tester | limit | 1 | 1.0 | — | — |" in scorecard
 
 
+@_requires_local_corpus(AGGREGATE_SCRIPT)
 def test_aggregate_reports_malformed_ledger_errors(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     good_dir = runs_root / "good"
@@ -1209,6 +1235,7 @@ def test_aggregate_reports_malformed_ledger_errors(tmp_path: Path) -> None:
     assert "Aggregate errors" in scorecard
 
 
+@_requires_local_corpus(AGENT_PROMPT)
 def test_agent_prompt_does_not_estimate_provider_cost_from_wall_time() -> None:
     prompt = AGENT_PROMPT.read_text()
 
@@ -1217,6 +1244,7 @@ def test_agent_prompt_does_not_estimate_provider_cost_from_wall_time() -> None:
     assert "do not estimate dollars from wall time" in prompt
 
 
+@_requires_local_corpus(LEGACY_BASIC_FINALIZE_SCRIPT, LEGACY_HARDMODE_FINALIZE_SCRIPT)
 @pytest.mark.parametrize(
     ("script_source", "mode"),
     [

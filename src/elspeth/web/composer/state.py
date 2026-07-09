@@ -19,6 +19,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.guarantee_propagation import compose_propagation
+from elspeth.contracts.plugin_protocols import TransformProtocol
 from elspeth.contracts.plugin_semantics import SemanticEdgeContract
 from elspeth.contracts.schema import (
     SchemaConfig,
@@ -1323,6 +1324,25 @@ def _check_schema_contracts(
             return True
         return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
 
+    def _probe_transform_construction(plugin: str, options: Mapping[str, Any]) -> TransformProtocol | None:
+        """Construct ``plugin``'s transform, or None on an expected config failure.
+
+        Genuine engine defects (non-config-probe exceptions) crash through —
+        that re-raise is this helper's contract, keeping the enclosing
+        non_raising boundary free of raises guarded by nodes-derived data.
+        """
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        try:
+            return get_shared_plugin_manager().create_transform(
+                plugin,
+                deep_thaw(options),
+            )
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
+            return None
+
     def _effective_producer_vote(producer: ProducerEntry) -> tuple[bool, frozenset[str]]:
         """Return (participates, guarantees) for preview propagation.
 
@@ -1962,16 +1982,8 @@ def _check_schema_contracts(
             # default and falls into the additive/loose-bound regime that we
             # cannot adjudicate without knowing the upstream emit set.
             continue
-        try:
-            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-
-            transform = get_shared_plugin_manager().create_transform(
-                node.plugin,
-                deep_thaw(node.options),
-            )
-        except Exception as exc:
-            if not _is_config_probe_exception(exc):
-                raise
+        transform = _probe_transform_construction(node.plugin, node.options)
+        if transform is None:
             continue
 
         output_config = transform._output_schema_config

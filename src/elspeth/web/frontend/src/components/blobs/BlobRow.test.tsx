@@ -302,3 +302,27 @@ describe("BlobRow status indicator (WCAG 1.4.1 non-colour cue)", () => {
     expect(actionIcons).toEqual(["eye", "play", "download", "trash"]);
   });
 });
+
+describe("BlobRow creator badge", () => {
+  it.each([
+    ["user", "Created by user", "user"],
+    ["assistant", "Created by assistant", "assistant"],
+    ["pipeline", "Created by pipeline", "pipeline"],
+  ] as const)(
+    "exposes the %s creator cue to assistive tech",
+    (createdBy, label, iconName) => {
+      render(
+        <BlobRow
+          blob={makeBlob({ created_by: createdBy })}
+          sessionId="session-1"
+          onDownload={vi.fn()}
+          onDelete={vi.fn()}
+          onUseAsInput={vi.fn()}
+        />,
+      );
+
+      const creator = screen.getByRole("img", { name: label });
+      expect(creator.querySelector(`svg[data-icon='${iconName}']`)).not.toBeNull();
+    },
+  );
+});

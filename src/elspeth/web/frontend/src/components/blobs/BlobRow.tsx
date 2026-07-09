@@ -39,6 +39,17 @@ function creatorBadge(createdBy: BlobMetadata["created_by"]): IconName {
   }
 }
 
+function creatorBadgeLabel(createdBy: BlobMetadata["created_by"]): string {
+  switch (createdBy) {
+    case "user":
+      return "Created by user";
+    case "assistant":
+      return "Created by assistant";
+    case "pipeline":
+      return "Created by pipeline";
+  }
+}
+
 function statusIndicator(status: string): {
   color: string;
   label: string;
@@ -62,6 +73,7 @@ function statusIndicator(status: string): {
 
 export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }: BlobRowProps) {
   const status = statusIndicator(blob.status);
+  const creatorLabel = creatorBadgeLabel(blob.created_by);
   const normalizedMimeType = blob.mime_type.split(";")[0].trim().toLowerCase();
   const canPreview = PREVIEWABLE_MIME_TYPES.has(normalizedMimeType);
 
@@ -142,7 +154,12 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
         </span>
 
         {/* Creator badge */}
-        <span className="blob-row-creator" title={`Created by ${blob.created_by}`}>
+        <span
+          className="blob-row-creator"
+          role="img"
+          aria-label={creatorLabel}
+          title={creatorLabel}
+        >
           <Icon name={creatorBadge(blob.created_by)} />
         </span>
 

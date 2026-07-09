@@ -115,8 +115,17 @@ def validate_single_edge(
         )
 
     # ===== PHASE 1: CONTRACT VALIDATION (field name requirements) =====
-    # This catches missing fields even for dynamic schemas
-    consumer_required = get_required_fields(graph, to_node_id)
+    # This catches missing fields even for dynamic schemas.
+    #
+    # SINK consumers are deliberately excluded: their required fields are
+    # validated by validate_sink_required_fields, whose EffectiveGuaranteeVote
+    # walk distinguishes an ABSTAINING upstream (no fields, no participation —
+    # defer to SinkExecutor's per-row declared_required_fields enforcement)
+    # from a participating upstream that genuinely misses fields (reject at
+    # build). Running the name check here too would pre-empt that abstention
+    # with a hard failure and make the dedicated sink check unreachable for
+    # its target scenario (elspeth-3283f2eaec).
+    consumer_required = frozenset() if to_info.node_type == NodeType.SINK else get_required_fields(graph, to_node_id)
 
     if consumer_required:
         # Get effective guaranteed fields (walks through pass-through nodes)

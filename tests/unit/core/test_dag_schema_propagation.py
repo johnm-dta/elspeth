@@ -411,6 +411,7 @@ class TestGuaranteedFieldsWithSchemaConfig:
             plugin_name="csv",
             config={"schema": {"mode": "observed", "required_fields": ["result_template_hash"]}},
             output_schema_config=sink_schema,
+            declared_required_fields=frozenset({"result_template_hash"}),
         )
 
         graph.add_edge("source", "transform", label="continue")

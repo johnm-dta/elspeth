@@ -427,6 +427,63 @@ class TestContractValidation:
         graph.validate_edge_compatibility()
 
 
+class TestSinkRequiredFieldsAbstention:
+    """Sink required-fields enforcement defers abstaining producers to runtime.
+
+    The generic edge-level Phase-1 name check must not pre-empt
+    ``validate_sink_required_fields``' abstention clause for SINK consumers
+    (elspeth-3283f2eaec): an abstaining direct predecessor (e.g. a
+    select_only field_mapper with an observed schema) makes no static claim,
+    and ``SinkExecutor`` enforces ``declared_required_fields`` per row. A
+    PARTICIPATING producer that misses a required field must still reject at
+    build time via the dedicated sink check.
+    """
+
+    def _build_chain(self, *, transform_schema: dict[str, Any]) -> ExecutionGraph:
+        graph = ExecutionGraph()
+        graph.add_node(
+            "source_1",
+            node_type=NodeType.SOURCE,
+            plugin_name="json",
+            config={"schema": {"mode": "observed", "guaranteed_fields": ["url"]}},
+        )
+        graph.add_node(
+            "mapper_1",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="field_mapper",
+            config={"schema": transform_schema},
+        )
+        graph.add_node(
+            "sink_1",
+            node_type=NodeType.SINK,
+            plugin_name="json",
+            config={"schema": {"mode": "observed", "required_fields": ["url"]}},
+            declared_required_fields=frozenset({"url"}),
+        )
+        graph.add_edge("source_1", "mapper_1", label="continue")
+        graph.add_edge("mapper_1", "sink_1", label="continue")
+        return graph
+
+    def test_abstaining_producer_into_required_sink_builds(self) -> None:
+        """Observed no-guarantee transform into a required-fields sink builds.
+
+        The tutorial pipeline shape: the mapper abstains, so the static sink
+        check defers to per-row enforcement instead of rejecting a pipeline
+        whose rows do carry the field.
+        """
+        graph = self._build_chain(transform_schema={"mode": "observed"})
+        # Should not raise — abstention defers to SinkExecutor's per-row check.
+        graph.validate_edge_compatibility()
+
+    def test_participating_producer_missing_field_still_rejects(self) -> None:
+        """A producer that participates but misses the field still fails the build."""
+        from elspeth.core.dag.models import GraphValidationError
+
+        graph = self._build_chain(transform_schema={"mode": "observed", "guaranteed_fields": ["summary"]})
+        with pytest.raises(GraphValidationError, match=r"does not guarantee"):
+            graph.validate_edge_compatibility()
+
+
 class TestChainValidation:
     """Tests for contract validation across multi-node chains."""
 
@@ -453,7 +510,11 @@ class TestChainValidation:
             },
         )
 
-        # Sink requires [a, b] - should fail because transform dropped b
+        # Sink requires [a, b] - should fail because transform dropped b.
+        # declared_required_fields mirrors what the builder derives from the
+        # sink instance (schema_config.get_effective_required_fields()) — the
+        # sink-required name check runs in validate_sink_required_fields, not
+        # the per-edge check (elspeth-3283f2eaec).
         graph.add_node(
             "sink_1",
             node_type=NodeType.SINK,
@@ -461,12 +522,13 @@ class TestChainValidation:
             config={
                 "schema": {"mode": "observed", "required_fields": ["a", "b"]},
             },
+            declared_required_fields=frozenset({"a", "b"}),
         )
 
         graph.add_edge("source_1", "transform_1", label="continue")
         graph.add_edge("transform_1", "sink_1", label="continue")
 
-        with pytest.raises(ValueError, match=r"Missing fields.*'b'"):
+        with pytest.raises(ValueError, match=r"requires fields \['b'\]"):
             graph.validate_edge_compatibility()
 
     def test_explicit_schema_combined_with_contract(self) -> None:
@@ -558,6 +620,7 @@ class TestChainValidation:
             config={
                 "schema": {"mode": "observed", "required_fields": ["a", "b", "c"]},
             },
+            declared_required_fields=frozenset({"a", "b", "c"}),
         )
 
         graph.add_edge("source_1", "transform_1", label="continue")
@@ -800,6 +863,7 @@ class TestForkCoalesceContracts:
             config={
                 "schema": {"mode": "observed", "required_fields": ["a_only"]},
             },
+            declared_required_fields=frozenset({"a_only"}),
         )
 
         graph.add_edge("branch_a", "coalesce_1", label="merge")
@@ -897,12 +961,13 @@ class TestForkCoalesceContracts:
             config={"schema": {"mode": "observed", "guaranteed_fields": ["b"]}},
         )
 
-        graph.add_node(
-            "coalesce_1",
-            node_type=NodeType.COALESCE,
-            plugin_name="coalesce",
-            config={"schema": {"mode": "observed"}, "merge": "union", "branches": {}, "policy": "require_all"},
-        )
+        graph.add_edge("source_1", "branch_a", label="a")
+        graph.add_edge("source_1", "branch_b", label="b")
+
+        # Computed schema simulates the builder: best_effort intersection of
+        # {a} and {b} is empty, but the coalesce still PARTICIPATES in the
+        # guarantee vote (explicit zero guarantees, not an abstention).
+        _add_coalesce_with_computed_schema(graph, "coalesce_1", ["branch_a", "branch_b"], policy="best_effort")
 
         # Sink requires any field - will fail since intersection is empty
         graph.add_node(
@@ -912,10 +977,9 @@ class TestForkCoalesceContracts:
             config={
                 "schema": {"mode": "observed", "required_fields": ["any_field"]},
             },
+            declared_required_fields=frozenset({"any_field"}),
         )
 
-        graph.add_edge("source_1", "branch_a", label="a")
-        graph.add_edge("source_1", "branch_b", label="b")
         graph.add_edge("branch_a", "coalesce_1", label="merge")
         graph.add_edge("branch_b", "coalesce_1", label="merge")
         graph.add_edge("coalesce_1", "sink_1", label="continue")

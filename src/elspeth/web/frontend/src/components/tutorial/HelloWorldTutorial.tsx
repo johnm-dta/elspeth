@@ -231,6 +231,25 @@ export function HelloWorldTutorial({
         console.error("[tutorial] skip opt-out persist failed:", err);
       });
   };
+
+  // Exit (unlike skip) leaves the tutorial for a usable freeform composer
+  // NOW: persist the opt-out AND publish it locally, so App's showTutorial
+  // gate unmounts the whole shell and the learner lands in the freeform
+  // composer on the same session (elspeth-61591e64bb). Fired by (a) the
+  // guided wizard's exited_to_freeform terminal — the wire-stage "Exit to
+  // freeform" button is reachable in tutorial mode and on blocked outcomes
+  // is the ONLY affordance — and (b) the persistent "Exit tutorial" chrome
+  // control below. Resilient even on failure: a rejected PATCH sets the
+  // store's writeError, which ALSO flips showTutorial false — the exit can
+  // never strand the learner in the shell.
+  const onExitTutorial = useCallback((): void => {
+    void usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" })
+      .catch((err) => {
+        console.error("[tutorial] exit opt-out persist failed:", err);
+      });
+  }, []);
   const stepLabels = TUTORIAL_STEP_LABELS;
   const currentIndex = stepIndex(state.step);
   const totalSteps = stepLabels.length;
@@ -305,6 +324,23 @@ export function HelloWorldTutorial({
             />
           );
         })}
+        {/* Persistent in-context exit (elspeth-61591e64bb): past the Welcome
+            bookend the tutorial previously offered NO discoverable way out —
+            the only escape was the buried Account menu → Composer preferences
+            → "Reset tutorial" two-step. Welcome keeps its own "Skip the
+            tutorial"; graduation IS the exit (its finish CTA persists the
+            same opt-out); every step between gets this control. */}
+        {(state.step === "guided" ||
+          state.step === "run" ||
+          state.step === "audit") && (
+          <button
+            type="button"
+            className="tutorial-link-button tutorial-exit-button"
+            onClick={onExitTutorial}
+          >
+            Exit tutorial
+          </button>
+        )}
       </nav>
       {state.step === "welcome" && (
         <>
@@ -338,6 +374,7 @@ export function HelloWorldTutorial({
           onCompleted={(id) =>
             dispatch({ type: "guidedCompleted", sessionId: id })
           }
+          onExited={onExitTutorial}
           onSessionMissing={onSessionMissing}
         />
       )}

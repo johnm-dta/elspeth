@@ -630,6 +630,15 @@
   background: var(--color-border-strong);
 }
 
+/* Persistent in-context exit (elspeth-61591e64bb): right-anchored in the
+   progress row so it reads as shell chrome, present on every step between
+   the Welcome and graduation bookends. */
+.tutorial-exit-button {
+  margin-left: auto;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
 /* Completed steps: filled (reached), no ring. */
 .tutorial-progress-dot--complete {
   background: var(--color-state-positive);

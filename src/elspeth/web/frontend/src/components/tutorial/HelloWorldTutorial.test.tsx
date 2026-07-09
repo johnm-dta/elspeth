@@ -88,10 +88,12 @@ vi.mock("./TutorialGuidedShell", async () => {
     TutorialGuidedShell: ({
       sessionId,
       onCompleted,
+      onExited,
       onSessionMissing,
     }: {
       sessionId: string;
       onCompleted: (s: string) => void;
+      onExited?: (s: string) => void;
       onSessionMissing?: (deadSessionId: string) => void;
     }) => {
       useEffect(() => {
@@ -103,9 +105,14 @@ vi.mock("./TutorialGuidedShell", async () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
       return (
-        <button type="button" onClick={() => onCompleted("sess-new")}>
-          finish-guided
-        </button>
+        <>
+          <button type="button" onClick={() => onCompleted("sess-new")}>
+            finish-guided
+          </button>
+          <button type="button" onClick={() => onExited?.("sess-new")}>
+            exit-guided
+          </button>
+        </>
       );
     },
   };
@@ -327,6 +334,107 @@ describe("HelloWorldTutorial — abandon beacon (F4)", () => {
     window.dispatchEvent(new Event("pagehide"));
 
     expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+});
+
+describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(usePreferencesStore);
+  });
+
+  it("persists the exit opt-out with the exit discriminator when guided exits to freeform", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(await screen.findByRole("button", { name: "exit-guided" }));
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: expect.any(String),
+        tutorial_completed_via: "exit",
+      }),
+    );
+    // Unlike skip (which keeps the graduation farewell mounted), exit
+    // publishes locally so App's showTutorial gate unmounts the shell and
+    // the learner lands in freeform on the same session.
+    await waitFor(() =>
+      expect(usePreferencesStore.getState().tutorialCompleted).toBe(true),
+    );
+  });
+
+  it("renders an Exit tutorial control on the guided step that persists the same opt-out", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Exit tutorial" }),
+    );
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tutorial_completed_at: expect.any(String),
+          tutorial_completed_via: "exit",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(usePreferencesStore.getState().tutorialCompleted).toBe(true),
+    );
+  });
+
+  it("renders the Exit tutorial control on the run step", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    expect(await screen.findByText("bold")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Exit tutorial" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Exit tutorial control on the resumed audit step", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "run",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      await screen.findByRole("heading", { name: "This is the audit story." }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Exit tutorial" }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no Exit tutorial control on the welcome bookend (Skip is the welcome exit)", () => {
+    render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("button", { name: "Skip the tutorial" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Exit tutorial" })).toBeNull();
+  });
+
+  it("offers no Exit tutorial control on graduation (the finish CTA is the exit)", () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Exit tutorial" })).toBeNull();
   });
 });
 

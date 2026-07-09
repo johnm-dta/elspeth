@@ -333,6 +333,61 @@ describe("TutorialGuidedShell", () => {
     expect(onCompleted).not.toHaveBeenCalled();
   });
 
+  it("calls onExited when an observed live wizard exits to freeform (elspeth-61591e64bb)", async () => {
+    // The wire-stage "Exit to freeform" button is reachable in tutorial mode
+    // and produces a real exited_to_freeform terminal. Without a hand-off the
+    // shell stays mounted over a terminal session and ChatPanel dead-ends on
+    // the "Preparing your guided pipeline…" placeholder.
+    const onCompleted = vi.fn();
+    const onExited = vi.fn();
+    render(
+      <TutorialGuidedShell
+        sessionId="sess-1"
+        onCompleted={onCompleted}
+        onExited={onExited}
+      />,
+    );
+    await waitFor(() => expect(startGuidedMock).toHaveBeenCalled());
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload(null),
+    } as never);
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload("exited_to_freeform"),
+    } as never);
+    await waitFor(() => expect(onExited).toHaveBeenCalledWith("sess-1"));
+    expect(onExited).toHaveBeenCalledTimes(1);
+    expect(onCompleted).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call onExited when mounted onto an already-exited session", async () => {
+    // Mirror of the back-nav guard for completions: a persisted
+    // exited_to_freeform session resolved straight from startGuided was never
+    // a live wizard under this mount, so the shell must not re-fire the exit
+    // hand-off (which would re-PATCH the opt-out on every remount).
+    const onExited = vi.fn();
+    startGuidedMock.mockImplementation(async () => {
+      useSessionStore.setState({
+        guidedSession: guidedSessionPayload("exited_to_freeform"),
+      } as never);
+    });
+    render(
+      <TutorialGuidedShell
+        sessionId="sess-1"
+        onCompleted={vi.fn()}
+        onExited={onExited}
+      />,
+    );
+    await waitFor(() => expect(startGuidedMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    await Promise.resolve();
+    expect(onExited).not.toHaveBeenCalled();
+  });
+
   it("shows a user-visible error if guided startup fails", async () => {
     startGuidedSessionMock.mockRejectedValueOnce(new Error("start failed"));
     render(

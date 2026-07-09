@@ -2948,7 +2948,13 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.queryByTestId("chat-input")).toBeNull();
   });
 
-  it("renders a guided placeholder (not the freeform body) when isTutorial and terminal is exited_to_freeform (concern B defensive)", () => {
+  it("routes an exited_to_freeform terminal to the freeform body, not the placeholder (elspeth-61591e64bb)", () => {
+    // The wire-stage "Exit to freeform" button IS reachable in tutorial mode
+    // and produces a real exited_to_freeform terminal. The old "defensive"
+    // placeholder made that terminal a permanent "Preparing your guided
+    // pipeline…" dead-end: nothing ever cleared it. The exit terminal now
+    // falls through to the freeform body — the tutorial shell's onExited
+    // hand-off persists the opt-out and unmounts the shell moments later.
     const terminal: TerminalState = {
       kind: "exited_to_freeform",
       reason: "user_pressed_exit",
@@ -2972,17 +2978,8 @@ describe("ChatPanel mode discriminator", () => {
 
     render(<ChatPanel isTutorial />);
 
-    expect(screen.getByTestId("tutorial-guided-loading")).toBeInTheDocument();
-    expect(screen.queryByTestId("chat-input")).toBeNull();
-    // The placeholder rail reflects the ACTUAL session step, not a hardcoded
-    // step_1 (GuidedWorkflowStepper marks the current step with
-    // aria-current="step", ChatPanel.tsx:1759). The transform-step rail item
-    // must be the current one.
-    const current = screen
-      .getByTestId("tutorial-guided-loading")
-      .querySelector('[aria-current="step"]');
-    expect(current).not.toBeNull();
-    expect(current).toHaveTextContent(/transform/i);
+    expect(screen.queryByTestId("tutorial-guided-loading")).toBeNull();
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
   });
 });
 

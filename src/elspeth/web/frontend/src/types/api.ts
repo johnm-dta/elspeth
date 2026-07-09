@@ -114,6 +114,10 @@ export interface UpdateUserComposerPreferencesPayload {
   tutorial_session_id?: string | null;
   tutorial_run_id?: string | null;
   tutorial_source_data_hash?: string | null;
+  // Request-only telemetry discriminator: marks a completion write as an
+  // explicit in-tutorial exit (elspeth-61591e64bb). Only valid alongside a
+  // non-null tutorial_completed_at in the same PATCH; never echoed back.
+  tutorial_completed_via?: "exit";
 }
 
 // ── First-run tutorial (Phase 4) ───────────────────────────────────────────

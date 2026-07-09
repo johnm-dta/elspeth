@@ -1940,27 +1940,29 @@ export function ChatPanel({
     );
   }
 
-  // ── Concern B: a tutorial must NEVER reach the panel-less freeform body ──
+  // ── Concern B: a tutorial shows the guided placeholder while loading ──
   //
   // Reaching this point means neither the completed branch nor the
   // guided-active branch matched. For a non-tutorial session that is the
-  // legitimate freeform surface (below). For a TUTORIAL session it is one of
-  // two states that must NOT show freeform:
-  //   (a) the TutorialGuidedShell startup flash, where guidedSession /
-  //       guidedNextTurn are transiently null before the async start resolves
-  //       (TutorialGuidedShell.tsx:61-81); and
-  //   (b) an `exited_to_freeform` terminal (which a tutorial can no longer
-  //       trigger after Task 2 removed the exit affordances, but is guarded
-  //       here defensively in case a stale persisted session carries it).
-  // Both are caught by this single guard; the completed branch above returns
-  // first, so a tutorial completion still graduates normally.
+  // legitimate freeform surface (below). For a TUTORIAL session, the
+  // placeholder covers the TutorialGuidedShell startup window: guidedSession
+  // is transiently null before the async start resolves, and a non-null
+  // pre-turn session is the gap during startGuided.
   //
-  // The rail reflects the ACTUAL session step when one is available
-  // (the exited_to_freeform case carries a real `guidedSession.step`); it
-  // falls back to "step_1_source" ONLY for the startup-flash case where
-  // `guidedSession === null` (no step exists yet). Hardcoding step_1 in the
-  // non-null case would show the wrong step in the rail — a fidelity gap.
-  if (isTutorial) {
+  // An `exited_to_freeform` terminal is deliberately EXCLUDED and falls
+  // through to the freeform body: the wire-stage "Exit to freeform" button
+  // IS reachable in tutorial mode (on blocked outcomes it is the only
+  // affordance), and the old always-placeholder guard turned that terminal
+  // into a permanent "Preparing…" dead-end — nothing ever cleared it
+  // (elspeth-61591e64bb). On exit the tutorial shell's onExited hand-off
+  // persists the opt-out and unmounts the shell; rendering the freeform
+  // body here is the correct surface for the brief in-flight window.
+  //
+  // The rail falls back to "step_1_source" ONLY for the startup-flash case
+  // where `guidedSession === null` (no step exists yet); a non-null session
+  // carries its real step. Hardcoding step_1 in the non-null case would
+  // show the wrong step in the rail — a fidelity gap.
+  if (isTutorial && guidedSession?.terminal?.kind !== "exited_to_freeform") {
     const placeholderStep: WorkflowStepId = guidedSession?.step ?? "step_1_source";
     return (
       <div

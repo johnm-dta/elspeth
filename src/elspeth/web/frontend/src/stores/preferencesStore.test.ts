@@ -216,17 +216,62 @@ describe("preferencesStore", () => {
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
   });
 
-  it("markTutorialGraduated respects the writing guard", async () => {
+  it("markTutorialGraduated waits out an in-flight write instead of dropping the opt-out", async () => {
+    // The old `if (writing) return` no-op silently dropped the graduation
+    // PATCH — an exit/skip click landing while another preferences write was
+    // in flight simply never persisted (elspeth-61591e64bb). The store now
+    // waits for the in-flight write to settle, then sends the PATCH.
     usePreferencesStore.setState({
       loaded: true,
       defaultMode: "guided",
       writing: true,
     });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: "2026-07-09T00:00:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-09T00:00:00Z",
+    });
+    // Simulate the in-flight write settling shortly after the click.
+    setTimeout(() => {
+      usePreferencesStore.setState({ writing: false });
+    }, 120);
 
     await usePreferencesStore.getState().markTutorialGraduated();
 
-    expect(mockUpdate).not.toHaveBeenCalled();
-    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+    expect(mockUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ tutorial_completed_at: expect.any(String) }),
+    );
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
+  });
+
+  it("markTutorialGraduated sends the exit discriminator when asked", async () => {
+    // The backend infers first_time/skip from payload shape; an explicit
+    // exit must carry tutorial_completed_via so it is not bucketed as
+    // "skip" (elspeth-61591e64bb telemetry correction).
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: "2026-07-09T00:00:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-09T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().markTutorialGraduated({ via: "exit" });
+
+    expect(mockUpdate).toHaveBeenCalledWith({
+      tutorial_completed_at: expect.any(String),
+      tutorial_completed_via: "exit",
+    });
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
   it("resetTutorial clears tutorial_completed_at through the PATCH contract", async () => {

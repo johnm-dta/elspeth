@@ -33,6 +33,16 @@ interface TutorialGuidedShellProps {
   sessionId: string;
   onCompleted: (sessionId: string) => void;
   /**
+   * An observed live wizard terminated with `exited_to_freeform` (the
+   * wire-stage "Exit to freeform" button is reachable in tutorial mode and
+   * on blocked outcomes is the ONLY affordance). Without this hand-off the
+   * shell stays mounted over a terminal session and the learner dead-ends
+   * on ChatPanel's "Preparing your guided pipeline…" placeholder
+   * (elspeth-61591e64bb). The parent persists the tutorial opt-out and
+   * lets the shell unmount into the freeform composer.
+   */
+  onExited?: (sessionId: string) => void;
+  /**
    * The persisted resume session no longer exists server-side (404 from the
    * start chain). Without this the shell dead-ends on a "Session not found"
    * error with NO forward affordance — the tutorial suppresses skip/exit, so
@@ -66,6 +76,7 @@ function isSessionMissingError(err: unknown): boolean {
 export function TutorialGuidedShell({
   sessionId,
   onCompleted,
+  onExited,
   onSessionMissing,
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
@@ -74,11 +85,13 @@ export function TutorialGuidedShell({
     (s) => s.resetForTutorialSession,
   );
   const startedRef = useRef(false);
-  const completedRef = useRef(false);
-  // True once this mount has OBSERVED a live (non-null, not-yet-completed)
-  // guidedSession. `onCompleted` may fire only for a completion this shell saw
-  // transition to while mounted — never when it mounts directly onto an
-  // already-completed session.
+  // A shell hands off exactly once per mount, whether the terminal it
+  // observed was a completion (onCompleted) or an exit (onExited).
+  const handedOffRef = useRef(false);
+  // True once this mount has OBSERVED a live (non-null, non-terminal)
+  // guidedSession. The terminal hand-offs may fire only for a terminal this
+  // shell saw transition to while mounted — never when it mounts directly
+  // onto an already-completed (or already-exited) session.
   const sawActiveRef = useRef(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,19 +162,22 @@ export function TutorialGuidedShell({
     })();
   }, [sessionId, startGuided, resetForTutorialSession, onSessionMissing]);
 
-  // Hand off to the run/audit/graduation tail when guided reaches completion —
-  // but ONLY on a completion this mount OBSERVED transition to. The back-nav
-  // GET path remounts this shell against the PERSISTED completed guided session
-  // (startGuided clears guidedSession to null, then sets it to the completed
-  // payload), so the shell mounts onto `terminal=completed` without ever seeing
-  // a live wizard. Firing onCompleted there bounces the user straight back to
-  // run (no-op flash from run-Back; guided skipped from audit-Back). Gate on
-  // sawActiveRef: a completed session that was never preceded by a live,
-  // not-yet-completed session during this mount must NOT graduate. Note the
-  // `terminal.kind === "completed"` guard also (deliberately) excludes
-  // `exited_to_freeform` — leaving the wizard for freeform is not a graduation.
+  // Hand off when guided reaches a terminal — but ONLY on a terminal this
+  // mount OBSERVED transition to. The back-nav GET path remounts this shell
+  // against the PERSISTED terminal guided session (startGuided clears
+  // guidedSession to null, then sets it to the terminal payload), so the
+  // shell mounts onto a terminal without ever seeing a live wizard. Firing
+  // there bounces the user straight back to run (completed) or re-PATCHes
+  // the opt-out on every remount (exited). Gate on sawActiveRef: a terminal
+  // session that was never preceded by a live, non-terminal session during
+  // this mount must NOT hand off.
+  //
+  // Two distinct hand-offs: `completed` graduates into the run/audit/
+  // graduation tail (onCompleted); `exited_to_freeform` is NOT a graduation
+  // — it leaves the tutorial for the freeform composer (onExited persists
+  // the opt-out so the shell unmounts, elspeth-61591e64bb).
   useEffect(() => {
-    if (completedRef.current) {
+    if (handedOffRef.current) {
       return;
     }
     const current = useSessionStore.getState();
@@ -172,18 +188,23 @@ export function TutorialGuidedShell({
       return;
     }
     const kind = guidedSession?.terminal?.kind;
-    // Record that we observed a live wizard: a non-null session that has not
-    // yet completed. The mount-effect's clear-to-null step leaves guidedSession
+    // Record that we observed a live wizard: a non-null session with no
+    // terminal yet. The mount-effect's clear-to-null step leaves guidedSession
     // null (not "active"), so requiring non-null here keeps the back-nav path
-    // from spuriously marking the wizard observed.
-    if (guidedSession !== undefined && guidedSession !== null && kind !== "completed") {
+    // from spuriously marking the wizard observed. Requiring terminal == null
+    // (not just "not completed") keeps a mount onto an already-exited session
+    // from arming the exit hand-off.
+    if (guidedSession !== undefined && guidedSession !== null && kind == null) {
       sawActiveRef.current = true;
     }
     if (kind === "completed" && sawActiveRef.current) {
-      completedRef.current = true;
+      handedOffRef.current = true;
       onCompleted(sessionId);
+    } else if (kind === "exited_to_freeform" && sawActiveRef.current) {
+      handedOffRef.current = true;
+      onExited?.(sessionId);
     }
-  }, [guidedSession, onCompleted, sessionId]);
+  }, [guidedSession, onCompleted, onExited, sessionId]);
 
   const bookends = guidedSession?.profile?.bookends ?? true;
 

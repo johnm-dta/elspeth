@@ -88,6 +88,11 @@ interface PreferencesState {
   saveTutorialMode: (mode: ComposerMode) => Promise<void>;
   markTutorialGraduated: (options?: {
     publishLocally?: boolean;
+    // Telemetry discriminator: an explicit in-tutorial exit (the wire-stage
+    // exit terminal or the shell-chrome "Exit tutorial" control) rides the
+    // PATCH as tutorial_completed_via so the backend does not bucket it as
+    // "skip" (elspeth-61591e64bb).
+    via?: "exit";
   }) => Promise<string | null>;
   publishTutorialGraduation: (completedAt: string | null) => void;
   resetTutorial: () => Promise<void>;
@@ -312,7 +317,15 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   },
 
   markTutorialGraduated: async (options = {}) => {
-    if (get().writing) return get().tutorialCompletedAt;
+    // A graduation opt-out (skip or exit) must never be silently dropped
+    // because an unrelated preferences write is in flight — the old
+    // `if (writing) return` no-op did exactly that, stranding exit clicks
+    // (elspeth-61591e64bb). Wait for the in-flight write to settle before
+    // sending; bounded so a hung PATCH cannot wedge the exit (a rare
+    // interleaved write beats a dropped opt-out).
+    for (let waitedMs = 0; get().writing && waitedMs < 5000; waitedMs += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     const publishLocally = options.publishLocally ?? true;
     const stamp = new Date().toISOString();
     const previous = {
@@ -326,6 +339,9 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     try {
       const payload = await updateUserComposerPreferences({
         tutorial_completed_at: stamp,
+        ...(options.via !== undefined
+          ? { tutorial_completed_via: options.via }
+          : {}),
       });
       set({
         ...(publishLocally

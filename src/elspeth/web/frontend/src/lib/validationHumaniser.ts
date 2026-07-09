@@ -119,16 +119,41 @@ export function makePhraseFor(
     const generatedPhrase = fallbackPhraseForGeneratedId(stripped);
     if (generatedPhrase !== null) return generatedPhrase;
     for (const [knownId, phrase] of phraseMap.entries()) {
-      if (
-        knownId.length > 0 &&
-        stripped.length > 0 &&
-        (stripped.includes(knownId) || knownId.includes(stripped))
-      ) {
+      if (componentIdHasKnownToken(stripped, knownId)) {
         return phrase;
       }
     }
     return UNKNOWN_COMPONENT_PHRASE;
   };
+}
+
+const MIN_FUZZY_COMPONENT_TOKEN_LENGTH = 4;
+const COMPONENT_ROLE_TOKENS = new Set([
+  "source",
+  "input",
+  "read",
+  "sink",
+  "output",
+  "write",
+  "node",
+  "transform",
+  "xform",
+]);
+
+function componentIdHasKnownToken(componentId: string, knownId: string): boolean {
+  const componentTokens = new Set(componentIdTokens(componentId));
+  if (componentTokens.size === 0) return false;
+  const meaningfulKnownTokens = componentIdTokens(knownId).filter(
+    (token) =>
+      token.length >= MIN_FUZZY_COMPONENT_TOKEN_LENGTH &&
+      !COMPONENT_ROLE_TOKENS.has(token),
+  );
+  if (meaningfulKnownTokens.length === 0) return false;
+  return meaningfulKnownTokens.every((token) => componentTokens.has(token));
+}
+
+function componentIdTokens(componentId: string): string[] {
+  return componentId.toLowerCase().split(/[_:-]+/).filter(Boolean);
 }
 
 function fallbackPhraseForGeneratedId(componentId: string): string | null {
@@ -161,7 +186,7 @@ function fallbackPhraseForGeneratedId(componentId: string): string | null {
 type GeneratedRole = "source" | "output" | "transform";
 
 function firstGeneratedRole(id: string): GeneratedRole | null {
-  const tokens = id.split(/[_:-]+/).filter(Boolean);
+  const tokens = componentIdTokens(id);
   for (const token of tokens) {
     if (/^(source|input|read)$/.test(token)) return "source";
     if (/^(sink|output|write)$/.test(token)) return "output";

@@ -260,6 +260,33 @@ describe("PipelineValidationSummary", () => {
     expect(screen.getByText("Technical details")).toBeInTheDocument();
   });
 
+  it("does not assign a short unmapped id to a substring-matching component", () => {
+    const rawDump =
+      "Schema contract violation: edge 'a' → 'out'\n" +
+      "  Consumer (csv) requires fields: ['score']\n" +
+      "  Producer (unknown) guarantees: ['body']\n" +
+      "  Missing fields: ['score']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "a",
+          component_type: "transform",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/"this step" step's output/i);
+    expect(status.textContent).toMatch(/write a CSV/i);
+    expect(status.textContent).not.toMatch(/rate each row/i);
+  });
+
   it("humanises generated edge ids instead of announcing two generic 'this step' placeholders", () => {
     useSessionStore.setState({
       compositionState: makeComposition(1, {

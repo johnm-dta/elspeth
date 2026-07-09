@@ -261,6 +261,28 @@ describe("ImportYamlModal", () => {
     expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
   });
 
+  it("counts section body entries when the section header has an inline comment", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      "source:\n" +
+        "  plugin: csv\n" +
+        "  on_success: summarize\n" +
+        "transforms: # generated steps\n" +
+        "  - name: summarize\n" +
+        "    plugin: llm\n" +
+        "  - name: normalize\n" +
+        "    plugin: lowercase\n" +
+        "sinks:\n" +
+        "  result:\n" +
+        "    plugin: json\n",
+    );
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 source, 2 processing steps, 1 output"),
+    ).toBeInTheDocument();
+  });
+
   it("does not close on Escape while the confirm step owns the keyboard", () => {
     useSessionStore.setState({ compositionState: nonEmptyState() } as never);
     render(<ImportYamlModal onClose={onClose} />);

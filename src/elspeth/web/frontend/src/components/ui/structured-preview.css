@@ -33,7 +33,7 @@
 
 .structured-preview-toggle[aria-pressed="true"] {
   border-color: var(--color-accent);
-  background: var(--color-accent-bg);
+  background: var(--color-accent-muted);
   color: var(--color-text);
 }
 

@@ -614,7 +614,7 @@
 .guided-pending-substep--current {
   border-color: var(--color-accent);
   color: var(--color-text);
-  background-color: var(--color-accent-bg);
+  background-color: var(--color-accent-muted);
   font-weight: 700;
 }
 

@@ -225,12 +225,16 @@ function parseYamlMappingLine(
     if (index >= trimmedLine.length) return null;
     const remainder = trimmedLine.slice(index + 1).trimStart();
     if (!remainder.startsWith(":")) return null;
-    return { key, inlineValue: remainder.slice(1).trim() };
+    return { key, inlineValue: yamlInlineValue(remainder.slice(1).trim()) };
   }
 
   const plainKey = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(trimmedLine);
   if (!plainKey) return null;
-  return { key: plainKey[1], inlineValue: plainKey[2].trim() };
+  return { key: plainKey[1], inlineValue: yamlInlineValue(plainKey[2].trim()) };
+}
+
+function yamlInlineValue(value: string): string {
+  return value.startsWith("#") ? "" : value;
 }
 
 function normaliseYamlPreviewIndent(lines: string[]): string[] {

@@ -111,6 +111,11 @@ function renderFields(properties: Record<string, JsonSchemaField>, required: str
 
 const PROSE_FALLBACK = "See the technical description above.";
 
+type ProseBlock =
+  | { kind: "code"; code: string; key: string }
+  | { kind: "list"; items: string[]; key: string }
+  | { kind: "paragraph"; text: string; key: string };
+
 export function PluginCard({
   plugin,
   schema,
@@ -270,7 +275,97 @@ function ProseSection({ label, body }: { label: string; body: string | null }) {
   return (
     <div className="plugin-card-prose-section">
       <div className="plugin-card-prose-label">{label}:</div>
-      <div className="plugin-card-prose-body">{body}</div>
+      <FormattedCatalogProse body={body} />
     </div>
   );
+}
+
+function FormattedCatalogProse({ body }: { body: string }) {
+  const blocks = parseProseBlocks(body);
+  return (
+    <div className="plugin-card-prose-body">
+      {blocks.map((block) => {
+        if (block.kind === "code") {
+          return (
+            <pre key={block.key} className="plugin-card-prose-code">
+              <code>{block.code}</code>
+            </pre>
+          );
+        }
+        if (block.kind === "list") {
+          return (
+            <ul key={block.key} className="plugin-card-prose-list">
+              {block.items.map((item, index) => (
+                <li key={`${block.key}-${index}`}>{renderInlineCode(item)}</li>
+              ))}
+            </ul>
+          );
+        }
+        return (
+          <p key={block.key} className="plugin-card-prose-paragraph">
+            {renderInlineCode(block.text)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+function parseProseBlocks(body: string): ProseBlock[] {
+  const blocks: ProseBlock[] = [];
+  const fencePattern = /```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fencePattern.exec(body)) !== null) {
+    appendTextBlocks(blocks, body.slice(cursor, match.index));
+    blocks.push({
+      kind: "code",
+      code: match[1].replace(/\n$/, ""),
+      key: `code-${blocks.length}`,
+    });
+    cursor = match.index + match[0].length;
+  }
+  appendTextBlocks(blocks, body.slice(cursor));
+  return blocks;
+}
+
+function appendTextBlocks(blocks: ProseBlock[], text: string): void {
+  for (const chunk of text.split(/\n{2,}/)) {
+    const trimmed = chunk.trim();
+    if (trimmed.length === 0) continue;
+    const lines = trimmed.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (lines.length > 0 && lines.every((line) => /^[-*]\s+/.test(line))) {
+      blocks.push({
+        kind: "list",
+        items: lines.map((line) => line.replace(/^[-*]\s+/, "")),
+        key: `list-${blocks.length}`,
+      });
+    } else {
+      blocks.push({
+        kind: "paragraph",
+        text: lines.join(" "),
+        key: `paragraph-${blocks.length}`,
+      });
+    }
+  }
+}
+
+function renderInlineCode(text: string): JSX.Element[] {
+  const parts: JSX.Element[] = [];
+  const pattern = /`([^`]+)`/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      parts.push(
+        <span key={`text-${cursor}`}>{text.slice(cursor, match.index)}</span>,
+      );
+    }
+    parts.push(<code key={`code-${match.index}`}>{match[1]}</code>);
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) {
+    parts.push(<span key={`text-${cursor}`}>{text.slice(cursor)}</span>);
+  }
+  return parts;
 }

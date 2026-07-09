@@ -10,6 +10,8 @@
 // directly; this test fires the event AFTER a parent re-render to catch that.
 // ============================================================================
 
+import { readFileSync } from "node:fs";
+
 import { useRef, useState, type RefObject } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
@@ -314,6 +316,39 @@ describe("ChatInput max length", () => {
       "maxlength",
       "4096",
     );
+  });
+});
+
+describe("ChatInput mobile density CSS", () => {
+  const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
+
+  function mediaBlock(maxWidth: number): string {
+    const start = chatCss.indexOf(`@media (max-width: ${maxWidth}px)`);
+    if (start === -1) {
+      throw new Error(`Missing max-width ${maxWidth}px media block`);
+    }
+    const next = chatCss.indexOf("\n/*", start + 1);
+    return next === -1 ? chatCss.slice(start) : chatCss.slice(start, next);
+  }
+
+  it("compacts the composer chrome on phones without shrinking the textarea out of view", () => {
+    const block = mediaBlock(760);
+
+    expect(block).toContain(".chat-input {");
+    expect(block).toContain("padding: var(--space-xs) var(--space-sm)");
+    expect(block).toContain("min-height: 54px");
+    expect(block).toContain("max-height: 28vh");
+    expect(block).toContain(".chat-input-icon-btn");
+    expect(block).toContain("min-width: 44px");
+    expect(block).toContain("min-height: var(--size-control)");
+    expect(block).toContain(".chat-input-send-btn");
+  });
+
+  it("gives composer controls overflow-safe labels on narrow screens", () => {
+    const block = mediaBlock(760);
+
+    expect(block).toContain("min-width: 0");
+    expect(block).toContain("overflow-wrap: anywhere");
   });
 });
 

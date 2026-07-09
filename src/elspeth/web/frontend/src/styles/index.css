@@ -17,6 +17,7 @@
 @import "./base.css";
 @import "./animations.css";
 @import "./shared.css";
+@import "../components/ui/structured-preview.css";
 
 /* Per-area component files (utility before component). */
 @import "../components/recovery/recovery.css";

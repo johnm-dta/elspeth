@@ -46,12 +46,19 @@ export function ModeSwitchButton({
   const exitToFreeform = useSessionStore((s) => s.exitToFreeform);
   const reactId = useId();
   const disabledReasonId = `${reactId}-mode-switch-disabled-reason`;
+  const confirmDescriptionId = `${reactId}-mode-switch-confirm-description`;
 
   const label = target === "guided" ? "Switch to guided" : "Exit to freeform";
   const confirmLabel =
     target === "guided"
       ? "Confirm switch to guided"
       : "Confirm exit to freeform";
+  const confirmTitle =
+    target === "guided" ? "Switch to guided mode?" : "Exit to freeform mode?";
+  const confirmNote =
+    target === "guided"
+      ? "Guided mode starts a fresh pipeline. Your current pipeline is saved to version history and can be restored."
+      : "Your guided progress remains saved. You can continue in the freeform composer with the current pipeline context.";
 
   function doSwitch(): void {
     void (target === "guided" ? enterGuided() : exitToFreeform());
@@ -78,28 +85,19 @@ export function ModeSwitchButton({
   if (confirming) {
     return (
       <div
-        className="mode-switch-confirm"
+        className="mode-switch-confirm mode-switch-confirm-card"
         role="group"
         aria-label={confirmLabel}
+        aria-describedby={confirmDescriptionId}
       >
-        {/*
-          Guided-direction consent disclosure ("fresh wizard + consent",
-          elspeth-e2c3dba6b5). Converting a worked freeform session reseeds a
-          FRESH guided wizard and sets the current pipeline aside; it is NOT a
-          lossless in-place switch. Disclose that here, plus the recoverability
-          (version history) that makes the discard consented. Only shown for the
-          guided direction with work — exiting to freeform is genuinely lossless
-          and keeps its terse confirm.
-        */}
-        {target === "guided" && (
-          <span className="mode-switch-confirm-note">
-            Guided mode starts a fresh pipeline. Your current pipeline is saved
-            to version history and can be restored.
-          </span>
-        )}
+        <span className="mode-switch-confirm-title">{confirmTitle}</span>
+        <span id={confirmDescriptionId} className="mode-switch-confirm-note">
+          {confirmNote}
+        </span>
         <button
           type="button"
           className="mode-switch-btn mode-switch-btn--confirm"
+          aria-describedby={confirmDescriptionId}
           onClick={() => {
             setConfirming(false);
             doSwitch();

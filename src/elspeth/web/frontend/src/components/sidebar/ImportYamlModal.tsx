@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as api from "@/api/client";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -91,6 +91,241 @@ interface ImportYamlModalProps {
   onClose: () => void;
 }
 
+interface ImportYamlDraftAnalysis {
+  hasText: boolean;
+  canImport: boolean;
+  sourceCount: number;
+  stepCount: number;
+  outputCount: number;
+  validationMessage: string;
+}
+
+type ImportYamlSection =
+  | "aggregations"
+  | "coalesce"
+  | "gates"
+  | "sinks"
+  | "source"
+  | "sources"
+  | "transforms";
+
+const IMPORT_YAML_SECTION_ALIASES: Record<string, ImportYamlSection> = {
+  aggregations: "aggregations",
+  coalesce: "coalesce",
+  gates: "gates",
+  sinks: "sinks",
+  source: "source",
+  sources: "sources",
+  transforms: "transforms",
+};
+
+export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysis {
+  const hasText = yamlText.trim().length > 0;
+  if (!hasText) {
+    return {
+      hasText: false,
+      canImport: false,
+      sourceCount: 0,
+      stepCount: 0,
+      outputCount: 0,
+      validationMessage: "Paste YAML to preview it.",
+    };
+  }
+
+  const lines = normaliseYamlPreviewIndent(yamlText.replace(/\r\n/g, "\n").split("\n"));
+  const sectionStarts: Array<{
+    section: ImportYamlSection;
+    lineIndex: number;
+    indent: number;
+    inlineValue: string;
+  }> = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    if (leadingSpaces(rawLine) !== 0) continue;
+    const trimmed = rawLine.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(trimmed);
+    if (!match) continue;
+    const section = IMPORT_YAML_SECTION_ALIASES[match[1]];
+    if (section === undefined) continue;
+    sectionStarts.push({
+      section,
+      lineIndex: index,
+      indent: leadingSpaces(rawLine),
+      inlineValue: match[2].trim(),
+    });
+  }
+
+  let sourceCount = 0;
+  let stepCount = 0;
+  let outputCount = 0;
+  const foundSections = new Set<ImportYamlSection>();
+  for (const start of sectionStarts) {
+    foundSections.add(start.section);
+    if (start.section === "source") {
+      sourceCount += 1;
+    } else if (start.section === "sources") {
+      sourceCount += countYamlSectionEntries(lines, start);
+    } else if (start.section === "sinks") {
+      outputCount += countYamlSectionEntries(lines, start);
+    } else {
+      stepCount += countYamlSectionEntries(lines, start);
+    }
+  }
+
+  if (foundSections.size === 0) {
+    return {
+      hasText: true,
+      canImport: false,
+      sourceCount: 0,
+      stepCount: 0,
+      outputCount: 0,
+      validationMessage:
+        "No pipeline sections found. Add source, transforms, gates, aggregations, coalesce, or sinks.",
+    };
+  }
+
+  return {
+    hasText: true,
+    canImport: true,
+    sourceCount,
+    stepCount,
+    outputCount,
+    validationMessage: "Ready for server validation.",
+  };
+}
+
+function leadingSpaces(value: string): number {
+  return value.length - value.trimStart().length;
+}
+
+function normaliseYamlPreviewIndent(lines: string[]): string[] {
+  const significantIndents = lines
+    .map((line) => ({ line, trimmed: line.trim() }))
+    .filter(
+      ({ trimmed }) =>
+        trimmed.length > 0 &&
+        !trimmed.startsWith("#") &&
+        trimmed !== "---" &&
+        trimmed !== "...",
+    )
+    .map(({ line }) => leadingSpaces(line));
+  if (significantIndents.length === 0) {
+    return lines;
+  }
+  const commonIndent = Math.min(...significantIndents);
+  if (commonIndent === 0) {
+    return lines;
+  }
+  return lines.map((line) => {
+    if (line.trim().length === 0) {
+      return line;
+    }
+    return line.slice(Math.min(commonIndent, leadingSpaces(line)));
+  });
+}
+
+function countYamlSectionEntries(
+  lines: string[],
+  start: {
+    lineIndex: number;
+    indent: number;
+    inlineValue: string;
+    section: ImportYamlSection;
+  },
+): number {
+  if (start.inlineValue.length > 0) {
+    if (start.inlineValue === "{}" || start.inlineValue === "[]") {
+      return 0;
+    }
+    return 1;
+  }
+
+  let count = 0;
+  let childIndent: number | null = null;
+  for (let index = start.lineIndex + 1; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const trimmed = rawLine.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+    const indent = leadingSpaces(rawLine);
+    if (indent <= start.indent) break;
+    if (childIndent !== null && indent !== childIndent) continue;
+
+    if (isRuntimeListSection(start.section)) {
+      if (trimmed.startsWith("- ")) {
+        childIndent = indent;
+        count += 1;
+      } else if (childIndent === null && /^[A-Za-z0-9_.-]+:\s*/.test(trimmed)) {
+        childIndent = indent;
+        count += 1;
+      }
+      continue;
+    }
+
+    if (/^[A-Za-z0-9_.-]+:\s*/.test(trimmed)) {
+      childIndent = indent;
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function isRuntimeListSection(section: ImportYamlSection): boolean {
+  return (
+    section === "aggregations" ||
+    section === "coalesce" ||
+    section === "gates" ||
+    section === "transforms"
+  );
+}
+
+function importYamlCountLine(analysis: ImportYamlDraftAnalysis): string {
+  return [
+    pluraliseCount(analysis.sourceCount, "source"),
+    pluraliseCount(analysis.stepCount, "processing step"),
+    pluraliseCount(analysis.outputCount, "output"),
+  ].join(", ");
+}
+
+function pluraliseCount(count: number, singular: string): string {
+  return `${count} ${count === 1 ? singular : `${singular}s`}`;
+}
+
+function ImportYamlDraftPreview({
+  analysis,
+  id,
+}: {
+  analysis: ImportYamlDraftAnalysis;
+  id: string;
+}): JSX.Element | null {
+  if (!analysis.hasText) return null;
+  return (
+    <section
+      id={id}
+      className="import-yaml-preview"
+      role="status"
+      aria-live="polite"
+      aria-label="Import YAML preflight"
+    >
+      {analysis.canImport && (
+        <div className="import-yaml-preview-section">
+          <div className="import-yaml-preview-heading">Parsed preview</div>
+          <p className="import-yaml-preview-counts">
+            {importYamlCountLine(analysis)}
+          </p>
+        </div>
+      )}
+      <div className="import-yaml-preview-section">
+        <div className="import-yaml-preview-heading">Validation summary</div>
+        <p className={analysis.canImport ? "import-yaml-preview-ok" : "import-yaml-preview-warning"}>
+          {analysis.validationMessage}
+        </p>
+      </div>
+    </section>
+  );
+}
+
 /**
  * Import-YAML modal: paste or load-from-file, confirm when replacing a
  * non-trivial pipeline, submit, and render the outcome. Mounted only while
@@ -120,10 +355,15 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   const textareaId = useId();
   const fileInputId = useId();
   const errorId = useId();
+  const draftPreviewId = useId();
 
   useFocusTrap(dialogRef, true, ".import-yaml-textarea");
 
   const isSubmitting = phase === "submitting";
+  const draftAnalysis = useMemo(
+    () => analyseImportYamlDraft(yamlText),
+    [yamlText],
+  );
   // Escape/backdrop close while drafting or after a result; NOT while the
   // nested ConfirmDialog owns the keyboard (its own Escape handler applies),
   // and not mid-submit (avoid abandoning the request with no feedback).
@@ -219,7 +459,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   }
 
   function handleSubmitClick(): void {
-    if (yamlText.trim().length === 0) return;
+    if (!draftAnalysis.canImport) return;
     // Confirm before a destructive replace when the session HAS content, and
     // also when its state is not yet known (mid-refetch, or a failed load
     // that left compositionState null): treating "unknown" as "empty" would
@@ -278,7 +518,14 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                   className="textarea input-mono import-yaml-textarea"
                   value={yamlText}
                   onChange={(e) => setYamlText(e.target.value)}
-                  aria-describedby={error ? errorId : undefined}
+                  aria-describedby={
+                    [
+                      error ? errorId : null,
+                      draftAnalysis.hasText ? draftPreviewId : null,
+                    ]
+                      .filter((id): id is string => id !== null)
+                      .join(" ") || undefined
+                  }
                   disabled={isSubmitting}
                   placeholder="Paste exported pipeline YAML here"
                   rows={14}
@@ -301,6 +548,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                   uploaded until you click Import.
                 </p>
               </div>
+              <ImportYamlDraftPreview analysis={draftAnalysis} id={draftPreviewId} />
               <div className="import-yaml-actions">
                 <button
                   type="button"
@@ -313,7 +561,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={yamlText.trim().length === 0 || isSubmitting}
+                  disabled={!draftAnalysis.canImport || isSubmitting}
                   onClick={handleSubmitClick}
                 >
                   {isSubmitting ? "Importing…" : "Import"}

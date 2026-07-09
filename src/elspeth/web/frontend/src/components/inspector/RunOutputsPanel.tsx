@@ -23,6 +23,7 @@ import {
   fetchRunOutputPreview,
   fetchRunOutputs,
 } from "@/api/client";
+import { StructuredJsonPreview } from "@/components/ui";
 import { absoluteTime } from "@/utils/time";
 import type {
   ApiError,
@@ -91,6 +92,28 @@ function basenameOf(pathOrUri: string): string {
   const stripped = pathOrUri.startsWith("file://") ? pathOrUri.slice(7) : pathOrUri;
   const idx = stripped.lastIndexOf("/");
   return idx === -1 ? stripped : stripped.slice(idx + 1);
+}
+
+function looksLikeLocalBlobStoragePath(pathOrUri: string): boolean {
+  const stripped = pathOrUri.startsWith("file://") ? pathOrUri.slice(7) : pathOrUri;
+  return stripped.includes("/blob-storage/");
+}
+
+function artifactDisplayName(artifact: RunOutputArtifact): string {
+  if (!isFileArtifact(artifact)) {
+    return artifact.path_or_uri;
+  }
+  if (looksLikeLocalBlobStoragePath(artifact.path_or_uri)) {
+    return artifact.sink_node_id || "artifact";
+  }
+  return basenameOf(artifact.path_or_uri);
+}
+
+function artifactDisplayTitle(artifact: RunOutputArtifact): string {
+  if (isFileArtifact(artifact) && looksLikeLocalBlobStoragePath(artifact.path_or_uri)) {
+    return `Recorded artifact for ${artifact.sink_node_id || "artifact"}`;
+  }
+  return artifact.path_or_uri;
 }
 
 function isFileArtifact(artifact: RunOutputArtifact): boolean {
@@ -309,8 +332,9 @@ interface ArtifactRowProps {
 
 function ArtifactRow({ artifact, expanded, onTogglePreview, onDownload }: ArtifactRowProps) {
   const isFile = isFileArtifact(artifact);
-  const displayName = isFile ? basenameOf(artifact.path_or_uri) : artifact.path_or_uri;
+  const displayName = artifactDisplayName(artifact);
   const shortHash = artifact.content_hash.slice(0, HASH_DISPLAY_LENGTH);
+  const displayTitle = artifactDisplayTitle(artifact);
 
   return (
     <div className="run-output-artifact-row">
@@ -319,7 +343,7 @@ function ArtifactRow({ artifact, expanded, onTogglePreview, onDownload }: Artifa
       </span>
       <span
         className="run-output-artifact-name"
-        title={artifact.path_or_uri}
+        title={displayTitle}
       >
         {displayName}
       </span>
@@ -366,7 +390,7 @@ function ArtifactActions({ artifact, expanded, onTogglePreview, onDownload }: Ar
     return (
       <span
         className="run-output-artifact-unavailable"
-        title={`Recorded path: ${artifact.path_or_uri}`}
+        title={artifactDisplayTitle(artifact)}
       >
         no longer available on disk
       </span>
@@ -447,7 +471,12 @@ function ArtifactPreviewView({
   }
   return (
     <div style={{ marginTop: 6 }}>
-      {preview.content_type === "csv" || preview.content_type === "jsonl" ? (
+      {preview.content_type === "json" ? (
+        <StructuredJsonPreview
+          text={preview.preview_text}
+          truncated={preview.truncated}
+        />
+      ) : preview.content_type === "csv" || preview.content_type === "jsonl" ? (
         <TabularPreview text={preview.preview_text} contentType={preview.content_type} />
       ) : (
         <pre

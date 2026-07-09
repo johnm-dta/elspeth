@@ -41,7 +41,14 @@ function emptyState(): CompositionState {
   };
 }
 
-const PIPELINE_YAML = "pipeline:\n  sources: {}\n";
+const PIPELINE_YAML =
+  "source:\n" +
+  "  plugin: csv\n" +
+  "  on_success: result\n" +
+  "sinks:\n" +
+  "  result:\n" +
+  "    plugin: json\n" +
+  "    on_write_failure: fail\n";
 
 describe("ImportYamlModal", () => {
   const onClose = vi.fn();
@@ -144,6 +151,78 @@ describe("ImportYamlModal", () => {
     render(<ImportYamlModal onClose={onClose} />);
 
     expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
+  });
+
+  it("keeps Import disabled until the paste looks like pipeline YAML", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml("not: a pipeline document\n");
+
+    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
+    expect(screen.getByText("Validation summary")).toBeInTheDocument();
+    expect(screen.getByText(/No pipeline sections found/i)).toBeInTheDocument();
+  });
+
+  it("does not treat a nested pipeline wrapper as importable runtime YAML", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      "pipeline:\n" +
+        "  sources:\n" +
+        "    source:\n" +
+        "      plugin: csv\n",
+    );
+
+    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
+    expect(screen.getByText(/No pipeline sections found/i)).toBeInTheDocument();
+  });
+
+  it("accepts uniformly indented top-level runtime YAML", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      "  source:\n" +
+        "    plugin: csv\n" +
+        "    on_success: result\n" +
+        "  sinks:\n" +
+        "    result:\n" +
+        "      plugin: json\n" +
+        "      on_write_failure: fail\n",
+    );
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(screen.getByText("1 source, 0 processing steps, 1 output")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+  });
+
+  it("shows a parsed preview and validation summary before Import is enabled", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      "source:\n" +
+        "  plugin: csv\n" +
+        "  on_success: summarize\n" +
+        "transforms:\n" +
+        "  - name: summarize\n" +
+        "    plugin: llm\n" +
+        "    input: source\n" +
+        "    on_success: result\n" +
+        "    on_error: fail\n" +
+        "sinks:\n" +
+        "  result:\n" +
+        "    plugin: json\n" +
+        "    on_write_failure: fail\n",
+    );
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 source, 1 processing step, 1 output"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Validation summary")).toBeInTheDocument();
+    expect(screen.getByText(/Ready for server validation/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Import YAML preflight" }),
+    ).toHaveAttribute("aria-live", "polite");
+    expect(screen.getByLabelText(/pipeline yaml/i)).toHaveAccessibleDescription(
+      /Ready for server validation/i,
+    );
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
   });
 
   it("does not close on Escape while the confirm step owns the keyboard", () => {

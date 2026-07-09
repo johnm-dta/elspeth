@@ -115,4 +115,31 @@ describe("GuidedPendingStrip", () => {
     });
     expect(stop.className).not.toContain("guided-pending-strip-stop--arming");
   });
+
+  it("shows optional substep progress with the current item marked", () => {
+    render(
+      <GuidedPendingStrip
+        composerProgress={snapshot({})}
+        substeps={["Read output request", "Choose sink shape", "Prepare JSON file"]}
+        activeSubstepIndex={1}
+      />,
+    );
+
+    const list = screen.getByRole("list", { name: "Tutorial step progress" });
+    expect(list).toHaveTextContent("Read output request");
+    expect(list).toHaveTextContent("Choose sink shape");
+    expect(list).toHaveTextContent("Prepare JSON file");
+    expect(screen.getByText("Choose sink shape")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
+  it("omits substep progress when no substeps are supplied", () => {
+    render(<GuidedPendingStrip composerProgress={snapshot({})} />);
+
+    expect(
+      screen.queryByRole("list", { name: "Tutorial step progress" }),
+    ).not.toBeInTheDocument();
+  });
 });

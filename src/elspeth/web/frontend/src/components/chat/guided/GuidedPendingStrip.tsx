@@ -30,6 +30,8 @@ interface GuidedPendingStripProps {
    * a habitual double-Enter after Send must land on a non-activatable node.
    */
   stripRef?: RefObject<HTMLDivElement>;
+  substeps?: readonly string[];
+  activeSubstepIndex?: number;
 }
 
 /**
@@ -73,6 +75,8 @@ export function GuidedPendingStrip({
   composerProgress,
   onStop,
   stripRef,
+  substeps,
+  activeSubstepIndex = 0,
 }: GuidedPendingStripProps): JSX.Element {
   const [stopArmed, setStopArmed] = useState(false);
   useEffect(() => {
@@ -95,6 +99,23 @@ export function GuidedPendingStrip({
             pending, so each compose counts from 00:00. */}
         <ElapsedReadout />
       </div>
+      {substeps !== undefined && substeps.length > 0 && (
+        <ol className="guided-pending-substeps" aria-label="Tutorial step progress">
+          {substeps.map((substep, index) => (
+            <li
+              key={substep}
+              className={
+                index === activeSubstepIndex
+                  ? "guided-pending-substep guided-pending-substep--current"
+                  : "guided-pending-substep"
+              }
+              aria-current={index === activeSubstepIndex ? "step" : undefined}
+            >
+              {substep}
+            </li>
+          ))}
+        </ol>
+      )}
       {onStop !== undefined && (
         <button
           type="button"

@@ -1,6 +1,7 @@
 // src/components/blobs/BlobRow.tsx
 import { useMemo, useState } from "react";
 import { previewBlobContentSnippet } from "@/api/client";
+import { Icon, StructuredJsonPreview, type IconName } from "@/components/ui";
 import type { BlobMetadata } from "@/types/api";
 import { describeStructuralSummary, summarizeContentStructure } from "@/utils/contentStructure";
 
@@ -27,39 +28,42 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function creatorBadge(createdBy: string): string {
+function creatorBadge(createdBy: BlobMetadata["created_by"]): IconName {
   switch (createdBy) {
     case "user":
-      return "\u{1F4E4}";
+      return "user";
     case "assistant":
-      return "\u{1F916}";
+      return "assistant";
     case "pipeline":
-      return "\u{2699}\u{FE0F}";
-    default:
-      return "";
+      return "pipeline";
   }
 }
 
-// Each status carries a distinct *shape* glyph alongside its hue, so the
-// ready/pending/error distinction survives colour-vision deficiency
-// (WCAG 1.4.1): filled disc, hollow ring, and warning triangle are
-// unmistakable regardless of colour.
-function statusIndicator(status: string): { color: string; label: string; glyph: string } {
+function statusIndicator(status: string): {
+  color: string;
+  label: string;
+  icon: IconName;
+} {
   switch (status) {
     case "ready":
-      return { color: "var(--color-success)", label: "Ready", glyph: "●" };
+      return { color: "var(--color-success)", label: "Ready", icon: "status-ready" };
     case "pending":
-      return { color: "var(--color-warning)", label: "Pending", glyph: "○" };
+      return { color: "var(--color-warning)", label: "Pending", icon: "status-pending" };
     case "error":
-      return { color: "var(--color-error)", label: "Error", glyph: "▲" };
+      return { color: "var(--color-error)", label: "Error", icon: "status-error" };
     default:
-      return { color: "var(--color-text-muted)", label: status, glyph: "◌" };
+      return {
+        color: "var(--color-text-muted)",
+        label: status,
+        icon: "status-unknown",
+      };
   }
 }
 
 export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }: BlobRowProps) {
   const status = statusIndicator(blob.status);
-  const canPreview = PREVIEWABLE_MIME_TYPES.has(blob.mime_type);
+  const normalizedMimeType = blob.mime_type.split(";")[0].trim().toLowerCase();
+  const canPreview = PREVIEWABLE_MIME_TYPES.has(normalizedMimeType);
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
@@ -110,8 +114,8 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
   // caveat instead of a guessed row count (see contentStructure.ts).
   const structuralSummary = useMemo(() => {
     if (previewContent === null) return null;
-    return summarizeContentStructure(blob.mime_type, previewContent, { truncated });
-  }, [previewContent, truncated, blob.mime_type]);
+    return summarizeContentStructure(normalizedMimeType, previewContent, { truncated });
+  }, [previewContent, truncated, normalizedMimeType]);
   const structuralSummaryLine = structuralSummary
     ? describeStructuralSummary(structuralSummary)
     : null;
@@ -124,7 +128,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
           borderBottom: previewOpen ? "none" : "1px solid var(--color-border)",
         }}
       >
-        {/* Status indicator — shape glyph (non-colour cue) + accessible name */}
+        {/* Status indicator: shape icon (non-colour cue) + accessible name. */}
         <span
           className="blob-row-status-dot"
           role="img"
@@ -134,12 +138,12 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
             color: status.color,
           }}
         >
-          {status.glyph}
+          <Icon name={status.icon} />
         </span>
 
         {/* Creator badge */}
         <span className="blob-row-creator" title={`Created by ${blob.created_by}`}>
-          {creatorBadge(blob.created_by)}
+          <Icon name={creatorBadge(blob.created_by)} />
         </span>
 
         {/* Filename */}
@@ -165,7 +169,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
               aria-expanded={previewOpen}
               className="blob-action-btn"
             >
-              {"\uD83D\uDC41"}
+              <Icon name="eye" />
             </button>
           )}
           {blob.status === "ready" && (
@@ -176,7 +180,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
                 aria-label={`Use ${blob.filename} as input`}
                 className="blob-action-btn"
               >
-                {"\u25B6"}
+                <Icon name="play" />
               </button>
               <button
                 onClick={() => onDownload(blob.id)}
@@ -184,7 +188,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
                 aria-label={`Download ${blob.filename}`}
                 className="blob-action-btn"
               >
-                {"\u2B07"}
+                <Icon name="download" />
               </button>
             </>
           )}
@@ -194,7 +198,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
             aria-label={`Delete ${blob.filename}`}
             className="blob-action-btn"
           >
-            {"\u2715"}
+            <Icon name="trash" />
           </button>
         </div>
       </div>
@@ -225,16 +229,26 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
                 )}
               </div>
             )}
-          {displayContent !== null && !previewLoading && (
-            <pre className="blob-row-preview-pre">
-              {displayContent}
-              {truncated && (
-                <span className="blob-row-preview-truncated">
-                  {"\n... (truncated)"}
-                </span>
-              )}
-            </pre>
-          )}
+          {displayContent !== null &&
+            !previewLoading &&
+            normalizedMimeType === "application/json" && (
+              <StructuredJsonPreview
+                text={displayContent}
+                truncated={truncated}
+              />
+            )}
+          {displayContent !== null &&
+            !previewLoading &&
+            normalizedMimeType !== "application/json" && (
+              <pre className="blob-row-preview-pre">
+                {displayContent}
+                {truncated && (
+                  <span className="blob-row-preview-truncated">
+                    {"\n... (truncated)"}
+                  </span>
+                )}
+              </pre>
+            )}
         </div>
       )}
     </div>

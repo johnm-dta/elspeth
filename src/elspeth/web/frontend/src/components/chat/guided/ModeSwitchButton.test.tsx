@@ -54,6 +54,23 @@ describe("ModeSwitchButton", () => {
     expect(screen.getByText(/version history/i)).toBeInTheDocument();
   });
 
+  it("target=guided, with work: renders an explicit contextual confirmation panel", () => {
+    const enterGuided = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ enterGuided });
+
+    const { container } = render(<ModeSwitchButton target="guided" hasWork />);
+    fireEvent.click(screen.getByRole("button", { name: "Switch to guided" }));
+
+    expect(container.querySelector(".mode-switch-confirm-card")).not.toBeNull();
+    expect(screen.getByText("Switch to guided mode?")).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: "Confirm switch to guided" }),
+    ).toHaveAttribute("aria-describedby");
+    expect(
+      screen.getByRole("button", { name: "Confirm switch to guided" }),
+    ).toHaveAccessibleDescription(/version history/i);
+  });
+
   it("target=freeform, with work: the confirm does NOT carry the fresh-wizard note", () => {
     // The disclosure is guided-direction only; exiting to freeform is a
     // genuinely lossless in-place switch and must keep its terse confirm.
@@ -64,6 +81,20 @@ describe("ModeSwitchButton", () => {
     fireEvent.click(screen.getByRole("button", { name: "Exit to freeform" }));
 
     expect(screen.queryByText(/version history/i)).toBeNull();
+  });
+
+  it("target=freeform, with work: names the current guided context before confirming", () => {
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ exitToFreeform });
+
+    render(<ModeSwitchButton target="freeform" hasWork />);
+    fireEvent.click(screen.getByRole("button", { name: "Exit to freeform" }));
+
+    expect(screen.getByText("Exit to freeform mode?")).toBeInTheDocument();
+    expect(screen.getByText(/continue in the freeform composer/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm exit to freeform" }),
+    ).toHaveAccessibleDescription(/continue in the freeform composer/i);
   });
 
   it("with work: Cancel dismisses the confirm without switching", () => {

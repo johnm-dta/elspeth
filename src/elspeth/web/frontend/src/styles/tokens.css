@@ -73,10 +73,9 @@
   --color-badge-gate:        #c390f9;
   --color-badge-sink:        #e07040;
   --color-badge-aggregation: #61daff;
-  /* Coalesce shifted from #14b0ae to break the byte-identical collision with
-     --color-success — previously a "completed" badge next to a coalesce node
-     was indistinguishable. The cyan-leaning teal sits clearly off the success
-     hue while staying in the same chromatic family. */
+  /* Coalesce stays in the cyan/teal family while success/completed now uses
+     a greener semantic token, so a completed badge next to a coalesce node
+     no longer collapses into one hue. */
   --color-badge-coalesce:    #18c2c0;
 
   /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
@@ -96,15 +95,15 @@
   --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
-  --color-success:           #16bab8;
+  --color-success:           #63d487;
   --color-error:             #ef8784;
   --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
   /* ── Semantic backgrounds — for inline alert/banner components ────────────── */
-  --color-success-bg:        rgba(20, 176, 174, 0.12);
-  --color-success-border:    rgba(20, 176, 174, 0.30);
+  --color-success-bg:        rgba(99, 212, 135, 0.12);
+  --color-success-border:    rgba(99, 212, 135, 0.30);
   --color-error-bg:          rgba(232, 86, 83, 0.12);
   --color-error-border:      rgba(232, 86, 83, 0.30);
   --color-warning-bg:        rgba(227, 132, 68, 0.14);
@@ -113,7 +112,7 @@
   --color-info-border:       rgba(97, 218, 255, 0.25);
 
   /* Per-node validation indicator borders */
-  --color-node-valid: #14b0ae;
+  --color-node-valid: #63d487;
   --color-node-warning: #e38444;
   --color-node-invalid: #e85653;
   --color-node-unchecked: var(--color-border-strong);
@@ -132,14 +131,14 @@
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #16bab8;
+  --color-status-completed:  #63d487;
   --color-status-failed:     #ef8784;
   --color-status-cancelled:  #e79761;
   /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
      darker than --color-status-pending so the two non-success-but-clean
-     statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
-     reuses --color-status-completed (teal) and signals "with caveats"
-     via the warning glyph rather than a different colour. */
+     statuses are visually distinguishable. COMPLETED_WITH_FAILURES
+     reuses --color-status-completed and signals "with caveats" via the
+     warning glyph rather than a different colour. */
   --color-status-empty:      #a4a4a4;
 
   /* ── Surface variants ─────────────────────────────────────────────────── */

@@ -125,6 +125,30 @@ describe("RunOutputsPanel", () => {
     expect(screen.queryByText("Preview")).not.toBeInTheDocument();
   });
 
+  it("does not leak raw local blob-storage paths in unavailable-row tooltips", async () => {
+    const rawPath =
+      "/home/john/.local/share/elspeth/blob-storage/sha256-abcdef0123456789";
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri: rawPath,
+          exists_now: false,
+          downloadable: false,
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    const unavailable = await screen.findByText(/no longer available on disk/i);
+    expect(unavailable).toHaveAttribute(
+      "title",
+      "Recorded artifact for final_report",
+    );
+    expect(unavailable.getAttribute("title")).not.toContain(rawPath);
+  });
+
   it("shows the 'outside allowed sink directories' tooltip when not downloadable", async () => {
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([fileArtifact({ exists_now: true, downloadable: false })]),
@@ -294,6 +318,78 @@ describe("RunOutputsPanel", () => {
     expect(screen.getByText("value")).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText("19.95")).toBeInTheDocument();
+  });
+
+  it("pretty-prints JSON previews and offers a table view for record arrays", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact({ path_or_uri: "file:///data/outputs/results.json" })]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({
+        content_type: "json",
+        preview_text: '[{"id":1,"status":"ok"},{"id":2,"status":"error"}]',
+        row_count_preview: null,
+      }),
+    );
+
+    const { container } = render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    await waitFor(() =>
+      expect(container.querySelector(".structured-preview-pre")?.textContent).toContain(
+        '{\n    "id": 1,',
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+
+    expect(screen.getByText("id")).toBeInTheDocument();
+    expect(screen.getByText("status")).toBeInTheDocument();
+    expect(screen.getByText("error")).toBeInTheDocument();
+  });
+
+  it("derives a friendly artifact label instead of showing opaque local blob paths", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri:
+            "/home/john/.local/share/elspeth/blob-storage/sha256-abcdef0123456789",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("final_report")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(
+        "/home/john/.local/share/elspeth/blob-storage/sha256-abcdef0123456789",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves legitimate hash-like filenames outside local blob storage", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri:
+            "file:///data/outputs/sha256-abcdef0123456789abcdef0123456789.json",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("sha256-abcdef0123456789abcdef0123456789.json"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("final_report")).not.toBeInTheDocument();
   });
 
   it("transitions to 'no longer available on disk' on artifact_purged_or_moved race", async () => {

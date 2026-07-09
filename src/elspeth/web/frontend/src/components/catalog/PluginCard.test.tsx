@@ -510,6 +510,49 @@ describe("PluginCard — Phase 7B reshape", () => {
     expect(codeBlock.tagName.toLowerCase()).toBe("pre");
   });
 
+  it("preserves inline and fenced code formatting in details prose", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_to_use:
+            "Use `options.path` when the file is local.\n\n```yaml\nsource:\n  plugin: csv\n```",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+
+    expect(screen.getByText("options.path").tagName.toLowerCase()).toBe("code");
+    const fenced = screen.getByText(/source:\s+plugin: csv/);
+    expect(fenced.tagName.toLowerCase()).toBe("code");
+    expect(fenced.closest("pre")).not.toBeNull();
+  });
+
+  it("renders bullet-style prose as a list for scannability", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_not_to_use:
+            "- when rows are already structured\n- when credentials would be embedded",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+
+    const list = screen.getByRole("list");
+    expect(within(list).getByText("when rows are already structured")).toBeInTheDocument();
+    expect(within(list).getByText("when credentials would be embedded")).toBeInTheDocument();
+  });
+
   it("falls back to a generic message when prose fields are null in details", async () => {
     render(
       <PluginCard

@@ -570,6 +570,7 @@
    conversation column above barely reflows on the swap. */
 .guided-pending-strip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-md);
   min-height: 76px;
@@ -588,6 +589,33 @@
   gap: var(--space-md);
   flex: 1;
   min-width: 0;
+}
+
+.guided-pending-substeps {
+  order: 2;
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin: calc(-1 * var(--space-xs)) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guided-pending-substep {
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+}
+
+.guided-pending-substep--current {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  background-color: var(--color-accent-bg);
+  font-weight: 700;
 }
 
 .guided-pending-strip-headline {

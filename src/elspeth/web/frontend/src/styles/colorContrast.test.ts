@@ -440,6 +440,28 @@ describe("role-family surface contrast", () => {
     );
   });
 
+  it("keeps dark success/status visually green instead of collapsing into teal info chrome", () => {
+    const success = hexToRgb(extractRootToken("--color-success"));
+    const statePositive = hexToRgb(extractRootToken("--color-state-positive"));
+    const info = hexToRgb(extractRootToken("--color-info"));
+
+    expect(extractRootToken("--color-status-completed")).toBe(
+      extractRootToken("--color-success"),
+    );
+    expect(extractRootToken("--color-success")).not.toBe(
+      extractRootToken("--color-state-positive"),
+    );
+    expect(extractRootToken("--color-success")).not.toBe(
+      extractRootToken("--color-info"),
+    );
+    // Success should read as green at a glance; info/state-positive retain
+    // the cyan/teal family. The old dark success token differed from teal by
+    // only two blue-channel points, making status and info hierarchy mushy.
+    expect(success.g - success.b).toBeGreaterThanOrEqual(35);
+    expect(Math.abs(statePositive.g - statePositive.b)).toBeLessThanOrEqual(40);
+    expect(info.b).toBeGreaterThan(info.g);
+  });
+
   it("uses opaque badge background tokens with non-text contrast in both themes", () => {
     for (const kind of BADGE_TOKEN_KINDS) {
       const foregroundToken = `--color-badge-${kind}`;

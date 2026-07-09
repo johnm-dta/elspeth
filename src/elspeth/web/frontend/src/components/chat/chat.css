@@ -514,14 +514,41 @@
 }
 
 @media (max-width: 760px) {
+  .chat-input {
+    padding: var(--space-xs) var(--space-sm);
+  }
+
   .chat-input-row {
     flex-wrap: wrap;
     align-items: stretch;
+    gap: var(--space-xs);
   }
 
   .chat-input-textarea {
     flex: 1 0 100%;
-    min-height: 68px;
+    min-height: 54px;
+    max-height: 28vh;
+    padding: var(--space-xs) var(--space-sm);
+    overflow-y: auto;
+  }
+
+  .chat-input-icon-btn {
+    min-width: 44px;
+    min-height: var(--size-control);
+    padding: var(--space-xs);
+  }
+
+  .chat-input-send-btn,
+  .chat-input-cancel-btn {
+    flex: 1 1 7rem;
+    min-width: 0;
+    min-height: var(--size-control);
+    padding: var(--space-xs) var(--space-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .chat-input-hint {
+    text-align: left;
   }
 }
 
@@ -651,10 +678,27 @@
 
 /* Two-step confirm container: primary + Cancel, wraps if the header is tight. */
 .mode-switch-confirm {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  gap: var(--space-xs) var(--space-sm);
   align-items: center;
+  max-width: min(34rem, 100%);
+}
+
+.mode-switch-confirm-card {
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.mode-switch-confirm-title {
+  grid-column: 1 / -1;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
 }
 
 /* Guided-direction consent disclosure ("fresh wizard + consent",
@@ -664,9 +708,10 @@
    expected consequence, not an error. Given a full row so it reads before the
    confirm/cancel buttons in the wrapped flex layout. */
 .mode-switch-confirm-note {
-  flex-basis: 100%;
+  grid-column: 1 / -1;
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
+  line-height: var(--line-height-normal);
 }
 
 /* C-4b: terminal-guided "Switch to guided" — permanently un-reentrable
@@ -1597,6 +1642,31 @@
   min-width: 0;
 }
 
+.composing-details-toggle {
+  justify-self: start;
+  min-height: var(--size-control-compact);
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+
+.composing-details-toggle:hover,
+.composing-details-toggle:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.composing-details {
+  display: grid;
+  gap: var(--space-1-5);
+}
+
 .composing-section {
   display: grid;
   gap: var(--space-2xs);
@@ -1635,6 +1705,36 @@
 /* ---------------------------------------------------------------------------
    TemplateCards (onboarding empty state)
    --------------------------------------------------------------------------- */
+.starter-examples-disclosure {
+  width: min(100%, 1120px);
+  margin: var(--space-md) auto;
+  padding: 0 var(--space-lg);
+}
+
+.starter-examples-disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.starter-examples-disclosure > summary:hover,
+.starter-examples-disclosure > summary:focus-visible {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+  background-color: var(--color-surface-elevated);
+}
+
+.starter-examples-disclosure[open] > summary {
+  margin-bottom: var(--space-sm);
+}
+
 .template-cards-container {
   padding: var(--space-xl) var(--space-2xl);
   width: min(100%, 1120px);

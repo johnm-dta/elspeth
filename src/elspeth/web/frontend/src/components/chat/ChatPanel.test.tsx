@@ -202,6 +202,10 @@ describe("ChatPanel", () => {
     render(<ChatPanel />);
 
     expect(screen.getByText("The model requested plugin schemas.")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Checking available source, transform, and sink tools."),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("Checking available source, transform, and sink tools.")).toBeInTheDocument();
     expect(screen.queryByText("Working on: convert HTML into JSON")).not.toBeInTheDocument();
   });
@@ -246,7 +250,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Revise the request and send it again.")).toBeInTheDocument();
   });
 
-  it("renders template cards as a static gallery without sending a template prompt", () => {
+  it("keeps starter examples collapsed in an empty freeform session without sending a template prompt", () => {
     const sendMessage = vi.fn();
     const session: Session = {
       id: "session-templates",
@@ -269,9 +273,14 @@ describe("ChatPanel", () => {
       messages: [],
     });
 
-    render(<ChatPanel />);
+    const { container } = render(<ChatPanel />);
 
     expect(screen.getByTestId("template-cards")).toBeInTheDocument();
+    const disclosure = container.querySelector("details.starter-examples-disclosure");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    expect(screen.getByText("Starter examples")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -2262,6 +2271,75 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.getByRole("region", { name: "Describe what you want" }),
     ).toBeInTheDocument();
+  });
+
+  it("tutorial step 2: shows guided-chat substep progress while composition is pending", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+      composerProgress: {
+        session_id: "session-guided",
+        request_id: "req-1",
+        phase: "using_tools",
+        headline: "Choosing a JSON output shape",
+        evidence: ["Inspecting sink schemas."],
+        likely_next: "Prepare the output fields.",
+        reason: null,
+        updated_at: "2026-07-03T00:00:00Z",
+      },
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    const progress = screen.getByRole("list", {
+      name: "Tutorial step progress",
+    });
+    expect(progress).toHaveTextContent("Read output request");
+    expect(progress).toHaveTextContent("Choose sink shape");
+    expect(progress).toHaveTextContent("Prepare JSON file");
+    expect(screen.getByText("Choose sink shape")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
+  it("tutorial step 2: marks the first substep before composer progress is available", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+      composerProgress: null,
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    expect(screen.getByText("Read output request")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
   });
 
   it("does NOT swap (and offers no Stop) while only a turn-respond is pending", () => {
@@ -5168,10 +5246,13 @@ describe("ChatPanel chat presentation (ux-review-2026-07-02)", () => {
     expect(log).not.toBeNull();
     expect(indicator).not.toBeNull();
     // Structural fix for the nested-live-region finding: the indicator's
-    // role="status" must be a SIBLING of the log container, never nested
-    // inside it where both live regions could announce the same change.
+    // role="status" summary must be a SIBLING of the log container, never
+    // nested inside it where both live regions could announce the same change.
     expect(log?.contains(indicator)).toBe(false);
-    expect(indicator?.getAttribute("role")).toBe("status");
+    const status = indicator?.querySelector<HTMLElement>('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(log?.contains(status ?? null)).toBe(false);
+    expect(status?.querySelector("button")).toBeNull();
   });
 
   it("shows the composer model chip in the chat header (elspeth-e9f7678de8)", async () => {

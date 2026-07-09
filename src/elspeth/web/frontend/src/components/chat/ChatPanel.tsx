@@ -113,6 +113,29 @@ function isEmptyRedactedOptions(value: unknown): boolean {
 
 const DEFAULT_PIPELINE_METADATA_NAME = "Untitled Pipeline";
 
+const TUTORIAL_STEP_2_COMPOSING_SUBSTEPS = [
+  "Read output request",
+  "Choose sink shape",
+  "Prepare JSON file",
+] as const;
+
+function tutorialStep2ActiveSubstep(
+  phase: string | null | undefined,
+): number {
+  if (
+    phase === null ||
+    phase === undefined ||
+    phase === "starting" ||
+    phase === "calling_model"
+  ) {
+    return 0;
+  }
+  if (phase === "using_tools") {
+    return 1;
+  }
+  return 2;
+}
+
 /**
  * Best-effort row-count from CSV-like text content.
  *
@@ -1616,6 +1639,12 @@ export function ChatPanel({
             composerProgress={composerProgress}
             onStop={cancelGuidedChat}
             stripRef={pendingStripRef}
+            substeps={
+              isTutorial === true && guidedSession.step === "step_2_sink"
+                ? TUTORIAL_STEP_2_COMPOSING_SUBSTEPS
+                : undefined
+            }
+            activeSubstepIndex={tutorialStep2ActiveSubstep(composerProgress?.phase)}
           />
         ) : (
           <ChatInput
@@ -2100,7 +2129,10 @@ export function ChatPanel({
         tabIndex={0}
       >
         {messages.length === 0 ? (
-          <TemplateCards onSelectTemplate={handleSelectTemplate} />
+          <details className="starter-examples-disclosure">
+            <summary>Starter examples</summary>
+            <TemplateCards onSelectTemplate={handleSelectTemplate} />
+          </details>
         ) : (
           // Render one bubble per *turn*, not one per audit row. The compose
           // loop persists every LLM round-trip as its own assistant row

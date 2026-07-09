@@ -194,10 +194,10 @@ export function ElapsedReadout() {
  * is processing the LLM tool-use loop. Uses the .composing-dot CSS
  * class from styles/animations.css for staggered bounce animation.
  *
- * This component carries its own role="status" live region and is mounted
- * OUTSIDE ChatPanel's role="log" messages container (elspeth-76a0cc485e):
- * nesting a status region inside an aria-live log risks double announcements
- * on AT that honours both regions.
+ * This component carries its own non-interactive role="status" summary and is
+ * mounted OUTSIDE ChatPanel's role="log" messages container
+ * (elspeth-76a0cc485e): nesting a status region inside an aria-live log risks
+ * double announcements on AT that honours both regions.
  */
 export function ComposingIndicator({
   latestRequest = null,
@@ -209,11 +209,16 @@ export function ComposingIndicator({
     heuristicWorkingView(latestRequest, compositionState);
   const isTerminal = isTerminalPhase(composerProgress?.phase);
   const isEstimated = workingView.source === "estimated";
+  const progressKey = latestRequest ?? composerProgress?.request_id ?? "idle";
+  const [detailsOpen, setDetailsOpen] = useState(isTerminal);
+
+  useEffect(() => {
+    setDetailsOpen(isTerminal);
+  }, [isTerminal, progressKey]);
 
   return (
     <div
       className={`composing-indicator composing-row${isTerminal ? " composing-indicator--terminal" : ""}`}
-      role="status"
     >
       <div className="composing-bubble">
         {isTerminal ? (
@@ -230,39 +235,55 @@ export function ComposingIndicator({
         <div
           className={`composing-working-view${isEstimated ? " composing-working-view--estimated" : ""}`}
         >
-          <div className="composing-label">
-            {isTerminal ? (
-              "Last composer update"
-            ) : (
-              <>
-                Working on...
-                {/* Mount lifecycle doubles as the reset: the readout only
-                    renders while non-terminal, so a terminal phase unmounts
-                    it and the next compose remounts it from 00:00. */}
-                <ElapsedReadout />
-              </>
-            )}
-          </div>
-          <div className="composing-title">
-            {workingView.headline}
-            {isEstimated && (
-              <span className="composing-estimated-tag"> (estimated)</span>
-            )}
-          </div>
-          <div className="composing-section">
+          <div className="composing-status-summary" role="status">
             <div className="composing-label">
-              {isEstimated ? "Best guess from your request" : "What ELSPETH can see"}
+              {isTerminal ? (
+                "Last composer update"
+              ) : (
+                <>
+                  Working on...
+                  {/* Mount lifecycle doubles as the reset: the readout only
+                      renders while non-terminal, so a terminal phase unmounts
+                      it and the next compose remounts it from 00:00. */}
+                  <ElapsedReadout />
+                </>
+              )}
             </div>
-            <ul className="composing-evidence">
-              {workingView.evidence.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+            <div className="composing-title">
+              {workingView.headline}
+              {isEstimated && (
+                <span className="composing-estimated-tag"> (estimated)</span>
+              )}
+            </div>
           </div>
-          <div className="composing-section">
-            <div className="composing-label">Likely next</div>
-            <div className="composing-text">{workingView.likelyNext}</div>
-          </div>
+
+          <button
+            type="button"
+            className="composing-details-toggle"
+            aria-expanded={detailsOpen}
+            onClick={() => setDetailsOpen((open) => !open)}
+          >
+            {detailsOpen ? "Hide details" : "Show details"}
+          </button>
+
+          {detailsOpen && (
+            <div className="composing-details">
+              <div className="composing-section">
+                <div className="composing-label">
+                  {isEstimated ? "Best guess from your request" : "What ELSPETH can see"}
+                </div>
+                <ul className="composing-evidence">
+                  {workingView.evidence.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="composing-section">
+                <div className="composing-label">Likely next</div>
+                <div className="composing-text">{workingView.likelyNext}</div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

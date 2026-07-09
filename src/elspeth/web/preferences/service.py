@@ -472,7 +472,13 @@ class PreferencesService:
         if tutorial_in_payload:
             prior_tutorial = prior_prefs.tutorial_completed_at if prior_prefs is not None else None
             addressed_mode = "default_mode" in payload.model_fields_set
-            if prior_tutorial is None and payload.tutorial_completed_at is not None and addressed_mode:
+            # The explicit discriminator outranks the payload-shape inference
+            # below: an exit-to-freeform opt-out (elspeth-61591e64bb) is a
+            # one-key completion write that shape-reads as "skip" (or, with a
+            # mode change riding along, "first_time").
+            if payload.tutorial_completed_at is not None and payload.tutorial_completed_via == "exit":
+                record_tutorial_completed_path("exit")
+            elif prior_tutorial is None and payload.tutorial_completed_at is not None and addressed_mode:
                 record_tutorial_completed_path("first_time")
             elif prior_tutorial is None and payload.tutorial_completed_at is not None and not addressed_mode:
                 record_tutorial_completed_path("skip")

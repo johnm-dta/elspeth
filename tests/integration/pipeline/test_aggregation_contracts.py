@@ -183,7 +183,10 @@ class TestAggregationOutputContracts:
             },
         )
 
-        # Sink requires subset of what aggregation guarantees
+        # Sink requires subset of what aggregation guarantees. Sink
+        # requirements are enforced from declared_required_fields (the
+        # builder invariant: populated from SinkProtocol), not the raw
+        # config schema — mirror both, as the builder does.
         graph.add_node(
             "sink_1",
             node_type=NodeType.SINK,
@@ -191,6 +194,7 @@ class TestAggregationOutputContracts:
             config={
                 "schema": {"mode": "observed", "required_fields": ["count", "sum"]},
             },
+            declared_required_fields=frozenset({"count", "sum"}),
         )
 
         graph.add_edge("source_1", "agg_1", label="continue")
@@ -226,7 +230,11 @@ class TestAggregationOutputContracts:
             },
         )
 
-        # Sink requires 'median' which aggregation doesn't guarantee
+        # Sink requires 'median' which aggregation doesn't guarantee. As in
+        # the positive test above, the enforced requirement set is
+        # declared_required_fields (builder invariant), and the rejection
+        # comes from validate_sink_required_fields — the single owner of
+        # sink required-field checks (elspeth-3283f2eaec).
         graph.add_node(
             "sink_1",
             node_type=NodeType.SINK,
@@ -234,6 +242,7 @@ class TestAggregationOutputContracts:
             config={
                 "schema": {"mode": "observed", "required_fields": ["count", "median"]},
             },
+            declared_required_fields=frozenset({"count", "median"}),
         )
 
         graph.add_edge("source_1", "agg_1", label="continue")
@@ -244,7 +253,7 @@ class TestAggregationOutputContracts:
 
         error = str(exc_info.value)
         assert "median" in error
-        assert "Missing fields" in error
+        assert "does not guarantee" in error
 
 
 class TestAggregationChainValidation:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.engine import Connection, Engine
@@ -13,7 +15,12 @@ import elspeth.core.landscape.factory as factory_module
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.factory import (
+    DataFlowReadRepository,
+    ExecutionReadRepository,
+    RecorderFactory,
+    RunLifecycleReadRepository,
+)
 from elspeth.core.landscape.plugin_audit_writer import PluginAuditWriterAdapter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
@@ -121,3 +128,81 @@ class TestPluginAuditWriter:
     def test_factory_does_not_define_plugin_audit_writer_adapter(self) -> None:
         assert "_PluginAuditWriterAdapter" not in vars(factory_module)
         assert "PluginAuditWriterAdapter" not in vars(factory_module)
+
+
+class _RecordingRepo:
+    """Duck-typed repository stub: records every call, returns a per-method sentinel."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        def _method(*args: object, **kwargs: object) -> tuple[str, str]:
+            self.calls.append((name, args, dict(kwargs)))
+            return ("delegated", name)
+
+        return _method
+
+
+class TestReadPortDelegation:
+    """Pin the facade -> repository wiring of the read-only capability ports.
+
+    The read ports are pure pass-through views introduced by the repository
+    splits; the regression class they guard is a facade method wired to the
+    wrong repository method, or dropping/reordering arguments, after a
+    refactor. Every public method must forward to the same-named repository
+    method with its arguments unchanged and return that method's result.
+    """
+
+    @pytest.mark.parametrize(
+        "facade_cls",
+        [RunLifecycleReadRepository, DataFlowReadRepository, ExecutionReadRepository],
+    )
+    def test_every_public_method_delegates_to_same_named_repo_method(self, facade_cls: type) -> None:
+        stub = _RecordingRepo()
+        facade = facade_cls(cast(Any, stub))
+        methods = [(name, func) for name, func in inspect.getmembers(facade_cls, inspect.isfunction) if not name.startswith("_")]
+        assert methods, f"{facade_cls.__name__} exposes no public methods"
+        for name, func in methods:
+            args: list[object] = []
+            kwargs: dict[str, object] = {}
+            parameters = list(inspect.signature(func).parameters.values())[1:]  # drop self
+            for param in parameters:
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                    args.append(f"arg-{param.name}")
+                elif param.kind is inspect.Parameter.KEYWORD_ONLY:
+                    kwargs[param.name] = f"kw-{param.name}"
+                elif param.kind is inspect.Parameter.VAR_POSITIONAL:
+                    args.extend((f"var-{param.name}-0", f"var-{param.name}-1"))
+                else:  # VAR_KEYWORD
+                    kwargs[f"extra_{param.name}"] = f"kw-{param.name}"
+            result = getattr(facade, name)(*args, **kwargs)
+            assert result == ("delegated", name), f"{facade_cls.__name__}.{name} did not return the repository result"
+            recorded_name, recorded_args, recorded_kwargs = stub.calls[-1]
+            assert recorded_name == name, f"{facade_cls.__name__}.{name} delegated to {recorded_name!r}"
+            assert recorded_args == tuple(args), f"{facade_cls.__name__}.{name} altered positional arguments"
+            assert recorded_kwargs == kwargs, f"{facade_cls.__name__}.{name} altered keyword arguments"
+
+
+class TestReadOnlyHandle:
+    """A read-only LandscapeDB handle must refuse the write-only repositories."""
+
+    def test_scheduler_and_run_coordination_raise_on_read_only_handle(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "landscape.db"
+        LandscapeDB.from_url(f"sqlite:///{db_path}")
+        read_only = LandscapeDB.from_url(f"sqlite:///{db_path}", read_only=True, create_tables=False)
+        read_only_factory = RecorderFactory(read_only)
+        with pytest.raises(RuntimeError, match="scheduler repository is not available"):
+            _ = read_only_factory.scheduler
+        with pytest.raises(RuntimeError, match="run coordination repository is not available"):
+            _ = read_only_factory.run_coordination
+        with pytest.raises(RuntimeError, match="writable repositories are not available"):
+            _ = read_only_factory.write_repositories()
+
+
+class TestWriteRepositoriesAuditWriter:
+    """LandscapeWriteRepositories composes the plugin audit writer adapter."""
+
+    def test_write_repositories_plugin_audit_writer_is_adapter(self, factory: RecorderFactory) -> None:
+        writer = factory.write_repositories().plugin_audit_writer()
+        assert isinstance(writer, PluginAuditWriterAdapter)

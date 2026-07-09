@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from sqlalchemy import insert, select
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 
 import elspeth.core.landscape.database as database_module
 from elspeth.contracts import NodeType, TerminalOutcome, TerminalPath
@@ -1130,3 +1134,149 @@ def _scheduler_events(engine: Tier1Engine):
 def _stored_datetime(value: datetime) -> datetime:
     """SQLite's DateTime adapter returns raw row-mapping timestamps without tzinfo."""
     return value.replace(tzinfo=None)
+
+
+def _insert_raw_recovery_event(
+    engine: Tier1Engine,
+    *,
+    event_id: str,
+    work_item_id: str,
+    context_json: str,
+    now: datetime,
+) -> None:
+    """Insert a RECOVER_EXPIRED_LEASE audit row directly, bypassing the store's writer."""
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.schema import scheduler_events_table
+
+    with engine.begin() as conn:
+        conn.execute(
+            insert(scheduler_events_table).values(
+                event_id=event_id,
+                run_id="run-1",
+                token_id="token-1",
+                work_item_id=work_item_id,
+                node_id=None,
+                event_type=SchedulerEventType.RECOVER_EXPIRED_LEASE.value,
+                from_status=None,
+                to_status=TokenWorkStatus.READY.value,
+                from_lease_owner=None,
+                to_lease_owner=None,
+                from_lease_expires_at=None,
+                to_lease_expires_at=None,
+                from_attempt=None,
+                to_attempt=1,
+                recorded_at=now,
+                caller_owner=None,
+                context_json=context_json,
+            )
+        )
+
+
+def test_scheduler_event_store_wraps_database_rejection_as_landscape_record_error() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler.events import SchedulerEventStore
+
+    class _RejectingConn:
+        def execute(self, statement: object) -> object:
+            raise OperationalError("INSERT INTO scheduler_events", {}, Exception("disk I/O error"))
+
+    store = SchedulerEventStore()
+    with pytest.raises(LandscapeRecordError, match="database rejected audit write: OperationalError"):
+        store.record(
+            cast(Connection, _RejectingConn()),
+            event_type=SchedulerEventType.RECOVER_EXPIRED_LEASE,
+            run_id="run-1",
+            token_id="token-1",
+            work_item_id="work-1",
+            node_id=None,
+            from_status=None,
+            to_status=TokenWorkStatus.READY,
+            from_lease_owner=None,
+            to_lease_owner=None,
+            from_attempt=None,
+            to_attempt=0,
+            recorded_at=datetime.now(UTC),
+        )
+
+
+def test_scheduler_event_store_rejects_unexpected_insert_rowcount() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler.events import SchedulerEventStore
+
+    class _ZeroRowConn:
+        def execute(self, statement: object) -> SimpleNamespace:
+            return SimpleNamespace(rowcount=0)
+
+    store = SchedulerEventStore()
+    with pytest.raises(LandscapeRecordError, match="affected 0 rows"):
+        store.record(
+            cast(Connection, _ZeroRowConn()),
+            event_type=SchedulerEventType.RECOVER_EXPIRED_LEASE,
+            run_id="run-1",
+            token_id="token-1",
+            work_item_id="work-1",
+            node_id=None,
+            from_status=None,
+            to_status=TokenWorkStatus.READY,
+            from_lease_owner=None,
+            to_lease_owner=None,
+            from_attempt=None,
+            to_attempt=0,
+            recorded_at=datetime.now(UTC),
+        )
+
+
+def test_recovery_event_reader_rejects_unparseable_context_json() -> None:
+    from elspeth.core.landscape.scheduler.events import SchedulerEventStore
+
+    engine = _make_scheduler_engine()
+    now = datetime.now(UTC)
+    _insert_scheduler_prerequisites(engine, now=now)
+    _insert_raw_recovery_event(engine, event_id="evt-corrupt-parse", work_item_id="w-old", context_json="{not json", now=now)
+
+    with engine.connect() as conn, pytest.raises(AuditIntegrityError, match="Corrupt scheduler recovery event context_json"):
+        SchedulerEventStore.recovery_event_for_previous_work_item(conn, run_id="run-1", previous_work_item_id="w-old")
+
+
+def test_recovery_event_reader_rejects_non_object_context_json() -> None:
+    from elspeth.core.landscape.scheduler.events import SchedulerEventStore
+
+    engine = _make_scheduler_engine()
+    now = datetime.now(UTC)
+    _insert_scheduler_prerequisites(engine, now=now)
+    _insert_raw_recovery_event(
+        engine, event_id="evt-corrupt-shape", work_item_id="w-old", context_json='["previous_work_item_id"]', now=now
+    )
+
+    with engine.connect() as conn, pytest.raises(AuditIntegrityError, match="expected object, got list"):
+        SchedulerEventStore.recovery_event_for_previous_work_item(conn, run_id="run-1", previous_work_item_id="w-old")
+
+
+def test_recovery_event_reader_rejects_non_string_previous_work_item_id() -> None:
+    from elspeth.core.landscape.scheduler.events import SchedulerEventStore
+
+    engine = _make_scheduler_engine()
+    now = datetime.now(UTC)
+    _insert_scheduler_prerequisites(engine, now=now)
+    _insert_raw_recovery_event(
+        engine, event_id="evt-corrupt-type", work_item_id="w-old", context_json='{"previous_work_item_id": 42}', now=now
+    )
+
+    with engine.connect() as conn, pytest.raises(AuditIntegrityError, match="previous_work_item_id must be str, got int"):
+        SchedulerEventStore.recovery_event_for_previous_work_item(conn, run_id="run-1", previous_work_item_id="w-old")
+
+
+def test_recovery_event_reader_skips_unrelated_events_and_returns_none() -> None:
+    from elspeth.core.landscape.scheduler.events import SchedulerEventStore
+
+    engine = _make_scheduler_engine()
+    now = datetime.now(UTC)
+    _insert_scheduler_prerequisites(engine, now=now)
+    _insert_raw_recovery_event(engine, event_id="evt-no-context-key", work_item_id="w-old", context_json='{"unrelated": true}', now=now)
+    _insert_raw_recovery_event(
+        engine, event_id="evt-other-item", work_item_id="w-old", context_json='{"previous_work_item_id": "w-different"}', now=now
+    )
+
+    with engine.connect() as conn:
+        result = SchedulerEventStore.recovery_event_for_previous_work_item(conn, run_id="run-1", previous_work_item_id="w-old")
+    assert result is None

@@ -54,6 +54,7 @@ export function HelloWorldTutorial({
   const [sessionId, setSessionId] = useState<string | null>(state.sessionId);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const guidedStartupExitRequestedRef = useRef(false);
 
   // Orphan cleanup runs ONLY on a fresh tutorial entry. On a resume the
   // persisted tutorial session still carries the pending title — sweeping it
@@ -199,6 +200,7 @@ export function HelloWorldTutorial({
       setStartError(tutorialComposerUnavailableMessage(composerUnavailableReason));
       return;
     }
+    guidedStartupExitRequestedRef.current = false;
     setStarting(true);
     setStartError(null);
     try {
@@ -273,6 +275,14 @@ export function HelloWorldTutorial({
     // guard.
     const { guidedSession, exitToFreeform } = useSessionStore.getState();
     const terminalKind = guidedSession?.terminal?.kind ?? null;
+    const tutorialSessionId = state.sessionId ?? sessionId;
+    if (
+      state.step === "guided" &&
+      guidedSession === null &&
+      tutorialSessionId !== null
+    ) {
+      guidedStartupExitRequestedRef.current = true;
+    }
     if (
       guidedSession !== null &&
       (terminalKind === null || terminalKind === "completed")
@@ -299,7 +309,7 @@ export function HelloWorldTutorial({
       .catch((err) => {
         console.error("[tutorial] exit opt-out persist failed:", err);
       });
-  }, [state.step, state.runId, state.sessionId]);
+  }, [state.step, state.runId, state.sessionId, sessionId]);
   const stepLabels = TUTORIAL_STEP_LABELS;
   const currentIndex = stepIndex(state.step);
   const totalSteps = stepLabels.length;
@@ -426,6 +436,7 @@ export function HelloWorldTutorial({
           }
           onExited={onExitTutorial}
           onSessionMissing={onSessionMissing}
+          exitRequestedRef={guidedStartupExitRequestedRef}
         />
       )}
       {state.step === "run" && state.sessionId !== null && (

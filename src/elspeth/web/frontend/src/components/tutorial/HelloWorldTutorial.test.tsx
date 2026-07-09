@@ -92,6 +92,7 @@ let stubShellReportsSessionMissing = false;
 // that exercise the run step with a bespoke runTutorialPipeline mock must use
 // a distinct id or they replay a previous test's cached run.
 let stubGuidedSessionId = "sess-new";
+let lastExitRequestedRef: { current: boolean } | null = null;
 vi.mock("./TutorialGuidedShell", async () => {
   const { useEffect } = await import("react");
   return {
@@ -100,12 +101,15 @@ vi.mock("./TutorialGuidedShell", async () => {
       onCompleted,
       onExited,
       onSessionMissing,
+      exitRequestedRef,
     }: {
       sessionId: string;
       onCompleted: (s: string) => void;
       onExited?: (s: string) => void;
       onSessionMissing?: (deadSessionId: string) => void;
+      exitRequestedRef?: { current: boolean };
     }) => {
+      lastExitRequestedRef = exitRequestedRef ?? null;
       useEffect(() => {
         if (stubShellReportsSessionMissing) {
           onSessionMissing?.(sessionId);
@@ -134,6 +138,7 @@ describe("HelloWorldTutorial staged flow", () => {
     resetStore(usePreferencesStore);
     stubShellReportsSessionMissing = false;
     stubGuidedSessionId = "sess-new";
+    lastExitRequestedRef = null;
   });
 
   it("renders the welcome bookend first", () => {
@@ -286,6 +291,7 @@ describe("HelloWorldTutorial — abandon beacon (F4)", () => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
     stubGuidedSessionId = "sess-new";
+    lastExitRequestedRef = null;
   });
 
   it("does not fire the abandon beacon on pagehide while still on the welcome bookend", async () => {
@@ -354,6 +360,7 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
     stubGuidedSessionId = "sess-new";
+    lastExitRequestedRef = null;
   });
 
   it("persists the exit opt-out with the exit discriminator when guided exits to freeform", async () => {
@@ -475,6 +482,19 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
         guidedSession: null,
       });
     }
+  });
+
+  it("Exit tutorial during Build queues a startup exit before guided state loads", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    const exit = await screen.findByRole("button", { name: "Exit tutorial" });
+    expect(useSessionStore.getState().guidedSession).toBeNull();
+    expect(lastExitRequestedRef?.current).toBe(false);
+
+    await user.click(exit);
+
+    expect(lastExitRequestedRef?.current).toBe(true);
   });
 
   it("adds the renamed tutorial session to the header session list before guided starts", async () => {

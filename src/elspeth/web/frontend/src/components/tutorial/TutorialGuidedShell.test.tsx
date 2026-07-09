@@ -13,6 +13,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 const startGuidedSessionMock = vi.fn();
 const startGuidedMock = vi.fn();
 const getTutorialSampleMock = vi.fn();
+const respondGuidedMock = vi.fn();
 const refreshInterpretationsMock = vi.fn();
 
 const SAMPLE_URLS = [
@@ -40,6 +41,7 @@ function guidedSessionPayload(terminalKind: TerminalKind | null): unknown {
 vi.mock("@/api/client", () => ({
   startGuidedSession: (...args: unknown[]) => startGuidedSessionMock(...args),
   getTutorialSample: (...args: unknown[]) => getTutorialSampleMock(...args),
+  respondGuided: (...args: unknown[]) => respondGuidedMock(...args),
 }));
 
 vi.mock("@/components/chat/ChatPanel", () => ({
@@ -64,6 +66,12 @@ describe("TutorialGuidedShell", () => {
     getTutorialSampleMock
       .mockReset()
       .mockResolvedValue({ sample_urls: SAMPLE_URLS });
+    respondGuidedMock.mockReset().mockResolvedValue({
+      guided_session: guidedSessionPayload("exited_to_freeform"),
+      next_turn: null,
+      terminal: { kind: "exited_to_freeform", reason: "user_pressed_exit" },
+      composition_state: null,
+    });
     // Start with NO active session so the test exercises the real production
     // path: TutorialGuidedShell must itself bind activeSessionId (D3/B4). A
     // pre-set activeSessionId here would mask a shell that forgot to bind it.
@@ -208,6 +216,43 @@ describe("TutorialGuidedShell", () => {
     resolveSample({ sample_urls: SAMPLE_URLS });
     const stub = await screen.findByTestId("chat-panel-stub");
     expect(stub.dataset.lockedPrompt).toContain(SAMPLE_URLS[2]);
+  });
+
+  it("exits server-side and stops startup when exit is requested before guided state loads", async () => {
+    let resolveStart: (value: unknown) => void = () => undefined;
+    const exitRequestedRef = { current: false };
+    startGuidedSessionMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+    render(
+      <TutorialGuidedShell
+        sessionId="sess-1"
+        onCompleted={vi.fn()}
+        exitRequestedRef={exitRequestedRef}
+      />,
+    );
+    await waitFor(() =>
+      expect(startGuidedSessionMock).toHaveBeenCalledWith("sess-1", "tutorial"),
+    );
+
+    exitRequestedRef.current = true;
+    resolveStart({});
+
+    await waitFor(() =>
+      expect(respondGuidedMock).toHaveBeenCalledWith("sess-1", {
+        chosen: null,
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: "exit_to_freeform",
+      }),
+    );
+    expect(getTutorialSampleMock).not.toHaveBeenCalled();
+    expect(startGuidedMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chat-panel-stub")).not.toBeInTheDocument();
   });
 
   it("clears stale completed guided state before starting a new tutorial session", async () => {

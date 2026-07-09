@@ -1,9 +1,17 @@
-import { useEffect, useRef, useState } from "react";
-import { getTutorialSample, startGuidedSession } from "@/api/client";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import {
+  getTutorialSample,
+  respondGuided,
+  startGuidedSession,
+} from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { GuidedStep } from "@/types/guided";
+import type {
+  GuidedRespondRequest,
+  GuidedRespondResponse,
+  GuidedStep,
+} from "@/types/guided";
 import {
   TUTORIAL_SINK_PROMPT,
   TUTORIAL_SOURCE_PROMPT,
@@ -50,7 +58,23 @@ interface TutorialGuidedShellProps {
    * Welcome and clears the stale resume fields.
    */
   onSessionMissing?: (deadSessionId: string) => void;
+  /**
+   * Set by the tutorial chrome when the learner exits during the startup
+   * window before GET /guided has populated guidedSession. The shell still
+   * owns the in-flight /guided/start promise, so it is the only layer that can
+   * reliably send the server-side exit once that start has actually landed.
+   */
+  exitRequestedRef?: MutableRefObject<boolean>;
 }
+
+const EXIT_TO_FREEFORM_REQUEST = {
+  chosen: null,
+  edited_values: null,
+  custom_inputs: null,
+  accepted_step_index: null,
+  edit_step_index: null,
+  control_signal: "exit_to_freeform",
+} satisfies GuidedRespondRequest;
 
 /** The start chain 404s when the persisted resume session was swept/archived. */
 function isSessionMissingError(err: unknown): boolean {
@@ -78,6 +102,7 @@ export function TutorialGuidedShell({
   onCompleted,
   onExited,
   onSessionMissing,
+  exitRequestedRef,
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const startGuided = useSessionStore((s) => s.startGuided);
@@ -124,13 +149,30 @@ export function TutorialGuidedShell({
       // can make ChatPanel render the completed surface and fire onCompleted
       // before the new tutorial session has loaded.
       resetForTutorialSession(sessionId);
+      const exitIfRequested = async (): Promise<boolean> => {
+        if (exitRequestedRef?.current !== true) {
+          return false;
+        }
+        try {
+          await exitStartedGuidedSession(sessionId);
+        } catch (err) {
+          console.error("[tutorial] startup exit-to-freeform failed:", err);
+        }
+        return true;
+      };
       try {
         await startGuidedSession(sessionId, "tutorial");
+        if (await exitIfRequested()) {
+          return;
+        }
         // Fetch the runtime-resolved synthetic URLs BEFORE entering the wizard.
         // The GET requires the TUTORIAL profile to be persisted (done by the
         // start above). Appended to the locked STEP_1 prompt; the box stays
         // gated (never editable) until they arrive.
         const sample = await getTutorialSample(sessionId);
+        if (await exitIfRequested()) {
+          return;
+        }
         // Only sample_urls are consumed client-side, appended to the locked
         // STEP_1 prompt. The synthetic pages are publicly hosted, so the
         // tutorial's web_scrape node carries no SSRF allowlist — it uses the
@@ -138,6 +180,9 @@ export function TutorialGuidedShell({
         // set an allowlist (a client-set allowlist is an SSRF widening vector).
         setSampleUrls(sample.sample_urls);
         await startGuided(sessionId);
+        if (await exitIfRequested()) {
+          return;
+        }
         // Rehydrate the interpretation-event projection for THIS session.
         // Every other route into a session goes through selectSession, which
         // does this (Phase 5b Task 3) — the tutorial bridge bypasses it, so
@@ -160,7 +205,13 @@ export function TutorialGuidedShell({
         setStarting(false);
       }
     })();
-  }, [sessionId, startGuided, resetForTutorialSession, onSessionMissing]);
+  }, [
+    sessionId,
+    startGuided,
+    resetForTutorialSession,
+    onSessionMissing,
+    exitRequestedRef,
+  ]);
 
   // Hand off when guided reaches a terminal — but ONLY on a terminal this
   // mount OBSERVED transition to. The back-nav GET path remounts this shell
@@ -263,4 +314,39 @@ function formatError(err: unknown): string {
     return err.message;
   }
   return "The guided tutorial could not be started.";
+}
+
+async function exitStartedGuidedSession(sessionId: string): Promise<void> {
+  const current = useSessionStore.getState();
+  if (
+    current.activeSessionId === sessionId &&
+    current.guidedSession?.terminal?.kind === "exited_to_freeform"
+  ) {
+    return;
+  }
+  if (current.activeSessionId === sessionId && current.guidedSession !== null) {
+    await current.exitToFreeform();
+    return;
+  }
+  const response = await respondGuided(sessionId, EXIT_TO_FREEFORM_REQUEST);
+  applyGuidedExitResponse(sessionId, response);
+}
+
+function applyGuidedExitResponse(
+  sessionId: string,
+  response: GuidedRespondResponse,
+): void {
+  if (useSessionStore.getState().activeSessionId !== sessionId) {
+    return;
+  }
+  useSessionStore.setState({
+    guidedSession: response.guided_session,
+    guidedNextTurn: response.next_turn,
+    guidedTerminal: response.terminal,
+    compositionState: response.composition_state,
+    guidedResponsePending: false,
+    error: null,
+    errorDetails: null,
+    guidedSelfHealNotice: null,
+  });
 }

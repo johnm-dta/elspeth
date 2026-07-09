@@ -29,6 +29,7 @@ from hypothesis import strategies as st
 
 from elspeth.contracts.audit import Operation
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.secret_scrub import scrub_payload_for_audit
 from elspeth.core.landscape import ExecutionRepository
 from elspeth.core.operations import track_operation
 
@@ -509,14 +510,22 @@ class TestOutputDataProperties:
     )
     @settings(max_examples=100)
     def test_output_data_recorded(self, data: dict[str, Any] | None) -> None:
-        """Property: output_data set on handle is passed to complete_operation."""
+        """Property: output_data set on handle reaches complete_operation audit-scrubbed.
+
+        track_operation passes ``handle.output_data`` through
+        ``scrub_payload_for_audit`` before recording (operations.py, commit
+        b9179dc19), so the recorded payload equals the SCRUBBED input — identical
+        to the raw input except under secret-looking keys (e.g. ``token``), which
+        hypothesis's literal-mining can and does generate.
+        """
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
         with track_operation(_as_execution_repo(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)) as handle:
             handle.output_data = data
 
-        assert recorder.completions[0].output_data == data
+        expected = scrub_payload_for_audit(data) if data is not None else None
+        assert recorder.completions[0].output_data == expected
 
     def test_handle_exposes_operation(self) -> None:
         """Property: OperationHandle.operation has correct metadata."""

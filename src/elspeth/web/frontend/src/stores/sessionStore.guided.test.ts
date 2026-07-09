@@ -514,6 +514,67 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
   });
 
+  // ── revertToVersion re-derives the guided surface from the reverted version ──
+  //
+  // Reverting can cross the guided/freeform boundary — most visibly the
+  // recoverability flow behind convertToGuided's "fresh wizard + consent"
+  // (elspeth-e2c3dba6b5): convert a worked freeform session to guided, then
+  // revert to the prior freeform version to get the pipeline back. Before this
+  // fix revertToVersion only patched compositionState, so the stale cached
+  // guidedSession kept the guided wizard on screen over restored freeform
+  // state — the "can be restored" promise was broken at the surface level.
+
+  it("revertToVersion: reverting to a freeform version clears the stale guided surface", async () => {
+    const { revertToVersion, getGuided } = await import("@/api/client");
+    // Reverted version is freeform: GET /guided 400s (no guided_session).
+    (revertToVersion as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sampleCompositionState,
+      version: 3,
+    });
+    (getGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ status: 400 });
+
+    // Pre-seed a live guided surface (as if we just converted to guided).
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedTerminal: null,
+    });
+
+    await useSessionStore.getState().revertToVersion("state-freeform");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+    expect(state.compositionState?.version).toBe(3);
+  });
+
+  it("revertToVersion: reverting to a guided version restores the guided surface", async () => {
+    const { revertToVersion, getGuided } = await import("@/api/client");
+    (revertToVersion as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sampleCompositionState,
+      version: 3,
+    });
+    // Reverted version is guided: GET /guided 200 with a real composition_state.
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
+    });
+
+    await useSessionStore.getState().revertToVersion("state-guided");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+    expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
+  });
+
   it("enterGuided: calls reenterGuided when terminal.kind === 'exited_to_freeform'", async () => {
     const { reenterGuided, getGuided } = await import("@/api/client");
     (reenterGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(

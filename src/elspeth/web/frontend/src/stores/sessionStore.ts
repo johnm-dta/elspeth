@@ -1862,8 +1862,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         activeSessionId,
         stateId,
       );
+      // Re-derive the guided surface from the reverted version. A revert can
+      // cross the guided/freeform boundary — most visibly the recoverability
+      // flow behind convertToGuided ("fresh wizard + consent",
+      // elspeth-e2c3dba6b5): convert a worked freeform session to guided, then
+      // revert to the prior freeform version to get the pipeline back. Patching
+      // only compositionState would leave the stale cached guidedSession
+      // rendering the guided wizard over restored freeform state (and the
+      // reverse — reverting to a guided version would keep freeform). Probe
+      // GET /guided (non-mutating; 400 => freeform-only) and set the wire
+      // fields to what the reverted version actually is, mirroring
+      // selectSession's discriminator.
+      const guided = await fetchGuidedStateForSelect(activeSessionId);
+      // Stale-guard: drop the result if the active session changed while the
+      // revert + probe were in flight (mirrors startGuided/selectSession).
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       // Clear selection — the reverted version may not contain the selected node
-      set({ compositionState, selectedNodeId: null });
+      set({
+        compositionState,
+        selectedNodeId: null,
+        guidedSession: guided?.guided_session ?? null,
+        guidedNextTurn: guided?.next_turn ?? null,
+        guidedTerminal: guided?.terminal ?? null,
+      });
     } catch {
       set({ error: "Failed to revert to version. Please try again." });
     }

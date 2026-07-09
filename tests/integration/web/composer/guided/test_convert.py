@@ -220,6 +220,12 @@ class TestConvertIdempotent:
 
         body = _convert(client, session_id)
         assert body["guided_session"]["step"] == step_before
+        # Branch 2 must REBUILD and return the live turn for a non-terminal step,
+        # exactly like GET /guided (elspeth-e2c3dba6b5 review P2). A double-click
+        # / cross-tab race lands the second "Switch to guided" here; if it returns
+        # next_turn=None the frontend keeps guidedSession but drops guidedNextTurn,
+        # isGuidedBuildActive goes false, and ChatPanel falls back to freeform.
+        assert body["next_turn"] is not None, "idempotent convert on a non-terminal step must return the current turn, not null"
 
     def test_convert_on_completed_session_returns_completed_terminal(self, composer_test_client: TestClient) -> None:
         """Branch 2 must return a non-exit terminal faithfully.
@@ -248,6 +254,10 @@ class TestConvertIdempotent:
         assert body["terminal"] is not None
         assert body["terminal"]["kind"] == "completed"
         assert body["guided_session"]["terminal"]["kind"] == "completed"
+        # The turn/None contract's other half: a TERMINAL session has no live
+        # turn, so next_turn stays null (mirrors GET /guided). The non-terminal
+        # rebuild above and this null here together pin both branches.
+        assert body["next_turn"] is None
 
 
 # ---------------------------------------------------------------------------

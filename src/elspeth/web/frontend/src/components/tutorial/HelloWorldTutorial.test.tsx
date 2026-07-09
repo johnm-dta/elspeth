@@ -477,10 +477,11 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
     }
   });
 
-  it("Exit tutorial leaves an already-terminal guided session alone", async () => {
+  it("Exit tutorial leaves an already-exited-to-freeform guided session alone", async () => {
     // The wizard-path hand-off (onExited) reaches the same handler with the
-    // terminal already set — firing the control signal again would be a
-    // duplicate respond POST against a terminal session.
+    // terminal already set to exited_to_freeform — firing the control signal
+    // again would be a duplicate respond POST that the backend 409s (only
+    // kind=COMPLETED is exempt from the terminal-rejection; guided.py:1190).
     const exitToFreeform = vi.fn().mockResolvedValue(undefined);
     const originalExit = useSessionStore.getState().exitToFreeform;
     useSessionStore.setState({
@@ -497,6 +498,38 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
         await screen.findByRole("button", { name: "Exit tutorial" }),
       );
       expect(exitToFreeform).not.toHaveBeenCalled();
+    } finally {
+      useSessionStore.setState({
+        exitToFreeform: originalExit,
+        guidedSession: null,
+      });
+    }
+  });
+
+  it("Exit tutorial after the guided wizard COMPLETED hands off to freeform", async () => {
+    // elspeth-e2c3dba6b5 review P2: a COMPLETED guided session survives the
+    // shell unmount, and ChatPanel's discriminator checks `completed` FIRST —
+    // so without this hand-off the learner lands on CompletionSummary and must
+    // click "Open freeform editor" (which itself just calls exitToFreeform) to
+    // reach freeform, contradicting the Exit control's "freeform NOW" promise.
+    // The backend accepts exit_to_freeform from kind=COMPLETED (guided.py:1222),
+    // transitioning it to exited_to_freeform so the surface falls through.
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    const originalExit = useSessionStore.getState().exitToFreeform;
+    useSessionStore.setState({
+      guidedSession: {
+        terminal: { kind: "completed", reason: null },
+      } as unknown as GuidedSession,
+      exitToFreeform,
+    });
+    try {
+      const user = userEvent.setup();
+      render(<HelloWorldTutorial />);
+      await user.click(screen.getByRole("button", { name: "Let's go" }));
+      await user.click(
+        await screen.findByRole("button", { name: "Exit tutorial" }),
+      );
+      expect(exitToFreeform).toHaveBeenCalledTimes(1);
     } finally {
       useSessionStore.setState({
         exitToFreeform: originalExit,

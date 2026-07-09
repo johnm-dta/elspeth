@@ -243,18 +243,31 @@ export function HelloWorldTutorial({
   // store's writeError, which ALSO flips showTutorial false — the exit can
   // never strand the learner in the shell.
   const onExitTutorial = useCallback((): void => {
-    // A live (non-terminal) guided build survives the shell unmount inside
-    // sessionStore, and the freeform ChatPanel's discriminator would render
-    // the guided workspace again — the exit would not land in freeform.
-    // Terminate it through the sanctioned wizard exit (backend-recorded as
-    // user_pressed_exit, so guided stays re-enterable). Best-effort like the
-    // persist below. The wizard-path onExited arrives here with the terminal
-    // already set, so this never double-fires the control signal; the
-    // duplicate markTutorialGraduated it can trigger (the shell observes the
-    // terminal and hands off) is absorbed by the store's landed-completion
+    // Two guided surfaces survive the shell unmount and would keep the learner
+    // OFF freeform, so both must be handed off through exitToFreeform (which
+    // POSTs control_signal=exit_to_freeform, backend-recorded as
+    // user_pressed_exit so guided stays re-enterable):
+    //   * a LIVE (terminal == null) build — ChatPanel's discriminator re-renders
+    //     the guided workspace;
+    //   * a COMPLETED build — the discriminator checks `completed` FIRST and
+    //     re-renders CompletionSummary, whose own "Open freeform editor" button
+    //     just calls exitToFreeform (elspeth-e2c3dba6b5 review P2). Firing it
+    //     here up front lands the learner in freeform NOW instead of on the
+    //     summary with an extra click. The backend exempts kind=COMPLETED from
+    //     the terminal-rejection for exactly this transition (guided.py:1222).
+    // An already-exited_to_freeform terminal (the wizard-path onExited hand-off
+    // reaches this handler with the terminal already set) is left alone: it
+    // already falls through to freeform, and re-firing would be a duplicate
+    // respond POST the backend 409s. Best-effort like the persist below; the
+    // duplicate markTutorialGraduated onExited can trigger (the shell observes
+    // the terminal and hands off) is absorbed by the store's landed-completion
     // guard.
     const { guidedSession, exitToFreeform } = useSessionStore.getState();
-    if (guidedSession !== null && guidedSession.terminal == null) {
+    const terminalKind = guidedSession?.terminal?.kind ?? null;
+    if (
+      guidedSession !== null &&
+      (terminalKind === null || terminalKind === "completed")
+    ) {
       void exitToFreeform().catch((err) => {
         console.error("[tutorial] exit-to-freeform hand-off failed:", err);
       });

@@ -1009,6 +1009,12 @@ async def post_guided_start(
                         chat_turn_seq=guided.chat_turn_seq,
                         profile=_workflow_profile_response(guided),
                     ),
+                    # next_turn=None is safe HERE (unlike post_guided_convert's
+                    # idempotency branch, elspeth-e2c3dba6b5 review P2): the start
+                    # response is always followed by a GET /guided that rebuilds
+                    # the live turn, whereas convert feeds the store directly via
+                    # enterGuided. If start ever stops being GET-followed, this
+                    # needs the same non-terminal rebuild convert now does.
                     next_turn=None,
                     terminal=TerminalStateResponse(
                         kind=terminal.kind.value,
@@ -3109,6 +3115,38 @@ async def post_guided_convert(
             if existing_state.guided_session is not None:
                 guided = existing_state.guided_session
                 terminal = guided.terminal
+                # Rebuild the live turn for a non-terminal step so a double-click
+                # / cross-tab "Switch to guided" that lands here returns the SAME
+                # active turn GET /guided would (elspeth-e2c3dba6b5 review P2).
+                # Reserve next_turn=None only for terminal sessions and steps with
+                # no rebuildable initial turn (STEP_3, no-recipe STEP_2_5) — for
+                # those _build_get_guided_turn returns None, matching GET's
+                # turn/None contract exactly. Without this the frontend keeps
+                # guidedSession but drops guidedNextTurn, isGuidedBuildActive goes
+                # false, and ChatPanel falls back to the freeform surface.
+                if terminal is None:
+                    try:
+                        turn = _build_get_guided_turn(existing_state, guided, catalog=catalog)
+                    except InvariantError as exc:
+                        # Same B1-sanitization rationale as get_guided: str(exc)
+                        # can embed {d!r} of a corrupted Tier-1 record including
+                        # Tier-3 sample_rows. Static detail; slog carries the
+                        # exc_class + frames only.
+                        slog.error(
+                            "guided.invariant_violated",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            exc_class=type(exc).__name__,
+                            site="post_guided_convert._build_get_guided_turn",
+                            frames=_safe_frame_strings(exc),
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Server invariant violated. See application audit log for diagnostic detail.",
+                        ) from exc
+                else:
+                    turn = None
+                shield_available = _resolve_shield_available(request, user.user_id)
                 return GetGuidedResponse(
                     guided_session=GuidedSessionResponse(
                         step=guided.step.value,
@@ -3145,7 +3183,7 @@ async def post_guided_convert(
                         chat_turn_seq=guided.chat_turn_seq,
                         profile=_workflow_profile_response(guided),
                     ),
-                    next_turn=None,
+                    next_turn=_turn_payload_response(turn, shield_available=shield_available),
                     terminal=TerminalStateResponse(
                         kind=terminal.kind.value,
                         reason=terminal.reason.value if terminal.reason is not None else None,

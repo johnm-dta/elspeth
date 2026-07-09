@@ -575,6 +575,41 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
   });
 
+  it("revertToVersion: uses the probed guided composition state when GET /guided materializes it", async () => {
+    const { revertToVersion, getGuided } = await import("@/api/client");
+    const revertedCompositionState = {
+      ...sampleCompositionState,
+      id: "state-reverted",
+      version: 3,
+    };
+    const probedCompositionState = {
+      ...sampleCompositionState,
+      id: "state-probed",
+      version: 4,
+    };
+
+    (revertToVersion as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      revertedCompositionState,
+    );
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sampleGetGuidedResponse,
+      composition_state: probedCompositionState,
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
+    });
+
+    await useSessionStore.getState().revertToVersion("state-guided");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+    expect(state.compositionState).toEqual(probedCompositionState);
+  });
+
   it("enterGuided: calls reenterGuided when terminal.kind === 'exited_to_freeform'", async () => {
     const { reenterGuided, getGuided } = await import("@/api/client");
     (reenterGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(

@@ -255,6 +255,51 @@ class TestAggregationOutputContracts:
         assert "median" in error
         assert "does not guarantee" in error
 
+    def test_direct_sink_config_required_fields_without_declared_argument_still_fail(self) -> None:
+        """Direct graph sink config requirements are still enforced."""
+        graph = ExecutionGraph()
+
+        graph.add_node(
+            "source_1",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+            config={"schema": {"mode": "observed", "guaranteed_fields": ["value"]}},
+        )
+
+        graph.add_node(
+            "agg_1",
+            node_type=NodeType.AGGREGATION,
+            plugin_name="batch_stats",
+            config={
+                "trigger": {"count": 1},
+                "output_mode": "transform",
+                "schema": {"mode": "observed", "guaranteed_fields": ["count", "sum"]},
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": ["value"],
+                },
+            },
+        )
+
+        graph.add_node(
+            "sink_1",
+            node_type=NodeType.SINK,
+            plugin_name="csv",
+            config={
+                "schema": {"mode": "observed", "required_fields": ["count", "median"]},
+            },
+        )
+
+        graph.add_edge("source_1", "agg_1", label="continue")
+        graph.add_edge("agg_1", "sink_1", label="continue")
+
+        with pytest.raises(ValueError) as exc_info:
+            graph.validate_edge_compatibility()
+
+        error = str(exc_info.value)
+        assert "median" in error
+        assert "does not guarantee" in error
+
 
 class TestAggregationChainValidation:
     """Tests for aggregation in multi-node chains (both edges validated)."""

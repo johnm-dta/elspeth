@@ -147,7 +147,9 @@ class ExecutionGraph:
                 when not provided explicitly.
             declared_required_fields: For SINK nodes only — the set of fields the
                 sink requires in its input rows. Populated by the builder from
-                SinkProtocol.declared_required_fields. Empty frozenset otherwise.
+                SinkProtocol.declared_required_fields, or derived from direct
+                add_node() raw sink schema config when omitted. Empty frozenset
+                otherwise.
             passes_through_input: For TRANSFORM nodes only — True iff the transform
                 unconditionally emits rows containing every input field
                 (ADR-007). Validator walk propagates predecessor guarantees
@@ -172,6 +174,9 @@ class ExecutionGraph:
                     component_id=node_id,
                     component_type=node_type.value if isinstance(node_type, NodeType) else str(node_type),
                 ) from exc
+
+        if node_type == NodeType.SINK and declared_required_fields is _EMPTY_DECLARED_REQUIRED_FIELDS and output_schema_config is not None:
+            declared_required_fields = output_schema_config.get_effective_required_fields()
 
         info = NodeInfo(
             node_id=NodeID(node_id),

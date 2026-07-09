@@ -1881,7 +1881,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       // Clear selection — the reverted version may not contain the selected node
       set({
-        compositionState,
+        compositionState: guided?.composition_state ?? compositionState,
         selectedNodeId: null,
         guidedSession: guided?.guided_session ?? null,
         guidedNextTurn: guided?.next_turn ?? null,

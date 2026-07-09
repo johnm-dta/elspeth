@@ -145,15 +145,15 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
     if (leadingSpaces(rawLine) !== 0) continue;
     const trimmed = rawLine.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(trimmed);
-    if (!match) continue;
-    const section = IMPORT_YAML_SECTION_ALIASES[match[1]];
+    const mapping = parseYamlMappingLine(trimmed);
+    if (mapping === null) continue;
+    const section = IMPORT_YAML_SECTION_ALIASES[mapping.key];
     if (section === undefined) continue;
     sectionStarts.push({
       section,
       lineIndex: index,
       indent: leadingSpaces(rawLine),
-      inlineValue: match[2].trim(),
+      inlineValue: mapping.inlineValue,
     });
   }
 
@@ -198,6 +198,39 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
 
 function leadingSpaces(value: string): number {
   return value.length - value.trimStart().length;
+}
+
+function parseYamlMappingLine(
+  trimmedLine: string,
+): { key: string; inlineValue: string } | null {
+  if (trimmedLine.startsWith('"') || trimmedLine.startsWith("'")) {
+    const quote = trimmedLine[0];
+    let key = "";
+    let index = 1;
+    for (; index < trimmedLine.length; index += 1) {
+      const char = trimmedLine[index];
+      if (quote === '"' && char === "\\" && index + 1 < trimmedLine.length) {
+        key += trimmedLine[index + 1];
+        index += 1;
+        continue;
+      }
+      if (quote === "'" && char === "'" && trimmedLine[index + 1] === "'") {
+        key += "'";
+        index += 1;
+        continue;
+      }
+      if (char === quote) break;
+      key += char;
+    }
+    if (index >= trimmedLine.length) return null;
+    const remainder = trimmedLine.slice(index + 1).trimStart();
+    if (!remainder.startsWith(":")) return null;
+    return { key, inlineValue: remainder.slice(1).trim() };
+  }
+
+  const plainKey = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(trimmedLine);
+  if (!plainKey) return null;
+  return { key: plainKey[1], inlineValue: plainKey[2].trim() };
 }
 
 function normaliseYamlPreviewIndent(lines: string[]): string[] {
@@ -256,14 +289,14 @@ function countYamlSectionEntries(
       if (trimmed.startsWith("- ")) {
         childIndent = indent;
         count += 1;
-      } else if (childIndent === null && /^[A-Za-z0-9_.-]+:\s*/.test(trimmed)) {
+      } else if (childIndent === null && parseYamlMappingLine(trimmed) !== null) {
         childIndent = indent;
         count += 1;
       }
       continue;
     }
 
-    if (/^[A-Za-z0-9_.-]+:\s*/.test(trimmed)) {
+    if (parseYamlMappingLine(trimmed) !== null) {
       childIndent = indent;
       count += 1;
     }

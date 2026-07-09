@@ -79,6 +79,7 @@ interface PreviewState {
 }
 
 const HASH_DISPLAY_LENGTH = 12;
+const INTERNAL_BLOB_STORAGE_BASENAME_RE = /^sha256-[0-9a-f]{12,128}$/i;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -96,7 +97,13 @@ function basenameOf(pathOrUri: string): string {
 
 function looksLikeLocalBlobStoragePath(pathOrUri: string): boolean {
   const stripped = pathOrUri.startsWith("file://") ? pathOrUri.slice(7) : pathOrUri;
-  return stripped.includes("/blob-storage/");
+  const segments = stripped.split("/").filter((segment) => segment.length > 0);
+  const blobStorageIndex = segments.lastIndexOf("blob-storage");
+  return (
+    blobStorageIndex !== -1 &&
+    blobStorageIndex === segments.length - 2 &&
+    INTERNAL_BLOB_STORAGE_BASENAME_RE.test(segments[blobStorageIndex + 1])
+  );
 }
 
 function artifactDisplayName(artifact: RunOutputArtifact): string {

@@ -192,6 +192,42 @@ describe("ImportYamlModal", () => {
     expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
   });
 
+  it("accepts top-level runtime keys with whitespace before the YAML colon", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      "sources :\n" +
+        "  source:\n" +
+        "    plugin: csv\n" +
+        "    on_success: result\n" +
+        "sinks :\n" +
+        "  result:\n" +
+        "    plugin: json\n" +
+        "    on_write_failure: fail\n",
+    );
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(screen.getByText("1 source, 0 processing steps, 1 output")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+  });
+
+  it("accepts quoted top-level runtime keys", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      '"sources":\n' +
+        "  source:\n" +
+        "    plugin: csv\n" +
+        "    on_success: result\n" +
+        '"sinks":\n' +
+        "  result:\n" +
+        "    plugin: json\n" +
+        "    on_write_failure: fail\n",
+    );
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(screen.getByText("1 source, 0 processing steps, 1 output")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+  });
+
   it("shows a parsed preview and validation summary before Import is enabled", () => {
     render(<ImportYamlModal onClose={onClose} />);
     typeYaml(

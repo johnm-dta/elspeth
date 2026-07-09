@@ -392,6 +392,23 @@ describe("RunOutputsPanel", () => {
     expect(screen.queryByText("final_report")).not.toBeInTheDocument();
   });
 
+  it("preserves user output paths that include a blob-storage directory", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri: "file:///data/outputs/blob-storage/report.json",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() => expect(screen.getByText("report.json")).toBeInTheDocument());
+    expect(screen.getByTitle("file:///data/outputs/blob-storage/report.json")).toBeInTheDocument();
+    expect(screen.queryByText("final_report")).not.toBeInTheDocument();
+  });
+
   it("transitions to 'no longer available on disk' on artifact_purged_or_moved race", async () => {
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([fileArtifact()]),

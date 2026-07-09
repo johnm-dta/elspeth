@@ -308,9 +308,7 @@ headline work.
   typed parser so a malformed plugin schema can no longer under-detect
   required secret fields; guided respond reads required turn-response keys
   directly so schema drift crashes instead of silently evaluating to
-  `False`; coalesce branch-loss checks distinguish an already-completed
-  merge from a row not yet seen instead of conflating both into one silent
-  default; and guided-session payloads serialized before the
+  `False`; and guided-session payloads serialized before the
   `on_validation_failure` field existed are refused at session rehydrate
   rather than silently defaulted (pre-release session stores are recreated
   at deploy).

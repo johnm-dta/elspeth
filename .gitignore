@@ -368,3 +368,5 @@ findings.jsonl
 # Local debugging screenshots — not part of the repo
 /images/
 .playwright-mcp/
+.playwright-cli/
+output/playwright/

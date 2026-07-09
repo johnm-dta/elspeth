@@ -1926,7 +1926,7 @@
    syntax-highlighted block (prism-react-renderer, vsDark / vsLight) with
    task-oriented actions:
      "Open freeform editor" -- continue editing in the freeform composer.
-     "Review YAML"          -- switch to the YAML review tab.
+     "Export YAML"          -- open the YAML export dialog.
      "Validate pipeline"    -- run validation for the active session.
 
    Visual hierarchy:

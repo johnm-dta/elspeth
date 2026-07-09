@@ -114,8 +114,62 @@ export function makePhraseFor(
     const direct = phraseMap.get(componentId);
     if (direct !== undefined) return direct;
     const stripped = componentId.replace(/^(node|source|output):/, "");
-    return phraseMap.get(stripped) ?? UNKNOWN_COMPONENT_PHRASE;
+    const strippedPhrase = phraseMap.get(stripped);
+    if (strippedPhrase !== undefined) return strippedPhrase;
+    const generatedPhrase = fallbackPhraseForGeneratedId(stripped);
+    if (generatedPhrase !== null) return generatedPhrase;
+    for (const [knownId, phrase] of phraseMap.entries()) {
+      if (
+        knownId.length > 0 &&
+        stripped.length > 0 &&
+        (stripped.includes(knownId) || knownId.includes(stripped))
+      ) {
+        return phrase;
+      }
+    }
+    return UNKNOWN_COMPONENT_PHRASE;
   };
+}
+
+function fallbackPhraseForGeneratedId(componentId: string): string | null {
+  const id = componentId.toLowerCase();
+  const role = firstGeneratedRole(id);
+  if (role === "source") {
+    if (/csv/.test(id)) return "read your CSV";
+    if (/json/.test(id)) return "read your JSON file";
+    if (/(api|http|url|web|scrape)/.test(id)) return "read from an API";
+    return "read your data";
+  }
+  if (role === "output") {
+    if (/csv/.test(id)) return "write a CSV";
+    if (/json/.test(id)) return "write a JSON file";
+    return "write the results";
+  }
+  if (role === "transform") {
+    if (/(scrape|fetch|web|http|url)/.test(id)) return "scrape each page";
+    return "process each row";
+  }
+  if (/(scrape|fetch|web|http|url)/.test(id)) return "scrape each page";
+  if (/csv/.test(id)) return "write a CSV";
+  if (/json/.test(id)) return "write a JSON file";
+  if (/(llm|rate|score|classif|summari[sz]e|xform|transform)/.test(id)) {
+    return "process each row";
+  }
+  return null;
+}
+
+type GeneratedRole = "source" | "output" | "transform";
+
+function firstGeneratedRole(id: string): GeneratedRole | null {
+  const tokens = id.split(/[_:-]+/).filter(Boolean);
+  for (const token of tokens) {
+    if (/^(source|input|read)$/.test(token)) return "source";
+    if (/^(sink|output|write)$/.test(token)) return "output";
+    if (/^(transform|xform|llm|rate|score|classif.*|summari[sz]e.*)$/.test(token)) {
+      return "transform";
+    }
+  }
+  return null;
 }
 
 /**

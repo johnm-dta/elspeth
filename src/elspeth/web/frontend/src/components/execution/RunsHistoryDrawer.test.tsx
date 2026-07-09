@@ -132,7 +132,7 @@ describe("RunsHistoryDrawer", () => {
   it("calls onClose when the Close button is clicked", async () => {
     const onClose = vi.fn();
     render(<RunsHistoryDrawer onClose={onClose} />);
-    await userEvent.click(screen.getByRole("button", { name: /close/i }));
+    await userEvent.click(screen.getByRole("button", { name: /close runs/i }));
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -269,6 +269,49 @@ describe("RunsHistoryDrawer", () => {
     );
     expect(screen.getByText("token-1")).toBeInTheDocument();
     expect(screen.getByTestId("run-outputs-panel")).toHaveAttribute("data-run-id", "r2");
+  });
+
+  it("shows the stored run failure cause immediately before diagnostics load", async () => {
+    const loadRunDiagnostics = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      runs: [
+        {
+          id: "r2",
+          status: "failed",
+          error: "HTTP 400: max_output_tokens below minimum value",
+        } as never,
+      ],
+      loadRunDiagnostics,
+      diagnosticsByRunId: {},
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /show detail for r2/i }));
+
+    expect(screen.getByTestId("run-stored-failure-detail")).toHaveTextContent(
+      "max_output_tokens below minimum value",
+    );
+  });
+
+  it("keeps the stored run failure cause visible when diagnostics have no failure_detail", async () => {
+    useExecutionStore.setState({
+      runs: [
+        {
+          id: "r2",
+          status: "failed",
+          error: "Pipeline aborted before runtime diagnostics were written.",
+        } as never,
+      ],
+      diagnosticsByRunId: { r2: makeDiagnostics({ failure_detail: null }) },
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /show detail for r2/i }));
+
+    expect(screen.queryByTestId("run-failure-detail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("run-stored-failure-detail")).toHaveTextContent(
+      "Pipeline aborted before runtime diagnostics were written.",
+    );
   });
 
   it("renders the diagnostics working view while explanation is pending", async () => {

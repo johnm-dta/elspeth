@@ -2,7 +2,7 @@
 // RunsHistoryDrawer
 //
 // Slide-over drawer listing every run for the current session. Opened from
-// InlineRunResults' "Past runs" button. Preserves audit-trail access to old
+// InlineRunResults' "Runs" button. Preserves audit-trail access to old
 // runs after the inspector Runs tab is removed.
 // ============================================================================
 
@@ -107,12 +107,12 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
       ref={drawerRef}
       role="dialog"
       aria-modal="true"
-      aria-label="Past pipeline runs"
+      aria-label="Pipeline runs"
       className="runs-history-drawer"
     >
       <header className="runs-history-drawer-header">
-        <h2>Past runs</h2>
-        <Button aria-label="Close past runs" onClick={onClose}>
+        <h2>Runs</h2>
+        <Button aria-label="Close runs" onClick={onClose}>
           Close
         </Button>
       </header>
@@ -182,6 +182,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                         explanation={diagnosticsExplanationByRunId[run.id] ?? null}
                         isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
                         isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
+                        runError={run.error ?? null}
                         workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
                         onExplain={() => void evaluateRunDiagnostics(run.id)}
                         onRefresh={() => void loadRunDiagnostics(run.id)}
@@ -218,6 +219,7 @@ interface RunDiagnosticsPanelProps {
   explanation: string | null;
   isEvaluating: boolean;
   isLoading: boolean;
+  runError: string | null;
   workingView: RunDiagnosticsWorkingView | null;
   onExplain: () => void;
   onRefresh: () => void;
@@ -229,6 +231,7 @@ function RunDiagnosticsPanel({
   explanation,
   isEvaluating,
   isLoading,
+  runError,
   workingView,
   onExplain,
   onRefresh,
@@ -269,6 +272,13 @@ function RunDiagnosticsPanel({
             {diagnostics.failure_detail.operation_type} failed - {diagnostics.failure_detail.node_id}
           </div>
           <pre>{diagnostics.failure_detail.error_message}</pre>
+        </div>
+      )}
+
+      {runError !== null && runError.trim().length > 0 && !diagnostics?.failure_detail && (
+        <div role="alert" data-testid="run-stored-failure-detail" className="run-failure-detail">
+          <div>Stored failure cause</div>
+          <pre>{runError}</pre>
         </div>
       )}
 

@@ -477,6 +477,24 @@ describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
     }
   });
 
+  it("adds the renamed tutorial session to the header session list before guided starts", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+
+    await waitFor(() => {
+      expect(useSessionStore.getState().sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "sess-new",
+            title: "First-run tutorial (in progress)",
+          }),
+        ]),
+      );
+    });
+  });
+
   it("Exit tutorial leaves an already-exited-to-freeform guided session alone", async () => {
     // The wizard-path hand-off (onExited) reaches the same handler with the
     // terminal already set to exited_to_freeform — firing the control signal

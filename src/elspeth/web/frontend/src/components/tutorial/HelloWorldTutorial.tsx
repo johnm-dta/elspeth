@@ -203,7 +203,16 @@ export function HelloWorldTutorial({
     setStartError(null);
     try {
       const session = await createSession();
-      await renameSession(session.id, HELLO_WORLD_PENDING_SESSION_TITLE);
+      const renamedSession = await renameSession(
+        session.id,
+        HELLO_WORLD_PENDING_SESSION_TITLE,
+      );
+      useSessionStore.setState((current) => ({
+        sessions: [
+          renamedSession,
+          ...current.sessions.filter((candidate) => candidate.id !== renamedSession.id),
+        ],
+      }));
       setSessionId(session.id);
       dispatch({ type: "start" });
     } catch (err) {

@@ -1491,6 +1491,7 @@ export function ChatPanel({
         {error && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
+        {isTutorial && <PipelineValidationSummary isTutorial />}
         <CompletionSummary terminal={guidedSession.terminal} isTutorial={isTutorial} />
         <InlineRunResults />
       </div>

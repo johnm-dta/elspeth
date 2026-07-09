@@ -16,7 +16,13 @@ import type { ComposerMode } from "@/types/api";
  * banner's timing watermark is set if the user opts out from settings
  * while a session is active.
  */
-export function ComposerPreferencesForm(): JSX.Element | null {
+interface ComposerPreferencesFormProps {
+  onResetTutorialComplete?: () => void;
+}
+
+export function ComposerPreferencesForm({
+  onResetTutorialComplete,
+}: ComposerPreferencesFormProps = {}): JSX.Element | null {
   const defaultMode = usePreferencesStore((s) => s.defaultMode);
   const loaded = usePreferencesStore((s) => s.loaded);
   const writing = usePreferencesStore((s) => s.writing);
@@ -47,10 +53,11 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   const onResetTutorial = useCallback(async () => {
     try {
       await resetTutorial();
+      onResetTutorialComplete?.();
     } catch (err) {
       console.error("[preferences] resetTutorial failed:", err);
     }
-  }, [resetTutorial]);
+  }, [onResetTutorialComplete, resetTutorial]);
 
   if (!loaded || defaultMode === null) return null;
 
@@ -202,7 +209,7 @@ export function ComposerPreferencesPanel({
           </button>
         </div>
         <div className="secrets-panel-body">
-          <ComposerPreferencesForm />
+          <ComposerPreferencesForm onResetTutorialComplete={onClose} />
         </div>
       </div>
     </>

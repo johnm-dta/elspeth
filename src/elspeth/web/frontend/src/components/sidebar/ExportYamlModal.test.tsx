@@ -30,6 +30,9 @@ describe("ExportYamlModal", () => {
     expect(
       screen.getByRole("dialog", { name: /export yaml/i }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: /review yaml/i }),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("yaml-view-stub")).toBeInTheDocument();
   });
 

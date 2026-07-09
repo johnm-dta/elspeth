@@ -137,7 +137,7 @@ function CompletionSummaryInner({ yaml, isTutorial }: CompletionSummaryInnerProp
           className="guided-completion-edit-btn"
           onClick={handleReviewYaml}
         >
-          Review YAML
+          Export YAML
         </button>
         <button
           type="button"

@@ -103,7 +103,7 @@ describe("CompletionSummary -- button identity", () => {
   it("renders task-oriented action buttons with type='button'", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     expect(screen.getAllByRole("button")).toHaveLength(3);
-    for (const name of [/open freeform editor/i, /review yaml/i, /validate pipeline/i]) {
+    for (const name of [/open freeform editor/i, /export yaml/i, /validate pipeline/i]) {
       expect(screen.getByRole("button", { name }).getAttribute("type")).toBe("button");
     }
   });
@@ -126,13 +126,13 @@ describe("CompletionSummary -- exit action", () => {
     expect(mockExit).toHaveBeenCalledWith();
   });
 
-  it("clicking 'Review YAML' opens the YAML export modal", async () => {
+  it("clicking 'Export YAML' opens the YAML export modal", async () => {
     const user = userEvent.setup();
     const handler = vi.fn();
     window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
 
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    await user.click(screen.getByRole("button", { name: /review yaml/i }));
+    await user.click(screen.getByRole("button", { name: /export yaml/i }));
 
     expect(handler).toHaveBeenCalledTimes(1);
     window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
@@ -242,7 +242,7 @@ describe("CompletionSummary -- tutorial suppression (concern B)", () => {
     // button count, so a regression that drops a non-freeform button can't
     // slip past an absent-button-only check.
     expect(
-      screen.getByRole("button", { name: "Review YAML" }),
+      screen.getByRole("button", { name: "Export YAML" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Validate pipeline" }),

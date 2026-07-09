@@ -1935,8 +1935,9 @@ describe("ChatPanel mode discriminator", () => {
       screen.getByRole("list", { name: /guided workflow/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Review YAML" }),
+      screen.getByRole("button", { name: "Export YAML" }),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-validation-summary")).toBeInTheDocument();
     // Tutorial completion suppresses the freeform handoff (concern B).
     expect(
       screen.queryByRole("button", { name: "Open freeform editor" }),
@@ -2530,7 +2531,7 @@ describe("ChatPanel mode discriminator", () => {
       screen.getByRole("button", { name: "Open freeform editor" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Review YAML" }),
+      screen.getByRole("button", { name: "Export YAML" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Validate pipeline" }),
@@ -2544,6 +2545,43 @@ describe("ChatPanel mode discriminator", () => {
     // Freeform surface suppressed.
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
+  });
+
+  it("tutorial completed: renders validation feedback on the reset tutorial shell", () => {
+    const terminal: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "source:\n  plugin: csv\n",
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_4_wire",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedTerminal: terminal,
+      compositionState: sourceLlmCsvComposition(),
+    });
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: READINESS,
+      },
+    } as never);
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByTestId("pipeline-validation-summary")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/looks good/i);
   });
 
   it("does not render ExitToFreeformButton on the completed surface (regression pin for elspeth-obs-0a1002de6d)", () => {

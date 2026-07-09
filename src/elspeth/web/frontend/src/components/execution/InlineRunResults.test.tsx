@@ -213,7 +213,7 @@ describe("InlineRunResults", () => {
     );
   });
 
-  it("exposes a 'Past runs' button when historical runs exist", () => {
+  it("exposes a runs drawer button when historical runs exist", () => {
     useExecutionStore.setState({
       activeRunId: null,
       runs: [
@@ -223,26 +223,32 @@ describe("InlineRunResults", () => {
     } as never);
     render(<InlineRunResults />);
     expect(
-      screen.getByRole("button", { name: /past runs \(1\)/i }),
+      screen.getByRole("button", { name: /runs \(2\)/i }),
     ).toBeInTheDocument();
   });
 
-  it("does not count the current terminal run as a past run", () => {
+  it("includes the current terminal run in the runs drawer when other runs exist", async () => {
     useExecutionStore.setState({
       activeRunId: "run-done",
       progress: {
         status: "completed",
       } as never,
-      runs: [{ id: "run-done", session_id: "sess-1", status: "completed" } as never],
+      runs: [
+        { id: "run-done", session_id: "sess-1", status: "completed" } as never,
+        { id: "run-failed", session_id: "sess-1", status: "failed" } as never,
+      ],
     } as never);
+    const user = userEvent.setup();
+
     render(<InlineRunResults />);
     expect(screen.getByTestId("run-outputs-stub")).toHaveAttribute(
       "data-run-id",
       "run-done",
     );
-    expect(
-      screen.queryByRole("button", { name: /past runs/i }),
-    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /runs \(2\)/i }));
+
+    expect(screen.getByText("run-done")).toBeInTheDocument();
+    expect(screen.getByText("run-failed")).toBeInTheDocument();
   });
 
   it("does not count an in-flight run as a past run", () => {
@@ -274,7 +280,7 @@ describe("InlineRunResults", () => {
     const user = userEvent.setup();
 
     render(<InlineRunResults />);
-    await user.click(screen.getByRole("button", { name: /past runs \(1\)/i }));
+    await user.click(screen.getByRole("button", { name: /runs \(1\)/i }));
 
     expect(screen.getByText("run-orphan")).toBeInTheDocument();
     expect(
@@ -296,7 +302,7 @@ describe("InlineRunResults", () => {
     const user = userEvent.setup();
 
     render(<InlineRunResults />);
-    await user.click(screen.getByRole("button", { name: /past runs \(1\)/i }));
+    await user.click(screen.getByRole("button", { name: /runs \(1\)/i }));
 
     expect(screen.getByText("run-old-1")).toBeInTheDocument();
     expect(screen.queryByText("run-active")).not.toBeInTheDocument();
@@ -357,7 +363,7 @@ describe("InlineRunResults", () => {
     expect(screen.getByTestId("run-outputs-stub")).toBeInTheDocument();
   });
 
-  it("opens and closes the Past runs drawer", async () => {
+  it("opens and closes the runs drawer", async () => {
     useExecutionStore.setState({
       activeRunId: null,
       runs: [
@@ -368,24 +374,25 @@ describe("InlineRunResults", () => {
     const user = userEvent.setup();
 
     render(<InlineRunResults />);
-    await user.click(screen.getByRole("button", { name: /past runs/i }));
+    await user.click(screen.getByRole("button", { name: /runs/i }));
 
-    expect(screen.getByRole("dialog", { name: /past pipeline runs/i })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: /pipeline runs/i })).toBeInTheDocument();
+    expect(screen.getByText("run-latest")).toBeInTheDocument();
     expect(screen.getByText("run-old-1")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /close past runs/i }));
+    await user.click(screen.getByRole("button", { name: /close runs/i }));
     expect(
-      screen.queryByRole("dialog", { name: /past pipeline runs/i }),
+      screen.queryByRole("dialog", { name: /pipeline runs/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("hides the 'Past runs' button when no historical runs exist", () => {
+  it("hides the runs drawer button when no runs exist", () => {
     useExecutionStore.setState({
       activeRunId: null,
       runs: [],
     } as never);
     render(<InlineRunResults />);
     expect(
-      screen.queryByRole("button", { name: /past runs/i }),
+      screen.queryByRole("button", { name: /runs/i }),
     ).not.toBeInTheDocument();
   });
 

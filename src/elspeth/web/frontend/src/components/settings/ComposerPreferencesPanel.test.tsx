@@ -109,6 +109,30 @@ describe("ComposerPreferencesForm", () => {
     expect(resetTutorial).toHaveBeenCalledTimes(1);
   });
 
+  it("closes the preferences panel after a successful tutorial reset", async () => {
+    const resetTutorial = vi
+      .spyOn(usePreferencesStore.getState(), "resetTutorial")
+      .mockResolvedValueOnce(undefined);
+    const onClose = vi.fn();
+
+    render(<ComposerPreferencesPanel onClose={onClose} />);
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    expect(resetTutorial).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the preferences panel open when tutorial reset fails", async () => {
+    vi.spyOn(usePreferencesStore.getState(), "resetTutorial")
+      .mockRejectedValueOnce(new Error("backend unavailable"));
+    const onClose = vi.fn();
+
+    render(<ComposerPreferencesPanel onClose={onClose} />);
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("shows Reset tutorial while a tutorial is IN PROGRESS (the wedged-resume escape hatch)", () => {
     // Completion-gating hid the escape hatch from exactly the users who
     // needed it: a wedged mid-tutorial resume (persisted session swept out

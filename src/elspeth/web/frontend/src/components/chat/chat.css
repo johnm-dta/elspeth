@@ -657,6 +657,18 @@
   align-items: center;
 }
 
+/* Guided-direction consent disclosure ("fresh wizard + consent",
+   elspeth-e2c3dba6b5): the switch reseeds a fresh wizard and sets the current
+   pipeline aside (recoverable via version history). Muted, informational
+   register — same treatment as .mode-switch-disabled-reason; it explains an
+   expected consequence, not an error. Given a full row so it reads before the
+   confirm/cancel buttons in the wrapped flex layout. */
+.mode-switch-confirm-note {
+  flex-basis: 100%;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 /* C-4b: terminal-guided "Switch to guided" — permanently un-reentrable
    (solver_exhausted / protocol_violation, not the reversible user exit).
    Disabled button + adjacent plain-language reason so the affordance never

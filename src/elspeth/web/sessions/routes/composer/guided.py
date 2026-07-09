@@ -3036,3 +3036,190 @@ async def post_guided_chat(
                             exc_class=type(persist_exc).__name__,
                             frames=_safe_frame_strings(persist_exc),
                         )
+
+
+# PLACEMENT IS LOAD-BEARING (TEMPORARY WORKAROUND — see elspeth-b8ea8a35cb).
+# post_guided_convert logically belongs with the other guided routes (next to
+# post_guided_start / post_guided_respond), but it is pinned LAST here for now.
+# The trust_tier.tier_model raw fingerprint is sha256(rule_id | ast_path | dump)
+# and ast_path begins with the enclosing function's module-level body[N] index.
+# The route handlers above carry HMAC-SIGNED tier_model suppressions
+# (config/cicd/enforce_tier_model/web.yaml) keyed by that fingerprint. Inserting
+# a def ABOVE them renumbers their body[N], rotates every downstream fingerprint,
+# and breaks 33 operator-held signatures (regen needs ELSPETH_JUDGE_METADATA_HMAC_KEY,
+# which agents must never hold). Appending here shifts no existing index, so the
+# branch stays green with no re-sign. elspeth-b8ea8a35cb moves it to its logical
+# home at merge, where the standard merge re-sign absorbs the rotation. Until
+# then: do not move this above another handler.
+@router.post("/{session_id}/guided/convert", response_model=GetGuidedResponse)
+async def post_guided_convert(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> GetGuidedResponse:
+    """Move a freeform session into guided mode.
+
+    "Switch to guided" on a session that has already done freeform composition
+    work cannot lazily read guided state: its persisted CompositionState carries
+    no ``guided_session``, so GET /guided 400s by design — and MUST keep doing
+    so, because ``fetchGuidedStateForSelect`` probes GET on every session select
+    and reads the 400 as "this session is freeform-only". A mutating GET would
+    flip every worked freeform session into the guided surface on load. This
+    explicit POST is the conversion; GET stays a pure reader.
+
+    Per the "fresh wizard + consent" product decision (elspeth-e2c3dba6b5) the
+    conversion does NOT walk the retained freeform graph through the wizard:
+    ``GuidedSession.initial()`` starts at STEP_1_SOURCE and the step handlers
+    rebuild source/sink/transform state from scratch, so proceeding over a
+    pre-built graph would clobber it. Instead it seeds a FRESH wizard as a NEW
+    composition-state version. The prior freeform pipeline stays recoverable via
+    GET /state/versions + POST /state/revert (revert copies ``composer_meta``
+    verbatim, so restoring the pre-conversion version lands the session back in
+    freeform with the graph intact) — the same recoverability contract as YAML
+    import. A system message records the switch and names the recoverable
+    version.
+
+    Idempotent and safe for every entry state, so "Switch to guided" can route
+    through it unconditionally:
+      * no persisted state (empty session) -> lazy fresh wizard, NON-persisting
+        (identical to GET /guided's lazy path; an empty graph must not open the
+        version history).
+      * ``guided_session`` already present -> return it UNCHANGED, including any
+        terminal (so a completed / solver-exhausted / protocol-violation surface
+        still renders — enterGuided routes those non-exit terminals here).
+      * persisted state with ``guided_session is None`` -> the conversion.
+
+    Raises 404 if the session does not exist or belong to the requesting user.
+    """
+    await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+    async with compose_lock:
+        state_record = await service.get_current_state(session_id)
+
+        # Branch 2: already guided (idempotent double-click, cross-tab race, or a
+        # terminal session reached via enterGuided's non-exit else-branch).
+        # Return the existing session UNCHANGED — never reseed. Mirrors
+        # post_guided_start's idempotency block, including the terminal payload
+        # and the ``next_turn=None`` snapshot semantics.
+        if state_record is not None:
+            existing_state = _state_from_record(state_record)
+            if existing_state.guided_session is not None:
+                guided = existing_state.guided_session
+                terminal = guided.terminal
+                return GetGuidedResponse(
+                    guided_session=GuidedSessionResponse(
+                        step=guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                summary=r.summary,
+                                emitter=r.emitter,
+                            )
+                            for r in guided.history
+                        ],
+                        terminal=TerminalStateResponse(
+                            kind=terminal.kind.value,
+                            reason=terminal.reason.value if terminal.reason is not None else None,
+                            pipeline_yaml=terminal.pipeline_yaml,
+                        )
+                        if terminal is not None
+                        else None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
+                                assistant_message_kind=t.assistant_message_kind,
+                                synthetic_failure_reason=t.synthetic_failure_reason,
+                            )
+                            for t in guided.chat_history
+                        ],
+                        chat_turn_seq=guided.chat_turn_seq,
+                        profile=_workflow_profile_response(guided),
+                    ),
+                    next_turn=None,
+                    terminal=TerminalStateResponse(
+                        kind=terminal.kind.value,
+                        reason=terminal.reason.value if terminal.reason is not None else None,
+                        pipeline_yaml=terminal.pipeline_yaml,
+                    )
+                    if terminal is not None
+                    else None,
+                    composition_state=_state_response(state_record),
+                )
+
+        # Branches 1 & 3: seed a FRESH guided wizard.
+        new_state = _initial_composition_state_with_guided_session()
+        seeded_guided = new_state.guided_session
+        if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
+            raise InvariantError("post_guided_convert: initial state has no guided_session")
+        turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
+
+        state_record_out: CompositionStateRecord | None
+        if state_record is None:
+            # Branch 1: empty session — lazy, non-persisting (mirror GET /guided).
+            # The fresh wizard is returned in memory; the first real answer
+            # persists it. An empty graph must not open the version history.
+            state_record_out = None
+        else:
+            # Branch 3: THE CONVERSION. Reseed a fresh wizard as a NEW version,
+            # setting the freeform graph aside. This is user-consented (two-step
+            # confirm) and fully recoverable: the prior freeform version stays in
+            # state/versions and revert restores it (composer_meta copied
+            # verbatim -> back to freeform). ``session_seed`` provenance is reused
+            # deliberately — the closed CompositionStateProvenance enum has no
+            # guided-convert value and widening it is a governance action
+            # (protocol.py), out of scope for this fix; the audit trail for the
+            # graph-discard is the system message emitted just below.
+            prior_version = state_record.version
+            new_composer_meta = {"guided_session": seeded_guided.to_dict()}
+            state_d = new_state.to_dict()
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+            state_data = CompositionStateData(
+                sources=state_d["sources"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=persisted_is_valid,
+                validation_errors=persisted_errors,
+                composer_meta=new_composer_meta,
+            )
+            state_record_out = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="session_seed",
+            )
+            await service.add_message(
+                session_id,
+                role="system",
+                content=(
+                    "Switched to guided mode with a fresh wizard. Your previous "
+                    f"freeform pipeline is saved as version {prior_version} and can "
+                    "be restored from version history."
+                ),
+                writer_principal="route_system_message",
+            )
+
+        shield_available = _resolve_shield_available(request, user.user_id)
+        return GetGuidedResponse(
+            guided_session=GuidedSessionResponse(
+                step=seeded_guided.step.value,
+                history=[],
+                terminal=None,
+                chat_history=[],
+                chat_turn_seq=seeded_guided.chat_turn_seq,
+                profile=_workflow_profile_response(seeded_guided),
+            ),
+            next_turn=_turn_payload_response(turn, shield_available=shield_available),
+            terminal=None,
+            composition_state=_state_response(state_record_out) if state_record_out is not None else None,
+        )

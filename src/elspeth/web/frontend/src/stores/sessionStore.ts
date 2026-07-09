@@ -450,10 +450,19 @@ interface SessionState {
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
   reenterGuided: () => Promise<void>;
+  // Convert a freeform session into guided mode (POST /guided/convert). Unlike
+  // startGuided's GET, this works for a session that has done freeform work
+  // (whose persisted state carries no guided_session and which GET rejects with
+  // 400): it seeds a fresh wizard as a new version, leaving the freeform
+  // pipeline recoverable via version history. Idempotent for already-guided
+  // sessions.
+  convertToGuided: (sessionId: string) => Promise<void>;
   // Unified entry point bound by the "Switch to guided" button in ChatPanel's
   // freeform body.  Branches on the current guidedSession terminal:
-  //   * no session or non-terminal session => startGuided (lazy-create / GET)
   //   * terminal.kind === "exited_to_freeform" => reenterGuided
+  //   * otherwise => convertToGuided (POST). It is idempotent for empty and
+  //     already-guided sessions and does the fresh-wizard conversion for a
+  //     worked freeform session — the one case GET /guided cannot serve.
   // The button stays a single affordance with one label regardless of branch.
   enterGuided: () => Promise<void>;
   // `signal` aborts the underlying fetch (Stop button / client timeout) — the
@@ -1471,15 +1480,56 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedTerminal: response.terminal,
         compositionState: response.composition_state,
       });
-    } catch {
+    } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
       // Error path: set error string, leave existing guided state alone.
       // Mirrors selectSession lines 207-209: set error, don't clobber fields
       // that were already loaded. The caller can inspect error to decide whether
-      // to surface a retry prompt.
-      set({ error: "Failed to load guided session. Please try again." });
+      // to surface a retry prompt. Surface the backend's typed detail when
+      // present (mirroring respondGuided/chatGuided/convertToGuided) instead of
+      // flattening every failure to the generic banner — a 400 that names a
+      // recoverable mode-state boundary should reach the user (elspeth-e2c3dba6b5).
+      const apiErr = err as ApiError;
+      set({
+        error:
+          apiErr.detail ?? "Failed to load guided session. Please try again.",
+      });
+    }
+  },
+
+  async convertToGuided(sessionId: string) {
+    // Capture the session identity before the await (stale-fetch guard,
+    // mirroring startGuided). If the user switches sessions while the POST is in
+    // flight, the response is dropped rather than overwriting the newly active
+    // session's guided state.
+    const requestedSessionId = sessionId;
+    try {
+      const response = await api.convertToGuided(sessionId);
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      // Atomically replace all 4 wire fields — server is authoritative (spec §7.3).
+      set({
+        guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
+        error: null,
+      });
+    } catch (err) {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      // Surface the backend's typed detail when present, mirroring
+      // respondGuided/reenterGuided. Convert 400s are rare (ownership only), but
+      // an unbound catch would recreate the generic-banner defect this fix removes.
+      const apiErr = err as ApiError;
+      set({
+        error:
+          apiErr.detail ?? "Failed to switch to guided mode. Please try again.",
+      });
     }
   },
 
@@ -1651,19 +1701,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async enterGuided() {
-    // Unified "Switch to guided" entry point.  Default-freeform sessions
-    // (no fetched guidedSession) take the startGuided path — GET /guided
-    // builds and persists the initial wizard turn server-side.  Sessions
-    // that were previously in guided and exited via the operator's "Exit
-    // to freeform" button reach a terminal of kind === "exited_to_freeform";
-    // those go through reenterGuided instead, because startGuided would
-    // return the terminal state and leave the discriminator on freeform.
+    // Unified "Switch to guided" entry point.  Sessions that were previously in
+    // guided and exited via the operator's "Exit to freeform" button reach a
+    // terminal of kind === "exited_to_freeform"; those go through reenterGuided,
+    // because convert would return the terminal state and leave the
+    // discriminator on freeform.
     //
-    // Other terminal kinds (completed, solver-exhausted, protocol-violation)
-    // are NOT re-entrable by design — see the reenter route handler at
-    // routes.py:5921 for the closed-list policy.  We still call startGuided
-    // for those; the discriminator at ChatPanel handles each terminal kind
-    // appropriately (completed → CompletionSummary; others → freeform).
+    // Every other case routes through convertToGuided (POST /guided/convert),
+    // which is idempotent and safe for all entry states:
+    //   * empty / never-worked session   => lazy fresh wizard (like GET did)
+    //   * worked freeform session         => fresh-wizard conversion — the one
+    //                                        case GET /guided 400s on, and the
+    //                                        whole point of this action
+    //                                        (elspeth-e2c3dba6b5)
+    //   * already-guided, non-terminal    => returned unchanged (idempotent)
+    //   * completed / solver-exhausted /
+    //     protocol-violation terminals    => returned unchanged, so the
+    //                                        discriminator at ChatPanel still
+    //                                        routes completed → CompletionSummary
+    //                                        and others → freeform. These are NOT
+    //                                        re-entrable by design (reenter's
+    //                                        closed-list policy), which is why
+    //                                        they take convert, not reenter.
     const { activeSessionId, guidedSession } = get();
     if (activeSessionId === null) {
       throw new Error("enterGuided called without active session");
@@ -1672,7 +1731,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       await get().reenterGuided();
       return;
     }
-    await get().startGuided(activeSessionId);
+    await get().convertToGuided(activeSessionId);
   },
 
   async chatGuided(message: string, signal?: AbortSignal) {

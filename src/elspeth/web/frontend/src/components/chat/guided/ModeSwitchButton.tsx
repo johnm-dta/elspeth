@@ -82,6 +82,21 @@ export function ModeSwitchButton({
         role="group"
         aria-label={confirmLabel}
       >
+        {/*
+          Guided-direction consent disclosure ("fresh wizard + consent",
+          elspeth-e2c3dba6b5). Converting a worked freeform session reseeds a
+          FRESH guided wizard and sets the current pipeline aside; it is NOT a
+          lossless in-place switch. Disclose that here, plus the recoverability
+          (version history) that makes the discard consented. Only shown for the
+          guided direction with work — exiting to freeform is genuinely lossless
+          and keeps its terse confirm.
+        */}
+        {target === "guided" && (
+          <span className="mode-switch-confirm-note">
+            Guided mode starts a fresh pipeline. Your current pipeline is saved
+            to version history and can be restored.
+          </span>
+        )}
         <button
           type="button"
           className="mode-switch-btn mode-switch-btn--confirm"

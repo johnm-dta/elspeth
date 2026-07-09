@@ -29,6 +29,7 @@ vi.mock("@/api/client", () => ({
   getGuided: vi.fn(),
   respondGuided: vi.fn(),
   reenterGuided: vi.fn(),
+  convertToGuided: vi.fn(),
   chatGuided: vi.fn(),
   // Phase 5b — selectSession fires a fire-and-forget refreshAll on the
   // interpretationEventsStore.  Mocked to resolve empty so jsdom does not
@@ -436,9 +437,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
   // terminal so callers always have a single action regardless of whether
   // the session is fresh or has previously exited.
 
-  it("enterGuided: calls startGuided when guidedSession is null (fresh / default-freeform)", async () => {
-    const { getGuided } = await import("@/api/client");
-    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+  it("enterGuided: calls convertToGuided when guidedSession is null (fresh / worked freeform)", async () => {
+    // Routing changed with elspeth-e2c3dba6b5: the non-terminal branch now goes
+    // through convertToGuided (POST /guided/convert) instead of startGuided
+    // (GET /guided). GET 400s for a worked freeform session; convert is the
+    // idempotent superset that also does the fresh-wizard conversion. The GET
+    // path must NOT be taken.
+    const { convertToGuided, getGuided } = await import("@/api/client");
+    (convertToGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       sampleGetGuidedResponse,
     );
 
@@ -449,9 +455,63 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     await useSessionStore.getState().enterGuided();
 
-    expect(getGuided).toHaveBeenCalledWith("sess-1");
+    expect(convertToGuided).toHaveBeenCalledWith("sess-1");
+    expect(getGuided).not.toHaveBeenCalled();
     const state = useSessionStore.getState();
     expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+  });
+
+  it("convertToGuided: populates all 4 wire fields atomically on success", async () => {
+    const { convertToGuided } = await import("@/api/client");
+    (convertToGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    useSessionStore.setState({ activeSessionId: "sess-1" });
+    await useSessionStore.getState().convertToGuided("sess-1");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+    expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
+    expect(state.guidedTerminal).toEqual(sampleGetGuidedResponse.terminal);
+    expect(state.compositionState).toEqual(
+      sampleGetGuidedResponse.composition_state,
+    );
+    expect(state.error).toBeNull();
+  });
+
+  it("convertToGuided: surfaces the backend's typed detail on failure", async () => {
+    const { convertToGuided } = await import("@/api/client");
+    (convertToGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      status: 400,
+      detail: "You do not own this session.",
+    });
+
+    useSessionStore.setState({ activeSessionId: "sess-1" });
+    await useSessionStore.getState().convertToGuided("sess-1");
+
+    expect(useSessionStore.getState().error).toBe(
+      "You do not own this session.",
+    );
+  });
+
+  it("startGuided: surfaces the backend's typed detail instead of the generic banner", async () => {
+    // elspeth-e2c3dba6b5 secondary fix: startGuided's catch used to hardcode
+    // "Failed to load guided session. Please try again." and discard
+    // ApiError.detail — asymmetric with respondGuided/chatGuided. A typed 400
+    // that names a recoverable mode-state boundary must reach the user.
+    const { getGuided } = await import("@/api/client");
+    (getGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      status: 400,
+      detail: "Session is not in guided mode. Use /api/sessions/{id}/messages.",
+    });
+
+    useSessionStore.setState({ activeSessionId: "sess-1" });
+    await useSessionStore.getState().startGuided("sess-1");
+
+    expect(useSessionStore.getState().error).toBe(
+      "Session is not in guided mode. Use /api/sessions/{id}/messages.",
+    );
   });
 
   it("enterGuided: calls reenterGuided when terminal.kind === 'exited_to_freeform'", async () => {

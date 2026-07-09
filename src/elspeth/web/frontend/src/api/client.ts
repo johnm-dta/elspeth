@@ -741,6 +741,30 @@ export async function reenterGuided(
 }
 
 /**
+ * Convert a freeform session into guided mode.
+ *
+ * "Switch to guided" on a session that has already done freeform composition
+ * work cannot go through GET /guided — that endpoint 400s by design for a
+ * session with no persisted guided_session (and must, since it is also the
+ * passive freeform-probe on session select). This POST is the explicit
+ * conversion: it seeds a FRESH wizard as a new composition-state version,
+ * setting the freeform pipeline aside (recoverable from version history), and
+ * returns the same envelope shape as GET /guided. Idempotent — a session that
+ * is already guided (including a terminal one) is returned unchanged.
+ */
+export async function convertToGuided(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/convert`, {
+    method: "POST",
+    headers: authHeaders(),
+    signal,
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
  * Post a free-text chat message scoped to the user's current wizard step.
  *
  * Most chat is advisory: the server invokes the per-step chat solver with

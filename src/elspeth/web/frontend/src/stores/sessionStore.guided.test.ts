@@ -1037,16 +1037,13 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     it("user cancel: abort resets pending and surfaces the cancelled copy (elspeth-fb4464cdf0)", async () => {
       const { chatGuided } = await import("@/api/client");
-      // Mirror the fetch abort contract: the request rejects with an
-      // AbortError once the ChatPanel Stop button aborts the controller.
+      // Mirror the fetch abort contract: abort(reason) rejects the in-flight
+      // fetch with the RAW reason value (here a bare string), not a
+      // DOMException (elspeth-475647c47a).
       (chatGuided as ReturnType<typeof vi.fn>).mockImplementationOnce(
         (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
           new Promise((_resolve, reject) => {
-            signal?.addEventListener("abort", () => {
-              const err = new Error("aborted");
-              err.name = "AbortError";
-              reject(err);
-            });
+            signal?.addEventListener("abort", () => reject(signal.reason));
           }),
       );
       useSessionStore.setState({
@@ -1074,14 +1071,12 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     it("client timeout: abort surfaces the timeout copy", async () => {
       const { chatGuided } = await import("@/api/client");
+      // Raw abort-reason string, matching real fetch semantics
+      // (elspeth-475647c47a).
       (chatGuided as ReturnType<typeof vi.fn>).mockImplementationOnce(
         (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
           new Promise((_resolve, reject) => {
-            signal?.addEventListener("abort", () => {
-              const err = new Error("aborted");
-              err.name = "AbortError";
-              reject(err);
-            });
+            signal?.addEventListener("abort", () => reject(signal.reason));
           }),
       );
       useSessionStore.setState({

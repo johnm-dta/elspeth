@@ -487,6 +487,62 @@ describe("sessionStore", () => {
       expect(state.messages[0].local_error).toBe(state.error);
     });
 
+    it("maps the raw compose_timeout abort reason to the compose-timeout copy (elspeth-475647c47a)", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      // useComposer aborts with controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
+      // a bare string. Per WHATWG semantics the in-flight fetch then rejects
+      // with that raw string — NOT a DOMException — so the store must classify
+      // on the rejection value too or the user gets the generic send failure.
+      const controller = new AbortController();
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_timeout");
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toMatch(/took too long/i);
+      expect(state.error).not.toContain("Failed to send message");
+      expect(state.messages[0].local_status).toBe("failed");
+      expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("maps the raw compose_user_cancel abort reason to the cancelled copy (elspeth-475647c47a)", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      const controller = new AbortController();
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_user_cancel");
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toContain("Composition stopped");
+      expect(state.error).not.toContain("Failed to send message");
+    });
+
     it("includes provider detail when an LLM unavailable response exposes it", async () => {
       const { sendMessage: mockSendMessage } = await import("@/api/client");
       (mockSendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
@@ -1569,6 +1625,47 @@ describe("sessionStore", () => {
       const state = useSessionStore.getState();
       expect(state.isComposing).toBe(false);
       expect(state.error).toContain("ELSPETH took too long");
+      expect(state.error).not.toContain("Failed to send message");
+      expect(state.messages[0].local_status).toBe("failed");
+      expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("maps the raw compose_timeout abort reason to the compose-timeout copy (elspeth-475647c47a)", async () => {
+      const { recompose: mockRecompose } = await import("@/api/client");
+      // Real fetch rejects with the bare abort-reason string, not a
+      // DOMException — see the sendMessage sibling test.
+      const controller = new AbortController();
+      (mockRecompose as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: new Date().toISOString(),
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+      });
+
+      const retryPromise = useSessionStore
+        .getState()
+        .retryMessage("user-1", controller.signal);
+      controller.abort("compose_timeout");
+      await retryPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toMatch(/took too long/i);
       expect(state.error).not.toContain("Failed to send message");
       expect(state.messages[0].local_status).toBe("failed");
       expect(state.messages[0].local_error).toBe(state.error);

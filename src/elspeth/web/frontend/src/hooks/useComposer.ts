@@ -13,8 +13,9 @@ import {
  * based on HTTP status and error_type field.
  *
  * The AbortController is wired to abort the underlying fetch when the
- * timeout fires. The sessionStore.sendMessage() call rejects with an
- * AbortError which is then mapped to the timeout user-facing message.
+ * timeout fires. Because abort() is given a bare-string reason, the
+ * in-flight fetch rejects with that raw string (not a DOMException);
+ * sessionStore classifies it and maps it to the user-facing copy.
  */
 export function useComposer() {
   const storeSendMessage = useSessionStore((s) => s.sendMessage);

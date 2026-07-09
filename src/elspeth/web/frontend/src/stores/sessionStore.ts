@@ -21,6 +21,7 @@ import type {
 } from "@/types/guided";
 import * as api from "@/api/client";
 import {
+  COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
@@ -55,6 +56,19 @@ function isAbortError(err: unknown): boolean {
   }
   const name = (err as { name?: unknown }).name;
   return name === "AbortError" || name === "TimeoutError";
+}
+
+function isComposeAbort(err: unknown): boolean {
+  // abort() with NO argument rejects the fetch with a DOMException named
+  // 'AbortError' — but useComposer aborts with a bare-string reason
+  // (compose_timeout / compose_user_cancel), and per WHATWG semantics the
+  // fetch then rejects with that RAW string. Classify on the rejection
+  // value as well as the structural shape (elspeth-475647c47a).
+  return (
+    isAbortError(err) ||
+    err === COMPOSE_TIMEOUT_ABORT_REASON ||
+    err === COMPOSE_USER_CANCEL_ABORT_REASON
+  );
 }
 
 function abortReason(signal?: AbortSignal): unknown {
@@ -888,10 +902,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch (err) {
       let errorMessage: string;
       // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any
-      // user-supplied signal) fires a DOMException with name 'AbortError',
-      // not a structured ApiError — the apiErr.detail fallback below would
+      // user-supplied signal) rejects with the raw abort-reason string, or a
+      // DOMException named 'AbortError' when aborted without a reason —
+      // never a structured ApiError. The apiErr.detail fallback below would
       // otherwise mask it as a generic send failure.
-      if (isAbortError(err)) {
+      if (isComposeAbort(err)) {
         errorMessage = composeAbortMessage(signal);
       } else {
         const apiErr = err as ApiError;
@@ -1284,7 +1299,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
-      if (isAbortError(err)) {
+      if (isComposeAbort(err)) {
         errorMessage = composeAbortMessage(signal);
       } else {
         const apiErr = err as ApiError;
@@ -1719,7 +1734,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // fetch. Reset the pending flag so the turn can be revised and re-sent,
       // and surface the same cancelled/timeout copy freeform uses — the
       // abort reason on the signal discriminates user-cancel from timeout.
-      if (isAbortError(err)) {
+      if (isComposeAbort(err)) {
         set({
           error: composeAbortMessage(signal),
           guidedChatPending: false,

@@ -8,6 +8,7 @@ from typing import Any, Final
 from pydantic import TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.plugins.transforms.llm.providers.openrouter import (
     OPENROUTER_BASE_URL,
     normalize_openrouter_base_url,
@@ -40,6 +41,17 @@ _TRUE_LITERALS: Final[frozenset[str]] = frozenset({"1", "true", "t", "yes", "y",
 _INT_ADAPTER: Final[TypeAdapter[int]] = TypeAdapter(int)
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored provider_config use_managed_identity value (untrusted scalar)",
+    source_param="value",
+    suppresses=("R5",),
+    invariant=(
+        "recognized false-y forms return False, recognized truthy forms return True, and any "
+        "ambiguous present value fails closed to True (policy error fires); never raises"
+    ),
+    non_raising=True,
+)
 def _provider_config_enables_managed_identity(value: object) -> bool:
     """Return whether a raw web-authored value enables managed identity.
 
@@ -63,6 +75,18 @@ def _provider_config_enables_managed_identity(value: object) -> bool:
     return bool(value)
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored RAG provider config (untrusted composer-author options mapping)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "returns MANAGED_IDENTITY_POLICY_ERROR only when a well-formed azure_search "
+        "provider_config enables managed identity; any missing or malformed key fails "
+        "closed to None (no policy error) and never raises"
+    ),
+    non_raising=True,
+)
 def web_rag_provider_config_policy_error(options: Mapping[str, Any]) -> str | None:
     """Reject web-authored RAG Azure Search configs that enable managed identity."""
     if options.get("provider") != "azure_search":
@@ -88,6 +112,18 @@ def _positive_int_or_none(value: object) -> int | None:
     return None
 
 
+@trust_boundary(
+    tier=3,
+    source="web/composer-authored LLM transform options (untrusted author-supplied mapping)",
+    source_param="options",
+    suppresses=("R1",),
+    invariant=(
+        "absent 'queries' means no multi-query retry-budget policy applies (None); a "
+        "malformed or unbounded retry budget returns LLM_RETRY_BUDGET_POLICY_ERROR; "
+        "never raises on malformed options"
+    ),
+    non_raising=True,
+)
 def web_llm_retry_budget_policy_error(plugin: str | None, options: Mapping[str, Any]) -> str | None:
     """Reject web-authored sequential multi-query LLM configs with unbounded local retries."""
     if plugin != "llm":
@@ -108,6 +144,18 @@ def web_llm_retry_budget_policy_error(plugin: str | None, options: Mapping[str, 
     return None
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored pipeline LLM provider config (untrusted author-supplied options mapping)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "omitted base_url falls back to the canonical OpenRouter endpoint (None); an "
+        "explicit base_url is rejected with LLM_BASE_URL_POLICY_ERROR unless it "
+        "normalises to the canonical endpoint; never raises on malformed options"
+    ),
+    non_raising=True,
+)
 def web_llm_base_url_policy_error(plugin: str | None, options: Mapping[str, Any]) -> str | None:
     """Reject web-authored OpenRouter LLM configs that override base_url.
 

@@ -6,6 +6,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.secrets import collect_credential_field_violations
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.state import CompositionState, SourceSpec
@@ -78,6 +79,18 @@ class SeedCompositionStateRequest(BaseModel):
     state: dict[str, Any]
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored source options from a pasted/seeded composition state",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "missing or non-string path values are skipped (False); a hostile string value "
+        "raises ValueError from path resolution rather than being coerced"
+    ),
+    test_ref="tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_source_options_reference_blob_storage_raises_on_nul_byte_path",
+    test_fingerprint="18ac99a70b815badb2f8ef53eb3061e7cb3d8b13299965bc591e559d2d961bf9",
+)
 def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_dir: str) -> bool:
     allowed_dirs = allowed_source_directories(data_dir)
     for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
@@ -90,6 +103,18 @@ def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_d
     return False
 
 
+@trust_boundary(
+    tier=3,
+    source="pasted/seeded CompositionState carrying web-authored source options",
+    source_param="state",
+    suppresses=("R1",),
+    invariant=(
+        "raises HTTPException 400 for any source whose options reference session blob storage "
+        "without a blob_ref binding; blob_ref-bound and non-blob sources pass"
+    ),
+    test_ref="tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_unbound_blob_storage_sources_raises_400_on_unbound_blob_path",
+    test_fingerprint="bdb265d5ce47ac3963b67735a2d485acdf4bc93c9d091f9b6c2da9c0571ca9a9",
+)
 def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: str) -> None:
     for source_name, source in state.sources.items():
         if source.options.get("blob_ref") is not None:

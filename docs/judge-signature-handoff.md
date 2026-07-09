@@ -30,6 +30,36 @@ keys re-key) is an assertion the operator step re-derives from the live source
 tree before it writes anything. The bundle is a worklist and an audit record,
 not a grant.
 
+## Judging runs on the agentic harness with tool access (2026-07-09 policy)
+
+All judging — including the **final signature verdict** — runs via the agentic
+harness (`--judge-transport agent`) with read-only tool access
+(`--judge-tools readonly`). The judge may Read/Grep/Glob within the source tree
+and allowlist dir (fail-closed PreToolUse containment guard) before ruling.
+
+Why: the excerpt-blinded judge systematically misjudged boundary code it could
+not see — verdicts flipped on whether a function's `def` line happened to fall
+inside the excerpt window, and whole rationale families were blocked for
+"missing" context that existed one screen away. The blind-judge campaigns ended
+in bulk operator overrides, which is a worse audit outcome than an informed
+verdict: the extra context is critical to getting good outcomes that don't
+require manually excluding everything.
+
+What this does NOT change:
+
+- **[O1] custody is untouched.** Tool access is read-only context for the
+  judge; the HMAC key stays operator-only and signing still never runs in CI.
+- **No raw bytes in signed YAML.** The original blinding existed so tool-read
+  (unscrubbed) source bytes could not enter signed rationales. That invariant
+  moved from input blinding to output scrubbing: in readonly mode the judge's
+  rationale passes through `scrub_secrets` (the same curated pattern set the
+  excerpt goes through) before it is printed or persisted.
+- `--judge-tools readonly` still requires `--judge-transport agent`; the
+  OpenRouter path has no tool loop and is rejected.
+
+Blinded mode (`--judge-tools none`) remains available and byte-identical to the
+historical behavior; entries signed before 2026-07-09 were produced under it.
+
 ## Actors and the seam
 
 ```

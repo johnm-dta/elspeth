@@ -1328,6 +1328,14 @@ class TestQueryDuplicateColumns:
 class TestQueryResultLimit:
     """Regression coverage for bounded raw MCP query results."""
 
+    def test_query_rejects_non_integer_limit(self) -> None:
+        """Tier-3 boundary: a caller-controlled non-int limit is rejected before any DB work."""
+        from elspeth.mcp.analyzers.queries import query
+
+        setup = make_recorder_with_run(run_id="bad-limit")
+        with pytest.raises(TypeError, match="query limit must be integer"):
+            query(setup.db, setup.factory, "SELECT 1", limit="50")  # type: ignore[arg-type]
+
     def test_query_uses_fetchmany_not_fetchall(self) -> None:
         """Raw query must not materialize every selected row before limiting."""
         from elspeth.mcp.analyzers.queries import query

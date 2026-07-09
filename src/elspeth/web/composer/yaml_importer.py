@@ -85,6 +85,15 @@ def _require_sequence(value: Any, path: str) -> Sequence[Any]:
     raise RuntimeYamlImportError(f"{path} must be a list, got {type(value).__name__}")
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored pipeline YAML entry mapping (untrusted import payload)",
+    source_param="entry",
+    suppresses=("R1", "R5"),
+    invariant="raises RuntimeYamlImportError unless the key holds a non-empty string",
+    test_ref="tests/unit/web/composer/test_yaml_importer.py::test_require_str_rejects_non_string_value",
+    test_fingerprint="94159e1bc6a7e13e0eeb7e72912b0a3fa036bf3091793e61c1893ab75b61722f",
+)
 def _require_str(entry: Mapping[str, Any], key: str, path: str) -> str:
     value = entry.get(key)
     if isinstance(value, str) and value:
@@ -129,6 +138,18 @@ def _string_tuple(value: Any, path: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored pipeline YAML source entry (untrusted import payload)",
+    source_param="entry",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "raises RuntimeYamlImportError on non-mapping entries, missing plugin/on_success, "
+        "or inline blob_ref; a missing or malformed on_validation_failure falls back to 'discard'"
+    ),
+    test_ref="tests/unit/web/composer/test_yaml_importer.py::test_source_from_runtime_entry_rejects_non_mapping_entry",
+    test_fingerprint="464ba44200f35d34d3eed43f62f4a50595385f53a9879dde0a9bd1e898dc8bae",
+)
 def _source_from_runtime_entry(source_name: str, entry: Any) -> SourceSpec:
     source = _require_mapping(entry, f"sources.{source_name}")
     options = dict(_optional_mapping(source.get("options"), f"sources.{source_name}.options"))
@@ -148,6 +169,19 @@ def _source_from_runtime_entry(source_name: str, entry: Any) -> SourceSpec:
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored pipeline YAML node section (untrusted import payload)",
+    source_param="section",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "raises RuntimeYamlImportError on non-sequence sections, non-mapping entries, and "
+        "missing or mistyped required node fields; optional fields (routes, fork_to, "
+        "branches, trigger) are read permissively and validated when present"
+    ),
+    test_ref="tests/unit/web/composer/test_yaml_importer.py::test_nodes_from_runtime_list_rejects_non_sequence_section",
+    test_fingerprint="7c2c5adda9b620f4628b42f0ece20f0b6c403e3fad0890a22ba38dacc86b0a3d",
+)
 def _nodes_from_runtime_list(section: Any, section_name: str, node_type: NodeType) -> list[NodeSpec]:
     if section is None:
         return []
@@ -235,6 +269,15 @@ def _nodes_from_runtime_list(section: Any, section_name: str, node_type: NodeTyp
     return nodes
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored pipeline YAML sinks mapping (untrusted import payload)",
+    source_param="sinks",
+    suppresses=("R1", "R5"),
+    invariant=("raises RuntimeYamlImportError on non-mapping sinks, non-string sink names, and missing plugin/on_write_failure fields"),
+    test_ref="tests/unit/web/composer/test_yaml_importer.py::test_outputs_from_runtime_sinks_rejects_non_mapping_sinks",
+    test_fingerprint="b44ac151ec41c1923352de32ff62370b062c753adf1edd1a973c46aa3bef64a7",
+)
 def _outputs_from_runtime_sinks(sinks: Any) -> tuple[OutputSpec, ...]:
     if sinks is None:
         return ()

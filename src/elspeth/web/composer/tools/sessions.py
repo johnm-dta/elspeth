@@ -1089,11 +1089,27 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM composer get_pipeline_state tool-call component argument",
+    source_param="component",
+    suppresses=("R5",),
+    invariant="returns False for non-string or non-alias component values; never raises on component",
+    non_raising=True,
+)
 def _is_full_state_component_alias(component: Any) -> bool:
     """Return whether a component argument explicitly requests full state."""
     return isinstance(component, str) and component.strip().lower() in _FULL_STATE_COMPONENT_ALIAS_SET
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM composer tool-call arguments",
+    source_param="args",
+    suppresses=("R1",),
+    invariant="omitted component returns full state; unknown component returns a repairable failure result; never raises on args",
+    non_raising=True,
+)
 def _execute_get_pipeline_state(
     args: dict[str, Any],
     state: CompositionState,

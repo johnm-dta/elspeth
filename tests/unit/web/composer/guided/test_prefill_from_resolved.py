@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.guided.emitters import (
     build_step_1_schema_form_turn_from_resolved,
     build_step_2_schema_form_turn_from_resolved,
 )
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.resolved import (
     SinkOutputResolved,
     SinkResolved,
@@ -74,8 +77,8 @@ def test_json_source_schema_marks_on_validation_failure_required_no_default() ->
 
 
 def test_source_resolved_round_trips_on_validation_failure() -> None:
-    """to_dict/from_dict preserves the new field; from_dict defaults it to
-    'discard' for legacy records serialized before the field existed."""
+    """to_dict/from_dict preserves the field; a record missing it is malformed
+    and crashes (Tier-1 strict rehydrate — no compat default)."""
     source = SourceResolved(
         plugin="json",
         options={"schema": {"mode": "observed"}},
@@ -87,8 +90,9 @@ def test_source_resolved_round_trips_on_validation_failure() -> None:
     assert payload["on_validation_failure"] == "quarantine_sink"
     assert SourceResolved.from_dict(payload).on_validation_failure == "quarantine_sink"
 
-    legacy = {k: v for k, v in payload.items() if k != "on_validation_failure"}
-    assert SourceResolved.from_dict(legacy).on_validation_failure == "discard"
+    truncated = {k: v for k, v in payload.items() if k != "on_validation_failure"}
+    with pytest.raises(InvariantError):
+        SourceResolved.from_dict(truncated)
 
 
 def test_sink_prefill_carries_applied_options() -> None:
@@ -108,3 +112,17 @@ def test_sink_prefill_carries_applied_options() -> None:
     assert turn["payload"]["plugin"] == "json"
     assert turn["payload"]["prefilled"]["path"] == "/out/y.jsonl"
     assert turn["payload"]["prefilled"]["collision_policy"] == "auto_increment"
+
+
+def test_resolve_blob_ref_path_raises_on_unresolvable_blob_ref() -> None:
+    """A blob:<ref> sentinel path with no session engine to resolve it must crash, not commit."""
+    from elspeth.web.composer.guided.steps import _resolve_blob_ref_path
+
+    resolved = SourceResolved(
+        plugin="csv",
+        options={"path": "blob:deadbeef-0000-0000-0000-000000000000"},
+        observed_columns=(),
+        sample_rows=(),
+    )
+    with pytest.raises(InvariantError, match="blob:<ref>"):
+        _resolve_blob_ref_path(resolved, session_engine=None, session_id=None)

@@ -1,11 +1,107 @@
-allow_hits: []
+allow_hits:
+- key: tui/lineage_view.py:R1:_append_node:fp=e9fafd54ce88cfd6
+  owner: john
+  reason: |-
+    `tui/lineage_view.py:196` is reading a deliberately sparse, locally derived adjacency index, not a required Tier-1 audit field: `outgoing_edges = _sort_edges(outgoing_by_node.get(node.node_id, []))`. The enclosing builder creates `outgoing_by_node` as `defaultdict(list)` at `tui/lineage_view.py:76` and only appends entries for nodes that actually have valid outgoing edges at `tui/lineage_view.py:80-83`, after rejecting edges whose endpoints are absent from `node_by_id`. In `_append_node`, a missing `node.node_id` in `outgoing_by_node` therefore means "leaf node with no outgoing edges", which is rendered through `has_children=bool(outgoing_edges or token_children)` at `tui/lineage_view.py:208`. The same function still lets real graph corruption crash where the child node must exist: `child = node_by_id[edge.to_node_id]` at `tui/lineage_view.py:230`. This suppression depends on `outgoing_by_node` remaining a sparse adjacency map whose absent key means no outgoing edges; if it becomes a complete mandatory audit-data map, or if required child lookup is softened, this rationale no longer applies.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T22:18:22.889548+00:00'
+  judge_model: 'claude-opus-4-8[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.8
+  judge_rationale: |-
+    RULE MISFIRES: R1 assumes a missing key signals a bug, but `outgoing_by_node` is a deliberately sparse source→edges adjacency index (built locally, populated only for nodes that have valid outgoing edges), where an absent key is the designed representation of a leaf node with no outgoing edges — a valid, expected state that the code handles meaningfully via `has_children=bool(outgoing_edges or token_children)` at line 208. The excerpt confirms this leaf/edge-iteration semantics, and the rationale credibly shows the code does NOT launder real corruption: required child lookups still crash directly via `node_by_id[edge.to_node_id]` (line 230), so genuine graph-integrity breaks surface. This is not external Tier-3 data flowing from a boundary parameter, so the @trust_boundary decorator does not apply. The rationale is site-specific, cites exact structure, states its own falsifying condition, and duplicate_count is 0; I could not directly re-read lines 76/230 (secret-scrubber denied the file), hence slightly reduced confidence.
+  judge_signature_version: 2
+  scope_fingerprint: d6227c77f4762170f9238f9bab60a29e0a333839202ef18bf2032eadaf8a4d17
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[7]/value/args[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c7216e97b555babfeeaca6c9f8d56a57b8269dcf3708cc346145db2e5cede72f'
+- key: tui/screens/explain_screen.py:R1:ExplainScreen:_artifact_for_lineage:fp=e6ffb4d9fa3b5b56
+  owner: john
+  reason: |-
+    `tui/screens/explain_screen.py:205-208` constructs `artifacts_by_state_id` as an intentionally sparse presentation index: `"artifacts_by_state_id: dict[str, list[Artifact]] = {}"` and only states with persisted artifacts are inserted via `"artifacts_by_state_id.setdefault(artifact.produced_by_state_id, []).append(artifact)"`. `_artifact_for_lineage` then walks every lineage state and treats absence from that sparse index as the expected “this state produced no artifact” case: at `tui/screens/explain_screen.py:309`, `"artifacts = artifacts_by_state_id.get(state.state_id, ())"`, followed by `if artifacts: return artifacts[-1]` and `return None`. This is not a Tier-1 audit-data invariant lookup where a missing key indicates corruption; it is an optional reverse-index lookup in the TUI display path, and the function’s return type is explicitly `Artifact | None`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T22:39:33.480645+00:00'
+  judge_model: 'claude-opus-4-8[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES. R1's premise is that a missing key signals a schema/contract bug that direct indexing should surface as KeyError, but the code at explain_screen.py:205-208 constructs `artifacts_by_state_id` as a deliberately partial index — it starts `{}` and only `setdefault(...).append`s entries for states that actually produced an artifact, so the vast majority of lineage states are legitimately absent. `_artifact_for_lineage` (309-312) walks every reversed state and treats absence as the expected 'this state produced no artifact' case, returning the declared `Artifact | None`; direct `artifacts_by_state_id[state.state_id]` would KeyError on the normal path. No first-party contract guarantees every state_id is a key, so this is an optional sparse-index lookup, not a defensive suppression on Tier-1 audit data. The decorator does not apply: the function takes only first-party-constructed arguments, and the subject is not rooted at an external parameter.
+  judge_signature_version: 2
+  scope_fingerprint: a87f578703bb3a17cb931a0dbdc50be76a6ee45a76b0b95addd63ecd0ed8a34a
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[23]/body[9]/body[1]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:e9e099da3a269705482f9128d1d892bf64f1ef399bd5a5e2c6b2351453357789'
+- key: tui/screens/explain_screen.py:R1:ExplainScreen:on_tree_select:fp=01464caccfb7b1d5
+  owner: john
+  reason: |-
+    `tui/screens/explain_screen.py:346` is an intentional optional cache lookup for display enrichment, not a Tier-1 audit-data read that must crash. The loaded-state caches are deliberately partial: `tui/screens/explain_screen.py:218-219` sets `latest_state_by_node_id` to `{}` when a focused lineage exists, so selecting a node outside the focused token path legitimately has no cached execution state. The call then passes that optional value as `state_for_display=state_for_display` with `scan_for_state=False` (`tui/screens/explain_screen.py:347-352`), and `_load_node_state` treats absence as a prescribed display-only condition: it only adds execution fields when `state_for_display is not None` (`tui/screens/explain_screen.py:471-473`) and otherwise returns the structural node detail (`tui/screens/explain_screen.py:480`). The suppression is therefore bound to the current two-cache fallback expression: `state_for_display = self._state.focused_state_by_node_id.get(node_id) or self._state.latest_state_by_node_id.get(node_id)`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T22:40:17.212431+00:00'
+  judge_model: 'claude-opus-4-8[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES. The `.get(node_id)` is a membership lookup on two deliberately partial in-memory caches, not a defensive read of guaranteed-present Tier-1 audit data. I verified the cited structure: `latest_state_by_node_id` is set to `{}` whenever a focused lineage exists (explain_screen.py:218-219), and `focused_state_by_node_id` holds only states along the focused token path (line 210), so selecting a node outside that path legitimately has no cached entry. Absence is an in-band, designed condition handled honestly — `_load_node_state` adds execution fields only when `state_for_display is not None` (line 471-473) and otherwise returns the structural node detail (line 480), so None means "display-only," not a fabricated default. Direct `[node_id]` access would raise KeyError on a valid "no state for this node" selection, which is not a schema bug; the rule's premise that a missing key indicates a contract violation is false here. The subject is rooted at `self._state`, not the `selection` parameter, so no @trust_boundary nudge applies.
+  judge_signature_version: 2
+  scope_fingerprint: f3ab79e14205dba03bd22f871c8cccbbd79177151612198bc33c3c3552027473
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[23]/body[11]/body[4]/body[0]/value/values[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:668095a697e8a4fe1ae238406c8ca9dc1802600418bfd149ecdc7dc4defa1f81'
+- key: tui/screens/explain_screen.py:R1:ExplainScreen:on_tree_select:fp=d9de8781b120fafc
+  owner: john
+  reason: |-
+    This is an intentional partial-cache lookup for TUI display enrichment, not a defensive read of required Tier-1 audit data. In `src/elspeth/tui/screens/explain_screen.py:186-220`, both maps are built as optional node-state indexes: `focused_state_by_node_id = {state.node_id: state for state in lineage_result.node_states}` only covers the focused token path, and `latest_state_by_node_id` is only populated from recorded node states when there is no focused token. The selected node itself is still validated through the node table at `src/elspeth/tui/screens/explain_screen.py:456-461` via `node = factory.data_flow.get_node(node_id, run_id)` followed by `if node is None: return None`. The `.get()` at `src/elspeth/tui/screens/explain_screen.py:346` only decides whether optional execution-state fields should be added; `src/elspeth/tui/screens/explain_screen.py:471-480` explicitly treats `state_for_display is None` as a valid structure-only detail result. Future drift that made `focused_state_by_node_id` or `latest_state_by_node_id` total over every selectable node, or made missing execution state impossible, would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T13:13:37.289295+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES. The two dicts are partial indexes by design — `focused_state_by_node_id` only covers the focused token path, `latest_state_by_node_id` is populated only when no focused token exists — so a missing key is a normal, expected outcome for a selectable node, not a broken invariant. The `.get()` here is not a defensive re-check of a shape our code guarantees; it's the intended lookup semantics (absent → None → structure-only detail), and downstream code at 471-480 explicitly treats None as valid. Direct subscript would spuriously KeyError on legitimate selections. The rationale identifies the maps' partiality, points to the downstream None-tolerant consumer, and names the drift conditions that would invalidate the suppression.
+  judge_signature_version: 2
+  scope_fingerprint: f3ab79e14205dba03bd22f871c8cccbbd79177151612198bc33c3c3552027473
+  judge_transport: openrouter
+  ast_path: 'body[23]/body[11]/body[4]/body[0]/value/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:2331ac8f7d65a88130c92a1ee5a2565f17257967dbbdf89e3ba353e4f8587f8b'
+- key: tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:fp=837c05db00cf931c
+  owner: john
+  reason: |-
+    This site is a legitimate sparse-index lookup, not defensive access to required audit data. In `src/elspeth/tui/widgets/lineage_tree.py:120`, `_build_tree` creates a local derived map, `tokens_by_sink: dict[str, list[TreeNode]] = {}`. Lines 136-140 populate that map only for tokens whose `path` has a terminal node: `terminal_node_id = path[-1]` followed by `tokens_by_sink[terminal_node_id].append(token_node)`. The flagged line, `token_children = tuple(tokens_by_sink.get(sink_node_id, [])) if sink_node_id is not None else ()`, is then iterating all sinks and asking whether this sink has any token leaves. A sink with no terminal tokens is an expected empty-child case, not missing required Tier-1 lineage data. The surrounding required lineage fields still use crash-on-missing access, e.g. `token["token_id"]`, `token["row_id"]`, `token["path"]`, `sink["name"]`, and `sink["node_id"]`, so future drift that changes `tokens_by_sink` from this locally built sparse grouping into a raw audit/lineage payload lookup would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-10-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-07-08T13:13:55.690027+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES. The `.get()` here is not defensive access to required Tier-1 audit data — `tokens_by_sink` is a locally-constructed sparse index built moments earlier in the same function (lines 120, 136-140), populated only for sinks that actually have terminal tokens. A missing key represents the legitimate 'sink has no tokens' case, and the empty-list default preserves meaning (no tokens → no children), not fabrication of absent audit data. The surrounding required lineage fields (`token['token_id']`, `sink['node_id']`, etc.) correctly use crash-on-missing direct subscript, confirming the author distinguished required from sparse access. R1's premise (hiding missing-key bugs in a required field) does not apply to a sparse local index.
+  judge_signature_version: 2
+  scope_fingerprint: 9f36874eded917b1d9a936b1fbb464490b76630d5b7781495041fcda378ed40b
+  judge_transport: openrouter
+  ast_path: 'body[6]/body[2]/body[9]/body[2]/value/body/args[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:8a8bcc30943ea037ad723acfa902f40b233d091a6fad06f5121de3abd3afbfda'
+
 per_file_rules:
 - pattern: tui/screens/explain_screen.py
   rules:
   - R5
   reason: ScreenState and NodeState detail projection guards, including explicit selection-state checks for CodeQL-visible initialization
   expires: null
-  max_hits: 9
+  max_hits: 11
 - pattern: tui/widgets/node_detail.py
   rules:
   - R5
@@ -17,4 +113,4 @@ per_file_rules:
   - R5
   reason: Offensive isinstance checks in __post_init__ — crash on invalid type per CLAUDE.md freeze_fields pattern
   expires: null
-  max_hits: 3
+  max_hits: 2

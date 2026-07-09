@@ -120,8 +120,11 @@ def _add_judge_tools_arg(parser: argparse.ArgumentParser) -> None:
     'readonly' lets the agent transport Read/Grep/Glob within the source tree +
     allowlist dir (fail-closed PreToolUse guard) to resolve a would-be block for
     lack of context. Requires ``--judge-transport agent`` (the OpenRouter path
-    has no tool loop). Signing paths reject it at runtime so raw tool-read bytes
-    cannot enter signed YAML rationales.
+    has no tool loop). Since 2026-07-09 signing paths accept it too — the
+    excerpt-blinded signing judge systematically misjudged boundary code it
+    could not see, forcing bulk operator overrides. In readonly mode the
+    judge's rationale is passed through ``scrub_secrets`` before it is printed
+    or persisted, so raw tool-read bytes still cannot enter signed YAML.
     """
     parser.add_argument(
         "--judge-tools",
@@ -131,20 +134,11 @@ def _add_judge_tools_arg(parser: argparse.ArgumentParser) -> None:
             "Read-only tool access for the judge. 'none' (default) is blinded "
             "(excerpt only). 'readonly' lets the agent transport Read/Grep/Glob "
             "within src + allowlist dir to investigate; requires --judge-transport "
-            "agent. Less reproducible than blinded mode; use for hard-case "
-            "non-signing adjudication, not deterministic decay sweeps. Commands "
-            "that write signed allowlist entries reject readonly mode."
+            "agent. Less reproducible than blinded mode. Valid on signing paths "
+            "since 2026-07-09; readonly-mode judge rationales are secret-scrubbed "
+            "before being persisted into signed allowlist entries."
         ),
     )
-
-
-def _reject_readonly_judge_tools_for_signing(command_name: str) -> int:
-    sys.stderr.write(
-        f"--judge-tools readonly is not supported for {command_name} because "
-        "signed judge rationales must be based only on the scrubbed excerpt. "
-        "Use reaudit with --judge-tools readonly for non-signing investigation.\n"
-    )
-    return 2
 
 
 def _non_empty_string(value: str) -> str:
@@ -1626,14 +1620,20 @@ def _run_justify(args: argparse.Namespace) -> int:
         return 2
 
     # Resolve the judge transport up front so a bad flag combination fails before
-    # any finding scan / HMAC handling. ``justify`` writes signed YAML carrying
-    # the judge's rationale verbatim; readonly tool mode lets the external agent
-    # read raw source bytes that do not pass through ``extract_safe_excerpt`` /
-    # ``scrub_secrets``. Keep signing paths blinded to the scrubbed excerpt.
+    # any finding scan / HMAC handling. Since 2026-07-09 (operator policy),
+    # signing paths ACCEPT ``--judge-tools readonly``: the excerpt-blinded judge
+    # produced systematic misjudgements that forced bulk operator overrides, so
+    # informed final-signature verdicts now outrank excerpt blinding. The
+    # original threat (raw tool-read bytes entering signed YAML rationales) is
+    # closed at the OUTPUT instead: in readonly mode the judge's rationale is
+    # passed through ``scrub_secrets`` before it is printed or persisted.
     transport: str = _CLI_TRANSPORT_CHOICES[args.judge_transport]
     tool_scope: AgentToolScope | None = None
     if args.judge_tools == "readonly":
-        return _reject_readonly_judge_tools_for_signing("justify")
+        if transport != TRANSPORT_AGENT:
+            sys.stderr.write("--judge-tools readonly requires --judge-transport agent (the openrouter transport has no tool loop).\n")
+            return 2
+        tool_scope = build_readonly_tool_scope(root=root, allowlist_dir=allowlist_dir)
 
     if args.operator_override:
         authorization_error = _operator_override_authorization_error()
@@ -1855,6 +1855,20 @@ def _run_justify(args: argparse.Namespace) -> int:
     except JudgeContractError as exc:
         sys.stderr.write(f"Judge contract error: {exc}\n")
         return 2
+
+    if tool_scope is not None:
+        # Readonly tool mode let the judge read raw (unscrubbed) source bytes,
+        # and its rationale is persisted verbatim into signed YAML — so the
+        # no-secrets-in-YAML invariant moves from input blinding to output
+        # scrubbing: apply the same curated secret-pattern set the excerpt
+        # goes through before the rationale is printed or persisted.
+        from dataclasses import replace as dataclass_replace
+
+        from elspeth_lints.core.source_excerpt import scrub_secrets
+
+        scrubbed_rationale = scrub_secrets(response.judge_rationale)
+        if scrubbed_rationale.redactions:
+            response = dataclass_replace(response, judge_rationale=scrubbed_rationale.text)
 
     # Resolve the verdict the entry will carry. If the operator
     # supplied --operator-override, the entry records
@@ -2693,6 +2707,54 @@ def _is_allow_hits_block_line(line: str) -> bool:
     return line.startswith("- ") or line.startswith(" ") or line.lstrip().startswith("#")
 
 
+def _require_single_allow_hits_header(lines: Sequence[str], target_yaml: Path) -> None:
+    """Refuse to edit a file carrying duplicate ``allow_hits`` mapping keys.
+
+    YAML keeps only the LAST duplicate mapping key, so rows appended under an
+    earlier ``allow_hits:`` block are silently invisible to the loader — signed
+    entries vanish without any error (observed 2026-07-09: three freshly signed
+    tui.yaml rows landed in a dead first block). Editing such a file makes the
+    damage worse, so every text-surgery path aborts until the blocks are merged.
+    """
+    headers = [idx + 1 for idx, line in enumerate(lines) if line.rstrip("\r\n") in ("allow_hits:", "allow_hits: []")]
+    if len(headers) > 1:
+        raise ValueError(
+            f"{target_yaml}: {len(headers)} allow_hits blocks found (lines {headers}); YAML keeps only the "
+            "last duplicate mapping key, so rows in earlier blocks are invisible to the loader. Merge the "
+            "blocks into one before editing."
+        )
+
+
+def _normalize_empty_allow_hits(text: str) -> str:
+    """Rewrite a bare ``allow_hits:`` header to ``allow_hits: []`` when its block has no entries.
+
+    Text surgery that removes the last entry leaves ``allow_hits:`` with
+    nothing under it, which parses as ``None`` and fails the loader's
+    "allow_hits must be a list" shape check — bricking every subsequent
+    allowlist load (including justify's similarity scan) until hand-repaired.
+    """
+    lines = text.splitlines(keepends=True)
+    header_index = None
+    for idx, line in enumerate(lines):
+        if line.rstrip("\r\n") == "allow_hits:":
+            header_index = idx
+            break
+    if header_index is None:
+        return text
+    for idx in range(header_index + 1, len(lines)):
+        line = lines[idx]
+        if not line.strip():
+            continue
+        if line.startswith("- "):
+            return text
+        if _is_allow_hits_block_line(line):
+            continue
+        break
+    eol = "\r\n" if lines[header_index].endswith("\r\n") else "\n"
+    lines[header_index] = f"allow_hits: []{eol}"
+    return "".join(lines)
+
+
 def _upsert_audit_review_in_yaml(target_yaml: Path, *, entry_key: str, review_text: str) -> None:
     """Insert or replace one nested ``audit_review`` block in an allowlist entry."""
 
@@ -2701,6 +2763,7 @@ def _upsert_audit_review_in_yaml(target_yaml: Path, *, entry_key: str, review_te
             raise ValueError(f"{target_yaml}: allowlist YAML file is required")
 
         lines = current.splitlines(keepends=True)
+        _require_single_allow_hits_header(lines, target_yaml)
         header_index = None
         for idx, line in enumerate(lines):
             if line.rstrip("\r\n") == "allow_hits:":
@@ -2774,13 +2837,23 @@ def _append_entry_to_yaml(target_yaml: Path, entry_text: str) -> None:
             return f"allow_hits:\n{entry_text}"
 
         lines = current.splitlines(keepends=True)
+        _require_single_allow_hits_header(lines, target_yaml)
 
         # Locate the ``allow_hits:`` header line; if absent, append the
-        # whole block at the bottom.
+        # whole block at the bottom. An explicit-empty ``allow_hits: []``
+        # header (left by removing a block's last entry) is reopened in
+        # place — appending a second ``allow_hits:`` block would create a
+        # duplicate mapping key.
         header_index = None
         for idx, line in enumerate(lines):
-            if line.rstrip("\r\n") == "allow_hits:":
+            stripped = line.rstrip("\r\n")
+            if stripped == "allow_hits:":
                 header_index = idx
+                break
+            if stripped == "allow_hits: []":
+                header_index = idx
+                eol = "\r\n" if line.endswith("\r\n") else "\n"
+                lines[idx] = f"allow_hits:{eol}"
                 break
 
         if header_index is None:
@@ -3274,8 +3347,9 @@ def _run_sign_judge_signatures(args: argparse.Namespace) -> int:
     existing ``justify`` implementation. If a judge call fails, the stale row is
     restored so a rejected suppression does not erase the remaining backlog.
     """
-    if args.judge_tools == "readonly":
-        return _reject_readonly_judge_tools_for_signing("sign-judge-signatures")
+    if args.judge_tools == "readonly" and _CLI_TRANSPORT_CHOICES[args.judge_transport] != TRANSPORT_AGENT:
+        sys.stderr.write("--judge-tools readonly requires --judge-transport agent (the openrouter transport has no tool loop).\n")
+        return 2
 
     from elspeth_lints.core.allowlist import _judge_metadata_hmac_key
     from elspeth_lints.core.judge_signature_diagnosis import diagnose_judge_signatures
@@ -3560,6 +3634,7 @@ def _pop_allow_hits_entry(target_yaml: Path, entry_key: str) -> str:
             raise ValueError(f"{target_yaml}: allowlist YAML file is required")
 
         lines = current.splitlines(keepends=True)
+        _require_single_allow_hits_header(lines, target_yaml)
         header_index = None
         for idx, line in enumerate(lines):
             if line.rstrip("\r\n") == "allow_hits:":
@@ -3591,7 +3666,7 @@ def _pop_allow_hits_entry(target_yaml: Path, entry_key: str) -> str:
         entry_start, entry_end = matching_ranges[0]
         removed_entry = "".join(lines[entry_start:entry_end])
         new_lines = [*lines[:entry_start], *lines[entry_end:]]
-        return "".join(new_lines)
+        return _normalize_empty_allow_hits("".join(new_lines))
 
     atomic_update_text(target_yaml, remove_from, encoding="utf-8", create_parent=False)
     if removed_entry is None:
@@ -3609,6 +3684,7 @@ def _remove_allow_hits_entries(target_yaml: Path, entry_keys: set[str]) -> None:
             raise ValueError(f"{target_yaml}: allowlist YAML file is required")
 
         lines = current.splitlines(keepends=True)
+        _require_single_allow_hits_header(lines, target_yaml)
         header_index = None
         for idx, line in enumerate(lines):
             if line.rstrip("\r\n") == "allow_hits:":
@@ -3646,7 +3722,7 @@ def _remove_allow_hits_entries(target_yaml: Path, entry_keys: set[str]) -> None:
         for key in sorted(entry_keys, key=lambda item: ranges_by_key[item][0], reverse=True):
             entry_start, entry_end = ranges_by_key[key]
             del new_lines[entry_start:entry_end]
-        return "".join(new_lines)
+        return _normalize_empty_allow_hits("".join(new_lines))
 
     atomic_update_text(target_yaml, remove_from, encoding="utf-8", create_parent=False)
 
@@ -3735,8 +3811,9 @@ def _run_sign_bundle(args: argparse.Namespace) -> int:
     place, restores/skips the blocked action, and returns non-zero with a
     per-action report.
     """
-    if args.judge_tools == "readonly":
-        return _reject_readonly_judge_tools_for_signing("sign-bundle")
+    if args.judge_tools == "readonly" and _CLI_TRANSPORT_CHOICES[args.judge_transport] != TRANSPORT_AGENT:
+        sys.stderr.write("--judge-tools readonly requires --judge-transport agent (the openrouter transport has no tool loop).\n")
+        return 2
 
     from elspeth_lints.core.allowlist import _judge_metadata_hmac_key
     from elspeth_lints.core.bundle_verify import verify_bundle_against_tree
@@ -4269,6 +4346,7 @@ def _rekey_entries_in_yaml(target_yaml: Path, specs: list[_RekeyRewriteSpec]) ->
             raise ValueError(f"{target_yaml}: allowlist YAML file is required")
 
         lines = current.splitlines(keepends=True)
+        _require_single_allow_hits_header(lines, target_yaml)
         header_index = None
         for idx, line in enumerate(lines):
             if line.rstrip("\r\n") == "allow_hits:":
@@ -4733,6 +4811,7 @@ def _rewrite_v1_entries_as_v2_in_yaml(target_yaml: Path, specs: list[_V2RewriteS
             raise ValueError(f"{target_yaml}: allowlist YAML file is required")
 
         lines = current.splitlines(keepends=True)
+        _require_single_allow_hits_header(lines, target_yaml)
         header_index = None
         for idx, line in enumerate(lines):
             if line.rstrip("\r\n") == "allow_hits:":

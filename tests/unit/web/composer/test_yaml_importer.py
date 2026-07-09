@@ -8,8 +8,32 @@ from elspeth.web.composer.yaml_generator import generate_public_yaml, generate_y
 from elspeth.web.composer.yaml_importer import (
     MAX_RUNTIME_YAML_IMPORT_CHARS,
     RuntimeYamlImportError,
+    _nodes_from_runtime_list,
+    _outputs_from_runtime_sinks,
+    _require_str,
+    _source_from_runtime_entry,
     composition_state_from_runtime_yaml,
 )
+
+
+def test_require_str_rejects_non_string_value() -> None:
+    with pytest.raises(RuntimeYamlImportError, match=r"sources\.s\.plugin must be a non-empty string"):
+        _require_str({"plugin": 7}, "plugin", "sources.s")
+
+
+def test_source_from_runtime_entry_rejects_non_mapping_entry() -> None:
+    with pytest.raises(RuntimeYamlImportError, match=r"sources\.s must be a mapping"):
+        _source_from_runtime_entry("s", ["not", "a", "mapping"])
+
+
+def test_nodes_from_runtime_list_rejects_non_sequence_section() -> None:
+    with pytest.raises(RuntimeYamlImportError, match="transforms must be a list"):
+        _nodes_from_runtime_list("not-a-list", "transforms", "transform")
+
+
+def test_outputs_from_runtime_sinks_rejects_non_mapping_sinks() -> None:
+    with pytest.raises(RuntimeYamlImportError, match="sinks must be a mapping"):
+        _outputs_from_runtime_sinks(["not", "a", "mapping"])
 
 
 def test_composition_state_from_runtime_yaml_rejects_non_mapping_root() -> None:

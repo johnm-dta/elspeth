@@ -1474,10 +1474,18 @@ class CoalesceExecutor:
         A completed/unknown key returns False — ``notify_branch_lost``'s own
         completed-keys check makes that replay a no-op.
         """
-        pending = self._pending.get((coalesce_name, row_id))
-        if pending is None:
+        key = (coalesce_name, row_id)
+        if key in self._pending:
+            return branch_name in self._pending[key].lost_branches
+        # Absent entry: distinguish the two legitimate states rather than
+        # conflating them into one silent default.
+        if key in self._completed_keys or self._check_landscape_for_completion(coalesce_name, row_id):
+            # Completed: the merge already resolved this row's losses;
+            # notify_branch_lost's completed-keys check no-ops the replay.
             return False
-        return branch_name in pending.lost_branches
+        # Never seen: the loss precedes the first branch arrival, so nothing
+        # is recorded yet — notify_branch_lost creates the entry and records it.
+        return False
 
     def notify_branch_lost(
         self,

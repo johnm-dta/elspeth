@@ -158,6 +158,14 @@ def _sync_get_blob(engine: Engine, blob_id: str, session_id: str | None = None) 
         return _blob_row_to_tool_dict(row)
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM composer tool-call blob_id argument",
+    source_param="blob_id",
+    suppresses=("R5",),
+    invariant="returns a repairable error message for non-string or non-UUID blob_id and None for canonical input; never raises on blob_id",
+    non_raising=True,
+)
 def _blob_id_uuid_validation_error(blob_id: Any) -> str | None:
     """Return a repairable boundary error when ``blob_id`` is not canonical."""
     if not isinstance(blob_id, str):

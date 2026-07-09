@@ -1299,6 +1299,18 @@ class ComposerServiceImpl:
         return None
 
     @staticmethod
+    @trust_boundary(
+        tier=3,
+        source="web-authored node/source options mapping (untrusted interpretation requirements)",
+        source_param="options",
+        suppresses=("R1", "R5"),
+        invariant=(
+            "returns the draft only when exactly one pending requirement matches "
+            "(kind, user_term); any missing, mistyped, or ambiguous requirement data "
+            "yields None and never raises"
+        ),
+        non_raising=True,
+    )
     def _matching_requirement_draft(
         options: Mapping[str, Any],
         *,
@@ -4751,6 +4763,17 @@ def _looks_like_advisor_prompt_injection(value: str) -> bool:
     return _ADVISOR_PROMPT_INJECTION_IGNORE_RE.search(value) is not None or _ADVISOR_PROMPT_INJECTION_CLEAN_RE.search(value) is not None
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored plugin options mapping (untrusted composer-author values)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "collects only string values under the advisor summary keys (flat and one "
+        "nested level); non-string and absent values are skipped, never raised on"
+    ),
+    non_raising=True,
+)
 def _advisor_prompt_option_values(options: Mapping[str, Any]) -> list[tuple[str, str]]:
     values: list[tuple[str, str]] = []
     for key in _ADVISOR_SUMMARY_PROMPT_VALUE_KEYS:
@@ -4996,6 +5019,16 @@ def _node_required_input_fields(node: NodeSpec) -> list[str]:
     return fields
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpec carrying web-authored plugin options (untrusted prompt_template value)",
+    source_param="node",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "returns the prompt_template string from the flat or nested options shape; absent or non-string values yield None and never raise"
+    ),
+    non_raising=True,
+)
 def _node_prompt_template(node: NodeSpec) -> str | None:
     """Return a node's ``prompt_template`` from the flat or nested options shape.
 

@@ -17,13 +17,18 @@ PluginClass = type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol
 
 
 class ConfigFieldPayload(TypedDict, total=False):
-    """JSON-ready view of one plugin config field."""
+    """JSON-ready view of one plugin config field.
+
+    Built exclusively from ``ConfigFieldSummary.model_dump(mode="json")``,
+    which always emits every field — ``description`` and ``default`` are
+    present-but-None when unset, never absent.
+    """
 
     name: Required[str]
     type: Required[str]
     required: Required[bool]
-    description: str | None
-    default: object | None
+    description: Required[str | None]
+    default: Required[object | None]
 
 
 class SecretRequirementPayload(TypedDict):
@@ -128,7 +133,7 @@ def format_plugin_inspect_text(payload: PluginInspectPayload) -> str:
         for field in config_fields:
             required = "required" if field["required"] else "optional"
             lines.append(f"  {field['name']} ({field['type']}, {required})")
-            if field.get("description"):
+            if field["description"]:
                 lines.append(f"    {field['description']}")
     else:
         lines.append("  (none)")

@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from sqlalchemy import Engine
 
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedStep
@@ -67,6 +68,18 @@ class StepHandlerResult:
     tool_result: ToolResult
 
 
+@trust_boundary(
+    tier=3,
+    source="committed SourceResolved carrying a web-authored path option (possibly a blob:<ref> sentinel)",
+    source_param="resolved",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "non-sentinel or absent paths pass through unchanged; a blob:<ref> sentinel that cannot "
+        "be resolved (no session engine/id, or the blob no longer exists) raises InvariantError"
+    ),
+    test_ref="tests/unit/web/composer/guided/test_prefill_from_resolved.py::test_resolve_blob_ref_path_raises_on_unresolvable_blob_ref",
+    test_fingerprint="8c5df0aeb31e64a24ee183b6a97722f0c91b3d76a0ed4ad36282aed5c535353f",
+)
 def _resolve_blob_ref_path(
     resolved: SourceResolved,
     *,
@@ -100,6 +113,18 @@ def _resolve_blob_ref_path(
     return dataclasses.replace(resolved, options=restored)
 
 
+@trust_boundary(
+    tier=3,
+    source="committed SourceResolved carrying web-authored options (untrusted path value)",
+    source_param="resolved",
+    suppresses=("R1",),
+    invariant=(
+        "an absent path option means no blob enrichment (commit proceeds unchanged); "
+        "malformed blob:<ref> sentinel paths are rejected upstream by _resolve_blob_ref_path, "
+        "which carries its own boundary; this function's own reads never raise"
+    ),
+    non_raising=True,
+)
 def handle_step_1_source(
     *,
     state: CompositionState,
@@ -200,6 +225,14 @@ def handle_step_1_source(
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored guided source options (untrusted path value)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=("returns () for any missing, mistyped, unresolvable, or non-allowlisted path; enrichment degrades, never raises"),
+    non_raising=True,
+)
 def _observed_columns_from_allowed_path(options: Mapping[str, Any], data_dir: str | None) -> tuple[str, ...]:
     """Derive observed columns from a committed local source path, or ``()``.
 
@@ -225,6 +258,17 @@ def _observed_columns_from_allowed_path(options: Mapping[str, Any], data_dir: st
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored guided source options (untrusted schema mapping)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "returns the options unchanged when the schema is absent or not a mapping; "
+        "only a well-formed schema without guaranteed_fields is enriched; never raises"
+    ),
+    non_raising=True,
+)
 def _source_options_with_guaranteed_fields(options: Mapping[str, Any], observed_columns: tuple[str, ...]) -> dict[str, object]:
     """Publish observed source fields into the committed schema contract."""
     enriched: dict[str, object] = dict(options)

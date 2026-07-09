@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from elspeth.contracts import NodeStateStatus
 from elspeth.contracts.coalesce_metadata import collision_value_fingerprint as _fingerprint_collision_value
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
@@ -609,6 +610,17 @@ def get_calls(db: LandscapeDB, factory: AnalyzerRepositories, state_id: str) -> 
 _VALUE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+@trust_boundary(
+    tier=3,
+    source="stored coalesce collision values re-read from audit context JSON (heterogeneous persisted shapes)",
+    source_param="value",
+    suppresses=("R5",),
+    invariant=(
+        "total boolean classifier: returns False for any value not matching the exact "
+        "redacted {value_hash, value_type} envelope; never raises"
+    ),
+    non_raising=True,
+)
 def _is_collision_value_fingerprint(value: Any) -> bool:
     """Return True when a stored collision value is already an audit-safe fingerprint."""
     return (
@@ -1034,6 +1046,15 @@ def _validate_readonly_sql(sql: str) -> None:
             raise ValueError(f"Query contains forbidden keyword: {keyword}")
 
 
+@trust_boundary(
+    tier=3,
+    source="MCP tool-call query arguments (caller-controlled limit)",
+    source_param="limit",
+    suppresses=("R5",),
+    invariant="rejects non-integer and bool limit with TypeError before range checks and fetchmany",
+    test_ref="tests/unit/mcp/test_analyzer_queries.py::TestQueryResultLimit::test_query_rejects_non_integer_limit",
+    test_fingerprint="a90ca8148b413c565391f57c3acc53219d7fd5000768564c5f2e098bdf7696f4",
+)
 def query(
     db: LandscapeDB,
     factory: AnalyzerRepositories,

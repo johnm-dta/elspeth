@@ -30,6 +30,7 @@ from typing import Any
 
 import yaml
 
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
@@ -40,10 +41,26 @@ from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
 _WEB_ONLY_OPTION_KEYS = frozenset({"blob_ref"}) | AUTHORING_METADATA_OPTION_KEYS
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored source options mapping (untrusted blob_ref value)",
+    source_param="options",
+    suppresses=("R1",),
+    invariant="returns True only when blob_ref is present and non-null; absent keys yield False, never raise",
+    non_raising=True,
+)
 def _has_blob_binding(options: dict[str, Any]) -> bool:
     return options.get("blob_ref") is not None
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored source options mapping (untrusted mode value)",
+    source_param="options",
+    suppresses=("R1",),
+    invariant="returns True only for the exact 'bind_source' mode string; absent or mistyped mode yields False, never raises",
+    non_raising=True,
+)
 def _has_bind_source_mode(options: dict[str, Any]) -> bool:
     return options.get("mode") == "bind_source"
 

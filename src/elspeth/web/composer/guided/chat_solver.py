@@ -26,6 +26,7 @@ from typing import Any, Final, cast
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
@@ -451,6 +452,17 @@ def _build_step_1_source_dynamic_block(
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="web-authored source schema option value (untrusted mapping)",
+    source_param="schema",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "returns None for a non-mapping schema; extracts only string mode and string-list "
+        "guaranteed_fields; malformed members are dropped, never raised on"
+    ),
+    non_raising=True,
+)
 def _llm_safe_schema_option(schema: Any) -> dict[str, Any] | None:
     if not isinstance(schema, Mapping):
         return None
@@ -466,6 +478,17 @@ def _llm_safe_schema_option(schema: Any) -> dict[str, Any] | None:
     return safe or {"shape": "object"}
 
 
+@trust_boundary(
+    tier=3,
+    source="committed SourceResolved carrying web-authored options (untrusted mapping values)",
+    source_param="current_source",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "builds the LLM revision-context payload from well-formed option values only; "
+        "non-mapping options degrade to empty, malformed rows/schema are dropped, never raised on"
+    ),
+    non_raising=True,
+)
 def _source_revision_context_for_llm(current_source: SourceResolved) -> dict[str, Any]:
     options = current_source.options if isinstance(current_source.options, Mapping) else {}
     payload: dict[str, Any] = {
@@ -550,6 +573,18 @@ def build_step_chat_context_block(
     return "\n".join(lines) + "\n"
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM-emitted resolve_source tool-call arguments (untrusted model output JSON)",
+    source_param="arguments",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "raises ValueError on non-object decode, missing keys, mistyped fields, or "
+        "scaffold-leaking assistant_message; never coerces malformed model output"
+    ),
+    test_ref="tests/unit/web/composer/guided/test_chat_solver.py::test_parse_non_string_on_validation_failure_raises",
+    test_fingerprint="1ec93dcfde3f57b3111f4ebe31b76a233f12a4490dac93d158cf688b720b083e",
+)
 def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | None) -> Step1SourceChatResolution:
     """Validate the resolve_source tool arguments from a LiteLLM response."""
     data = json.loads(arguments)
@@ -929,6 +964,18 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM-emitted resolve_sink tool-call arguments (untrusted model output JSON)",
+    source_param="arguments",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "raises ValueError on non-object decode, missing keys, mistyped output entries, "
+        "or more than one output (MVP cap); never coerces malformed model output"
+    ),
+    test_ref="tests/unit/web/composer/guided/test_chat_solver.py::test_parse_step_2_sink_rejects_non_object_arguments",
+    test_fingerprint="aabc76735b39fbea9806dfb0c320ad5b74984b74687d075435b5c150854dd8d3",
+)
 def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str]:
     """Validate the resolve_sink tool arguments. Returns (sink, assistant_message)."""
     data = json.loads(arguments)

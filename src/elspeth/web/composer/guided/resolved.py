@@ -50,11 +50,7 @@ class SourceResolved:
                 options=d["options"],
                 observed_columns=tuple(d["observed_columns"]),
                 sample_rows=tuple(dict(r) for r in d["sample_rows"]),
-                # Absent on a legacy record (serialized before this field existed):
-                # its historically-correct value was the hardcoded "discard" the
-                # commit handler always applied, so absence is deterministic, not a
-                # defect — default it rather than crashing the session rehydrate.
-                on_validation_failure=d.get("on_validation_failure", "discard"),
+                on_validation_failure=d["on_validation_failure"],
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"SourceResolved.from_dict: malformed record {d!r}") from exc

@@ -35,6 +35,7 @@ from elspeth.contracts.sink import (
     FILE_SINK_PLUGINS,
     LOCAL_RECOVERY_SINK_PLUGINS,
 )
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.config import (
     _MAX_NODE_NAME_LENGTH,
@@ -850,6 +851,18 @@ _RFC_RESERVED_DOMAIN_LABELS: tuple[str, ...] = (
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpec carrying web-authored web_scrape options (untrusted abuse_contact value)",
+    source_param="node",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "returns a high-severity ValidationEntry only for a well-formed abuse_contact at an "
+        "RFC-reserved domain; absent, mistyped, or malformed values yield None (sibling "
+        "plugin-schema rules report those) and never raise"
+    ),
+    non_raising=True,
+)
 def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> ValidationEntry | None:
     """Reject web_scrape.http.abuse_contact values at RFC-reserved domains.
 
@@ -893,6 +906,18 @@ def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> Validatio
     return None
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpec carrying web-authored web_scrape options (untrusted http identity fields)",
+    source_param="node",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "emits a high-severity ValidationEntry per placeholder-valued wire-visible HTTP "
+        "identity field; missing or mistyped options/http/field values are skipped "
+        "(no entry) and never raised on"
+    ),
+    non_raising=True,
+)
 def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[ValidationEntry, ...]:
     """Reject placeholder values in web_scrape's wire-visible HTTP identity fields."""
     if node.plugin != "web_scrape":
@@ -984,6 +1009,18 @@ def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
     return _locked_input_field_set(output.options, owner=f"output:{output.name}")
 
 
+@trust_boundary(
+    tier=3,
+    source="NodeSpecs carrying composer/LLM/user-authored options re-read from session state",
+    source_param="nodes",
+    suppresses=("R1",),
+    invariant=(
+        "optional node option flags (e.g. select_only) default at the read site; malformed "
+        "node config surfaces as blocking ValidationEntry results, never a raise (genuine "
+        "engine defects crash through via the config-probe re-raise guards)"
+    ),
+    non_raising=True,
+)
 def _check_schema_contracts(
     sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],

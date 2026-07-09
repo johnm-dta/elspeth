@@ -562,6 +562,7 @@ class TestGetGuidedAuditPayloadOrdering:
                     "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
                     "observed_columns": ["col_a"],
                     "sample_rows": [{"col_a": "x"}],
+                    "on_validation_failure": "discard",
                 },
                 "step_2_result": None,
                 "step_3_proposal": None,
@@ -604,6 +605,7 @@ class TestGetGuidedFullStateRebuild:
             "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
             "observed_columns": ["col_a", "col_b"],
             "sample_rows": [{"col_a": "x", "col_b": "1"}],
+            "on_validation_failure": "discard",
         }
 
     def _make_sink_resolved_dict(self) -> dict:

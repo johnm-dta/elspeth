@@ -23,6 +23,7 @@ from elspeth.web.composer.guided.chat_solver import (
     _build_step_1_source_dynamic_block,
     _build_step_2_sink_tool_prompt,
     _parse_step_1_source_tool_arguments,
+    _parse_step_2_sink_tool_arguments,
     build_step_chat_context_block,
     solve_step_chat,
 )
@@ -313,6 +314,12 @@ def test_parse_non_string_on_validation_failure_raises() -> None:
     """When the model sends a non-string value, reject at the Tier-3 boundary."""
     with pytest.raises(ValueError, match="on_validation_failure must be a string"):
         _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure=123), plugin_hint="json")
+
+
+def test_parse_step_2_sink_rejects_non_object_arguments() -> None:
+    """Malformed LLM resolve_sink arguments are rejected at the Tier-3 parse boundary."""
+    with pytest.raises(ValueError, match="must decode to an object"):
+        _parse_step_2_sink_tool_arguments('["not", "an", "object"]')
 
 
 def test_parse_rejects_tool_scaffolding_in_assistant_message() -> None:

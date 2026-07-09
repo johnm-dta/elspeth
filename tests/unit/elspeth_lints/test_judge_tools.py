@@ -535,9 +535,31 @@ def test_cli_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.Ca
     assert "requires --judge-transport agent" in capsys.readouterr().err
 
 
-def test_cli_justify_readonly_rejected_for_signing_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # justify writes signed YAML, so readonly tool mode is unsafe even with the
-    # agent transport: tool-read bytes bypass source_excerpt.scrub_secrets.
+def test_cli_justify_readonly_requires_agent_transport(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Since 2026-07-09 signing paths accept readonly tools (informed
+    # final-signature verdicts; rationale is output-scrubbed), but only the
+    # agent transport has a tool loop — OpenRouter must still be rejected.
+    import argparse
+
+    from elspeth_lints.core.cli import _run_justify
+
+    args = argparse.Namespace(
+        root=tmp_path,
+        repo_root=None,
+        allowlist_dir=tmp_path,
+        judge_transport="openrouter",
+        judge_tools="readonly",
+        file_path="missing.py",
+    )
+    assert _run_justify(args) == 2
+    captured = capsys.readouterr()
+    assert "requires --judge-transport agent" in captured.err
+
+
+def test_cli_justify_readonly_with_agent_transport_passes_gate(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # 2026-07-09 policy: readonly + agent transport is ADMITTED on the signing
+    # path. Prove the gate no longer rejects by asserting the run proceeds to
+    # the next check (the missing --file-path), not the tool-mode refusal.
     import argparse
 
     from elspeth_lints.core.cli import _run_justify
@@ -548,15 +570,16 @@ def test_cli_justify_readonly_rejected_for_signing_path(tmp_path: Path, capsys: 
         allowlist_dir=tmp_path,
         judge_transport="agent",
         judge_tools="readonly",
+        operator_override=False,
         file_path="missing.py",
     )
     assert _run_justify(args) == 2
     captured = capsys.readouterr()
-    assert "not supported for justify" in captured.err
-    assert "scrubbed excerpt" in captured.err
+    assert "does not exist under" in captured.err
+    assert "requires --judge-transport agent" not in captured.err
 
 
-def test_cli_sign_judge_signatures_readonly_rejected_for_signing_path(
+def test_cli_sign_judge_signatures_readonly_requires_agent_transport(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -567,13 +590,14 @@ def test_cli_sign_judge_signatures_readonly_rejected_for_signing_path(
     from elspeth_lints.core.cli import _run_sign_judge_signatures
 
     def fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError("readonly signing rejection must run before signing side effects")
+        raise AssertionError("transport validation must run before signing side effects")
 
     monkeypatch.setattr(cli, "_load_judge_signing_env_file", fail_if_called)
     monkeypatch.setattr(cli, "_pop_allow_hits_entry", fail_if_called)
     monkeypatch.setattr(cli, "_run_justify", fail_if_called)
     monkeypatch.setattr(diagnosis, "diagnose_judge_signatures", fail_if_called)
     args = argparse.Namespace(
+        judge_transport="openrouter",
         judge_tools="readonly",
         env_file=None,
         dry_run=False,
@@ -583,5 +607,35 @@ def test_cli_sign_judge_signatures_readonly_rejected_for_signing_path(
     )
     assert _run_sign_judge_signatures(args) == 2
     captured = capsys.readouterr()
-    assert "not supported for sign-judge-signatures" in captured.err
-    assert "scrubbed excerpt" in captured.err
+    assert "requires --judge-transport agent" in captured.err
+
+
+def test_cli_sign_judge_signatures_readonly_with_agent_transport_passes_gate(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the agent transport, readonly mode is admitted: the run proceeds
+    # past the tool-mode gate into normal signing preconditions (pinned here
+    # via an env-file loader sentinel that fires only after the gate).
+    import argparse
+
+    import elspeth_lints.core.cli as cli
+    from elspeth_lints.core.cli import _run_sign_judge_signatures
+
+    def sentinel(*args: object, **kwargs: object) -> None:
+        raise ValueError("gate-admitted sentinel")
+
+    monkeypatch.setattr(cli, "_load_judge_signing_env_file", sentinel)
+    args = argparse.Namespace(
+        judge_transport="agent",
+        judge_tools="readonly",
+        env_file=None,
+        dry_run=True,
+        root=Path("/unused/root"),
+        allowlist_dir=Path("/unused/allowlist"),
+        manifest=[],
+    )
+    assert _run_sign_judge_signatures(args) == 2
+    captured = capsys.readouterr()
+    assert "gate-admitted sentinel" in captured.err
+    assert "requires --judge-transport agent" not in captured.err

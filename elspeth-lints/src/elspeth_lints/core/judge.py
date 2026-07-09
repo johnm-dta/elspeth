@@ -1159,8 +1159,11 @@ _TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES: frozenset[str] = frozenset({"count", 
 
 # Bound the investigation so a pathological run cannot loop or spend
 # unboundedly. Hitting the cap before a verdict is classified as a failure
-# (see ``_consume_agent_messages``), never a silent partial.
-_AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 12
+# (see ``_consume_agent_messages``), never a silent partial. 12 was twice
+# insufficient for real entries in the 2026-07-09 sitting (heartbeat R7 and a
+# large composer validator both hit the cap on consecutive runs while ruling
+# on genuinely deep call chains); 24 keeps the bound while covering them.
+_AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 24
 
 # Basenames that must never be read even if they somehow sit inside an allowed
 # root — defense in depth. The HMAC signing key lived in a repo ``.env`` once

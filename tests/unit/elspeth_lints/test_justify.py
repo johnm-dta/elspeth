@@ -3082,3 +3082,165 @@ def test_build_yaml_entry_text_refuses_whitespace_only_rationale(blank_rationale
             judge_transport="openrouter",
             ast_path="Module.body[0]",
         )
+
+
+def test_pop_last_allow_hits_entry_leaves_loadable_empty_list(tmp_path: Path) -> None:
+    """Popping a file's only entry must not brick every later allowlist load.
+
+    A bare ``allow_hits:`` header parses as None and fails the loader's
+    "allow_hits must be a list" shape check — which is exactly what stalled the
+    2026-07-08 re-sign campaign on ``__init__.yaml`` (single-entry file, drift
+    repair pops the row, justify's similarity scan then cannot load the dir).
+    """
+    import yaml
+
+    from elspeth_lints.core.cli import _pop_allow_hits_entry
+
+    target_yaml = tmp_path / "__init__.yaml"
+    key = "__init__.py:R6:_module_:fp=abc123"
+    target_yaml.write_text(
+        f"allow_hits:\n- key: {key}\n  owner: john\n  reason: only entry\n",
+        encoding="utf-8",
+    )
+
+    removed = _pop_allow_hits_entry(target_yaml, key)
+
+    assert f"- key: {key}" in removed
+    written = target_yaml.read_text(encoding="utf-8")
+    assert "allow_hits: []" in written
+    assert yaml.safe_load(written)["allow_hits"] == []
+
+
+def test_append_entry_reopens_explicit_empty_allow_hits(tmp_path: Path) -> None:
+    """Appending into ``allow_hits: []`` reopens the block instead of duplicating the key."""
+    import yaml
+
+    target_yaml = tmp_path / "__init__.yaml"
+    target_yaml.write_text(
+        "allow_hits: []\nper_file_rules:\n- pattern: widget.py\n  rules:\n  - R5\n  max_hits: 1\n",
+        encoding="utf-8",
+    )
+    key = "__init__.py:R6:_module_:fp=abc123"
+
+    _append_entry_to_yaml(target_yaml, f"- key: {key}\n  owner: john\n  reason: restored entry\n")
+
+    written = target_yaml.read_text(encoding="utf-8")
+    assert written.count("allow_hits") == 1
+    data = yaml.safe_load(written)
+    assert [entry["key"] for entry in data["allow_hits"]] == [key]
+    assert data["per_file_rules"][0]["pattern"] == "widget.py"
+
+
+def test_pop_then_restore_round_trip_on_single_entry_file(tmp_path: Path) -> None:
+    """The signer's pop -> justify-fails -> restore path must round-trip a single-entry file."""
+    import yaml
+
+    from elspeth_lints.core.cli import _pop_allow_hits_entry
+
+    target_yaml = tmp_path / "__init__.yaml"
+    key = "__init__.py:R6:_module_:fp=abc123"
+    original = f"allow_hits:\n- key: {key}\n  owner: john\n  reason: only entry\n"
+    target_yaml.write_text(original, encoding="utf-8")
+
+    removed = _pop_allow_hits_entry(target_yaml, key)
+    _append_entry_to_yaml(target_yaml, removed)
+
+    written = target_yaml.read_text(encoding="utf-8")
+    data = yaml.safe_load(written)
+    assert [entry["key"] for entry in data["allow_hits"]] == [key]
+    assert data["allow_hits"][0]["reason"] == "only entry"
+
+
+def test_justify_readonly_tools_scrubs_judge_rationale_before_persist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-07-09 policy: readonly tools are allowed on the signing path, and the
+    no-secrets-in-YAML invariant moves to the OUTPUT — a judge rationale that
+    quotes raw tool-read bytes is secret-scrubbed before it is persisted."""
+    import elspeth_lints.core.judge as judge_mod
+    from elspeth_lints.core.judge import TRANSPORT_AGENT as agent_transport
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    secret = "AKIAIOSFODNN7EXAMPLE"  # secret-scan: allow-this-line (AWS docs example key; exercises the rationale scrubber)
+
+    def fake_call_judge(request: Any, **kwargs: Any) -> Any:
+        return judge_mod.JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id="claude-opus-4-7",
+            judge_rationale=f"boundary is honest; config file showed {secret} beside the client init",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.9,
+            prompt_tokens_total=100,
+            prompt_tokens_cached=None,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport=agent_transport,
+        )
+
+    monkeypatch.setattr(judge_mod, "call_judge", fake_call_judge)
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", "test-judge-metadata-hmac-key-2026-05-24")
+
+    exit_code = main(
+        [
+            "justify",
+            "--root",
+            str(root),
+            "--allowlist-dir",
+            str(allowlist_dir),
+            "--file-path",
+            "plugins/widget.py",
+            "--symbol",
+            "Widget.lookup",
+            "--rationale",
+            "payload is Tier-3 external data from upstream tool-call",
+            "--owner",
+            "test-agent-readonly",
+            "--judge-transport",
+            "agent",
+            "--judge-tools",
+            "readonly",
+        ]
+    )
+
+    assert exit_code == 0
+    text = (allowlist_dir / "plugins.yaml").read_text(encoding="utf-8")
+    assert secret not in text
+    assert "[REDACTED-SECRET-" in text
+    assert "boundary is honest" in text
+
+
+def test_append_refuses_duplicate_allow_hits_blocks(tmp_path: Path) -> None:
+    """A file with two allow_hits blocks must abort, not append into the dead one.
+
+    YAML keeps only the LAST duplicate mapping key, so rows appended under an
+    earlier block silently vanish from every load (observed 2026-07-09: three
+    freshly judge-signed tui.yaml rows landed in an invisible first block).
+    """
+    from elspeth_lints.core.cli import _append_entry_to_yaml
+
+    target_yaml = tmp_path / "tui.yaml"
+    target_yaml.write_text(
+        "allow_hits:\n- key: a.py:R1:f:fp=aaa\n  owner: john\n  reason: old\n\nallow_hits:\n- key: b.py:R1:g:fp=bbb\n  owner: john\n  reason: older\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="2 allow_hits blocks"):
+        _append_entry_to_yaml(target_yaml, "- key: c.py:R1:h:fp=ccc\n  owner: john\n  reason: new\n")
+    # Both blocks untouched — no partial write.
+    assert target_yaml.read_text(encoding="utf-8").count("allow_hits:") == 2
+
+
+def test_pop_refuses_duplicate_allow_hits_blocks(tmp_path: Path) -> None:
+    """Popping from a duplicate-block file must abort before any surgery."""
+    from elspeth_lints.core.cli import _pop_allow_hits_entry
+
+    target_yaml = tmp_path / "tui.yaml"
+    target_yaml.write_text(
+        "allow_hits: []\n\nallow_hits:\n- key: b.py:R1:g:fp=bbb\n  owner: john\n  reason: only\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="2 allow_hits blocks"):
+        _pop_allow_hits_entry(target_yaml, "b.py:R1:g:fp=bbb")

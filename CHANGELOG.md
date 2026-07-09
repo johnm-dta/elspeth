@@ -4,7 +4,7 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## 0.7.0 - 2026-07-08 (LLM-primary guided pipeline creation)
+## 0.7.0 - 2026-07-09 (LLM-primary guided pipeline creation)
 
 Guided pipeline creation becomes LLM-primary. The guided composer is
 reworked so each stage of a pipeline — source, then sink, then transforms,
@@ -225,6 +225,14 @@ separately (the same precedent as 0.5.4 into 0.6.0).
 - **Dead `aggregation_boundaries` checkpoint knob removed** — the unused
   aggregation-boundaries checkpoint configuration option is deleted from the
   config surface (pre-release tech-debt removal; there is no data to migrate).
+- **Dynamic attribute probes replaced with explicit contracts** — the
+  remaining `hasattr`/fallback attribute probing is removed across provider
+  response parsing, export sink shape handling, plugin lifecycle attributes,
+  journal platform checks, composer trust seams, and web route application
+  state; each site now declares the contract it relies on and fails closed
+  when that contract is not met. Provider response parsing keeps to data-only
+  reads while still mapping Pydantic extra fields, so provider token counts,
+  costs, and cache-usage siblings remain captured.
 
 ### Fixed
 
@@ -291,6 +299,21 @@ headline work.
   lost-branch union schema fields are tolerated; absolute-path SQLite DSNs keep
   their slash count through sanitization; and `AuditedHTTPClient` no longer
   double-decompresses gzip bodies.
+- **Silent-degradation paths converted to structured failures** — the
+  FAILED-resume counter baseline handles only database `OperationalError`, so
+  other audit corruption signals propagate instead of degrading to partial
+  counters; race-created journal parent directories are verified owner-only
+  through a symlink-refusing check rather than skipping enforcement when the
+  directory already exists; catalog plugin-schema parsing is extracted into a
+  typed parser so a malformed plugin schema can no longer under-detect
+  required secret fields; guided respond reads required turn-response keys
+  directly so schema drift crashes instead of silently evaluating to
+  `False`; coalesce branch-loss checks distinguish an already-completed
+  merge from a row not yet seen instead of conflating both into one silent
+  default; and guided-session payloads serialized before the
+  `on_validation_failure` field existed are refused at session rehydrate
+  rather than silently defaulted (pre-release session stores are recreated
+  at deploy).
 
 ### Security
 

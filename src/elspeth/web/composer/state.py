@@ -1333,11 +1333,12 @@ def _check_schema_contracts(
         non_raising boundary free of raises guarded by nodes-derived data.
         """
         from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from elspeth.web.interpretation_state import strip_authoring_options
 
         try:
             return get_shared_plugin_manager().create_transform(
                 plugin,
-                deep_thaw(options),
+                strip_authoring_options(deep_thaw(options)),
             )
         except Exception as exc:
             if not _is_config_probe_exception(exc):

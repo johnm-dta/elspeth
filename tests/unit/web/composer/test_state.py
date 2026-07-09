@@ -3653,6 +3653,55 @@ class TestSchemaContractValidation:
         assert result.is_valid, result.errors
         assert not any("contract probe" in w.message.lower() for w in result.warnings), [w.message for w in result.warnings]
 
+    def test_rule_c_self_consistency_fires_through_authoring_metadata(self) -> None:
+        """Rule C must not be silently skipped by composer-only option keys.
+
+        The per-node select_only self-consistency check probes the plugin
+        constructor; with ``interpretation_requirements`` left in options the
+        probe raised (extra keys forbidden) and Rule C silently skipped the
+        exact guided nodes it exists to check. The probe must strip authoring
+        metadata like every other contract probe.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": ["url"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"url": "url"},
+                    # Declares 'bogus' as a required output field the mapping
+                    # will never emit -> Rule C violation.
+                    "schema": {"mode": "fixed", "fields": ["url: str", "bogus: str"]},
+                    "interpretation_requirements": [
+                        {
+                            "id": "drop_fields_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "drop_fields",
+                            "status": "resolved",
+                            "draft": "Keep only url.",
+                            "event_id": "00000000-0000-0000-0000-000000000001",
+                            "accepted_value": "Keep only url.",
+                            "accepted_artifact_hash": "0" * 64,
+                        }
+                    ],
+                },
+            )
+        )
+        state = state.with_output(self._make_output())
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert any("Transform contract violation" in e.message and "bogus" in e.message for e in result.errors), [
+            e.message for e in result.errors
+        ]
+
     def test_consumer_schema_required_fields_violation_fails(self) -> None:
         state = self._empty_state()
         state = state.with_source(

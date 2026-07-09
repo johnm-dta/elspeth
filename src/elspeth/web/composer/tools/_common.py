@@ -1188,7 +1188,13 @@ def _credential_wiring_contract_failure(
     inline_instruction = (
         "Set `<field>: {secret_ref: NAME}` directly in the node's options "
         "when calling set_pipeline / upsert_node. (The marker is stripped "
-        "before option validation and resolved at execution time.)"
+        "before option validation and resolved at execution time.) This "
+        "rejection left pipeline state unchanged: repair by re-issuing only "
+        "the rejected call with the marker substituted for the literal "
+        "value — do not rebuild the pipeline from scratch. For a component "
+        "already in state, patching just that component "
+        "(patch_source_options / patch_node_options / patch_output_options) "
+        "with the marker is the minimal correction."
     )
     post_hoc_instruction = f"Alternatively, after the node already exists in state, call {repair_text} to attach the marker post-hoc."
     error_msg = (

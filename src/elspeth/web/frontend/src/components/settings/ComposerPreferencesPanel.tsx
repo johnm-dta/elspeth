@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { useTheme, type Theme } from "@/hooks/useTheme";
 import type { ComposerMode } from "@/types/api";
 
 /**
@@ -29,6 +30,7 @@ export function ComposerPreferencesForm({
   const writeError = usePreferencesStore((s) => s.writeError);
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
   const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
+  const { theme, setTheme } = useTheme();
 
   // TODO(hidden-jobs-settings): Add a user-settings view for hidden jobs
   // (run-bearing sessions archived from the switcher). The session switcher
@@ -59,6 +61,13 @@ export function ComposerPreferencesForm({
     }
   }, [onResetTutorialComplete, resetTutorial]);
 
+  const onThemeChange = useCallback(
+    (nextTheme: Theme) => {
+      setTheme(nextTheme);
+    },
+    [setTheme],
+  );
+
   if (!loaded || defaultMode === null) return null;
 
   return (
@@ -86,6 +95,39 @@ export function ComposerPreferencesForm({
             onChange={() => void onChange("freeform")}
           />
           <span>Freeform</span>
+        </label>
+      </fieldset>
+      <fieldset style={{ marginTop: 16 }}>
+        <legend>Theme</legend>
+        <label>
+          <input
+            type="radio"
+            name="composer-theme"
+            value="system"
+            checked={theme === "system"}
+            onChange={() => onThemeChange("system")}
+          />
+          <span>System</span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="composer-theme"
+            value="light"
+            checked={theme === "light"}
+            onChange={() => onThemeChange("light")}
+          />
+          <span>Light</span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="composer-theme"
+            value="dark"
+            checked={theme === "dark"}
+            onChange={() => onThemeChange("dark")}
+          />
+          <span>Dark</span>
         </label>
       </fieldset>
       {writeError !== null && (

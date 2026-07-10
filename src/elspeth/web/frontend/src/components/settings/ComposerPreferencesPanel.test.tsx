@@ -20,6 +20,9 @@ vi.mock("@/api/client", () => ({
 
 describe("ComposerPreferencesForm", () => {
   beforeEach(() => {
+    localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.style.colorScheme = "";
     resetStore(usePreferencesStore);
     usePreferencesStore.setState({
       loaded: true,
@@ -42,6 +45,20 @@ describe("ComposerPreferencesForm", () => {
     render(<ComposerPreferencesForm />);
     expect(screen.getByLabelText(/freeform/i)).toBeChecked();
     expect(screen.getByLabelText(/guided/i)).not.toBeChecked();
+  });
+
+  it("exposes reversible theme controls in Composer preferences", async () => {
+    localStorage.setItem("elspeth_theme", "light");
+    render(<ComposerPreferencesForm />);
+
+    expect(screen.getByRole("group", { name: /theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /system/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /light/i })).toBeChecked();
+
+    await userEvent.click(screen.getByRole("radio", { name: /dark/i }));
+
+    expect(localStorage.getItem("elspeth_theme")).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 
   it("writes the new default-mode on selection (forwards activeSessionId watermark)", async () => {
@@ -166,6 +183,9 @@ describe("ComposerPreferencesForm", () => {
 // transitively covered by E2E — fast unit feedback was missing.
 describe("ComposerPreferencesPanel — modal chrome", () => {
   beforeEach(() => {
+    localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.style.colorScheme = "";
     resetStore(usePreferencesStore);
     usePreferencesStore.setState({
       loaded: true,

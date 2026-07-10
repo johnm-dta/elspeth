@@ -65,7 +65,7 @@ test.describe("release smoke — built bundle renders against real backend", () 
       await page.getByRole("button", { name: "Switch to guided" }).click();
       await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
-      await page.getByRole("button", { name: "csv", exact: true }).click();
+      await page.getByRole("button", { name: "CSV", exact: true }).click();
 
       // POSITIVE: the source SchemaForm renders. CSV source has three required
       // fields (config_base.py): schema, path, on_validation_failure.

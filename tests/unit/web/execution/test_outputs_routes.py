@@ -163,6 +163,7 @@ class TestRunOutputsManifestEndpoint:
                 created_at=datetime.now(UTC),
                 exists_now=True,
                 downloadable=True,
+                storage_kind="sink_file",
             )
             for i in range(25)
         ]
@@ -257,6 +258,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="sink_file",
                     )
                 ],
             )
@@ -303,6 +305,7 @@ class TestRunOutputContentEndpoint:
                     created_at=datetime.now(UTC),
                     exists_now=True,
                     downloadable=True,
+                    storage_kind="sink_file",
                 )
             ],
             run_id=run_id,
@@ -345,6 +348,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="sink_file",
                     )
                 ],
             )
@@ -404,6 +408,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="sink_file",
                     )
                 ],
             )
@@ -454,6 +459,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="sink_file",
                     )
                 ],
             )
@@ -560,6 +566,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="sink_file",
                     )
                 ],
             )
@@ -612,6 +619,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="unknown",
                     )
                 ],
             )
@@ -665,6 +673,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="blob",
                     )
                 ],
             )
@@ -716,6 +725,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=True,
                         downloadable=True,
+                        storage_kind="blob",
                     )
                 ],
             )
@@ -789,6 +799,7 @@ class TestRunOutputContentEndpoint:
                         created_at=datetime.now(UTC),
                         exists_now=False,
                         downloadable=False,
+                        storage_kind="sink_file",
                     )
                 ],
             )
@@ -829,6 +840,7 @@ def _file_artifact_in_outputs(
         created_at=datetime.now(UTC),
         exists_now=True,
         downloadable=True,
+        storage_kind="sink_file",
     )
 
 
@@ -880,6 +892,7 @@ class TestRunOutputPreviewEndpoint:
                     created_at=datetime.now(UTC),
                     exists_now=True,
                     downloadable=True,
+                    storage_kind="sink_file",
                 )
             ],
             run_id=run_id,
@@ -937,6 +950,7 @@ class TestRunOutputPreviewEndpoint:
                     created_at=datetime.now(UTC),
                     exists_now=True,
                     downloadable=True,
+                    storage_kind="sink_file",
                 )
             ],
             run_id=run_id,
@@ -981,6 +995,7 @@ class TestRunOutputPreviewEndpoint:
                     created_at=datetime.now(UTC),
                     exists_now=True,
                     downloadable=True,
+                    storage_kind="sink_file",
                 )
             ],
             run_id=run_id,
@@ -1099,6 +1114,7 @@ class TestRunOutputPreviewEndpoint:
             created_at=datetime.now(UTC),
             exists_now=True,
             downloadable=False,
+            storage_kind="unknown",
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
@@ -1131,6 +1147,7 @@ class TestRunOutputPreviewEndpoint:
             created_at=datetime.now(UTC),
             exists_now=False,
             downloadable=False,
+            storage_kind="sink_file",
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
@@ -1157,6 +1174,7 @@ class TestRunOutputPreviewEndpoint:
             created_at=datetime.now(UTC),
             exists_now=False,
             downloadable=False,
+            storage_kind="unknown",
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 

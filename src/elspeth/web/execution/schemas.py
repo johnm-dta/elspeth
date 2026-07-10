@@ -781,6 +781,9 @@ class RunDiagnosticArtifact(_StrictResponse):
     created_at: datetime
 
 
+RunOutputArtifactStorageKind = Literal["blob", "payload", "sink_file", "unknown"]
+
+
 class RunOutputArtifact(_StrictResponse):
     """One sink-write artefact in the run's full outputs manifest.
 
@@ -795,6 +798,26 @@ class RunOutputArtifact(_StrictResponse):
     when the file is gone, or when the path resolves outside the
     sink-allowlist. Lets the UI suppress download buttons that would
     otherwise 4xx on click.
+
+    ``storage_kind`` is a structured discriminator classifying
+    ``path_or_uri`` against elspeth's real filesystem storage layouts
+    (see ``_classify_storage_kind`` in ``web/execution/outputs.py``):
+
+    * ``"blob"``      — the composer blob store, ``{data_dir}/blobs/...``
+    * ``"payload"``   — the content-addressed payload store,
+                        ``{data_dir}/payloads/...``
+    * ``"sink_file"`` — the canonical sink output directory,
+                        ``{data_dir}/outputs/...``
+    * ``"unknown"``   — anything else (a user-configured path outside
+                        those layouts, an object-store URI, or a legacy
+                        caller that omitted ``data_dir``)
+
+    "blob" and "payload" are elspeth's own opaque internal storage —
+    the UI must never render their basename or full path as the row
+    title; it renders a friendly label instead. Independent of
+    ``downloadable``/``exists_now``: classification does not require the
+    file to exist on disk (a purged blob-store path still reports
+    ``storage_kind="blob"``).
     """
 
     artifact_id: str
@@ -806,6 +829,7 @@ class RunOutputArtifact(_StrictResponse):
     created_at: datetime
     exists_now: bool
     downloadable: bool
+    storage_kind: RunOutputArtifactStorageKind
 
 
 PreviewContentType = Literal["text", "csv", "jsonl", "json", "binary"]

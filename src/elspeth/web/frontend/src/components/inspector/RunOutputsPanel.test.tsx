@@ -50,6 +50,7 @@ function fileArtifact(overrides: Partial<RunOutputArtifact> = {}): RunOutputArti
     created_at: "2026-05-10T00:00:00Z",
     exists_now: true,
     downloadable: true,
+    storage_kind: "sink_file",
     ...overrides,
   };
 }
@@ -125,9 +126,13 @@ describe("RunOutputsPanel", () => {
     expect(screen.queryByText("Preview")).not.toBeInTheDocument();
   });
 
-  it("does not leak raw local blob-storage paths in unavailable-row tooltips", async () => {
-    const rawPath =
-      "/home/john/.local/share/elspeth/blob-storage/sha256-abcdef0123456789";
+  it("does not leak raw internal storage paths in unavailable-row tooltips", async () => {
+    // Regression for elspeth-52af16f9ae: the frontend previously guessed
+    // "internal storage" from a path-shape regex that no repo code
+    // actually produces. The backend now classifies storage_kind
+    // structurally; a purged blob-store artifact (exists_now=false)
+    // must still mask its raw path in the tooltip.
+    const rawPath = "/var/lib/elspeth/data/blobs/session-1/blob-abc_report.json";
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([
         fileArtifact({
@@ -135,6 +140,7 @@ describe("RunOutputsPanel", () => {
           path_or_uri: rawPath,
           exists_now: false,
           downloadable: false,
+          storage_kind: "blob",
         }),
       ]),
     );
@@ -348,13 +354,14 @@ describe("RunOutputsPanel", () => {
     expect(screen.getByText("error")).toBeInTheDocument();
   });
 
-  it("derives a friendly artifact label instead of showing opaque local blob paths", async () => {
+  it("derives a friendly artifact label instead of showing opaque blob-store paths", async () => {
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([
         fileArtifact({
           sink_node_id: "final_report",
           path_or_uri:
-            "/home/john/.local/share/elspeth/blob-storage/sha256-abcdef0123456789",
+            "/home/john/.local/share/elspeth/data/blobs/session-1/blob-abc_report.json",
+          storage_kind: "blob",
         }),
       ]),
     );
@@ -366,18 +373,47 @@ describe("RunOutputsPanel", () => {
     );
     expect(
       screen.queryByText(
-        "/home/john/.local/share/elspeth/blob-storage/sha256-abcdef0123456789",
+        "/home/john/.local/share/elspeth/data/blobs/session-1/blob-abc_report.json",
       ),
     ).not.toBeInTheDocument();
   });
 
-  it("preserves legitimate hash-like filenames outside local blob storage", async () => {
+  it("derives a friendly artifact label for payload-store paths too", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri:
+            "/home/john/.local/share/elspeth/data/payloads/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+          storage_kind: "payload",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("final_report")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(
+        "/home/john/.local/share/elspeth/data/payloads/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves legitimate hash-like filenames when storage_kind is not internal storage", async () => {
+    // Regression for elspeth-52af16f9ae: this filename would have matched
+    // the old sha256-basename regex heuristic, but the backend classifies
+    // it as "unknown" (it's not under the blob or payload store layout),
+    // so the raw name must render as-is.
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([
         fileArtifact({
           sink_node_id: "final_report",
           path_or_uri:
             "file:///data/outputs/sha256-abcdef0123456789abcdef0123456789.json",
+          storage_kind: "unknown",
         }),
       ]),
     );
@@ -392,12 +428,18 @@ describe("RunOutputsPanel", () => {
     expect(screen.queryByText("final_report")).not.toBeInTheDocument();
   });
 
-  it("preserves user output paths that include a blob-storage directory", async () => {
+  it("preserves user output paths that include a blob-storage-looking directory name", async () => {
+    // Regression for elspeth-52af16f9ae: a user-configured sink path that
+    // happens to contain a "blob-storage" segment is classified
+    // storage_kind="sink_file" by the backend (it's not under the real
+    // blob-store layout), so the raw path must render as-is — the old
+    // regex heuristic would have masked this incorrectly.
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([
         fileArtifact({
           sink_node_id: "final_report",
           path_or_uri: "file:///data/outputs/blob-storage/report.json",
+          storage_kind: "sink_file",
         }),
       ]),
     );

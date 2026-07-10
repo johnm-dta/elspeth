@@ -39,6 +39,7 @@ function fileArtifact(overrides: Partial<RunOutputArtifact> = {}): RunOutputArti
     created_at: "2026-05-19T10:04:00Z",
     exists_now: true,
     downloadable: true,
+    storage_kind: "sink_file",
     ...overrides,
   };
 }

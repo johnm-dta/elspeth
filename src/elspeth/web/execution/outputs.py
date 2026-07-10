@@ -28,7 +28,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import artifacts_table
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
-from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputsResponse
+from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputArtifactStorageKind, RunOutputsResponse
 from elspeth.web.paths import allowed_sink_directories
 
 _FILE_URI_PREFIX = "file://"
@@ -53,6 +53,53 @@ def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path, *, session_i
         return False
     allowed = allowed_sink_directories(str(data_dir), session_id=session_id)
     return any(resolved.is_relative_to(base) for base in allowed)
+
+
+def _classify_storage_kind(
+    fs_paths: tuple[Path, ...] | None,
+    data_dir: str | Path | None,
+) -> RunOutputArtifactStorageKind:
+    """Classify a file-backed artifact's path against elspeth's real
+    storage layouts, so the UI can tell "internal opaque storage" from
+    "a path a sink was configured to write to" — replaces a frontend
+    regex heuristic that matched a layout no repo code actually
+    produces (elspeth-52af16f9ae).
+
+    Recognised layouts, matched by directory (not by filename shape):
+
+    * ``{data_dir}/blobs/...``    — composer blob store; see
+      ``_blob_storage_path`` in ``web/composer/tools/blobs.py``.
+    * ``{data_dir}/payloads/...`` — content-addressed payload store; see
+      ``FilesystemPayloadStore`` in ``core/payload_store.py``.
+    * ``{data_dir}/outputs/...``  — the canonical sink output directory.
+
+    Anything else — a user-configured sink path outside those three
+    directories, an object-store URI (``fs_paths=None``), or a legacy
+    caller with no configured ``data_dir`` — classifies as ``"unknown"``:
+    the safe default that does not assert internal-storage status it
+    cannot verify.
+
+    Classification is independent of on-disk existence: ``Path.resolve()``
+    does not require the target to exist, so a purged blob-store path
+    still classifies as ``"blob"`` rather than silently degrading to
+    ``"unknown"`` (which would leak the raw path back into the UI via the
+    exact fallback this discriminator exists to close).
+    """
+    if fs_paths is None or data_dir is None:
+        return "unknown"
+    base = Path(data_dir).resolve()
+    for fs_path in fs_paths:
+        try:
+            resolved = fs_path.resolve()
+        except OSError:
+            continue
+        if resolved.is_relative_to(base / "blobs"):
+            return "blob"
+        if resolved.is_relative_to(base / "payloads"):
+            return "payload"
+        if resolved.is_relative_to(base / "outputs"):
+            return "sink_file"
+    return "unknown"
 
 
 class RunOutputsAuditUnavailableError(RuntimeError):
@@ -164,6 +211,7 @@ def load_run_outputs_from_db(
                 and fs_paths is not None
                 and any(fs_path.exists() and _is_path_in_sink_allowlist(fs_path, data_dir, session_id=session_id) for fs_path in fs_paths)
             )
+            storage_kind = _classify_storage_kind(fs_paths, data_dir)
             artifacts.append(
                 RunOutputArtifact(
                     artifact_id=row.artifact_id,
@@ -175,6 +223,7 @@ def load_run_outputs_from_db(
                     created_at=row.created_at,
                     exists_now=exists_now,
                     downloadable=downloadable,
+                    storage_kind=storage_kind,
                 )
             )
     return RunOutputsResponse(

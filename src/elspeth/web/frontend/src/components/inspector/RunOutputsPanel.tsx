@@ -79,7 +79,6 @@ interface PreviewState {
 }
 
 const HASH_DISPLAY_LENGTH = 12;
-const INTERNAL_BLOB_STORAGE_BASENAME_RE = /^sha256-[0-9a-f]{12,128}$/i;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -95,14 +94,17 @@ function basenameOf(pathOrUri: string): string {
   return idx === -1 ? stripped : stripped.slice(idx + 1);
 }
 
-function looksLikeLocalBlobStoragePath(pathOrUri: string): boolean {
-  const stripped = pathOrUri.startsWith("file://") ? pathOrUri.slice(7) : pathOrUri;
-  const segments = stripped.split("/").filter((segment) => segment.length > 0);
-  const blobStorageIndex = segments.lastIndexOf("blob-storage");
+/**
+ * "blob" and "payload" are elspeth's own opaque internal storage — a
+ * content hash or blob id as a filename, meaningless to an operator.
+ * Server-classified (see storage_kind on the wire type) against the
+ * REAL storage layouts, not guessed from path shape: replaces a former
+ * frontend regex heuristic that matched a layout no repo code actually
+ * produced (elspeth-52af16f9ae).
+ */
+function isInternalStoragePath(artifact: RunOutputArtifact): boolean {
   return (
-    blobStorageIndex !== -1 &&
-    blobStorageIndex === segments.length - 2 &&
-    INTERNAL_BLOB_STORAGE_BASENAME_RE.test(segments[blobStorageIndex + 1])
+    artifact.storage_kind === "blob" || artifact.storage_kind === "payload"
   );
 }
 
@@ -110,14 +112,14 @@ function artifactDisplayName(artifact: RunOutputArtifact): string {
   if (!isFileArtifact(artifact)) {
     return artifact.path_or_uri;
   }
-  if (looksLikeLocalBlobStoragePath(artifact.path_or_uri)) {
+  if (isInternalStoragePath(artifact)) {
     return artifact.sink_node_id || "artifact";
   }
   return basenameOf(artifact.path_or_uri);
 }
 
 function artifactDisplayTitle(artifact: RunOutputArtifact): string {
-  if (isFileArtifact(artifact) && looksLikeLocalBlobStoragePath(artifact.path_or_uri)) {
+  if (isFileArtifact(artifact) && isInternalStoragePath(artifact)) {
     return `Recorded artifact for ${artifact.sink_node_id || "artifact"}`;
   }
   return artifact.path_or_uri;

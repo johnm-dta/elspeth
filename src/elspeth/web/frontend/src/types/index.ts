@@ -730,6 +730,26 @@ export interface WebSocketTicketResponse {
 // from "is the file in the sink-allowlist AND on disk now?" — used by the
 // UI to suppress download buttons that would otherwise 4xx on click.
 
+// Structured discriminator classifying `path_or_uri` against elspeth's
+// real filesystem storage layouts (computed server-side by
+// `_classify_storage_kind` in web/execution/outputs.py — keep in sync):
+//   * "blob"      — the composer blob store, {data_dir}/blobs/...
+//   * "payload"   — the content-addressed payload store, {data_dir}/payloads/...
+//   * "sink_file" — the canonical sink output directory, {data_dir}/outputs/...
+//   * "unknown"   — anything else (a user-configured path, an object-store
+//                   URI, or a legacy response with no data_dir configured)
+// "blob" and "payload" are elspeth's own opaque internal storage — the UI
+// must never render their basename or full path as the row title/tooltip.
+export const RUN_OUTPUT_ARTIFACT_STORAGE_KIND_VALUES = [
+  "blob",
+  "payload",
+  "sink_file",
+  "unknown",
+] as const;
+
+export type RunOutputArtifactStorageKind =
+  (typeof RUN_OUTPUT_ARTIFACT_STORAGE_KIND_VALUES)[number];
+
 export interface RunOutputArtifact {
   artifact_id: string;
   sink_node_id: string;
@@ -740,6 +760,7 @@ export interface RunOutputArtifact {
   created_at: string;
   exists_now: boolean;
   downloadable: boolean;
+  storage_kind: RunOutputArtifactStorageKind;
 }
 
 export interface RunOutputsResponse {

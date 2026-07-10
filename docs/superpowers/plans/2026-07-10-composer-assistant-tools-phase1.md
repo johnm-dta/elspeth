@@ -1159,7 +1159,7 @@ def test_openai_key_prefix_flagged():
     assert reasons
 
 def test_pem_header_flagged():
-    assert scan_text_for_secret_markers("-----BEGIN PRIVATE KEY-----") 
+    assert scan_text_for_secret_markers("-----BEGIN PRIVATE KEY-----")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

@@ -19,6 +19,7 @@ import type {
   TurnPayload,
   TerminalState,
   GuidedRespondRequest,
+  GuidedRespondResponse,
 } from "@/types/guided";
 import * as api from "@/api/client";
 import {
@@ -207,6 +208,24 @@ function mergeCompositionProposals(
 // and later hits a genuinely new staleness gets a fresh budget.
 const turnNotEmittedSelfHealCounts = new Map<string, number>();
 const MAX_TURN_NOT_EMITTED_SELF_HEALS = 1;
+
+/**
+ * The exit-to-freeform guided-respond body: sets control_signal and nulls
+ * every choice field. Exported so it is a single literal shared by
+ * exitToFreeform (below, sugar over respondGuided for the already-active
+ * session) and TutorialGuidedShell's startup exit path, which cannot use
+ * respondGuided/exitToFreeform for a session that is not yet the store's
+ * active session (see applyGuidedResponse) and so must call the raw
+ * api.respondGuided directly with the same body.
+ */
+export const EXIT_TO_FREEFORM_REQUEST = {
+  chosen: null,
+  edited_values: null,
+  custom_inputs: null,
+  accepted_step_index: null,
+  edit_step_index: null,
+  control_signal: "exit_to_freeform",
+} satisfies GuidedRespondRequest;
 
 // Resetting guided-mode state landed in five places: initialState plus
 // the four navigation actions that switch session context (createSession,
@@ -469,6 +488,22 @@ interface SessionState {
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  /**
+   * Apply a GuidedRespondResponse to the store: atomically replace the 4 wire
+   * fields, await the B1/D12 interpretation-event refresh, and clear the C-3
+   * turn_not_emitted self-heal bookkeeping. Extracted from respondGuided's
+   * success path so TutorialGuidedShell's not-yet-active exit path — which
+   * must call the raw api.respondGuided directly with an explicit sessionId,
+   * since respondGuided/exitToFreeform both key off get().activeSessionId —
+   * applies the response through the SAME bookkeeping instead of a forked
+   * copy that silently drifts as this evolves. Takes sessionId explicitly
+   * (not get().activeSessionId) so it can no-op correctly if the session it
+   * belongs to is no longer active by the time it lands.
+   */
+  applyGuidedResponse: (
+    sessionId: string,
+    response: GuidedRespondResponse,
+  ) => Promise<void>;
   reenterGuided: () => Promise<void>;
   // Convert a freeform session into guided mode (POST /guided/convert). Unlike
   // startGuided's GET, this works for a session that has done freeform work
@@ -1625,32 +1660,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
-      // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
-      set({
-        guidedSession: response.guided_session,
-        guidedNextTurn: response.next_turn,
-        guidedTerminal: response.terminal,
-        compositionState: response.composition_state,
-      });
-      // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
-      // in interpretationEventsStore before guidedResponsePending clears, else
-      // the submit button can briefly re-enable before the card-block arrives.
-      // Keep guidedResponsePending true across this await so the guided turn
-      // stays disabled until the pending-card projection has refreshed.
-      await refreshInterpretationEventsForSession(requestedSessionId);
-      if (get().activeSessionId !== requestedSessionId) {
-        return;
-      }
-      // A successful respond clears any earlier rejection surfaced near the
-      // turn widget (e.g. a wire_confirm_rejected 409) — the mirror of
-      // reenterGuided's error:null on success.
-      turnNotEmittedSelfHealCounts.delete(requestedSessionId);
-      set({
-        guidedResponsePending: false,
-        error: null,
-        errorDetails: null,
-        guidedSelfHealNotice: null,
-      });
+      // Apply the response (atomic 4-field replace + B1/D12 interpretation
+      // refresh + C-3 self-heal bookkeeping) via the shared helper — see
+      // applyGuidedResponse below, also used by TutorialGuidedShell's
+      // not-yet-active exit path.
+      await get().applyGuidedResponse(requestedSessionId, response);
     } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
         return;
@@ -1742,6 +1756,41 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSelfHealNotice: null,
       });
     }
+  },
+
+  async applyGuidedResponse(sessionId: string, response: GuidedRespondResponse) {
+    // Mirrors respondGuided's own stale-fetch guard: a response that arrives
+    // for a session that is no longer active must not clobber whatever the
+    // user has since switched to.
+    if (get().activeSessionId !== sessionId) {
+      return;
+    }
+    // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
+    set({
+      guidedSession: response.guided_session,
+      guidedNextTurn: response.next_turn,
+      guidedTerminal: response.terminal,
+      compositionState: response.composition_state,
+    });
+    // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
+    // in interpretationEventsStore before guidedResponsePending clears, else
+    // the submit button can briefly re-enable before the card-block arrives.
+    // Keep guidedResponsePending true across this await so the guided turn
+    // stays disabled until the pending-card projection has refreshed.
+    await refreshInterpretationEventsForSession(sessionId);
+    if (get().activeSessionId !== sessionId) {
+      return;
+    }
+    // A successful respond clears any earlier rejection surfaced near the
+    // turn widget (e.g. a wire_confirm_rejected 409) — the mirror of
+    // reenterGuided's error:null on success.
+    turnNotEmittedSelfHealCounts.delete(sessionId);
+    set({
+      guidedResponsePending: false,
+      error: null,
+      errorDetails: null,
+      guidedSelfHealNotice: null,
+    });
   },
 
   async reenterGuided() {
@@ -1911,15 +1960,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   async exitToFreeform() {
     // Sugar over respondGuided — sets control_signal and nulls all choice fields.
-    // All state mutation is handled by respondGuided.
-    await get().respondGuided({
-      chosen: null,
-      edited_values: null,
-      custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: "exit_to_freeform",
-    });
+    // All state mutation is handled by respondGuided (via applyGuidedResponse).
+    await get().respondGuided(EXIT_TO_FREEFORM_REQUEST);
   },
 
   async loadStateVersions() {

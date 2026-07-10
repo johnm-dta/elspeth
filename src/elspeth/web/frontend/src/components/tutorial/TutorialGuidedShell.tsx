@@ -6,12 +6,11 @@ import {
 } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
-import { useSessionStore } from "@/stores/sessionStore";
-import type {
-  GuidedRespondRequest,
-  GuidedRespondResponse,
-  GuidedStep,
-} from "@/types/guided";
+import {
+  EXIT_TO_FREEFORM_REQUEST,
+  useSessionStore,
+} from "@/stores/sessionStore";
+import type { GuidedStep } from "@/types/guided";
 import {
   TUTORIAL_SINK_PROMPT,
   TUTORIAL_SOURCE_PROMPT,
@@ -66,15 +65,6 @@ interface TutorialGuidedShellProps {
    */
   exitRequestedRef?: MutableRefObject<boolean>;
 }
-
-const EXIT_TO_FREEFORM_REQUEST = {
-  chosen: null,
-  edited_values: null,
-  custom_inputs: null,
-  accepted_step_index: null,
-  edit_step_index: null,
-  control_signal: "exit_to_freeform",
-} satisfies GuidedRespondRequest;
 
 /** The start chain 404s when the persisted resume session was swept/archived. */
 function isSessionMissingError(err: unknown): boolean {
@@ -328,25 +318,15 @@ async function exitStartedGuidedSession(sessionId: string): Promise<void> {
     await current.exitToFreeform();
     return;
   }
+  // Not yet an active-with-loaded-guidedSession session (activeSessionId
+  // may not even be bound to this session yet, or the store hasn't fetched
+  // its GuidedSession) — store.respondGuided/exitToFreeform both key off
+  // get().activeSessionId and cannot serve that case, so call the raw API
+  // directly with the explicit sessionId, then apply the response through
+  // the SAME helper respondGuided's own success path uses (see
+  // applyGuidedResponse in sessionStore.ts), so the interpretation-event
+  // refresh and turn_not_emitted self-heal bookkeeping stay in lockstep with
+  // the store instead of forking into a separately-maintained copy.
   const response = await respondGuided(sessionId, EXIT_TO_FREEFORM_REQUEST);
-  applyGuidedExitResponse(sessionId, response);
-}
-
-function applyGuidedExitResponse(
-  sessionId: string,
-  response: GuidedRespondResponse,
-): void {
-  if (useSessionStore.getState().activeSessionId !== sessionId) {
-    return;
-  }
-  useSessionStore.setState({
-    guidedSession: response.guided_session,
-    guidedNextTurn: response.next_turn,
-    guidedTerminal: response.terminal,
-    compositionState: response.composition_state,
-    guidedResponsePending: false,
-    error: null,
-    errorDetails: null,
-    guidedSelfHealNotice: null,
-  });
+  await useSessionStore.getState().applyGuidedResponse(sessionId, response);
 }

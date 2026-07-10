@@ -1788,6 +1788,13 @@ class TestIDORCoverageDrift:
             "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
+            # Freeform→guided convert endpoint (``POST /api/sessions/
+            # {session_id}/guided/convert``, elspeth-e2c3dba6b5). Gates on
+            # ``_verify_session_ownership`` like every other session-scoped
+            # guided route; the inventory entry was missed when the endpoint
+            # landed and caught by this drift-guard during the 0.7.1 review
+            # sweep.
+            "post_guided_convert",
             # 0.7.0 synthetic-scrape tutorial redesign added the
             # ``GET /api/sessions/{session_id}/guided/tutorial-sample``
             # endpoint (runtime-derived sample-page URLs + SSRF host-class

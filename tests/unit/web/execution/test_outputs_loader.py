@@ -398,6 +398,40 @@ def test_storage_kind_payload_for_path_under_payloads_directory(tmp_path: Path) 
     assert response.artifacts[0].storage_kind == "payload"
 
 
+def test_storage_kind_payload_honours_payload_root_override(tmp_path: Path) -> None:
+    # WebSettings.payload_store_path can relocate the payload store outside
+    # data_dir; classification must follow the configured root, not the
+    # data_dir-relative default (review-0.7.1 batch E follow-up).
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    override_root = tmp_path / "elsewhere" / "payload-store"
+    payload_dir = override_root / "ab"
+    payload_dir.mkdir(parents=True)
+    content_hash = "ab" + "d" * 62
+    target = payload_dir / content_hash
+    target.write_bytes(b"payload-bytes")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-payload-override"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        without_override = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+        with_override = load_run_outputs_from_db(
+            db,
+            run_id=run_id,
+            landscape_run_id=run_id,
+            data_dir=data_dir,
+            payload_root=override_root,
+        )
+
+    assert without_override.artifacts[0].storage_kind == "unknown"
+    assert with_override.artifacts[0].storage_kind == "payload"
+
+
 def test_storage_kind_sink_file_for_path_under_outputs_directory(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     outputs_dir = data_dir / "outputs"

@@ -219,6 +219,13 @@
   line-height: 1.4;
 }
 
+/* Inline and fenced code in common.css set an explicit --font-size-sm the
+   override above doesn't reach; keep code at the card's density too. */
+.plugin-card-prose-body .markdown-body .inline-code,
+.plugin-card-prose-body .markdown-body .code-block {
+  font-size: var(--font-size-xs);
+}
+
 .plugin-card-example-code {
   max-height: 140px;
   margin: var(--space-xs) 0 0;

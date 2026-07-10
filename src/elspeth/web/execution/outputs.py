@@ -58,6 +58,8 @@ def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path, *, session_i
 def _classify_storage_kind(
     fs_paths: tuple[Path, ...] | None,
     data_dir: str | Path | None,
+    *,
+    payload_root: Path | None = None,
 ) -> RunOutputArtifactStorageKind:
     """Classify a file-backed artifact's path against elspeth's real
     storage layouts, so the UI can tell "internal opaque storage" from
@@ -69,8 +71,11 @@ def _classify_storage_kind(
 
     * ``{data_dir}/blobs/...``    — composer blob store; see
       ``_blob_storage_path`` in ``web/composer/tools/blobs.py``.
-    * ``{data_dir}/payloads/...`` — content-addressed payload store; see
-      ``FilesystemPayloadStore`` in ``core/payload_store.py``.
+    * ``payload_root`` (default ``{data_dir}/payloads``) — content-
+      addressed payload store; see ``FilesystemPayloadStore`` in
+      ``core/payload_store.py``. Settings-driven callers pass
+      ``WebSettings.get_payload_store_path()`` so a configured
+      ``payload_store_path`` override is honoured.
     * ``{data_dir}/outputs/...``  — the canonical sink output directory.
 
     Anything else — a user-configured sink path outside those three
@@ -88,6 +93,7 @@ def _classify_storage_kind(
     if fs_paths is None or data_dir is None:
         return "unknown"
     base = Path(data_dir).resolve()
+    payloads = payload_root.resolve() if payload_root is not None else base / "payloads"
     for fs_path in fs_paths:
         try:
             resolved = fs_path.resolve()
@@ -95,7 +101,7 @@ def _classify_storage_kind(
             continue
         if resolved.is_relative_to(base / "blobs"):
             return "blob"
-        if resolved.is_relative_to(base / "payloads"):
+        if resolved.is_relative_to(payloads):
             return "payload"
         if resolved.is_relative_to(base / "outputs"):
             return "sink_file"
@@ -176,6 +182,7 @@ def load_run_outputs_from_db(
     landscape_run_id: str,
     data_dir: str | Path | None = None,
     session_id: str | None = None,
+    payload_root: Path | None = None,
 ) -> RunOutputsResponse:
     """Read every sink-write artefact for a run and return the full manifest.
 
@@ -211,7 +218,7 @@ def load_run_outputs_from_db(
                 and fs_paths is not None
                 and any(fs_path.exists() and _is_path_in_sink_allowlist(fs_path, data_dir, session_id=session_id) for fs_path in fs_paths)
             )
-            storage_kind = _classify_storage_kind(fs_paths, data_dir)
+            storage_kind = _classify_storage_kind(fs_paths, data_dir, payload_root=payload_root)
             artifacts.append(
                 RunOutputArtifact(
                     artifact_id=row.artifact_id,
@@ -261,4 +268,5 @@ def load_run_outputs_for_settings(
             landscape_run_id=landscape_run_id,
             data_dir=settings.data_dir,
             session_id=session_id,
+            payload_root=settings.get_payload_store_path(),
         )

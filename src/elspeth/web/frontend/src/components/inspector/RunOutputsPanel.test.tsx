@@ -453,15 +453,16 @@ describe("RunOutputsPanel", () => {
 
   it("preserves legitimate hash-like filenames when storage_kind is not internal storage", async () => {
     // Regression for elspeth-52af16f9ae: this filename would have matched
-    // the old sha256-basename regex heuristic, but the backend classifies
-    // it as "unknown" (it's not under the blob or payload store layout),
-    // so the raw name must render as-is.
+    // the old sha256-basename regex heuristic, but only blob/payload
+    // storage_kind values mask — a user-configured sink directory outside
+    // the recognised layouts classifies "unknown", so the raw name must
+    // render as-is.
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([
         fileArtifact({
           sink_node_id: "final_report",
           path_or_uri:
-            "file:///data/outputs/sha256-abcdef0123456789abcdef0123456789.json",
+            "file:///srv/exports/sha256-abcdef0123456789abcdef0123456789.json",
           storage_kind: "unknown",
         }),
       ]),

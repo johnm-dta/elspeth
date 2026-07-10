@@ -1,15 +1,13 @@
 import { useMemo, useState } from "react";
 import { CodeBlock, hasLossyNumberLiteral } from "@/components/chat/CodeBlock";
+import { PreviewTable, type PreviewTableModel } from "./PreviewTable";
 
 interface StructuredJsonPreviewProps {
   text: string;
   truncated?: boolean;
 }
 
-interface TableModel {
-  headers: string[];
-  rows: string[][];
-}
+type TableModel = PreviewTableModel;
 
 type PreviewMode = "json" | "table";
 
@@ -57,7 +55,7 @@ export function StructuredJsonPreview({
       </div>
 
       {activeMode === "table" && table ? (
-        <StructuredPreviewTable table={table} />
+        <PreviewTable table={table} />
       ) : (
         <CodeBlock code={text} prettyJson ariaLabel="JSON preview" />
       )}
@@ -72,35 +70,6 @@ export function StructuredJsonPreview({
           Could not parse as JSON, so the raw preview is shown.
         </p>
       )}
-    </div>
-  );
-}
-
-function StructuredPreviewTable({ table }: { table: TableModel }) {
-  return (
-    <div className="structured-preview-table-wrap">
-      <table className="structured-preview-table">
-        <thead>
-          <tr>
-            {table.headers.map((header) => (
-              <th key={header} scope="col">
-                {header}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {table.rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
-              {table.headers.map((header, columnIndex) => (
-                <td key={`${header}-${columnIndex}`}>
-                  {row[columnIndex] ?? ""}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }

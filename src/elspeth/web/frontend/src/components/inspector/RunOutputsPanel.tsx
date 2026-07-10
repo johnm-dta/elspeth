@@ -23,7 +23,11 @@ import {
   fetchRunOutputPreview,
   fetchRunOutputs,
 } from "@/api/client";
-import { StructuredJsonPreview } from "@/components/ui";
+import {
+  PreviewTable,
+  StructuredJsonPreview,
+  type PreviewTableModel,
+} from "@/components/ui";
 import { absoluteTime } from "@/utils/time";
 import type {
   ApiError,
@@ -540,77 +544,60 @@ interface TabularPreviewProps {
   contentType: "csv" | "jsonl";
 }
 
-function TabularPreview({ text, contentType }: TabularPreviewProps) {
-  // Minimal tabular renderer for the preview pane. Tolerant of malformed
-  // rows. This is deliberately not a full CSV parser (no quoted-comma
-  // handling) — preview is best-effort, not a data-loading path.
-  //
-  // Two content types feed this component:
-  //   * csv  — backend tags both `.csv` and `.tsv` files as content_type
-  //            "csv" (see web/execution/preview._CSV_EXTENSIONS), so we
-  //            sniff the first line for tab vs comma rather than
-  //            hardcoding `,`. Without this, TSV rows collapse into a
-  //            single column.
-  //   * jsonl — each line is a JSON object that must NOT be split on
-  //             commas (that fragments the JSON across cells). Each line
-  //             is rendered as a single-column row, no header styling.
+/**
+ * Builds a headers+rows model for the shared PreviewTable out of raw
+ * csv/jsonl preview text. Tolerant of malformed rows — this is
+ * deliberately not a full CSV parser (no quoted-comma handling); preview
+ * is best-effort, not a data-loading path.
+ *
+ * Two content types feed this:
+ *   * csv  — backend tags both `.csv` and `.tsv` files as content_type
+ *            "csv" (see web/execution/preview._CSV_EXTENSIONS), so we
+ *            sniff the first line for tab vs comma rather than
+ *            hardcoding `,`. Without this, TSV rows collapse into a
+ *            single column. The first line is the real header row.
+ *   * jsonl — each line is a JSON object that must NOT be split on
+ *             commas (that fragments the JSON across cells). Each line
+ *             is rendered as a single-column row under one synthetic
+ *             "value" header — jsonl has no column structure of its own,
+ *             but every PreviewTable still gets a real th scope="col"
+ *             header cell rather than the old bold-td fake header
+ *             (elspeth-611a05668e).
+ */
+function buildTabularPreviewModel(
+  text: string,
+  contentType: "csv" | "jsonl",
+): PreviewTableModel | null {
   const lines = text.split("\n").filter((line) => line.length > 0);
   if (lines.length === 0) {
     return null;
   }
-  let rows: string[][];
-  let hasHeader: boolean;
   if (contentType === "jsonl") {
-    rows = lines.map((line) => [line]);
-    hasHeader = false;
-  } else {
-    const firstLine = lines[0];
-    const tabCount = (firstLine.match(/\t/g) ?? []).length;
-    const commaCount = (firstLine.match(/,/g) ?? []).length;
-    const delimiter = tabCount > commaCount ? "\t" : ",";
-    rows = lines.map((line) => line.split(delimiter));
-    hasHeader = true;
+    return {
+      headers: ["value"],
+      rows: lines.map((line) => [line]),
+    };
   }
-  const columnCount = Math.max(...rows.map((row) => row.length));
-  return (
-    <div
-      style={{
-        maxHeight: 300,
-        overflow: "auto",
-        border: "1px solid var(--color-border)",
-        borderRadius: "var(--radius-sm)",
-      }}
-    >
-      <table
-        style={{
-          borderCollapse: "collapse",
-          fontSize: 11,
-          fontFamily: "monospace",
-          width: "100%",
-        }}
-      >
-        <tbody>
-          {rows.map((row, rowIdx) => (
-            <tr key={rowIdx}>
-              {Array.from({ length: columnCount }, (_, colIdx) => (
-                <td
-                  key={colIdx}
-                  style={{
-                    border: "1px solid var(--color-border)",
-                    padding: "2px 6px",
-                    overflowWrap: "anywhere",
-                    backgroundColor:
-                      hasHeader && rowIdx === 0 ? "var(--color-surface-hover)" : "transparent",
-                    fontWeight: hasHeader && rowIdx === 0 ? 600 : 400,
-                  }}
-                >
-                  {row[colIdx] ?? ""}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+  const firstLine = lines[0];
+  const tabCount = (firstLine.match(/\t/g) ?? []).length;
+  const commaCount = (firstLine.match(/,/g) ?? []).length;
+  const delimiter = tabCount > commaCount ? "\t" : ",";
+  const [headerRow, ...bodyRows] = lines.map((line) => line.split(delimiter));
+  const columnCount =
+    bodyRows.length === 0
+      ? headerRow.length
+      : Math.max(headerRow.length, ...bodyRows.map((row) => row.length));
+  const headers = Array.from({ length: columnCount }, (_, i) => headerRow[i] ?? "");
+  const rows = bodyRows.map((row) =>
+    Array.from({ length: columnCount }, (_, i) => row[i] ?? ""),
   );
+  return { headers, rows };
+}
+
+function TabularPreview({ text, contentType }: TabularPreviewProps) {
+  const table = buildTabularPreviewModel(text, contentType);
+  if (!table) {
+    return null;
+  }
+  return <PreviewTable table={table} />;
 }

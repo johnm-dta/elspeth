@@ -83,6 +83,28 @@ describe("StructuredJsonPreview", () => {
     expect(screen.getByText("ok")).toBeInTheDocument();
   });
 
+  it("renders the JSON table view through the shared PreviewTable (real th scope=col)", async () => {
+    // Parity guard for elspeth-611a05668e: the JSON table view and
+    // RunOutputsPanel's csv/jsonl preview now share one PreviewTable
+    // component, so header cells must be real th[scope=col] here too —
+    // not just for the tabular consumer.
+    const user = userEvent.setup();
+    const { container } = render(
+      <StructuredJsonPreview text='[{"id":1,"status":"ok"}]' />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Table view" }));
+
+    const table = container.querySelector(".structured-preview-table");
+    expect(table).not.toBeNull();
+    const headerCells = screen.getAllByRole("columnheader");
+    headerCells.forEach((cell) => {
+      expect(cell.tagName).toBe("TH");
+      expect(cell.getAttribute("scope")).toBe("col");
+    });
+    expect(table?.querySelectorAll("tbody td").length).toBeGreaterThan(0);
+  });
+
   it("preserves first-seen header order across rows with differing keys", async () => {
     const user = userEvent.setup();
     render(

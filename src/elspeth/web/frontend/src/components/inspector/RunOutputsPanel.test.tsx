@@ -295,6 +295,55 @@ describe("RunOutputsPanel", () => {
       expect(screen.getByText('{"a":1,"b":2}')).toBeInTheDocument(),
     );
     expect(screen.getByText('{"a":3,"b":4}')).toBeInTheDocument();
+
+    // jsonl has no column structure of its own, but it still gets a real
+    // th scope="col" header cell through the shared PreviewTable rather
+    // than rendering headerless (or with the old fake bold-td header).
+    const header = screen.getByRole("columnheader");
+    expect(header.tagName).toBe("TH");
+    expect(header.getAttribute("scope")).toBe("col");
+  });
+
+  it("renders nothing for an empty csv/jsonl preview body instead of an empty table shell", async () => {
+    // buildTabularPreviewModel returns null for zero data lines; TabularPreview
+    // must render nothing rather than an empty PreviewTable — this empty
+    // state must keep working across the TabularPreview rewrite.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({ preview_text: "", row_count_preview: null }),
+    );
+
+    const { container } = render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Hide preview/ })).toBeInTheDocument(),
+    );
+    expect(container.querySelector(".structured-preview-table")).toBeNull();
+    expect(screen.queryByRole("columnheader")).not.toBeInTheDocument();
+  });
+
+  it("renders csv preview headers as real th[scope=col], not a fake bold-td header", async () => {
+    // Regression for elspeth-611a05668e: csv/jsonl previously rendered
+    // through a bespoke inline-styled table that faked its header row
+    // with a bold <td>. Both the csv/jsonl and JSON table renderers now
+    // share one PreviewTable component with a real thead/th scope="col".
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(csvPreview());
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    const headerCells = await screen.findAllByRole("columnheader");
+    expect(headerCells.map((el) => el.textContent)).toEqual(["col1", "col2"]);
+    headerCells.forEach((cell) => {
+      expect(cell.tagName).toBe("TH");
+      expect(cell.getAttribute("scope")).toBe("col");
+    });
   });
 
   it("renders TSV preview (content_type=csv, tab-separated) with tab delimiter sniffing", async () => {

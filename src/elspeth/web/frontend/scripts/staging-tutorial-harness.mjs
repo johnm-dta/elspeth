@@ -4,6 +4,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { chromium } from "@playwright/test";
+import {
+  driveStagedGuidedTutorial,
+  isComposeRequest,
+  isRunRequest,
+} from "./staging-tutorial-driver.mjs";
 
 const TOKEN_KEY = "auth_token";
 const DEFAULT_BASE_URL = "https://elspeth.foundryside.dev";
@@ -274,14 +279,16 @@ async function fetchSessionEvidence(token, sessionId) {
   ]);
   const events = Array.isArray(eventsEnvelope?.events) ? eventsEnvelope.events : [];
   const pendingEvents = events.filter((event) => event.choice === "pending");
+  const reviewEvents = events.filter((event) => event.choice !== "abandoned");
   const pendingKinds = pendingEvents.map((event) => event.kind).sort();
+  const reviewKinds = reviewEvents.map((event) => event.kind).sort();
   const expectedKinds = [...BASE_EXPECTED_TUTORIAL_KINDS, ...(expectedVagueTerm ? ["vague_term"] : [])].sort();
-  const cleanupEvidence = rawHtmlCleanupEvidence(state, pendingEvents);
-  const promptShieldEvidence = promptShieldRecommendationEvidence(state, pendingEvents);
+  const cleanupEvidence = rawHtmlCleanupEvidence(state, reviewEvents);
+  const promptShieldEvidence = promptShieldRecommendationEvidence(state, reviewEvents);
   const blockingToolValidationDiagnostics = latestBlockingToolValidationDiagnostics(messages);
   const hasExpectedTutorialAssumptions =
-    expectedKinds.every((kind) => pendingKinds.includes(kind)) &&
-    pendingEvents.some(
+    expectedKinds.every((kind) => reviewKinds.includes(kind)) &&
+    reviewEvents.some(
       (event) =>
         event.kind === "invented_source" &&
         event.affected_node_id === "source" &&
@@ -289,16 +296,16 @@ async function fetchSessionEvidence(token, sessionId) {
         event.user_term.length > 0,
     ) &&
     (!expectedVagueTerm ||
-      pendingEvents.some(
+      reviewEvents.some(
         (event) => event.kind === "vague_term" && event.user_term === expectedVagueTerm,
       )) &&
-    pendingEvents.some(
+    reviewEvents.some(
       (event) =>
         event.kind === "llm_prompt_template" &&
         typeof event.user_term === "string" &&
         event.user_term.startsWith("llm_prompt_template:"),
     ) &&
-    pendingEvents.some(
+    reviewEvents.some(
       (event) =>
         event.kind === "pipeline_decision" &&
         event.affected_node_id !== "source" &&
@@ -315,6 +322,11 @@ async function fetchSessionEvidence(token, sessionId) {
     state_exists: state !== null && typeof state === "object" && !("error" in state),
     state_error: state?.error ?? null,
     state_version: state?.version ?? null,
+    interpretation_count: events.length,
+    interpretation_kinds: reviewKinds,
+    interpretation_terms: reviewEvents
+      .map((event) => `${event.kind}:${event.affected_node_id ?? ""}:${event.user_term ?? ""}:${event.choice ?? ""}`)
+      .sort(),
     pending_interpretation_count: pendingEvents.length,
     pending_interpretation_kinds: pendingKinds,
     pending_interpretation_terms: pendingEvents
@@ -343,11 +355,21 @@ async function runOne(browser, token, index) {
 
   const apiFailures = [];
   const consoleErrors = [];
-  let rejectMessageFailure = null;
-  let messageFailureSettled = false;
-  const messageFailurePromise = new Promise((_, reject) => {
-    rejectMessageFailure = reject;
+  let rejectBlockingFailure = null;
+  let blockingFailureSettled = false;
+  const blockingFailurePromise = new Promise((_, reject) => {
+    rejectBlockingFailure = reject;
   });
+  void blockingFailurePromise.catch(() => undefined);
+  const makeStep = () => ({
+    fired: false,
+    responded: false,
+    status: null,
+    body: null,
+    elapsed_ms: null,
+  });
+  const steps = { compose: makeStep(), run: makeStep() };
+  const stepStartedAt = { compose: null, run: null };
   const context = await browser.newContext({
     baseURL,
     storageState: {
@@ -366,37 +388,80 @@ async function runOne(browser, token, index) {
       consoleErrors.push(message.text());
     }
   });
+  page.on("request", (request) => {
+    const url = request.url();
+    const method = request.method();
+    if (isComposeRequest(url, method) && !steps.compose.fired) {
+      steps.compose.fired = true;
+      stepStartedAt.compose = Date.now();
+    } else if (isRunRequest(url, method)) {
+      steps.run.fired = true;
+      stepStartedAt.run = Date.now();
+    }
+  });
+  page.on("requestfailed", (request) => {
+    const url = request.url();
+    const method = request.method();
+    const errorText = request.failure()?.errorText ?? "connection failed";
+    if (isComposeRequest(url, method)) {
+      steps.compose.body ??= errorText;
+    } else if (isRunRequest(url, method)) {
+      steps.run.body ??= errorText;
+    }
+  });
   page.on("response", (response) => {
+    const method = response.request().method();
+    const url = response.url();
+    const isSessionCreate = method === "POST" && url === `${baseURL}/api/sessions`;
+    const compose = isComposeRequest(url, method);
+    const run = isRunRequest(url, method);
+    if (compose || run) {
+      const target = compose ? steps.compose : steps.run;
+      const startedAt = compose ? stepStartedAt.compose : stepStartedAt.run;
+      target.responded = true;
+      target.status = response.status();
+      target.elapsed_ms = startedAt === null ? null : Date.now() - startedAt;
+    }
     if (response.status() >= 500) {
       apiFailures.push({
         status: response.status(),
-        method: response.request().method(),
-        url: response.url(),
+        method,
+        url,
       });
     }
-    const isComposerMessagePost =
-      response.request().method() === "POST" &&
-      /\/api\/sessions\/[^/]+\/messages$/.test(new URL(response.url()).pathname);
-    if (isComposerMessagePost && response.status() >= 400 && !messageFailureSettled) {
-      messageFailureSettled = true;
+    if (isSessionCreate && response.ok()) {
+      void response
+        .json()
+        .then((session) => {
+          if (typeof session?.id === "string") {
+            sessionId = session.id;
+          }
+        })
+        .catch(() => {});
+    }
+    const isBlockingPost = compose || run;
+    if (isBlockingPost && response.status() >= 400 && !blockingFailureSettled) {
+      blockingFailureSettled = true;
       void readResponseBody(response)
         .then((body) => {
+          const target = compose ? steps.compose : steps.run;
+          target.body = JSON.stringify(body).slice(0, 1000);
           apiFailures.push({
             status: response.status(),
-            method: response.request().method(),
-            url: response.url(),
+            method,
+            url,
             body,
           });
-          rejectMessageFailure?.(
+          rejectBlockingFailure?.(
             new Error(
-              `composer message POST failed (${response.status()}): ${JSON.stringify(body).slice(0, 1000)}`,
+              `tutorial ${compose ? "compose" : "run"} POST failed (${response.status()}): ${JSON.stringify(body).slice(0, 1000)}`,
             ),
           );
         })
         .catch((error) => {
-          rejectMessageFailure?.(
+          rejectBlockingFailure?.(
             new Error(
-              `composer message POST failed (${response.status()}) and body could not be read: ${
+              `tutorial ${compose ? "compose" : "run"} POST failed (${response.status()}) and body could not be read: ${
                 error instanceof Error ? error.message : String(error)
               }`,
             ),
@@ -407,45 +472,68 @@ async function runOne(browser, token, index) {
 
   let sessionId = null;
   let screenshot = null;
+  let graduated = false;
 
   try {
     await page.goto("/", { waitUntil: "networkidle", timeout: 45_000 });
+    const sessionResponsePromise = page
+      .waitForResponse(
+        (response) =>
+          response.url() === `${baseURL}/api/sessions` &&
+          response.request().method() === "POST",
+        { timeout: 30_000 },
+      )
+      .catch(() => null);
     await page.getByRole("button", { name: "Let's go" }).click({ timeout: 30_000 });
+    const sessionResponse = await sessionResponsePromise;
+    if (sessionResponse?.ok()) {
+      const session = await sessionResponse.json().catch(() => null);
+      if (typeof session?.id === "string") {
+        sessionId = session.id;
+      }
+    }
     if (promptOverride.trim()) {
-      await page.locator("#tutorial-prompt").fill(promptOverride);
+      const legacyPrompt = page.locator("#tutorial-prompt");
+      if ((await legacyPrompt.count().catch(() => 0)) > 0) {
+        await legacyPrompt.fill(promptOverride);
+      } else {
+        console.warn(
+          "[tutorial-harness] TUTORIAL_PROMPT_OVERRIDE ignored; staged tutorial uses locked per-stage prompts",
+        );
+      }
     }
 
-    const sessionResponsePromise = page.waitForResponse(
-      (response) =>
-        response.url() === `${baseURL}/api/sessions` &&
-        response.request().method() === "POST",
-      { timeout: 30_000 },
-    );
-    await page.getByRole("button", { name: "Build it" }).click({ timeout: 30_000 });
-    const sessionResponse = await sessionResponsePromise;
-    const session = await sessionResponse.json();
-    sessionId = session.id;
-
     await Promise.race([
-      page.waitForFunction(
-        () => {
-          const text = document.body.innerText;
-          return (
-            text.includes("Here is what the composer drafted") ||
-            text.includes("The composer did not return a pipeline draft.") ||
-            text.includes("The pipeline is still empty") ||
-            text.includes("The tutorial could not build the draft pipeline.") ||
-            text.includes("Internal Server Error")
-          );
-        },
-        undefined,
-        { timeout: buildTimeoutMs },
-      ),
-      messageFailurePromise,
+      page.getByLabel(/guided composer/i).waitFor({ state: "visible", timeout: 60_000 }),
+      blockingFailurePromise,
     ]);
+    await Promise.race([
+      driveStagedGuidedTutorial(page, {
+        timeoutMs: buildTimeoutMs,
+        decisionScreenshotPath: resolve(artifactsDir, `run-${index}-guided-decision-summary.png`),
+      }),
+      blockingFailurePromise,
+    ]);
+    await Promise.race([
+      page
+        .getByRole("button", { name: "Continue", exact: true })
+        .waitFor({ state: "visible", timeout: buildTimeoutMs }),
+      blockingFailurePromise,
+    ]);
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await page.getByText(/This is the audit story/i).waitFor({ timeout: 60_000 });
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await page
+      .getByRole("heading", { name: "You're ready to use the composer." })
+      .waitFor({ timeout: 60_000 });
+    graduated = true;
+    await page
+      .getByRole("button", { name: "Take me to the composer" })
+      .click({ timeout: 30_000 })
+      .catch(() => undefined);
 
     const bodyText = await page.locator("body").innerText();
-    const landed = bodyText.includes("Here is what the composer drafted");
+    const landed = graduated;
     if (!landed) {
       await mkdir(artifactsDir, { recursive: true });
       screenshot = resolve(artifactsDir, `run-${index}-failure.png`);
@@ -471,6 +559,8 @@ async function runOne(browser, token, index) {
       ok,
       session_id: sessionId,
       landed,
+      graduated,
+      steps,
       api_failures: apiFailures,
       console_errors: consoleErrors,
       screenshot,
@@ -487,6 +577,8 @@ async function runOne(browser, token, index) {
       ok: false,
       session_id: sessionId,
       landed: false,
+      graduated,
+      steps,
       api_failures: apiFailures,
       console_errors: consoleErrors,
       screenshot,

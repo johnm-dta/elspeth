@@ -218,14 +218,14 @@ const MAX_TURN_NOT_EMITTED_SELF_HEALS = 1;
  * active session (see applyGuidedResponse) and so must call the raw
  * api.respondGuided directly with the same body.
  */
-export const EXIT_TO_FREEFORM_REQUEST = {
+export const EXIT_TO_FREEFORM_REQUEST = Object.freeze({
   chosen: null,
   edited_values: null,
   custom_inputs: null,
   accepted_step_index: null,
   edit_step_index: null,
   control_signal: "exit_to_freeform",
-} satisfies GuidedRespondRequest;
+} satisfies GuidedRespondRequest);
 
 // Resetting guided-mode state landed in five places: initialState plus
 // the four navigation actions that switch session context (createSession,
@@ -1566,7 +1566,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   // Guided-mode actions
   async startGuided(sessionId: string) {
     // Capture which session this fetch belongs to before the await.
-    // Mirrors the active-session guard in loadComposerProgress (lines 367-372):
+    // Mirrors the active-session guard in loadComposerProgress:
     // if the user switches sessions while the request is in flight, the
     // stale response is silently dropped rather than overwriting the newly
     // active session's guided state.
@@ -1647,7 +1647,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       throw new Error("respondGuided called without active session");
     }
     // Capture the session identity before the await (Codex #4 stale-fetch guard).
-    // Mirrors the active-session guard in loadComposerProgress (lines 367-372).
+    // Mirrors the active-session guard in loadComposerProgress.
     const requestedSessionId = activeSessionId;
     // Clear any stale self-heal notice at the start of the next attempt, per
     // its documented lifecycle (the resync notice describes the PREVIOUS

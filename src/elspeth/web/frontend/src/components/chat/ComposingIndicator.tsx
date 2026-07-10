@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { ComposerProgressSnapshot, CompositionState } from "@/types/api";
 import { hasSources } from "@/utils/compositionState";
+import { plural } from "@/utils/plural";
 
 interface ComposingIndicatorProps {
   latestRequest?: string | null;
@@ -43,10 +44,6 @@ function terminalStatusLabel(
   if (phase === "failed") return "Failed";
   if (phase === "cancelled") return "Stopped";
   return "Updated";
-}
-
-function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
-  return count === 1 ? `1 ${singular}` : `${count} ${pluralLabel}`;
 }
 
 function setupCount(count: number, singular: string, pluralLabel = `${singular}s`): string {

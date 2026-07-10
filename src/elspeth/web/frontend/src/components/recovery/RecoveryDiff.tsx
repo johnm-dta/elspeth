@@ -6,6 +6,7 @@ import type {
 } from "@/types/api";
 import type { OutputSpec, SourceSpec } from "@/types/index";
 import { sortedSourceEntries } from "@/utils/compositionState";
+import { plural } from "@/utils/plural";
 
 // DiffKind / DiffSection / DiffEntry are exported for reuse by the chat
 // panel's proposal cards (elspeth-10f76f9250): mutating tool-call proposals
@@ -97,10 +98,6 @@ function labelForEntry(entry: DiffEntry): string {
         ? "Removed"
         : "Changed";
   return `${action} ${entry.section}`;
-}
-
-function pluralize(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function addCollectionDiff<T>(
@@ -205,7 +202,7 @@ function buildDiff(
   const groups: DiffGroup[] = [
     {
       kind: "added",
-      label: pluralize(
+      label: plural(
         entries.filter((entry) => entry.kind === "added").length,
         "addition",
       ),
@@ -213,7 +210,7 @@ function buildDiff(
     },
     {
       kind: "changed",
-      label: pluralize(
+      label: plural(
         entries.filter((entry) => entry.kind === "changed").length,
         "change",
       ),
@@ -221,7 +218,7 @@ function buildDiff(
     },
     {
       kind: "removed",
-      label: pluralize(
+      label: plural(
         entries.filter((entry) => entry.kind === "removed").length,
         "removal",
       ),

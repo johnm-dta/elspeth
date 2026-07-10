@@ -6,6 +6,7 @@ import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { ApiError } from "@/types/index";
 import { hasCompositionContent } from "@/utils/compositionState";
+import { plural } from "@/utils/plural";
 
 export const IMPORT_YAML_CONFIRM_TITLE = "Replace the current pipeline?";
 export const IMPORT_YAML_CONFIRM_CONFIRM_LABEL = "Replace pipeline";
@@ -352,14 +353,10 @@ function isRuntimeListSection(section: ImportYamlSection): boolean {
 
 function importYamlCountLine(analysis: ImportYamlDraftAnalysis): string {
   return [
-    pluraliseCount(analysis.sourceCount, "source"),
-    pluraliseCount(analysis.stepCount, "processing step"),
-    pluraliseCount(analysis.outputCount, "output"),
+    plural(analysis.sourceCount, "source"),
+    plural(analysis.stepCount, "processing step"),
+    plural(analysis.outputCount, "output"),
   ].join(", ");
-}
-
-function pluraliseCount(count: number, singular: string): string {
-  return `${count} ${count === 1 ? singular : `${singular}s`}`;
 }
 
 function ImportYamlDraftPreview({

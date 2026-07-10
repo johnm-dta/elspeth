@@ -20,6 +20,7 @@ import {
   type RunProgress,
   type RunStatus,
 } from "@/types/index";
+import { plural } from "@/utils/plural";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
 
 function statusLabel(status: RunStatus | null): string {
@@ -66,10 +67,6 @@ function runSummaryParts(
     parts.push(`${discardTotal} discarded`);
   }
   return parts;
-}
-
-function pluralRows(count: number): string {
-  return `${count} ${count === 1 ? "row" : "rows"}`;
 }
 
 function sourceValidationFallbackStage(summary: DiscardSummary): DiscardStageSummary | null {
@@ -146,7 +143,7 @@ function DiscardSummaryWarning({ run }: { run: Run | null }): JSX.Element | null
   return (
     <div role="alert" className="discard-summary-warning">
       <strong>
-        {pluralRows(stage.count)} discarded at {discardStageLabel(stage)}
+        {plural(stage.count, "row")} discarded at {discardStageLabel(stage)}
         {nodeSuffix}. {terminalNote}
       </strong>
       <span>{discardCauseText(stage)} View diagnostics for the first failed row's error message.</span>

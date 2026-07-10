@@ -232,6 +232,59 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().error).toMatch(/failed to load sessions/i);
     });
 
+    it("ignores a stale response that resolves after a subsequent create+rename replaced the list (elspeth-4d5b0e634a)", async () => {
+      // Regression pin for the tutorial session-list race: an app-start
+      // loadSessions can still be in flight when the user clicks "Let's go"
+      // (createSession + renameSession). If the fetch resolves afterwards
+      // with its pre-rename snapshot, it must not clobber the rename.
+      const apiMod = await import("@/api/client");
+      let resolveFetch!: (sessions: unknown[]) => void;
+      (apiMod.fetchSessions as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+      );
+
+      // App-start loadSessions fires and is still in flight...
+      const loading = useSessionStore.getState().loadSessions();
+
+      // ...when the tutorial's "Let's go" creates and renames a session —
+      // the exact sequence HelloWorldTutorial.onStart runs.
+      (apiMod.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "tutorial-session",
+        title: "Session — 10 Jul 2026",
+        created_at: "2026-07-10T00:00:00Z",
+        updated_at: "2026-07-10T00:00:00Z",
+      });
+      await useSessionStore.getState().createSession();
+
+      const renamed = {
+        id: "tutorial-session",
+        title: "First-run tutorial (in progress)",
+        created_at: "2026-07-10T00:00:00Z",
+        updated_at: "2026-07-10T00:00:01Z",
+      };
+      (apiMod.renameSession as ReturnType<typeof vi.fn>).mockResolvedValue(renamed);
+      await useSessionStore
+        .getState()
+        .renameSession("tutorial-session", "First-run tutorial (in progress)");
+
+      const sessionsAfterMutation = useSessionStore.getState().sessions;
+      expect(sessionsAfterMutation[0]).toEqual(renamed);
+
+      // NOW the stale app-start fetch resolves with its pre-rename (empty)
+      // snapshot.
+      resolveFetch([]);
+      await loading;
+
+      // The rename must survive — the stale snapshot did not clobber it.
+      expect(useSessionStore.getState().sessions).toBe(sessionsAfterMutation);
+      expect(useSessionStore.getState().sessions[0]).toEqual(renamed);
+      // The fetch itself still succeeded, so the loaded-ness flag is honest
+      // to flip even though its (stale) snapshot was discarded.
+      expect(useSessionStore.getState().sessionsLoaded).toBe(true);
+    });
+
     it("selectSession clears compositionStateLoaded while fetching, sets it once settled", async () => {
       const apiMod = await import("@/api/client");
       let resolveState!: (value: null) => void;

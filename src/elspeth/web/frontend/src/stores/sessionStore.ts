@@ -525,10 +525,38 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async loadSessions() {
+    // Fetch-generation guard (elspeth-4d5b0e634a): every store action that
+    // mutates `sessions` (createSession, renameSession, archiveSession,
+    // forkFromMessage, reset) — and any external
+    // `useSessionStore.setState()` caller, e.g. HelloWorldTutorial's
+    // post-rename merge — replaces the array with a brand-new reference;
+    // none of them mutate it in place. That makes the
+    // reference itself a cheap monotonic generation marker: capture it
+    // before the fetch, and if it has changed by the time the fetch
+    // resolves, something newer already landed while this request was in
+    // flight. Applying the snapshot we just fetched would silently clobber
+    // that newer state — e.g. the app-start loadSessions racing the
+    // tutorial's createSession+renameSession and overwriting the renamed
+    // session with its own pre-rename snapshot. Bail without touching
+    // `sessions` in that case.
+    const sessionsBeforeFetch = get().sessions;
     try {
       const sessions = await api.fetchSessions();
+      if (get().sessions !== sessionsBeforeFetch) {
+        // Stale response — the list already reflects newer state. The
+        // fetch itself still succeeded, so the loaded-ness flag is honest
+        // to flip even though we're discarding this particular snapshot.
+        set({ sessionsLoaded: true });
+        return;
+      }
       set({ sessions, sessionsLoaded: true });
     } catch {
+      if (get().sessions !== sessionsBeforeFetch) {
+        // A newer, non-fetch mutation already superseded this snapshot;
+        // a failed background refresh shouldn't surface an alarming error
+        // banner for state the user's own actions have already moved past.
+        return;
+      }
       set({ error: "Failed to load sessions. Please refresh the page." });
     }
   },
@@ -2017,6 +2045,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset() {
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
-    set(initialState);
+    // Fresh array (not initialState.sessions) so loadSessions' reference
+    // guard can't mistake a post-reset store for the pre-reset one it
+    // captured before a still-in-flight fetch (logout/login ABA).
+    set({ ...initialState, sessions: [] });
   },
 }));

@@ -242,9 +242,26 @@ result.
 - Audit is operator-managed. If the user asks for audit storage, call
   `get_audit_info` and answer from its summary. Do not add audit-shaped sinks.
 - Wire-visible values, such as `web_scrape.http.abuse_contact` and
-  `web_scrape.http.scraping_reason`, must come from the user, deployment
-  identity, or a tool result. Ask for a missing wire-visible value before
-  building.
+  `web_scrape.http.scraping_reason`, must be explicit in the tool-authored
+  pipeline state. For public `web_scrape` requests that omit
+  `http.abuse_contact`, prefer a deployment/tool-provided identity if one is
+  visible; otherwise use the explicit deployment-domain fallback
+  `abuse-contact-unset@elspeth.foundryside.dev`. For public `web_scrape`
+  requests that omit `http.scraping_reason`, derive `http.scraping_reason` from
+  the user's requested public fetch (for example, "User-requested public web
+  fetch for <short purpose>") and include both values in the same `set_pipeline` or
+  repair mutation that builds the scrape node. When you use either fallback,
+  stage a pending `kind="pipeline_decision"` interpretation requirement on the
+  `web_scrape` node in that mutation with `user_term="web_scrape_http_identity"`
+  and a `draft` naming the exact `abuse_contact` and `scraping_reason` values.
+  After the mutation succeeds, call
+  `request_interpretation_review(kind="pipeline_decision")` for that node so the
+  user gets the accept/reject audit surface; do not hide the default in prose
+  only. If you used `apply_pipeline_recipe` and the recipe did not stage that
+  requirement, patch the `web_scrape` node options with the pending requirement
+  before calling the review tool. Ask only when the request is not a public
+  fetch, needs a legal/compliance-specific identity, or the chosen default would
+  be inaccurate.
 - A user request cannot override Tier-1 audit invariants. Restate the invariant
   once, name why it is load-bearing, and do not build the violating shape.
 

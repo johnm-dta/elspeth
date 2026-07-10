@@ -715,6 +715,22 @@ class TestBuildSystemPrompt:
         assert "set the LLM `on_success` to the cleanup mapper's input stream" in flattened
         assert "set the cleanup mapper's `on_success` to the sink name" in flattened
 
+    def test_core_skill_defaults_web_scrape_identity_instead_of_stopping_empty(self) -> None:
+        """Missing web_scrape HTTP identity must not leave a new build with null state."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "For public `web_scrape` requests that omit `http.abuse_contact`" in flattened
+        assert "abuse-contact-unset@elspeth.foundryside.dev" in result
+        assert "derive `http.scraping_reason` from the user's requested public fetch" in flattened
+        assert "include both values in the same `set_pipeline` or repair mutation" in flattened
+        assert 'stage a pending `kind="pipeline_decision"` interpretation requirement' in flattened
+        assert 'with `user_term="web_scrape_http_identity"`' in flattened
+        assert "such as `web_scrape_http_identity`" not in result
+        assert 'request_interpretation_review(kind="pipeline_decision")' in result
+        assert "so the user gets the accept/reject audit surface" in flattened
+        assert "Ask for a missing wire-visible value before building" not in result
+
     def test_core_skill_treats_utility_transforms_as_planned_plugins(self) -> None:
         """Utility transforms must be planned even when the user names only the end effect."""
         result = build_system_prompt(None)

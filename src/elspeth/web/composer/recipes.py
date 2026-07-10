@@ -646,14 +646,18 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         description=(
             "Operator-owned monitored contact address sent in web_scrape HTTP metadata. "
-            "Do not default or invent this value; ask the operator if absent."
+            "If the public-fetch request omits it and no deployment/tool identity is visible, "
+            "use abuse-contact-unset@elspeth.foundryside.dev and surface that default after "
+            "the recipe/tool call with a pipeline_decision interpretation review."
         ),
     ),
     "scraping_reason": SlotSpec(
         slot_type="str",
         description=(
             "Operator-authored reason for scraping, sent in web_scrape HTTP metadata. "
-            "Do not default or infer this value from the tutorial prose."
+            "If the public-fetch request omits it, derive an explicit reason from the user's "
+            "requested public fetch and surface that default after the recipe/tool call with "
+            "a pipeline_decision interpretation review."
         ),
     ),
     "output_path": SlotSpec(

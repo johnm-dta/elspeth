@@ -30,6 +30,7 @@ INTERPRETATION_REVIEW_PENDING_CODE = "interpretation_review_pending"
 PENDING_INTERPRETATION_AUTHORING_TEXT = "pending interpretation"
 RAW_HTML_CLEANUP_USER_TERM: Final[str] = "drop_raw_html_fields"
 RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
+WEB_SCRAPE_HTTP_IDENTITY_USER_TERM: Final[str] = "web_scrape_http_identity"
 PROMPT_SHIELD_USER_TERM: Final[str] = "prompt_injection_shield_recommendation"
 PROMPT_SHIELD_WARNING_DRAFT: Final[str] = (
     "Recommend inserting azure_prompt_shield (or the deployment equivalent prompt-injection shield) "
@@ -140,6 +141,21 @@ def validate_pipeline_decision_semantics(
     web_scrape_raw_fields: frozenset[str],
 ) -> None:
     """Validate that reviewed pipeline-shaping decisions match node behavior."""
+
+    if _is_web_scrape_http_identity_decision(user_term=user_term):
+        if plugin != "web_scrape":
+            raise ValueError(
+                f"{context}: web-scrape HTTP identity decision must be implemented by a web_scrape node; "
+                f"node {node_id!r} has plugin {plugin!r}"
+            )
+        http = options.get("http")
+        if not isinstance(http, Mapping):
+            raise ValueError(f"{context}: web-scrape HTTP identity decision requires options.http on node {node_id!r}")
+        for field_name in ("abuse_contact", "scraping_reason"):
+            value = http.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{context}: web-scrape HTTP identity decision requires non-empty http.{field_name} on node {node_id!r}")
+        return
 
     if not _is_raw_html_cleanup_decision(user_term=user_term, draft=draft):
         return
@@ -473,6 +489,10 @@ def _is_raw_html_cleanup_decision(*, user_term: str, draft: str | None) -> bool:
         return False
     normalized_draft = draft.lower()
     return all(marker in normalized_draft for marker in _RAW_HTML_CLEANUP_DRAFT_MARKERS)
+
+
+def _is_web_scrape_http_identity_decision(*, user_term: str) -> bool:
+    return user_term.strip() == WEB_SCRAPE_HTTP_IDENTITY_USER_TERM
 
 
 def _validated_mapping_pair(source_field: object, target_field: object, *, context: str, node_id: str) -> tuple[str, str]:
@@ -1067,7 +1087,35 @@ def pipeline_decision_artifact_hash(
         return _prompt_shield_artifact_hash(node, all_nodes)
     if normalized == RAW_HTML_CLEANUP_USER_TERM:
         return _raw_html_cleanup_artifact_hash(node, all_nodes)
+    if normalized == WEB_SCRAPE_HTTP_IDENTITY_USER_TERM:
+        return _web_scrape_http_identity_artifact_hash(node)
     raise ValueError(f"pipeline_decision_artifact_hash: unknown pipeline_decision user_term {user_term!r}")
+
+
+def _web_scrape_http_identity_artifact_hash(node: NodeSpec) -> str:
+    """Material-scoped hash for the web_scrape HTTP identity review."""
+
+    if node.plugin != "web_scrape":
+        raise ValueError(f"pipeline_decision_artifact_hash: web_scrape_http_identity requires a web_scrape node, got {node.plugin!r}")
+    http = node.options.get("http")
+    if not isinstance(http, Mapping):
+        raise ValueError("pipeline_decision_artifact_hash: web_scrape_http_identity requires options.http")
+    abuse_contact = http.get("abuse_contact")
+    scraping_reason = http.get("scraping_reason")
+    allowed_hosts = http.get("allowed_hosts", "public_only")
+    if not isinstance(abuse_contact, str) or not abuse_contact.strip():
+        raise ValueError("pipeline_decision_artifact_hash: web_scrape_http_identity requires http.abuse_contact")
+    if not isinstance(scraping_reason, str) or not scraping_reason.strip():
+        raise ValueError("pipeline_decision_artifact_hash: web_scrape_http_identity requires http.scraping_reason")
+    return stable_hash(
+        {
+            "review_kind": "web_scrape_http_identity",
+            "node_id": node.id,
+            "abuse_contact": abuse_contact,
+            "scraping_reason": scraping_reason,
+            "allowed_hosts": allowed_hosts,
+        }
+    )
 
 
 def _prompt_shield_artifact_hash(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> str:

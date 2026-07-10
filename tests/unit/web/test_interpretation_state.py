@@ -83,6 +83,51 @@ def _state_with_cleanup_node(options: dict[str, object]) -> CompositionState:
     )
 
 
+def _state_with_web_scrape_identity_node(
+    *,
+    abuse_contact: str = "abuse-contact-unset@elspeth.foundryside.dev",
+    scraping_reason: str = "User-requested public web fetch for rules download",
+    allowed_hosts: object | None = "public_only",
+) -> CompositionState:
+    http: dict[str, object] = {
+        "abuse_contact": abuse_contact,
+        "scraping_reason": scraping_reason,
+    }
+    if allowed_hosts is not None:
+        http["allowed_hosts"] = allowed_hosts
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "content_fingerprint",
+                    "format": "markdown",
+                    "http": http,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 def _state_with_web_scrape_cleanup_node(options: dict[str, object]) -> CompositionState:
     return CompositionState(
         source=None,
@@ -1247,6 +1292,64 @@ def test_prompt_shield_hash_survives_model_swap() -> None:
     post_swap_hash = pipeline_decision_artifact_hash(post_swap.nodes[1], post_swap.nodes, user_term=PROMPT_SHIELD_USER_TERM)
 
     assert pre_swap_hash == post_swap_hash
+
+
+def test_web_scrape_http_identity_hash_binds_wire_visible_defaults() -> None:
+    state = _state_with_web_scrape_identity_node()
+
+    artifact_hash = pipeline_decision_artifact_hash(
+        state.nodes[0],
+        state.nodes,
+        user_term="web_scrape_http_identity",
+    )
+
+    assert artifact_hash == stable_hash(
+        {
+            "review_kind": "web_scrape_http_identity",
+            "node_id": "fetch_pages",
+            "abuse_contact": "abuse-contact-unset@elspeth.foundryside.dev",
+            "scraping_reason": "User-requested public web fetch for rules download",
+            "allowed_hosts": "public_only",
+        }
+    )
+
+
+def test_web_scrape_http_identity_hash_changes_when_identity_changes() -> None:
+    state_a = _state_with_web_scrape_identity_node()
+    state_b = _state_with_web_scrape_identity_node(abuse_contact="ops@agency.gov.au")
+
+    hash_a = pipeline_decision_artifact_hash(state_a.nodes[0], state_a.nodes, user_term="web_scrape_http_identity")
+    hash_b = pipeline_decision_artifact_hash(state_b.nodes[0], state_b.nodes, user_term="web_scrape_http_identity")
+
+    assert hash_a != hash_b
+
+
+def test_web_scrape_http_identity_hash_treats_omitted_allowed_hosts_as_public_only() -> None:
+    state_explicit = _state_with_web_scrape_identity_node(allowed_hosts="public_only")
+    state_omitted = _state_with_web_scrape_identity_node(allowed_hosts=None)
+
+    hash_explicit = pipeline_decision_artifact_hash(
+        state_explicit.nodes[0],
+        state_explicit.nodes,
+        user_term="web_scrape_http_identity",
+    )
+    hash_omitted = pipeline_decision_artifact_hash(
+        state_omitted.nodes[0],
+        state_omitted.nodes,
+        user_term="web_scrape_http_identity",
+    )
+
+    assert hash_explicit == hash_omitted
+
+
+def test_web_scrape_http_identity_hash_changes_when_fetch_boundary_changes() -> None:
+    state_a = _state_with_web_scrape_identity_node()
+    state_b = _state_with_web_scrape_identity_node(allowed_hosts=["10.0.0.0/8"])
+
+    hash_a = pipeline_decision_artifact_hash(state_a.nodes[0], state_a.nodes, user_term="web_scrape_http_identity")
+    hash_b = pipeline_decision_artifact_hash(state_b.nodes[0], state_b.nodes, user_term="web_scrape_http_identity")
+
+    assert hash_a != hash_b
 
 
 def test_prompt_shield_warning_is_advisory_not_blocking() -> None:

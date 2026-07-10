@@ -208,46 +208,15 @@
   gap: var(--space-xs);
 }
 
-.plugin-card-prose-paragraph {
-  margin: 0;
-}
-
-.plugin-card-prose-body code {
-  padding: 0 var(--space-2xs);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-bg);
-  color: var(--color-text);
-  font-family: var(--font-mono);
-  font-size: 0.95em;
-}
-
-.plugin-card-prose-code {
-  max-height: 140px;
-  margin: 0;
-  padding: var(--space-sm);
-  overflow: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-bg);
-  color: var(--color-text);
+/* Prose fields (usage_when_to_use / usage_when_not_to_use) render through
+   the shared MarkdownRenderer (elspeth-b7b1b62940), which sets its own
+   font-size/line-height on .markdown-body itself — that wins over the
+   inherited xs/1.4 above. Re-assert the catalog card's denser reference-card
+   typography here so the shared chat dialect doesn't inflate prose inside
+   the compact card. */
+.plugin-card-prose-body .markdown-body {
   font-size: var(--font-size-xs);
-  line-height: 1.35;
-  white-space: pre-wrap;
-}
-
-.plugin-card-prose-code code {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-}
-
-.plugin-card-prose-list {
-  display: grid;
-  gap: var(--space-2xs);
-  margin: 0;
-  padding-left: var(--space-lg);
+  line-height: 1.4;
 }
 
 .plugin-card-example-code {

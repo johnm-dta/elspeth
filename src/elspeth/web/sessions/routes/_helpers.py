@@ -11,7 +11,7 @@ import contextlib
 import hashlib
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as _replace
 from datetime import UTC, datetime
@@ -1521,6 +1521,123 @@ async def _persist_llm_calls(
                 f"session_id={session_id!r} on success path — Tier-1 audit "
                 f"corruption (no recovery)"
             ) from save_err
+
+
+_CLIENT_DISCONNECT_CANCEL_MARKER = "elspeth_client_disconnected"
+
+
+def _is_client_disconnect_cancel(exc: asyncio.CancelledError) -> bool:
+    """True when ``exc`` was delivered by :func:`_cancel_on_client_disconnect`."""
+    return bool(getattr(exc, _CLIENT_DISCONNECT_CANCEL_MARKER, False))
+
+
+@contextlib.asynccontextmanager
+async def _cancel_on_client_disconnect(request: Request) -> AsyncIterator[None]:
+    """Cancel the enclosing route task when the HTTP client disconnects.
+
+    The server stack does not do this on its own: uvicorn's
+    ``connection_lost`` only flags the request cycle as disconnected (it
+    never cancels the ASGI task), and Starlette's ``request_response``
+    has no disconnect watcher, so a client abort (Stop button, SPA
+    compose timeout, closed tab) leaves the route running to completion
+    as a zombie — burning the LLM budget, holding the per-session
+    compose lock for minutes, and mutating composition state the client
+    will never see (elspeth-e08063c3a5). The composer stack is already
+    built for cancellation (``attach_llm_calls`` rides on the
+    CancelledError instance; the routes have cancelled-path
+    bookkeeping); this watcher supplies the missing trigger.
+
+    Semantics:
+
+    * The guarded block MUST be awaited inline in the route task —
+      running it in a child task would launder the CancelledError
+      instance at the task boundary and drop the attached llm_calls
+      audit records.
+    * On disconnect, the route task is cancelled; the CancelledError is
+      marked (see :func:`_is_client_disconnect_cancel`) and the task's
+      cancellation count is restored via ``uncancel()`` so the route can
+      convert it into a quiet HTTP response after its cancelled-path
+      bookkeeping (uvicorn discards writes on a disconnected connection,
+      but a CancelledError escaping the app is logged as "Exception in
+      ASGI application").
+    * If the disconnect races the guarded block's completion, the
+      pending cancellation is flushed and absorbed here so it cannot
+      detonate mid-way through the route's post-compose persist tail.
+    * Both test transports (Starlette TestClient, httpx ASGITransport)
+      block their ``receive()`` until the response completes, so the
+      watcher stays dormant under tests unless a disconnect is
+      explicitly simulated.
+    """
+    task = asyncio.current_task()
+    if task is None:  # pure-sync dispatch (unit-test seams); nothing to watch
+        yield
+        return
+    triggered = False
+
+    async def _watch_disconnect() -> None:
+        nonlocal triggered
+        while True:
+            try:
+                message = await request.receive()
+            except Exception:
+                # A broken receive channel means we cannot observe the
+                # client any more — stop watching rather than risk
+                # cancelling a healthy compose on a transport quirk.
+                return
+            if message["type"] == "http.disconnect":
+                triggered = True
+                task.cancel()
+                return
+
+    watcher = asyncio.create_task(_watch_disconnect())
+    try:
+        yield
+    except asyncio.CancelledError as exc:
+        if triggered:
+            # Our own cancel: restore the task's cancellation count and
+            # mark the exception so the route's cancelled-path can
+            # discriminate disconnect-initiated cancellation from a real
+            # external cancel (server shutdown), which must keep
+            # unwinding.
+            task.uncancel()
+            setattr(exc, _CLIENT_DISCONNECT_CANCEL_MARKER, True)
+        raise
+    else:
+        # Normal exit: resolve completion races BEFORE the route resumes
+        # its persist tail, so a disconnect-cancel that landed in the
+        # same tick the guarded block completed cannot detonate mid-way
+        # through the post-compose persists.
+        if not watcher.done():
+            watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            # A pending EXTERNAL cancel can also deliver at this await;
+            # it is re-raised below via the cancelling() re-check rather
+            # than silently swallowed by the suppress.
+            await watcher
+        if task.cancelling() > 0:
+            if triggered:
+                # task.cancel() was called but the CancelledError has
+                # not been delivered yet (awaiting a done future does
+                # not yield to the loop). Flush it at a controlled
+                # suspension point and absorb it — the compose finished,
+                # its results persist normally, and the response is
+                # simply discarded by the disconnected transport.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.sleep(0)
+                task.uncancel()
+            if task.cancelling() > 0:
+                # An external cancel (e.g. server shutdown) raced the
+                # guarded block's completion — keep unwinding exactly as
+                # if it had landed inside the block.
+                raise asyncio.CancelledError()
+    finally:
+        # Exception paths (compose errors, cancellation) reach here
+        # without the else-branch teardown: detach the watcher without
+        # awaiting it — awaiting would add a suspension point on the
+        # unwind path. A cancelled task is collected by the loop without
+        # "exception was never retrieved" noise.
+        if not watcher.done():
+            watcher.cancel()
 
 
 async def _persist_chat_turns(
@@ -4266,6 +4383,7 @@ __all__ = [
     "_RuntimePreflightOutcome",
     "_SessionComposeLockRegistry",
     "_bounded_composer_exception_class",
+    "_cancel_on_client_disconnect",
     "_capture_runtime_preflight_failure",
     "_composer_chat_history",
     "_composer_conversation_messages",
@@ -4291,6 +4409,7 @@ __all__ = [
     "_initial_composition_state_with_guided_session",
     "_inspect_latest_ready_session_blob",
     "_interpretation_event_response",
+    "_is_client_disconnect_cancel",
     "_is_composer_audit_tool_message",
     "_is_composer_llm_audit_tool_message",
     "_litellm_error_detail",

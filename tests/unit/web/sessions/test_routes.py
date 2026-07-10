@@ -2618,6 +2618,205 @@ class TestMessageRoutes:
         user_msg = next(m for m in messages if m["role"] == "user")
         assert user_msg["composition_state_id"] == state_id
 
+    def test_send_message_with_stale_state_id_composes_against_head(self, tmp_path) -> None:
+        """A stale (but session-owned) client state_id must not poison the
+        compose loop's optimistic-concurrency baseline.
+
+        Regression test for elspeth-e08063c3a5: after a client-aborted
+        turn, the SPA's ``compositionState.id`` lags the DB head (the
+        aborted turn's response never arrived). The follow-up send
+        carries the stale id. The route must:
+
+        * keep the client-asserted id for USER-MESSAGE provenance
+          (AD-2/AD-7 — it records what the user saw), and
+        * seed ``composer.compose(current_state_id=...)`` — which the
+          compose loop threads into ``persist_compose_turn`` as
+          ``expected_current_state_id`` — from the ACTUAL head loaded
+          under the compose lock, exactly as ``/recompose`` does.
+
+        Seeding the loop from the stale client id made every follow-up
+        send fail with 409 stale_compose_state ("The session changed
+        while the compose turn was running.") until page reload.
+        """
+        head_version_state = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(name="v2"),
+            version=2,
+        )
+        mock_composer = _make_composer_mock(
+            response_text="Recovered",
+            # version matches the seeded head so the route's
+            # version-changed save path stays out of this test's scope.
+            state=head_version_state,
+        )
+        app, service = _make_app(tmp_path)
+        app.state.composer_service = mock_composer
+        client = TestClient(app)
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = resp.json()["id"]
+
+        loop = asyncio.new_event_loop()
+        try:
+            stale_record = loop.run_until_complete(
+                service.save_composition_state(
+                    uuid.UUID(session_id),
+                    CompositionStateData(
+                        metadata_={"name": "v1", "description": ""},
+                        is_valid=True,
+                    ),
+                    provenance="session_seed",
+                ),
+            )
+            head_record = loop.run_until_complete(
+                service.save_composition_state(
+                    uuid.UUID(session_id),
+                    CompositionStateData(
+                        metadata_={"name": "v2", "description": ""},
+                        is_valid=True,
+                    ),
+                    provenance="session_seed",
+                ),
+            )
+        finally:
+            loop.close()
+
+        msg_resp = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "And now add a sink", "state_id": str(stale_record.id)},
+        )
+        assert msg_resp.status_code == 200
+
+        compose_kwargs = mock_composer.compose.await_args.kwargs
+        assert compose_kwargs["current_state_id"] == str(head_record.id), (
+            "compose loop's optimistic-concurrency baseline must be the DB "
+            "head loaded under the compose lock, not the client-asserted "
+            "state_id — a stale client id turns into an unrecoverable 409 "
+            "stale_compose_state on every follow-up send"
+        )
+
+        msgs_resp = client.get(f"/api/sessions/{session_id}/messages")
+        user_msg = next(m for m in msgs_resp.json() if m["role"] == "user")
+        assert user_msg["composition_state_id"] == str(stale_record.id), (
+            "user-message provenance must still record the client-asserted state (AD-2)"
+        )
+
+    def test_client_disconnect_cancels_compose_turn(self, tmp_path) -> None:
+        """A client disconnect mid-compose must cancel the server-side turn.
+
+        Regression test for elspeth-e08063c3a5 (zombie half): uvicorn's
+        ``connection_lost`` only flags the cycle as disconnected and
+        Starlette's ``request_response`` has no disconnect watcher, so
+        without ``_cancel_on_client_disconnect`` a client abort (Stop
+        button / SPA compose timeout / closed tab) left the compose loop
+        running to completion — burning LLM budget, holding the
+        per-session compose lock for minutes, and advancing composition
+        state the client never sees.
+
+        Drives the ASGI app directly: the request body is delivered,
+        then — once the composer stub signals it has started — the
+        receive channel yields ``http.disconnect``. The watcher must
+        cancel the route task; the route's cancelled-path bookkeeping
+        converts the disconnect-initiated cancel into a quiet 499 (the
+        client is gone; uvicorn discards the bytes — the conversion
+        exists so CancelledError does not escape the app and get logged
+        as an ASGI crash on every Stop click).
+        """
+
+        class _HangingComposer:
+            """compose() parks forever; records whether it was cancelled."""
+
+            def __init__(self, started: asyncio.Event) -> None:
+                self.started = started
+                self.cancelled = False
+
+            async def compose(self, *args: Any, **kwargs: Any) -> ComposerResult:
+                del args, kwargs
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                raise AssertionError("unreachable — compose never completes")
+
+        app, _service = _make_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = resp.json()["id"]
+
+        async def drive() -> tuple[list[dict[str, Any]], _HangingComposer]:
+            compose_started = asyncio.Event()
+            composer = _HangingComposer(compose_started)
+            app.state.composer_service = composer
+
+            request_messages = [
+                {
+                    "type": "http.request",
+                    "body": json.dumps({"content": "build a pipeline"}).encode(),
+                    "more_body": False,
+                }
+            ]
+            sent: list[dict[str, Any]] = []
+
+            async def receive() -> dict[str, Any]:
+                if request_messages:
+                    return request_messages.pop(0)
+                # Second receive() is the disconnect watcher: report the
+                # client gone as soon as the compose loop is running.
+                await compose_started.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict[str, Any]) -> None:
+                sent.append(message)
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": f"/api/sessions/{session_id}/messages",
+                "raw_path": f"/api/sessions/{session_id}/messages".encode(),
+                "query_string": b"",
+                "root_path": "",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+            }
+            # Pre-fix behaviour is an unbounded hang (nothing observes the
+            # disconnect); the wait_for turns that into a bounded failure.
+            await asyncio.wait_for(app(scope, receive, send), timeout=5.0)
+            return sent, composer
+
+        loop = asyncio.new_event_loop()
+        try:
+            sent, composer = loop.run_until_complete(drive())
+        finally:
+            loop.close()
+
+        assert composer.cancelled is True, "compose loop must be cancelled when the client disconnects"
+        status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+        assert status == 499, f"disconnect-cancel must unwind as a quiet 499, got {status}"
+
+        # The turn must NOT have produced an assistant message — the user
+        # message persists (it was committed before compose started), the
+        # zombie's would-be reply must not.
+        msgs = client.get(f"/api/sessions/{session_id}/messages").json()
+        assert [m["role"] for m in msgs] == ["user"]
+
+        # And the session must not be wedged: a fresh send composes fine.
+        app.state.composer_service = _make_composer_mock(response_text="Still alive")
+        follow_up = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "try again"},
+        )
+        assert follow_up.status_code == 200
+        assert follow_up.json()["message"]["content"] == "Still alive"
+
     def test_get_messages(self, tmp_path) -> None:
         mock_composer = _make_composer_mock()
 

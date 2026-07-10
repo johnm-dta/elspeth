@@ -23,6 +23,7 @@ from .._helpers import (
     SessionServiceProtocol,
     UserIdentity,
     _BadRequestLLMError,
+    _cancel_on_client_disconnect,
     _composer_chat_history,
     _composer_conversation_messages,
     _composer_progress_sink,
@@ -33,6 +34,7 @@ from .._helpers import (
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
+    _is_client_disconnect_cancel,
     _litellm_error_detail,
     _llm_calls_from_exception,
     _message_response,
@@ -152,17 +154,22 @@ async def recompose(
             from litellm.exceptions import AuthenticationError as LiteLLMAuthError
 
             try:
-                result = await composer.compose(
-                    last_user_content,
-                    chat_messages,
-                    state,
-                    session_id=str(session_id),
-                    current_state_id=str(pre_send_state_id) if pre_send_state_id is not None else None,
-                    user_id=str(user.user_id),
-                    progress=progress_sink,
-                    guided_terminal=_guided_terminal_for_compose,
-                    user_message_id=request_id,
-                )
+                # Same disconnect watcher as send_message: cancel the
+                # zombie turn when the client aborts the retry
+                # (elspeth-e08063c3a5). Compose stays awaited inline —
+                # see the send_message block comment.
+                async with _cancel_on_client_disconnect(request):
+                    result = await composer.compose(
+                        last_user_content,
+                        chat_messages,
+                        state,
+                        session_id=str(session_id),
+                        current_state_id=str(pre_send_state_id) if pre_send_state_id is not None else None,
+                        user_id=str(user.user_id),
+                        progress=progress_sink,
+                        guided_terminal=_guided_terminal_for_compose,
+                        user_message_id=request_id,
+                    )
             except ComposerConvergenceError as exc:
                 terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
                 # Same three-sub-cause discriminator as the /messages catch
@@ -606,6 +613,13 @@ async def recompose(
                     )
                 )
             terminal_status = "cancelled"
+            if _is_client_disconnect_cancel(exc):
+                # Disconnect-initiated cancel — see the send_message
+                # mirror for the 499-conversion rationale.
+                raise HTTPException(
+                    status_code=499,
+                    detail="Client disconnected while the compose turn was running.",
+                ) from exc
             raise
         finally:
             _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "recompose"})

@@ -478,12 +478,13 @@ describe("RunOutputsPanel", () => {
     expect(screen.queryByText("final_report")).not.toBeInTheDocument();
   });
 
-  it("preserves user output paths that include a blob-storage-looking directory name", async () => {
+  it("preserves user output filenames that include a blob-storage-looking directory name without exposing the raw path", async () => {
     // Regression for elspeth-52af16f9ae: a user-configured sink path that
     // happens to contain a "blob-storage" segment is classified
     // storage_kind="sink_file" by the backend (it's not under the real
-    // blob-store layout), so the raw path must render as-is — the old
-    // regex heuristic would have masked this incorrectly.
+    // blob-store layout), so the basename must render as-is — the old
+    // regex heuristic would have masked this incorrectly. The full local
+    // file URI is still server-private and must not leak through the title.
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([
         fileArtifact({
@@ -497,7 +498,8 @@ describe("RunOutputsPanel", () => {
     render(<RunOutputsPanel runId={RUN_ID} />);
 
     await waitFor(() => expect(screen.getByText("report.json")).toBeInTheDocument());
-    expect(screen.getByTitle("file:///data/outputs/blob-storage/report.json")).toBeInTheDocument();
+    expect(screen.getByTitle("report.json")).toBeInTheDocument();
+    expect(screen.queryByTitle("file:///data/outputs/blob-storage/report.json")).not.toBeInTheDocument();
     expect(screen.queryByText("final_report")).not.toBeInTheDocument();
   });
 

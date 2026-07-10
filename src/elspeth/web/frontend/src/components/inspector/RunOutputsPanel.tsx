@@ -126,6 +126,9 @@ function artifactDisplayTitle(artifact: RunOutputArtifact): string {
   if (isFileArtifact(artifact) && isInternalStoragePath(artifact)) {
     return `Recorded artifact for ${artifact.sink_node_id || "artifact"}`;
   }
+  if (isFileArtifact(artifact)) {
+    return artifactDisplayName(artifact);
+  }
   return artifact.path_or_uri;
 }
 

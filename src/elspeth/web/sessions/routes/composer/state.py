@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,6 +9,7 @@ from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.secrets import collect_credential_field_violations
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.state import CompositionState, SourceSpec
+from elspeth.web.composer.yaml_generator import reattach_guided_blob_refs_for_public_export
 from elspeth.web.composer.yaml_importer import (
     MAX_RUNTIME_YAML_IMPORT_CHARS,
     RuntimeYamlImportError,
@@ -565,35 +565,7 @@ def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     narrow, pre-existing edge shared with that redactor; equal paths do mean "the
     same underlying file", and guided sessions commit a single source today.
     """
-    guided = state.guided_session
-    if guided is None or guided.step_1_result is None:
-        return state
-    snapshot_options = guided.step_1_result.options
-    blob_ref = snapshot_options.get("blob_ref")
-    # No blob_ref on the snapshot ⇒ operator-typed source; leave every path alone.
-    if not blob_ref:
-        return state
-    blob_backed_paths: set[str] = set()
-    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
-        value = snapshot_options.get(key)
-        if isinstance(value, str):
-            blob_backed_paths.add(value)
-    if not blob_backed_paths:
-        return state
-
-    reattached: dict[str, SourceSpec] = {}
-    changed = False
-    for source_name, source in state.sources.items():
-        options = source.options
-        if "blob_ref" in options or not any(options.get(key) in blob_backed_paths for key in SOURCE_LOCAL_PATH_OPTION_KEYS):
-            reattached[source_name] = source
-            continue
-        merged = dict(options)
-        merged["blob_ref"] = str(blob_ref)
-        reattached[source_name] = replace(source, options=merged)
-        changed = True
-
-    return replace(state, sources=reattached) if changed else state
+    return reattach_guided_blob_refs_for_public_export(state)
 
 
 @router.get("/{session_id}/state/yaml")

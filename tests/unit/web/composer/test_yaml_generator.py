@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import yaml
 
+from elspeth.web.composer.guided.resolved import SourceResolved
+from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
@@ -540,6 +544,47 @@ class TestGenerateYaml:
         assert public_options["schema"] == {"mode": "observed"}
         assert "/data/blobs/session/20b944e3_input.txt" not in public_yaml
         assert generate_pipeline_dict(state)["sources"]["source"]["options"]["path"] == "/data/blobs/session/20b944e3_input.txt"
+
+    def test_public_yaml_strips_guided_blob_storage_path_without_committed_blob_ref(self) -> None:
+        blob_path = "/home/john/elspeth/data/blobs/session/20b944e3_project_pages.json"
+        blob_ref = "20b944e3-fd46-434f-b9a2-4fb508db30f0"
+        guided_session = replace(
+            GuidedSession.initial(),
+            step_1_result=SourceResolved(
+                plugin="json",
+                options={
+                    "path": blob_path,
+                    "blob_ref": blob_ref,
+                    "schema": {"mode": "observed"},
+                },
+                observed_columns=("title", "url"),
+                sample_rows=(),
+            ),
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": blob_path, "schema": {"mode": "observed"}},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        public_yaml = generate_public_yaml(state)
+        public_options = yaml.safe_load(public_yaml)["sources"]["source"]["options"]
+
+        assert "path" not in public_options
+        assert "blob_ref" not in public_options
+        assert public_options["schema"] == {"mode": "observed"}
+        assert blob_path not in public_yaml
 
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine

@@ -26,6 +26,7 @@ after blob ownership checks pass.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import yaml
@@ -241,9 +242,49 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
     return _generate_pipeline_dict(state, omit_blob_bound_source_paths=False)
 
 
+def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> CompositionState:
+    """Reconstitute guided blob refs before public YAML generation.
+
+    Guided mode can commit a source with only the storage ``path`` while the
+    authoritative ``blob_ref`` survives in the guided Step 1 snapshot. Public
+    YAML stripping keys off ``blob_ref``, so reattach it to a working copy when
+    the committed source path exactly matches the snapshot path.
+    """
+    guided = state.guided_session
+    if guided is None or guided.step_1_result is None:
+        return state
+    snapshot_options = guided.step_1_result.options
+    blob_ref = snapshot_options.get("blob_ref")
+    if not blob_ref:
+        return state
+
+    blob_backed_paths: set[str] = set()
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+        value = snapshot_options.get(key)
+        if isinstance(value, str):
+            blob_backed_paths.add(value)
+    if not blob_backed_paths:
+        return state
+
+    reattached = {}
+    changed = False
+    for source_name, source in state.sources.items():
+        options = source.options
+        if "blob_ref" in options or not any(options.get(key) in blob_backed_paths for key in SOURCE_LOCAL_PATH_OPTION_KEYS):
+            reattached[source_name] = source
+            continue
+        merged = dict(options)
+        merged["blob_ref"] = str(blob_ref)
+        reattached[source_name] = replace(source, options=merged)
+        changed = True
+
+    return replace(state, sources=reattached) if changed else state
+
+
 def generate_public_pipeline_dict(state: CompositionState) -> dict[str, Any]:
     """Convert a CompositionState to public export/share/MCP pipeline dict."""
-    return _generate_pipeline_dict(state, omit_blob_bound_source_paths=True)
+    export_state = reattach_guided_blob_refs_for_public_export(state)
+    return _generate_pipeline_dict(export_state, omit_blob_bound_source_paths=True)
 
 
 def generate_yaml(state: CompositionState) -> str:

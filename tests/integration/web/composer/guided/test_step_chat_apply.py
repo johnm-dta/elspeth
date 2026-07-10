@@ -343,6 +343,56 @@ def test_step_1_chat_upload_hint_binds_latest_uploaded_csv_without_llm(composer_
     assert source["observed_columns"] == ["sku", "color", "quantity"]
 
 
+def test_step_1_chat_upload_hint_binds_named_csv_when_newer_blob_exists(composer_test_client: TestClient) -> None:
+    """The upload-helper fast path must honor the filename carried by chat text."""
+    client = composer_test_client
+    session_id = _create_session(client)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    target_upload = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={
+            "filename": "guided_inventory.csv",
+            "content": "sku,color,quantity\nSKU-001,red,2\nSKU-002,blue,5\n",
+            "mime_type": "text/csv",
+        },
+    )
+    assert target_upload.status_code == 201, target_upload.json()
+    target_blob_id = target_upload.json()["id"]
+    newer_upload = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={
+            "filename": "newer_inventory.csv",
+            "content": "wrong_id,wrong_value\nWRONG-001,nope\n",
+            "mime_type": "text/csv",
+        },
+    )
+    assert newer_upload.status_code == 201, newer_upload.json()
+
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(side_effect=AssertionError("named upload should bind before LLM chat")),
+    ):
+        status, body = _post_chat(
+            client,
+            session_id,
+            message='I\'ve uploaded "guided_inventory.csv"; please use it as the pipeline input.',
+            step_index="step_1_source",
+        )
+
+    assert status == 200, body
+    prefilled = body["next_turn"]["payload"]["prefilled"]
+    assert prefilled["path"] == f"blob:{target_blob_id}"
+    assert {field.split(":", 1)[0] for field in prefilled["schema"]["fields"]} == {
+        "sku",
+        "color",
+        "quantity",
+    }
+    source = body["composition_state"]["composer_meta"]["guided_session"]["step_1_result"]
+    assert source["options"]["blob_ref"] == target_blob_id
+    assert source["observed_columns"] == ["sku", "color", "quantity"]
+
+
 def test_step_1_chat_negated_upload_message_stays_advisory_no_mutation(composer_test_client: TestClient) -> None:
     client = composer_test_client
     session_id = _create_session(client)

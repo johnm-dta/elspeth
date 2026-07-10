@@ -2511,16 +2511,22 @@ def _summarize_guided_response(
 async def _inspect_latest_ready_session_blob(
     blob_service: BlobServiceProtocol,
     session_id: UUID,
+    *,
+    filename: str | None = None,
 ) -> SourceInspectionFacts | None:
-    """Inspect the newest ready blob for Step-1 schema prefill.
+    """Inspect the newest matching ready blob for Step-1 schema prefill.
 
     Blob bytes are Tier 3 and ``inspect_blob_content`` is the source-boundary
     validation/coercion point. If the session has no ready blob, the caller
-    falls back to the existing observed-schema prefill.
+    falls back to the existing observed-schema prefill. When ``filename`` is
+    provided, only ready blobs whose stored filename exactly matches it are
+    eligible.
     """
     records = await blob_service.list_blobs(session_id, limit=None)
     for record in records:
         if record.status != "ready":
+            continue
+        if filename is not None and record.filename != filename:
             continue
         content = await blob_service.read_blob_content(record.id)
         return inspect_blob_content(

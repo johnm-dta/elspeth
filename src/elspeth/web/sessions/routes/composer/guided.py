@@ -351,15 +351,17 @@ def _step_1_plugin_hint(guided: GuidedSession) -> str | None:
     return None
 
 
-def _step_1_message_mentions_uploaded_input(message: str) -> bool:
-    """Return whether a Step-1 chat message is the upload helper's bind request."""
+def _step_1_uploaded_input_filename(message: str) -> str | None:
+    """Return the filename from the upload helper's Step-1 bind request."""
     stripped = message.strip()
     prefix = "I've uploaded \""
     suffix = '"; please use it as the pipeline input.'
     if not stripped.startswith(prefix) or not stripped.endswith(suffix):
-        return False
+        return None
     filename = stripped[len(prefix) : -len(suffix)]
-    return bool(filename) and '"' not in filename and "\n" not in filename and "\r" not in filename
+    if not filename or '"' in filename or "\n" in filename or "\r" in filename:
+        return None
+    return filename
 
 
 async def _source_from_latest_uploaded_blob_for_step_1_chat(
@@ -379,9 +381,14 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     by the visible form, then let ``handle_step_1_source`` resolve the masked
     ``blob:<id>`` sentinel authoritatively.
     """
-    if plugin_hint is None or not _step_1_message_mentions_uploaded_input(message):
+    uploaded_filename = _step_1_uploaded_input_filename(message)
+    if plugin_hint is None or uploaded_filename is None:
         return None
-    inspection_facts = await _inspect_latest_ready_session_blob(blob_service, session_id)
+    inspection_facts = await _inspect_latest_ready_session_blob(
+        blob_service,
+        session_id,
+        filename=uploaded_filename,
+    )
     if inspection_facts is None:
         return None
     prefilled = build_step_1_source_prefill(plugin_hint, inspection_facts=inspection_facts)

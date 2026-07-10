@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Literal
 
@@ -33,6 +34,7 @@ from .._helpers import (
     ComposerChatInitiator,
     ComposerChatTurn,
     ComposerChatTurnStatus,
+    ComposerProgressEvent,
     CompositionState,
     CompositionStateData,
     CompositionStateRecord,
@@ -63,12 +65,15 @@ from .._helpers import (
     TurnResponse,
     TurnType,
     UserIdentity,
+    _composer_progress_sink,
     _dispatch_guided_respond,
+    _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _initial_composition_state_with_guided_session,
     _persist_chat_turns,
     _persist_llm_calls,
     _persist_tool_invocations,
+    _publish_progress,
     _replace,
     _safe_frame_strings,
     _state_from_record,
@@ -90,6 +95,7 @@ from .._helpers import (
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
     build_step_4_wire_turn,
+    client_cancelled_progress_event,
     contextlib,
     datetime,
     deep_thaw,
@@ -2055,6 +2061,12 @@ async def post_guided_chat(
         # chat turn to the state version it ran against.
         recorder = BufferingRecorder()
         state_record_out: CompositionStateRecord | None = None
+        # Guards the finally block's terminal progress publish below: an
+        # early 400/409 guard-clause rejection (not-guided / terminal /
+        # step-mismatch) must not emit an orphan "complete"/"failed" event
+        # for a compose that never started.
+        progress_started = False
+        progress_registry = _get_composer_progress_registry(request)
         try:
             state_record = await service.get_current_state(session_id)
             if state_record is None:
@@ -2090,6 +2102,32 @@ async def post_guided_chat(
                         f"{guided.step.value!r}. Re-fetch GET /api/sessions/{{id}}/guided and retry."
                     ),
                 )
+
+            # Uniform across every guided step (STEP_1/STEP_2/advisory-only
+            # steps alike) — never forked on "is tutorial". STEP_2_SINK's
+            # resolver additionally emits calling_model/using_tools hops
+            # (see resolve_step_2_sink_chat_with_auto_drop below); other
+            # steps get this single starting->complete bracket, which is
+            # coarse but real — not a timer-based fake progression.
+            progress_sink = _composer_progress_sink(
+                progress_registry,
+                session_id=str(session_id),
+                request_id=None,
+                user_id=str(user.user_id),
+            )
+            await _publish_progress(
+                progress_registry,
+                session_id=str(session_id),
+                request_id=None,
+                user_id=str(user.user_id),
+                event=ComposerProgressEvent(
+                    phase="starting",
+                    headline="I'm reading your message for this step.",
+                    evidence=("The chat message was accepted for this guided step.",),
+                    likely_next="ELSPETH will ask the model how to respond.",
+                ),
+            )
+            progress_started = True
 
             settings = request.app.state.settings
             started_at = datetime.now(UTC)
@@ -2391,6 +2429,7 @@ async def post_guided_chat(
                     max_discovery_iters=settings.composer_max_discovery_turns,
                     timeout_seconds=settings.composer_timeout_seconds,
                     context_block=chat_context_block,
+                    progress=progress_sink,
                 )
                 # ``prose_chat`` (a declined-to-prose SUCCESS) and
                 # ``fallback_chat`` (an error) are mutually exclusive; either
@@ -2398,6 +2437,29 @@ async def post_guided_chat(
                 chat_result = sink_chat_result.fallback_chat or sink_chat_result.prose_chat
                 sink_resolution = sink_chat_result.sink_resolution
                 if sink_resolution is not None:
+                    # The resolver only ever publishes calling_model/using_tools
+                    # (both map to tutorial substep 1 — "Choose sink shape").
+                    # Without a distinct event here the registry stays pinned
+                    # on the resolver's last phase through the commit below AND
+                    # through _build_guided_chat_apply_response's real DB write,
+                    # so substep 2 ("Prepare JSON file") is unreachable while
+                    # the pending strip is mounted — the finally block's
+                    # "complete" publish lands after guidedChatPending has
+                    # already flipped false and unmounted the strip. "saving"
+                    # is a real observable signal (the sink IS being committed
+                    # to session state right now), not a synthetic tick.
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session_id),
+                        request_id=None,
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="saving",
+                            headline="ELSPETH is saving the output configuration.",
+                            evidence=("The resolved sink is being committed to the pipeline.",),
+                            likely_next="ELSPETH will confirm the updated pipeline.",
+                        ),
+                    )
                     finished_at = datetime.now(UTC)
                     latency_ms = int((_perf_counter() - started_perf) * 1000)
                     data_dir = str(settings.data_dir) if settings.data_dir else None
@@ -2954,6 +3016,69 @@ async def post_guided_chat(
             # the guided/respond split and keeps logging as the channel of
             # last resort only when no safer audit channel remains.
             primary_exc = sys.exception()
+            if progress_started:
+                # Published FIRST, before the audit-drain below — deliberately
+                # NOT the same ordering as freeform's send_message
+                # (messages.py:731 publishes its "complete" event AFTER
+                # _persist_tool_invocations/_persist_llm_calls, because
+                # messages.py builds and returns its response after those
+                # persists too). Here every step branch above already built
+                # and returned its response inline; only the audit drain
+                # remains in this finally block, so an AuditIntegrityError
+                # raised out of _persist_chat_turns on the success path must
+                # not strand the frontend poller on a stale non-terminal
+                # phase — hence publishing ahead of the drain, not after it.
+                if primary_exc is None:
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session_id),
+                        request_id=None,
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="complete",
+                            headline="ELSPETH finished responding to this chat message.",
+                            evidence=("The guided chat turn finished.",),
+                            likely_next="Review the reply and continue the wizard.",
+                            reason="composer_complete",
+                        ),
+                    )
+                elif isinstance(primary_exc, asyncio.CancelledError):
+                    # asyncio.shield, exactly like messages.py's
+                    # client_cancelled publish (messages.py:797-821): the
+                    # task is being torn down, so a bare await here risks
+                    # the registry update never landing; shield lets the
+                    # publish run to completion in the background while the
+                    # suppress absorbs the CancelledError shield() re-raises
+                    # on the cancelling task.
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(
+                            _publish_progress(
+                                progress_registry,
+                                session_id=str(session_id),
+                                request_id=None,
+                                user_id=str(user.user_id),
+                                event=client_cancelled_progress_event(),
+                            )
+                        )
+                else:
+                    # Guided chat degrades almost every failure mode to a
+                    # 200 synthetic-unavailable reply inside the resolver
+                    # (see post_guided_chat's docstring); reaching here means
+                    # an unexpected exception genuinely escaped, so this is a
+                    # rare defensive backstop, not the expected path.
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session_id),
+                        request_id=None,
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="failed",
+                            headline="The guided chat could not finish this request.",
+                            evidence=("An unexpected error interrupted this chat turn.",),
+                            likely_next="Review the visible error message, then retry.",
+                            reason="service_setup_failed",
+                        ),
+                    )
             if primary_exc is None:
                 await _persist_tool_invocations(
                     service,

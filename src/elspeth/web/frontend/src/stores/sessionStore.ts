@@ -6,6 +6,7 @@ import type {
   CompositionState,
   CompositionStateVersion,
   ComposerPreferences,
+  ComposerProgressPhase,
   ComposerProgressSnapshot,
   CompositionProposal,
   ApiError,
@@ -90,6 +91,22 @@ function isHttpConflict(err: unknown): boolean {
 
 let composerProgressPollTimer: ReturnType<typeof setInterval> | null = null;
 let composerProgressPollSessionId: string | null = null;
+// True once THIS poll session (the span between startComposerProgressPolling
+// and stopComposerProgressPolling) has observed a non-terminal snapshot.
+// Guards against the stale-terminal-flash race: the immediate poll fired by
+// startComposerProgressPolling can win the race against the POST's own
+// "starting" publish and return the PRIOR turn's terminal snapshot
+// (complete/failed/cancelled) still sitting in the registry. Surfacing that
+// stale snapshot at the START of a fresh compose flashed the tutorial step-2
+// indicator's LAST substep as current before dropping back to the first —
+// exactly the backward-jump class the calling_model/using_tools remap was
+// meant to prevent (elspeth-a8eeebb3aa review follow-up).
+let composerProgressPollSeenNonTerminal = false;
+const TERMINAL_COMPOSER_PROGRESS_PHASES = new Set<ComposerProgressPhase>([
+  "complete",
+  "failed",
+  "cancelled",
+]);
 
 function clearComposerProgressPollTimer(): void {
   if (composerProgressPollTimer !== null) {
@@ -400,7 +417,10 @@ interface SessionState {
   loadCompositionProposals: (sessionId?: string) => Promise<void>;
   acceptProposal: (proposalId: string) => Promise<void>;
   rejectProposal: (proposalId: string) => Promise<void>;
-  loadComposerProgress: (sessionId?: string) => Promise<void>;
+  loadComposerProgress: (
+    sessionId?: string,
+    options?: { discardStaleTerminal?: boolean },
+  ) => Promise<void>;
   startComposerProgressPolling: (sessionId: string) => void;
   stopComposerProgressPolling: (sessionId?: string) => void;
   loadInflightMessages: (sessionId: string) => Promise<void>;
@@ -1125,7 +1145,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  async loadComposerProgress(sessionId?: string) {
+  async loadComposerProgress(
+    sessionId?: string,
+    options?: { discardStaleTerminal?: boolean },
+  ) {
     const targetSessionId = sessionId ?? get().activeSessionId;
     if (!targetSessionId) return;
 
@@ -1134,6 +1157,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const current = get();
       if (current.activeSessionId !== targetSessionId) {
         return;
+      }
+      const isTerminal = TERMINAL_COMPOSER_PROGRESS_PHASES.has(progress.phase);
+      if (options?.discardStaleTerminal && isTerminal && !composerProgressPollSeenNonTerminal) {
+        // Stale carry-over from the PREVIOUS turn's terminal snapshot,
+        // fetched before this compose's own "starting" event has landed in
+        // the registry — drop it rather than flash a "done" state at the
+        // start of a fresh compose. Callers outside the poll session (the
+        // explicit final load in sendMessage/retryMessage/chatGuided's
+        // finally, after stopComposerProgressPolling) don't pass
+        // discardStaleTerminal — that one-shot load runs strictly after the
+        // request settles, so the registry can only hold THIS turn's own
+        // terminal event by then, never stale data.
+        return;
+      }
+      if (progress.phase !== "idle" && !isTerminal) {
+        composerProgressPollSeenNonTerminal = true;
       }
       set({ composerProgress: progress.phase === "idle" ? null : progress });
     } catch {
@@ -1144,11 +1183,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   startComposerProgressPolling(sessionId: string) {
     clearComposerProgressPollTimer();
     composerProgressPollSessionId = sessionId;
+    composerProgressPollSeenNonTerminal = false;
     set({ composerProgress: null });
-    void get().loadComposerProgress(sessionId);
+    void get().loadComposerProgress(sessionId, { discardStaleTerminal: true });
     composerProgressPollTimer = setInterval(() => {
       if (composerProgressPollSessionId !== sessionId) return;
-      void useSessionStore.getState().loadComposerProgress(sessionId);
+      void useSessionStore
+        .getState()
+        .loadComposerProgress(sessionId, { discardStaleTerminal: true });
     }, COMPOSER_PROGRESS_POLL_INTERVAL_MS);
   },
 
@@ -1763,6 +1805,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // its documented lifecycle — a successful advisory chat must not leave a
     // "we've refreshed — please try again" resync notice pinned above it.
     set({ guidedChatPending: true, guidedSelfHealNotice: null });
+    // Mirrors sendMessage/retryMessage: the backend guided-chat route (any
+    // step, not just step_2_sink — see post_guided_chat) now writes progress
+    // snapshots the same way freeform compose does, so start polling here
+    // too. Previously chatGuided never polled at all, which is why the
+    // tutorial's step-2 substep indicator (composerProgress-derived) never
+    // advanced in production (elspeth-a8eeebb3aa) — tests only ever passed
+    // because they injected composerProgress directly via setState.
+    get().startComposerProgressPolling(requestedSessionId);
 
     try {
       const response = await api.chatGuided(
@@ -1819,6 +1869,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: apiErr.detail ?? "Failed to send chat message. Please try again.",
         guidedChatPending: false,
       });
+    } finally {
+      // Real finally (not duplicated into the success/catch branches above)
+      // so polling stops on EVERY exit path, including the stale-session
+      // early returns — mirrors sendMessage/retryMessage's teardown. The
+      // extra loadComposerProgress picks up the backend's final
+      // complete/failed/cancelled snapshot for the brief window before
+      // guidedChatPending flips the pending strip away.
+      get().stopComposerProgressPolling(requestedSessionId);
+      await get().loadComposerProgress(requestedSessionId);
     }
   },
 

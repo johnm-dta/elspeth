@@ -25,6 +25,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
@@ -103,6 +104,13 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
 
     # Audit recorder for test inspection (Phase 3 Task 3.4 will wire this)
     app.state.composer_recorder = BufferingRecorder()
+
+    # post_guided_chat (elspeth-a8eeebb3aa) publishes composer-progress
+    # snapshots the same way the freeform send_message route does — mirrors
+    # the create_app() production wiring at app.py:930. Without this the
+    # guided/chat route's unconditional _get_composer_progress_registry(request)
+    # call AttributeErrors against this hand-rolled minimal app.
+    app.state.composer_progress_registry = ComposerProgressRegistry()
 
     # Mount session router (sessions + guided endpoints)
     router = create_session_router()

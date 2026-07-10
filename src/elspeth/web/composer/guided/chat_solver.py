@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Any, Final, cast
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
+from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
@@ -41,6 +42,7 @@ from elspeth.web.composer.llm_response_parsing import (
     build_llm_call_record,
     supports_anthropic_prompt_cache_markers,
 )
+from elspeth.web.composer.progress import emit_progress, model_call_progress_event, tool_batch_progress_event
 from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
@@ -1084,6 +1086,7 @@ async def maybe_resolve_step_2_sink_chat(
     max_discovery_iters: int | None = None,
     timeout_seconds: float | None = None,
     context_block: str | None = None,
+    progress: ComposerProgressSink | None = None,
 ) -> Step2SinkChatOutcome:
     """Resolve a Step-2 chat message into a sink config via a discovery loop.
 
@@ -1163,6 +1166,9 @@ async def maybe_resolve_step_2_sink_chat(
         response: Any = None
         error_class: str | None = None
         error_message: str | None = None
+        # Visible before the (slow) provider round-trip so a poller sampling
+        # mid-call sees "calling_model", not a stale prior-phase snapshot.
+        await emit_progress(progress, model_call_progress_event(user_message))
         try:
             response = await _bounded_acompletion(kwargs, timeout_seconds)
             message = response.choices[0].message
@@ -1210,6 +1216,10 @@ async def maybe_resolve_step_2_sink_chat(
             # Thread the assistant tool-call request once, then answer every
             # call id with its result, or the next round 400s.
             assert state is not None and catalog is not None  # implied by discovery_enabled
+            await emit_progress(
+                progress,
+                tool_batch_progress_event(tuple(tc.function.name for tc in discovery_calls if tc.function is not None)),
+            )
             messages.append(_assistant_tool_calls_message(message, tool_calls))
             for tool_call in tool_calls:
                 messages.append(

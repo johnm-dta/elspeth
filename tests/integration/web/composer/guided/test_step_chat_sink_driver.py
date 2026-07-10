@@ -286,6 +286,41 @@ async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sink_wrapper_threads_progress_sink_to_driver() -> None:
+    """The route's ``progress`` kwarg must reach the real discovery loop, not
+    get dropped at the auto-drop wrapper seam. Patches the wrapper's actual
+    dependency (``maybe_resolve_step_2_sink_chat``) rather than the sink's own
+    call signature so a future rename of the ``progress`` parameter on either
+    side would fail this test instead of silently decoupling them.
+    """
+    captured_kwargs: dict[str, object] = {}
+
+    async def _capture_and_resolve(**kwargs: object) -> Step2SinkChatOutcome:
+        captured_kwargs.update(kwargs)
+        return Step2SinkChatOutcome(sink=None, assistant_message="ok")
+
+    async def _progress_sink(_event: object) -> None:
+        return None
+
+    with patch(
+        "elspeth.web.sessions._guided_step_chat.maybe_resolve_step_2_sink_chat",
+        new=_capture_and_resolve,
+    ):
+        await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="s1",
+            user_id="u1",
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what is a sink?",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            progress=_progress_sink,
+        )
+    assert captured_kwargs["progress"] is _progress_sink
+
+
+@pytest.mark.asyncio
 async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> None:
     async def _raise_provider_timeout(**_kwargs: object) -> Step2SinkChatOutcome:
         raise TimeoutError("provider timeout")

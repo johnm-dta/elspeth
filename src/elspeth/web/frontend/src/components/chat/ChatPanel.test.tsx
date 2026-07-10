@@ -2342,6 +2342,54 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
+  it("tutorial step 2: 'calling_model' also marks 'Choose sink shape' current (elspeth-a8eeebb3aa remap)", () => {
+    // Regression guard for the backward-jump the original mapping produced:
+    // the real backend (maybe_resolve_step_2_sink_chat) re-emits
+    // calling_model before EVERY provider round, including the round right
+    // after a discovery tool call — so calling_model must map to the SAME
+    // substep as using_tools (1), not substep 0. Folding both into substep 1
+    // also means the indicator advances even for a single-shot resolve with
+    // no discovery tool call at all, which is the tutorial's actual traffic
+    // shape ("Save the pipeline's results to a JSON file." resolves `json`
+    // directly without needing list_sinks/get_plugin_schema).
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+      composerProgress: {
+        session_id: "session-guided",
+        request_id: "req-1",
+        phase: "calling_model",
+        headline: "I'm asking the model to choose the next safe pipeline update.",
+        evidence: [],
+        likely_next: null,
+        reason: null,
+        updated_at: "2026-07-03T00:00:00Z",
+      },
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    expect(screen.getByText("Choose sink shape")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("Read output request")).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+
   it("does NOT swap (and offers no Stop) while only a turn-respond is pending", () => {
     // Deliberate asymmetry: a respond in flight has its own adjacent
     // "Saving decision..." status and nothing abortable — and a live-guided

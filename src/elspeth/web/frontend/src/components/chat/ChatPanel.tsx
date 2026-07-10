@@ -122,15 +122,22 @@ const TUTORIAL_STEP_2_COMPOSING_SUBSTEPS = [
 function tutorialStep2ActiveSubstep(
   phase: string | null | undefined,
 ): number {
-  if (
-    phase === null ||
-    phase === undefined ||
-    phase === "starting" ||
-    phase === "calling_model"
-  ) {
+  if (phase === null || phase === undefined || phase === "starting") {
     return 0;
   }
-  if (phase === "using_tools") {
+  // calling_model and using_tools share substep 1 ("Choose sink shape"):
+  // the guided sink resolver (maybe_resolve_step_2_sink_chat) re-emits
+  // calling_model before EVERY provider round, including the round after
+  // a discovery tool call. Mapping calling_model to substep 0 (as this
+  // function used to) made the indicator jump backward mid-compose —
+  // 0 -> 1 (using_tools) -> 0 (next calling_model) -> 2 (complete) — for
+  // a ticket titled "never advances", a visible regression back to 0 is
+  // worse than the original bug. Folding both phases into substep 1 is
+  // monotonic regardless of how many discovery rounds run, and — the
+  // common case for the tutorial's one-line "Save ... to a JSON file"
+  // prompt — still lights up substep 1 even when the model resolves in a
+  // single shot with no discovery tool call at all (elspeth-a8eeebb3aa).
+  if (phase === "calling_model" || phase === "using_tools") {
     return 1;
   }
   return 2;

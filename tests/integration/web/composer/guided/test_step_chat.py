@@ -31,6 +31,7 @@ from uuid import UUID
 
 from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
+from tests.integration.web.composer.guided.test_step_3_e2e import _outputs_path
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -1777,3 +1778,211 @@ class TestChatHistoryDiscriminatorPersistence:
         assert chat_history[0]["content"] == "a pre-migration reply"
         assert chat_history[0]["assistant_message_kind"] is None
         assert chat_history[0]["synthetic_failure_reason"] is None
+
+
+class TestStepChatProgressWiring:
+    """elspeth-a8eeebb3aa: ``post_guided_chat`` now writes ``/composer-progress``
+    snapshots to the SAME app-scoped ``ComposerProgressRegistry`` the freeform
+    ``send_message`` route writes to, so a poller (``loadComposerProgress`` in
+    sessionStore.ts) sees real phase movement during a guided chat compose —
+    previously ``composerProgress`` stayed ``null`` for the entire guided
+    compose because ``chatGuided`` never started polling AND the backend
+    never published anything, and the only tests that exercised the substep
+    indicator injected ``composerProgress`` directly via ``setState``.
+
+    Deliberately drives BOTH step_1_source and step_2_sink to prove the
+    wiring is uniform across guided steps (not forked on step_2_sink, and
+    not forked on "is tutorial" — CLAUDE.md's tutorial-parity doctrine): the
+    route publishes the same starting/complete bracket regardless of step,
+    and only step_2_sink's resolver additionally hops through calling_model/
+    using_tools mid-flight.
+    """
+
+    def _progress(self, client: TestClient, session_id: str) -> dict:
+        resp = client.get(f"/api/sessions/{session_id}/composer-progress")
+        assert resp.status_code == 200, resp.json()
+        return resp.json()
+
+    def test_step_1_chat_publishes_starting_to_complete_bracket(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        # Idle before any chat — proves the assertion below is caused by
+        # THIS request, not leftover snapshot state from session creation.
+        assert self._progress(composer_test_client, session_id)["phase"] == "idle"
+
+        with patch(
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_llm_reply("step-1 advice")),
+        ):
+            status, _ = _post_chat(
+                composer_test_client,
+                session_id,
+                message="how do I describe my CSV?",
+                step_index="step_1_source",
+            )
+        assert status == 200
+
+        progress = self._progress(composer_test_client, session_id)
+        assert progress["phase"] == "complete"
+        assert progress["reason"] == "composer_complete"
+
+    def test_step_2_sink_chat_is_visibly_calling_model_mid_flight_then_completes(self, composer_test_client: TestClient) -> None:
+        """The decisive check: poll the registry FROM INSIDE the patched LLM
+        call (i.e. while the route's ``await`` on the provider round-trip is
+        still pending) and see ``calling_model`` — not a stale snapshot and
+        not ``idle``. This is what a real frontend poller would observe
+        mid-compose; asserting only the post-request final state would not
+        prove the mid-flight visibility the ticket is about.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+        storage_path = TestStepChatCrossStep._seed_csv_blob(composer_test_client, session_id)
+        TestStepChatCrossStep._respond(composer_test_client, session_id, chosen=["csv"])
+        TestStepChatCrossStep._respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text", "note"],
+                "sample_rows": [{"text": "Hello", "note": "world"}],
+            },
+        )
+        guided = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()
+        assert guided["guided_session"]["step"] == "step_2_sink", guided
+
+        mid_flight_snapshots: list[dict] = []
+
+        async def _capturing_completion(**_kwargs: object) -> SimpleNamespace:
+            registry = composer_test_client.app.state.composer_progress_registry
+            snapshot = await registry.get_latest(session_id)
+            mid_flight_snapshots.append(snapshot.model_dump())
+            return _fake_llm_reply("step-2 advice")
+
+        with patch(_CHAT_SOLVER_ACOMPLETION, new=_capturing_completion):
+            status, _ = _post_chat(
+                composer_test_client,
+                session_id,
+                message="which sink for JSON output?",
+                step_index="step_2_sink",
+            )
+        assert status == 200
+
+        assert len(mid_flight_snapshots) == 1
+        assert mid_flight_snapshots[0]["phase"] == "calling_model"
+
+        final_progress = self._progress(composer_test_client, session_id)
+        assert final_progress["phase"] == "complete"
+        assert final_progress["reason"] == "composer_complete"
+
+    def test_step_2_sink_resolution_publishes_saving_while_committing(self, composer_test_client: TestClient) -> None:
+        """Advisor-caught gap: the resolver only ever publishes calling_model/
+        using_tools (both substep 1), and the route's "complete" lands in
+        `finally` — AFTER the frontend has already flipped `guidedChatPending`
+        to false and unmounted the pending strip. Without a distinct event
+        while `handle_step_2_sink` commits the resolved sink and
+        `_build_guided_chat_apply_response` persists it, substep 2
+        ("Prepare JSON file") is unreachable while the strip is visible —
+        this is the SAME failure mode as the original ticket, just for the
+        third substep instead of the second. Captures the registry snapshot
+        from inside the persist tail (an async seam, unlike the sync
+        handle_step_2_sink call itself) to prove "saving" is visible during
+        the real DB write, not just theoretically published somewhere.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+        storage_path = TestStepChatCrossStep._seed_csv_blob(composer_test_client, session_id)
+        TestStepChatCrossStep._respond(composer_test_client, session_id, chosen=["csv"])
+        TestStepChatCrossStep._respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text", "note"],
+                "sample_rows": [{"text": "Hello", "note": "world"}],
+            },
+        )
+        guided = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()
+        assert guided["guided_session"]["step"] == "step_2_sink", guided
+
+        # Path must resolve inside the session's outputs dir (the same
+        # constraint test_step_chat_apply.py's passing STEP_2 commit test
+        # satisfies via this exact helper) — a bare relative filename fails
+        # handle_step_2_sink's commit validation and silently falls back to
+        # the advisory-rejection branch, which would make this test's
+        # assistant_message_kind precondition assertion the one that fails.
+        out_path = _outputs_path(composer_test_client, "chat_out.jsonl")
+        resolve_sink_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="resolve_sink",
+                                    arguments=json.dumps(
+                                        {
+                                            "resolution": "sink",
+                                            "outputs": [
+                                                {
+                                                    "plugin": "json",
+                                                    "options": {
+                                                        "path": out_path,
+                                                        "schema": {"mode": "observed"},
+                                                        "mode": "write",
+                                                        "collision_policy": "auto_increment",
+                                                    },
+                                                    "required_fields": [],
+                                                    "schema_mode": "observed",
+                                                }
+                                            ],
+                                            "assistant_message": "Output set to JSON.",
+                                        }
+                                    ),
+                                )
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+
+        from elspeth.web.sessions.routes.composer import guided as guided_module
+
+        mid_commit_snapshots: list[dict] = []
+        real_apply_response = guided_module._build_guided_chat_apply_response
+
+        async def _capturing_apply_response(*args: object, **kwargs: object) -> object:
+            registry = composer_test_client.app.state.composer_progress_registry
+            snapshot = await registry.get_latest(session_id)
+            mid_commit_snapshots.append(snapshot.model_dump())
+            return await real_apply_response(*args, **kwargs)
+
+        with (
+            patch(_CHAT_SOLVER_ACOMPLETION, new=_ReturningLiteLLMCompletion(resolve_sink_response)),
+            patch.object(guided_module, "_build_guided_chat_apply_response", side_effect=_capturing_apply_response),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="save the results as json",
+                step_index="step_2_sink",
+            )
+        assert status == 200, body
+        # Load-bearing precondition for the assertion below: a silent
+        # commit-rejection fallback (handle_step_2_sink's strict seam
+        # rejects the proposal) also returns 200, which would mask this
+        # test as passing while never exercising the "saving" publish at
+        # all (mid_commit_snapshots would just stay empty AND
+        # _build_guided_chat_apply_response would never be called).
+        assert body["assistant_message_kind"] == "assistant", body
+        assert body["assistant_message"] == "Output set to JSON."
+
+        assert len(mid_commit_snapshots) == 1
+        assert mid_commit_snapshots[0]["phase"] == "saving"
+
+        final_progress = self._progress(composer_test_client, session_id)
+        assert final_progress["phase"] == "complete"

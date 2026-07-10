@@ -280,6 +280,79 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
 
 
 @pytest.mark.asyncio
+async def test_sink_loop_progress_events_advance_through_discovery_and_resolve() -> None:
+    """Progress phases published to a real ``ComposerProgressSink`` across a
+    list_sinks -> resolve_sink round trip, exercising the actual production
+    seam (elspeth-a8eeebb3aa): calling_model precedes EVERY provider round
+    (including the round after the discovery tool result is threaded back),
+    and using_tools precedes the discovery dispatch. The frontend folds both
+    calling_model and using_tools into the same substep (ChatPanel.tsx
+    tutorialStep2ActiveSubstep) precisely because this loop re-emits
+    calling_model a second time — that mapping is exercised in the frontend
+    test suite; this test pins the backend event sequence it must handle.
+    """
+    responses = [
+        _response(tool_calls=[_tool_call("c1", "list_sinks", {})]),
+        _response(tool_calls=[_tool_call("c2", "resolve_sink", _RESOLVE_SINK_ARGS)]),
+    ]
+    phases: list[str] = []
+
+    async def _fake(**kwargs: Any) -> SimpleNamespace:
+        return responses.pop(0)
+
+    async def _capture_progress(event: Any) -> None:
+        phases.append(event.phase)
+
+    with patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake):
+        result = await maybe_resolve_step_2_sink_chat(
+            model="m",
+            user_message="save the results as a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            state=_empty_state(),
+            catalog=_catalog(),
+            user_id="u1",
+            progress=_capture_progress,
+        )
+
+    assert result.sink is not None
+    assert phases == ["calling_model", "using_tools", "calling_model"]
+
+
+@pytest.mark.asyncio
+async def test_sink_loop_progress_single_shot_resolve_emits_calling_model_only() -> None:
+    """A single-round resolve (no discovery tool call at all) still emits
+    calling_model — the common case for the tutorial's one-line "Save the
+    pipeline's results to a JSON file." prompt, where the composer model
+    resolves ``json`` directly without needing list_sinks/get_plugin_schema.
+    Without this event the substep indicator would never leave substep 0 for
+    the tutorial's actual traffic shape, even with the loop instrumented.
+    """
+    responses = [_response(tool_calls=[_tool_call("c1", "resolve_sink", _RESOLVE_SINK_ARGS)])]
+    phases: list[str] = []
+
+    async def _fake(**kwargs: Any) -> SimpleNamespace:
+        return responses.pop(0)
+
+    async def _capture_progress(event: Any) -> None:
+        phases.append(event.phase)
+
+    with patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake):
+        result = await maybe_resolve_step_2_sink_chat(
+            model="m",
+            user_message="save the results as a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            progress=_capture_progress,
+        )
+
+    assert result.sink is not None
+    assert phases == ["calling_model"]
+
+
+@pytest.mark.asyncio
 async def test_sink_loop_single_shot_when_no_catalog() -> None:
     """Without state+catalog the loop degrades to the pre-loop single-shot path."""
     responses = [_response(tool_calls=[_tool_call("c1", "resolve_sink", _RESOLVE_SINK_ARGS)])]

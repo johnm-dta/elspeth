@@ -1225,6 +1225,165 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.guidedSession).toEqual(sampleGuidedSession);
     });
 
+    it("starts composer-progress polling on send and applies the loaded snapshot (elspeth-a8eeebb3aa)", async () => {
+      // The REAL production seam, not composerProgress injected via setState:
+      // previously chatGuided never called startComposerProgressPolling at
+      // all, so composerProgress stayed null for the entire guided compose
+      // and the tutorial step-2 substep indicator never advanced. This test
+      // fails against the pre-fix chatGuided (fetchComposerProgress would
+      // never be called) even though setState-injection tests elsewhere in
+      // this suite passed throughout.
+      const { chatGuided, fetchComposerProgress } = await import("@/api/client");
+      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleChatResponse,
+      );
+      (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+        session_id: "sess-1",
+        request_id: null,
+        phase: "calling_model",
+        headline: "I'm asking the model to choose the next safe pipeline update.",
+        evidence: [],
+        likely_next: null,
+        reason: null,
+        updated_at: "2026-07-10T00:00:00Z",
+      });
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().chatGuided("What columns are available?");
+
+      expect(fetchComposerProgress).toHaveBeenCalledWith("sess-1");
+      expect(useSessionStore.getState().composerProgress).toEqual(
+        expect.objectContaining({ phase: "calling_model" }),
+      );
+    });
+
+    it("finally block scopes stop+reload to the session captured before the await, not one switched to mid-flight", async () => {
+      // Mirrors sendMessage/retryMessage's captured-activeSessionId finally
+      // semantics: every fetchComposerProgress call this chatGuided call
+      // makes must stay scoped to sess-A even though the store's
+      // activeSessionId flips to sess-B before the response resolves.
+      const { chatGuided, fetchComposerProgress } = await import("@/api/client");
+      let resolveChat!: (v: GuidedChatResponse) => void;
+      (chatGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<GuidedChatResponse>((resolve) => {
+          resolveChat = resolve;
+        }),
+      );
+      (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+        session_id: "sess-A",
+        request_id: null,
+        phase: "idle",
+        headline: "x",
+        evidence: [],
+        likely_next: null,
+        reason: null,
+        updated_at: "2026-07-10T00:00:00Z",
+      });
+      useSessionStore.setState({
+        activeSessionId: "sess-A",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const chatPromise = useSessionStore
+        .getState()
+        .chatGuided("What columns are available?");
+
+      useSessionStore.setState({
+        activeSessionId: "sess-B",
+        guidedSession: null,
+        guidedChatPending: false,
+      });
+      resolveChat(sampleChatResponse);
+      await chatPromise;
+
+      const calledSessions = (
+        fetchComposerProgress as ReturnType<typeof vi.fn>
+      ).mock.calls.map((call) => call[0]);
+      expect(calledSessions.length).toBeGreaterThan(0);
+      expect(calledSessions.every((id) => id === "sess-A")).toBe(true);
+    });
+
+    it("discards a stale terminal snapshot at poll start; a fresh terminal snapshot after compose settles still surfaces (elspeth-a8eeebb3aa review follow-up)", async () => {
+      // Regression for a review-caught race: startComposerProgressPolling's
+      // immediate poll can win the race against the backend's own "starting"
+      // publish and return the PREVIOUS turn's terminal snapshot still
+      // sitting in the registry (e.g. a step-1 send left phase="complete";
+      // the step-2 send's immediate GET can beat the POST's guard clauses).
+      // Surfacing that stale snapshot flashed the tutorial substep
+      // indicator's LAST step as current before dropping back to the first —
+      // the exact backward-jump class the calling_model/using_tools remap
+      // was meant to prevent, just via a different path.
+      const { chatGuided, fetchComposerProgress } = await import(
+        "@/api/client"
+      );
+      const fetchMock = fetchComposerProgress as ReturnType<typeof vi.fn>;
+
+      let resolveChat!: (v: GuidedChatResponse) => void;
+      (chatGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<GuidedChatResponse>((resolve) => {
+          resolveChat = resolve;
+        }),
+      );
+
+      const staleComplete = {
+        session_id: "sess-1",
+        request_id: null,
+        phase: "complete" as const,
+        headline: "stale — from the PREVIOUS turn",
+        evidence: [],
+        likely_next: null,
+        reason: "composer_complete" as const,
+        updated_at: "2026-07-09T00:00:00Z",
+      };
+      const freshComplete = {
+        ...staleComplete,
+        headline: "fresh — this turn's own completion",
+        updated_at: "2026-07-10T00:00:02Z",
+      };
+
+      // First call = startComposerProgressPolling's immediate poll (must be
+      // discarded). Manually controlled so the test can deterministically
+      // wait for its discard/set decision to fully settle before asserting.
+      let resolveFirstFetch!: (v: typeof staleComplete) => void;
+      fetchMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirstFetch = resolve;
+          }),
+      );
+      // Second call = chatGuided's finally block's explicit final load,
+      // which is NOT part of the poll session's discard filter.
+      fetchMock.mockResolvedValueOnce(freshComplete);
+
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const chatPromise = useSessionStore
+        .getState()
+        .chatGuided("What columns are available?");
+
+      resolveFirstFetch(staleComplete);
+      // Flush every pending microtask (the mock promise's resolution AND
+      // loadComposerProgress's post-await discard decision) via a macrotask
+      // tick, so the assertion below reflects the settled state rather than
+      // a coincidental pass before the continuation has run at all.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(useSessionStore.getState().composerProgress).toBeNull();
+
+      resolveChat(sampleChatResponse);
+      await chatPromise;
+
+      expect(useSessionStore.getState().composerProgress).toEqual(
+        freshComplete,
+      );
+    });
+
     it("client timeout: abort surfaces the timeout copy", async () => {
       const { chatGuided } = await import("@/api/client");
       // Raw abort-reason string, matching real fetch semantics

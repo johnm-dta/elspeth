@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import structlog
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
@@ -325,6 +326,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
     max_discovery_iters: int | None = None,
     timeout_seconds: float | None = None,
     context_block: str | None = None,
+    progress: ComposerProgressSink | None = None,
 ) -> Step2SinkChatResult:
     """Wrap Step-2 ``resolve_sink`` chat with the guided-chat fallback contract.
 
@@ -364,6 +366,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             max_discovery_iters=max_discovery_iters,
             timeout_seconds=timeout_seconds,
             context_block=context_block,
+            progress=progress,
         )
         if outcome.sink is not None:
             return Step2SinkChatResult(

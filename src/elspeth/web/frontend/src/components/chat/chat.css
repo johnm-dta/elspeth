@@ -676,10 +676,19 @@
   border-color: var(--color-accent);
 }
 
-/* Two-step confirm container: primary + Cancel, wraps if the header is tight. */
+/* Two-step confirm container: primary + Cancel, wraps if the header is tight.
+   Flex (not grid) is load-bearing: flex-wrap lets Confirm and Cancel break
+   onto independent lines as space shrinks. A `grid-template-columns: auto
+   auto` version (tried and reverted, elspeth-036e8ab365) anchors both
+   buttons to the same row every time — its "auto" columns can't fall below
+   the combined min-content width of BOTH buttons, so next to the
+   nowrap ModelChip in .chat-panel-header-actions the Cancel button was
+   clipped by .chat-panel's overflow:hidden on narrow viewports (~320-400px).
+   flex-wrap lets a single button occupy a line on its own, so the floor is
+   one button's min-content width, not the pair's. */
 .mode-switch-confirm {
-  display: inline-grid;
-  grid-template-columns: auto auto;
+  display: inline-flex;
+  flex-wrap: wrap;
   gap: var(--space-xs) var(--space-sm);
   align-items: center;
   max-width: min(34rem, 100%);
@@ -694,7 +703,7 @@
 }
 
 .mode-switch-confirm-title {
-  grid-column: 1 / -1;
+  flex-basis: 100%;
   color: var(--color-text);
   font-size: var(--font-size-sm);
   font-weight: 700;
@@ -708,7 +717,7 @@
    expected consequence, not an error. Given a full row so it reads before the
    confirm/cancel buttons in the wrapped flex layout. */
 .mode-switch-confirm-note {
-  grid-column: 1 / -1;
+  flex-basis: 100%;
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   line-height: var(--line-height-normal);

@@ -322,17 +322,34 @@ describe("ChatInput max length", () => {
 describe("ChatInput mobile density CSS", () => {
   const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
 
-  function mediaBlock(maxWidth: number): string {
-    const start = chatCss.indexOf(`@media (max-width: ${maxWidth}px)`);
-    if (start === -1) {
-      throw new Error(`Missing max-width ${maxWidth}px media block`);
+  // chat.css has FOUR separate `@media (max-width: 760px)` blocks (inline
+  // run-results, this composer-density block, inline-source-fallback, and
+  // template-cards-grid). A plain indexOf lands on whichever comes first in
+  // the file — not necessarily the composer-density block these tests mean
+  // to pin — and then over-reads to the next top-level comment, which
+  // happens to swallow the intended block too, so the assertions passed by
+  // accident (elspeth-05d5caa717). Bound each candidate block to its OWN
+  // closing brace (mirrors Layout.test.tsx's regex idiom: nested rules
+  // close on an indented `}`, the media block itself closes on an
+  // unindented `\n}`) and disambiguate among same-breakpoint blocks by a
+  // selector marker unique to the one under test.
+  function mediaBlock(maxWidth: number, marker: string): string {
+    const pattern = new RegExp(
+      `@media \\(max-width: ${maxWidth}px\\)\\s*\\{([\\s\\S]*?)\\n\\}`,
+      "g",
+    );
+    for (const match of chatCss.matchAll(pattern)) {
+      if (match[1].includes(marker)) {
+        return match[1];
+      }
     }
-    const next = chatCss.indexOf("\n/*", start + 1);
-    return next === -1 ? chatCss.slice(start) : chatCss.slice(start, next);
+    throw new Error(
+      `No max-width ${maxWidth}px media block in chat.css contains "${marker}"`,
+    );
   }
 
   it("compacts the composer chrome on phones without shrinking the textarea out of view", () => {
-    const block = mediaBlock(760);
+    const block = mediaBlock(760, ".chat-input-textarea");
 
     expect(block).toContain(".chat-input {");
     expect(block).toContain("padding: var(--space-xs) var(--space-sm)");
@@ -345,7 +362,7 @@ describe("ChatInput mobile density CSS", () => {
   });
 
   it("gives composer controls overflow-safe labels on narrow screens", () => {
-    const block = mediaBlock(760);
+    const block = mediaBlock(760, ".chat-input-textarea");
 
     expect(block).toContain("min-width: 0");
     expect(block).toContain("overflow-wrap: anywhere");

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { CodeBlock, hasLossyNumberLiteral } from "@/components/chat/CodeBlock";
 
 interface StructuredJsonPreviewProps {
   text: string;
@@ -12,23 +13,25 @@ interface TableModel {
 
 type PreviewMode = "json" | "table";
 
-const JSON_NUMBER_PATTERN =
-  /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
-
-interface DecimalValue {
-  sign: "" | "-";
-  digits: string;
-  scale: number;
-}
-
 export function StructuredJsonPreview({
   text,
   truncated = false,
 }: StructuredJsonPreviewProps) {
-  const parsed = useMemo(() => parseJsonPreview(text), [text]);
+  // Cheap: parse + a lexical lossy-literal scan. Deliberately stops short of
+  // building the TableModel (header union + formatCellValue per cell) —
+  // that's the expensive part `table` below defers until table mode is
+  // actually active.
+  const parsed = useMemo(() => parseJsonPreviewValue(text), [text]);
   const [mode, setMode] = useState<PreviewMode>("json");
-  const canShowTable = parsed.table !== null;
+  const canShowTable = parsed.isValid && !parsed.isLossy;
   const activeMode = canShowTable ? mode : "json";
+
+  const table = useMemo(() => {
+    if (!canShowTable || activeMode !== "table") {
+      return null;
+    }
+    return buildTableModel(parsed.value);
+  }, [canShowTable, activeMode, parsed]);
 
   return (
     <div className="structured-preview">
@@ -53,10 +56,10 @@ export function StructuredJsonPreview({
         )}
       </div>
 
-      {activeMode === "table" && parsed.table ? (
-        <StructuredPreviewTable table={parsed.table} />
+      {activeMode === "table" && table ? (
+        <StructuredPreviewTable table={table} />
       ) : (
-        <pre className="structured-preview-pre">{parsed.prettyText}</pre>
+        <CodeBlock code={text} prettyJson ariaLabel="JSON preview" />
       )}
 
       {truncated && (
@@ -102,179 +105,24 @@ function StructuredPreviewTable({ table }: { table: TableModel }) {
   );
 }
 
-function parseJsonPreview(text: string): {
+interface JsonPreviewParse {
   isValid: boolean;
-  prettyText: string;
-  table: TableModel | null;
-} {
+  isLossy: boolean;
+  value: unknown;
+}
+
+// Cheap membership check for "is this text safe to tabularise": parse +
+// the shared lossy-literal scan from CodeBlock. Deliberately stops short of
+// building the TableModel — see `table` in StructuredJsonPreview above,
+// which defers that (header union + formatCellValue per cell) until table
+// mode is actually active (elspeth-37dc3472de).
+function parseJsonPreviewValue(text: string): JsonPreviewParse {
   try {
     const value = JSON.parse(text) as unknown;
-    if (hasLossyNumberLiteral(text)) {
-      return {
-        isValid: true,
-        prettyText: text,
-        table: null,
-      };
-    }
-
-    return {
-      isValid: true,
-      prettyText: JSON.stringify(value, null, 2),
-      table: buildTableModel(value),
-    };
+    return { isValid: true, isLossy: hasLossyNumberLiteral(text), value };
   } catch {
-    return {
-      isValid: false,
-      prettyText: text,
-      table: null,
-    };
+    return { isValid: false, isLossy: false, value: undefined };
   }
-}
-
-function hasLossyNumberLiteral(text: string): boolean {
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (char === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (char !== "-" && !isDigit(char)) {
-      continue;
-    }
-
-    const start = index;
-    if (char === "-") {
-      index += 1;
-      if (index >= text.length || !isDigit(text[index])) {
-        index = start;
-        continue;
-      }
-    }
-
-    if (text[index] === "0") {
-      index += 1;
-    } else {
-      while (index < text.length && isDigit(text[index])) {
-        index += 1;
-      }
-    }
-
-    if (text[index] === ".") {
-      index += 1;
-      while (index < text.length && isDigit(text[index])) {
-        index += 1;
-      }
-    }
-
-    if (text[index] === "e" || text[index] === "E") {
-      index += 1;
-      if (text[index] === "+" || text[index] === "-") {
-        index += 1;
-      }
-      while (index < text.length && isDigit(text[index])) {
-        index += 1;
-      }
-    }
-
-    if (isLossyJsonNumberLiteral(text.slice(start, index))) {
-      return true;
-    }
-    index -= 1;
-  }
-
-  return false;
-}
-
-function isLossyJsonNumberLiteral(token: string): boolean {
-  const numericValue = Number(token);
-  if (!Number.isFinite(numericValue)) {
-    return true;
-  }
-
-  const rendered = JSON.stringify(numericValue);
-  if (typeof rendered !== "string" || rendered === "null") {
-    return true;
-  }
-
-  const sourceValue = parseDecimalValue(token);
-  const renderedValue = parseDecimalValue(rendered);
-  if (sourceValue === null || renderedValue === null) {
-    return false;
-  }
-
-  return (
-    sourceValue.sign !== renderedValue.sign ||
-    sourceValue.digits !== renderedValue.digits ||
-    sourceValue.scale !== renderedValue.scale
-  );
-}
-
-function parseDecimalValue(token: string): DecimalValue | null {
-  const match = token.match(JSON_NUMBER_PATTERN);
-  if (!match) {
-    return null;
-  }
-
-  const [, rawSign, integerPart, fractionPart = "", exponentPart = "0"] = match;
-  const exponent = Number(exponentPart);
-  if (!Number.isSafeInteger(exponent)) {
-    return null;
-  }
-  const sign = rawSign === "-" ? "-" : "";
-
-  let digits = `${integerPart}${fractionPart}`.replace(/^0+/, "");
-  if (digits.length === 0) {
-    return { sign, digits: "0", scale: 0 };
-  }
-
-  let scale = fractionPart.length - exponent;
-  if (scale < 0) {
-    const zerosToAppend = -scale;
-    if (zerosToAppend > 400) {
-      return null;
-    }
-    digits += "0".repeat(zerosToAppend);
-    scale = 0;
-  }
-
-  while (scale > 0 && digits.endsWith("0")) {
-    digits = digits.slice(0, -1);
-    scale -= 1;
-  }
-
-  if (digits.length === 0) {
-    return { sign, digits: "0", scale: 0 };
-  }
-
-  return {
-    sign,
-    digits,
-    scale,
-  };
-}
-
-function isDigit(char: string): boolean {
-  return char >= "0" && char <= "9";
 }
 
 function buildTableModel(value: unknown): TableModel | null {
@@ -316,9 +164,11 @@ function buildArrayTable(values: unknown[]): TableModel | null {
   }
 
   const headers: string[] = [];
+  const seenHeaders = new Set<string>();
   for (const row of values) {
     for (const key of Object.keys(row)) {
-      if (!headers.includes(key)) {
+      if (!seenHeaders.has(key)) {
+        seenHeaders.add(key);
         headers.push(key);
       }
     }

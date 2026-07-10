@@ -148,9 +148,9 @@ describe("BlobRow structural self-disclosure (T-3)", () => {
     await user.click(screen.getByRole("button", { name: /preview rows\.json/i }));
 
     await waitFor(() =>
-      expect(container.querySelector(".structured-preview-pre")?.textContent).toContain(
-        '{\n    "id": 1,',
-      ),
+      expect(
+        container.querySelector('[data-codeblock-format="json"]')?.textContent,
+      ).toContain('"id": 1,'),
     );
 
     await user.click(screen.getByRole("button", { name: "Table view" }));

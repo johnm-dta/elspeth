@@ -342,8 +342,8 @@ describe("RunOutputsPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
 
     await waitFor(() =>
-      expect(container.querySelector(".structured-preview-pre")?.textContent).toContain(
-        '{\n    "id": 1,',
+      expect(container.querySelector('[data-codeblock-format="json"]')?.textContent).toContain(
+        '"id": 1,',
       ),
     );
 

@@ -37,7 +37,16 @@
   color: var(--color-text);
 }
 
-.structured-preview-pre {
+/* Shared CodeBlock for the JSON view (elspeth-865bc4fcfc). Mirrors the
+   ack-card CodeBlock chrome (chat.css), scoped to the same box the old
+   plain <pre> used: capped height + scroll, since blob/run-output previews
+   can be large. */
+.structured-preview .code-block-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.structured-preview .code-block {
   max-height: 300px;
   margin: 0;
   overflow: auto;
@@ -49,8 +58,31 @@
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   line-height: var(--line-height-normal);
+}
+
+.structured-preview .code-block--plain {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.structured-preview .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.structured-preview .code-block-wrapper:hover .code-block-copy,
+.structured-preview .code-block-copy:focus-visible {
+  opacity: 1;
 }
 
 .structured-preview-table-wrap {

@@ -3,7 +3,11 @@ import { useMemo, useState } from "react";
 import { previewBlobContentSnippet } from "@/api/client";
 import { Icon, StructuredJsonPreview, type IconName } from "@/components/ui";
 import type { BlobMetadata } from "@/types/api";
-import { describeStructuralSummary, summarizeContentStructure } from "@/utils/contentStructure";
+import {
+  describeStructuralSummary,
+  normalizeMimeType,
+  summarizeContentStructure,
+} from "@/utils/contentStructure";
 
 const PREVIEWABLE_MIME_TYPES = new Set([
   "text/plain",
@@ -74,7 +78,7 @@ function statusIndicator(status: string): {
 export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }: BlobRowProps) {
   const status = statusIndicator(blob.status);
   const creatorLabel = creatorBadgeLabel(blob.created_by);
-  const normalizedMimeType = blob.mime_type.split(";")[0].trim().toLowerCase();
+  const normalizedMimeType = normalizeMimeType(blob.mime_type);
   const canPreview = PREVIEWABLE_MIME_TYPES.has(normalizedMimeType);
 
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -248,15 +252,12 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
             )}
           {displayContent !== null &&
             !previewLoading &&
-            normalizedMimeType === "application/json" && (
+            (normalizedMimeType === "application/json" ? (
               <StructuredJsonPreview
                 text={displayContent}
                 truncated={truncated}
               />
-            )}
-          {displayContent !== null &&
-            !previewLoading &&
-            normalizedMimeType !== "application/json" && (
+            ) : (
               <pre className="blob-row-preview-pre">
                 {displayContent}
                 {truncated && (
@@ -265,7 +266,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
                   </span>
                 )}
               </pre>
-            )}
+            ))}
         </div>
       )}
     </div>

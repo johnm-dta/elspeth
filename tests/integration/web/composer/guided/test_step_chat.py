@@ -272,6 +272,7 @@ class TestStepChatSuccess:
         ``history`` field is owned by /respond + emitters.
         """
         session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
         seeded = _seed_guided_session(composer_test_client, session_id)
         history_before = seeded["guided_session"]["history"]
 
@@ -495,6 +496,27 @@ class TestStep1SourceResolution:
         resp = client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["csv"]})
         assert resp.status_code == 200, resp.json()
         assert resp.json()["next_turn"]["type"] == "schema_form"
+
+    def test_fresh_step_1_chat_uses_source_resolver(self, composer_test_client: TestClient) -> None:
+        """A first chat submit can build the source without a seeded state row."""
+        session_id = _create_session(composer_test_client)
+        entry = _seed_guided_session(composer_test_client, session_id)
+        assert entry["composition_state"] is None
+        assert entry["guided_session"]["history"] == []
+
+        completion = _ReturningLiteLLMCompletion(_fake_resolve_source_response_csv())
+        with patch(_CHAT_SOLVER_ACOMPLETION, new=completion):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="make a csv source with a text column",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert len(completion.calls) == 1
+        assert any(tool["function"]["name"] == "resolve_source" for tool in completion.calls[0]["tools"])
+        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
 
     def test_step_1_chat_commits_source_in_place_and_rerenders_form(
         self,
@@ -979,6 +1001,7 @@ class TestStepChatTransientFailure:
         session ``solver_exhausted``.
         """
         session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
         seeded = _seed_guided_session(composer_test_client, session_id)
 
         with patch(
@@ -1165,6 +1188,7 @@ class TestStepChatTransientFailure:
         from litellm.exceptions import BudgetExceededError
 
         session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
         seeded = _seed_guided_session(composer_test_client, session_id)
 
         with patch(

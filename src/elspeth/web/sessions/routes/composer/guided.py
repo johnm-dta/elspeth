@@ -2201,6 +2201,33 @@ async def post_guided_chat(
                 (r for r in reversed(guided.history) if r.step == guided.step),
                 None,
             )
+
+            # GET /guided deliberately leaves a fresh session unpersisted, so
+            # its visible Step-1 turn is still latent on the first mutating
+            # request. Materialise that turn here before dispatch: the Step-1
+            # resolver is gated by the current turn type, and treating a missing
+            # record as "no source tools" incorrectly routes fresh sessions to
+            # the advisory-only solver.
+            if existing_record_for_chat is None and guided.step is GuidedStep.STEP_1_SOURCE:
+                turn = _build_get_guided_turn(state, guided, catalog=catalog)
+                if turn is None:
+                    raise InvariantError("Guided Step-1 chat has no rebuildable current turn")
+                guided, existing_record_for_chat, emitted_turn_type, emitted_payload_hash = _append_server_turn_record(
+                    guided,
+                    current_step=guided.step,
+                    turn=turn,
+                )
+                state = _replace(state, guided_session=guided)
+                emit_turn_emitted(
+                    recorder,
+                    step=guided.step,
+                    turn_type=emitted_turn_type,
+                    payload_hash=emitted_payload_hash,
+                    payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, turn["payload"]),
+                    emitter="server",
+                    composition_version=state.version,
+                    actor=user.user_id,
+                )
             current_turn_type = existing_record_for_chat.turn_type if existing_record_for_chat is not None else None
             chat_result = None
             # Computed once, up front: reused by the STEP_1/STEP_2 resolve

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import * as api from "@/api/client";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -49,6 +49,15 @@ export const IMPORT_YAML_422_MESSAGE =
 
 const IMPORT_YAML_GENERIC_ERROR_DETAIL = "Failed to import YAML. Please try again.";
 
+// The client-side line scanner (analyseImportYamlDraft) is advisory only --
+// it cannot parse arbitrary YAML (no flow-style mappings, no full grammar),
+// so a scan miss must not block Import. Server-side validation, which does
+// run a real YAML parser, is the only hard gate. Pinned as a constant so
+// tests assert the exact string.
+export const IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE =
+  "Preview unavailable: couldn't parse pipeline sections client-side. " +
+  "The server will validate this document when you import it.";
+
 interface ImportErrorInfo {
   title: string;
   detail: string;
@@ -93,7 +102,12 @@ interface ImportYamlModalProps {
 
 interface ImportYamlDraftAnalysis {
   hasText: boolean;
-  canImport: boolean;
+  // Whether the client-side line scanner recognised pipeline sections and
+  // produced a real preview -- purely informational. It does NOT gate
+  // Import: the scanner has no real YAML grammar (e.g. flow-style mappings
+  // defeat it), so server-side validation is the only hard gate. See
+  // IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE.
+  sectionsParsed: boolean;
   sourceCount: number;
   stepCount: number;
   outputCount: number;
@@ -124,7 +138,7 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
   if (!hasText) {
     return {
       hasText: false,
-      canImport: false,
+      sectionsParsed: false,
       sourceCount: 0,
       stepCount: 0,
       outputCount: 0,
@@ -177,18 +191,17 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
   if (foundSections.size === 0) {
     return {
       hasText: true,
-      canImport: false,
+      sectionsParsed: false,
       sourceCount: 0,
       stepCount: 0,
       outputCount: 0,
-      validationMessage:
-        "No pipeline sections found. Add source, transforms, gates, aggregations, coalesce, or sinks.",
+      validationMessage: IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE,
     };
   }
 
   return {
     hasText: true,
-    canImport: true,
+    sectionsParsed: true,
     sourceCount,
     stepCount,
     outputCount,
@@ -251,7 +264,17 @@ function normaliseYamlPreviewIndent(lines: string[]): string[] {
   if (significantIndents.length === 0) {
     return lines;
   }
-  const commonIndent = Math.min(...significantIndents);
+  // Reduce with an accumulator rather than Math.min(...significantIndents):
+  // spreading one array element per line into a call's argument list blows
+  // the engine's argument/stack limit on very large pastes (no textarea
+  // maxLength; multi-MB exports are a supported scenario). This is O(n)
+  // time, O(1) stack.
+  let commonIndent = significantIndents[0];
+  for (let index = 1; index < significantIndents.length; index += 1) {
+    if (significantIndents[index] < commonIndent) {
+      commonIndent = significantIndents[index];
+    }
+  }
   if (commonIndent === 0) {
     return lines;
   }
@@ -286,7 +309,17 @@ function countYamlSectionEntries(
     const trimmed = rawLine.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
     const indent = leadingSpaces(rawLine);
-    if (indent <= start.indent) break;
+    // A YAML block sequence's '-' marker may sit at the SAME indent as its
+    // parent key (an "indentless sequence" -- valid YAML, and PyYAML's
+    // default emitter style). Only a '- ' item at the section's own indent
+    // continues the section; any other line at that indent is the next
+    // sibling top-level key and still ends the scan.
+    const isIndentlessSequenceItem =
+      isRuntimeListSection(start.section) &&
+      indent === start.indent &&
+      trimmed.startsWith("- ");
+    if (indent < start.indent) break;
+    if (indent === start.indent && !isIndentlessSequenceItem) break;
     if (childIndent !== null && indent !== childIndent) continue;
 
     if (isRuntimeListSection(start.section)) {
@@ -345,7 +378,7 @@ function ImportYamlDraftPreview({
       aria-live="polite"
       aria-label="Import YAML preflight"
     >
-      {analysis.canImport && (
+      {analysis.sectionsParsed && (
         <div className="import-yaml-preview-section">
           <div className="import-yaml-preview-heading">Parsed preview</div>
           <p className="import-yaml-preview-counts">
@@ -355,7 +388,7 @@ function ImportYamlDraftPreview({
       )}
       <div className="import-yaml-preview-section">
         <div className="import-yaml-preview-heading">Validation summary</div>
-        <p className={analysis.canImport ? "import-yaml-preview-ok" : "import-yaml-preview-warning"}>
+        <p className={analysis.sectionsParsed ? "import-yaml-preview-ok" : "import-yaml-preview-warning"}>
           {analysis.validationMessage}
         </p>
       </div>
@@ -397,10 +430,22 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   useFocusTrap(dialogRef, true, ".import-yaml-textarea");
 
   const isSubmitting = phase === "submitting";
+  // Deferred so the O(lines) indent-normalisation + section/entry scan
+  // doesn't re-run synchronously on every keystroke (large pasted pipelines
+  // would otherwise block typing and re-fire the aria-live preview region
+  // per keypress). This only affects the advisory preview -- Import gating
+  // below reads the live, non-deferred yamlText, matching what doImport()
+  // actually submits.
+  const deferredYamlText = useDeferredValue(yamlText);
   const draftAnalysis = useMemo(
-    () => analyseImportYamlDraft(yamlText),
-    [yamlText],
+    () => analyseImportYamlDraft(deferredYamlText),
+    [deferredYamlText],
   );
+  // Server-side validation is the only hard gate (see
+  // IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE); Import is enabled for any
+  // non-empty paste, independent of whether the client-side scanner (or its
+  // deferred preview) recognised pipeline sections.
+  const hasYamlText = yamlText.trim().length > 0;
   // Escape/backdrop close while drafting or after a result; NOT while the
   // nested ConfirmDialog owns the keyboard (its own Escape handler applies),
   // and not mid-submit (avoid abandoning the request with no feedback).
@@ -496,7 +541,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   }
 
   function handleSubmitClick(): void {
-    if (!draftAnalysis.canImport) return;
+    if (!hasYamlText) return;
     // Confirm before a destructive replace when the session HAS content, and
     // also when its state is not yet known (mid-refetch, or a failed load
     // that left compositionState null): treating "unknown" as "empty" would
@@ -598,7 +643,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={!draftAnalysis.canImport || isSubmitting}
+                  disabled={!hasYamlText || isSubmitting}
                   onClick={handleSubmitClick}
                 >
                   {isSubmitting ? "Importing…" : "Import"}

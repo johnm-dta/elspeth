@@ -7,6 +7,7 @@ import {
   buildImportSuccessMessage,
   IMPORT_YAML_NOT_RUNNABLE_INTRO,
   IMPORT_YAML_422_MESSAGE,
+  IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE,
 } from "./ImportYamlModal";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
@@ -153,16 +154,21 @@ describe("ImportYamlModal", () => {
     expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
   });
 
-  it("keeps Import disabled until the paste looks like pipeline YAML", () => {
+  // The client-side line scanner is advisory only -- server-side validation
+  // (via importCompositionYaml) is the sole hard gate. A scanner miss must
+  // not permanently disable Import: it shows an honest "couldn't parse"
+  // advisory instead and lets the server have the final say.
+  it("keeps Import enabled with an advisory when the paste doesn't look like known pipeline sections", () => {
     render(<ImportYamlModal onClose={onClose} />);
     typeYaml("not: a pipeline document\n");
 
-    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
     expect(screen.getByText("Validation summary")).toBeInTheDocument();
-    expect(screen.getByText(/No pipeline sections found/i)).toBeInTheDocument();
+    expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText("Parsed preview")).toBeNull();
   });
 
-  it("does not treat a nested pipeline wrapper as importable runtime YAML", () => {
+  it("keeps Import enabled with an advisory for a nested pipeline wrapper the scanner can't preview", () => {
     render(<ImportYamlModal onClose={onClose} />);
     typeYaml(
       "pipeline:\n" +
@@ -171,8 +177,24 @@ describe("ImportYamlModal", () => {
         "      plugin: csv\n",
     );
 
-    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
-    expect(screen.getByText(/No pipeline sections found/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+    expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
+  });
+
+  it("keeps Import enabled for flow-style YAML the line scanner can't preview but the backend accepts", () => {
+    // '{' at column 0 fails parseYamlMappingLine's plain-key regex, so the
+    // scanner finds no sections here even though this is a valid top-level
+    // flow mapping that yaml.safe_load (and the backend's section-key check)
+    // accepts. Previously this permanently disabled Import with no override.
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      '{"source": {"plugin": "csv", "on_success": "result"}, ' +
+        '"sinks": {"result": {"plugin": "json", "on_write_failure": "fail"}}}',
+    );
+
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+    expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText("Parsed preview")).toBeNull();
   });
 
   it("accepts uniformly indented top-level runtime YAML", () => {
@@ -281,6 +303,52 @@ describe("ImportYamlModal", () => {
     expect(
       screen.getByText("1 source, 2 processing steps, 1 output"),
     ).toBeInTheDocument();
+  });
+
+  it("counts indentless block-sequence entries (PyYAML's default emitter style)", () => {
+    // The '-' marker of a YAML block sequence may sit at the SAME indent as
+    // its parent key ("transforms:" and "- name: a" both at column 0) -- a
+    // valid, common emitter style. countYamlSectionEntries used to break the
+    // scan the instant it saw indent <= start.indent, undercounting to 0.
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(
+      "source:\n" +
+        "  plugin: csv\n" +
+        "  on_success: a\n" +
+        "transforms:\n" +
+        "- name: a\n" +
+        "  plugin: uppercase\n" +
+        "- name: b\n" +
+        "  plugin: lowercase\n" +
+        "sinks:\n" +
+        "  result:\n" +
+        "    plugin: json\n",
+    );
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 source, 2 processing steps, 1 output"),
+    ).toBeInTheDocument();
+  });
+
+  it("normalises indentation on a very large paste without throwing (RangeError guard)", () => {
+    // normaliseYamlPreviewIndent used to spread ~1 number per line into
+    // Math.min(...significantIndents); a multi-MB paste (no textarea
+    // maxLength, and multi-MB exports are a supported scenario) blows the
+    // engine's call-argument/stack limit and throws RangeError during render.
+    const bigBody = Array.from(
+      { length: 200000 },
+      (_, i) => `  field_${i}: value`,
+    ).join("\n");
+    const bigYaml = `source:\n  plugin: csv\n${bigBody}\nsinks:\n  result:\n    plugin: json\n`;
+
+    render(<ImportYamlModal onClose={onClose} />);
+
+    expect(() => typeYaml(bigYaml)).not.toThrow();
+    // Gating is on live non-empty text (Issue 1's advisory-only preflight),
+    // so Import stays enabled regardless of whether the (possibly deferred)
+    // preview analysis has caught up yet.
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
   });
 
   it("does not close on Escape while the confirm step owns the keyboard", () => {

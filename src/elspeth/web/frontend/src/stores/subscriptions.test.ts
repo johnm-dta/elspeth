@@ -431,6 +431,42 @@ describe("subscriptions — validation result side effects", () => {
     expect(message).not.toContain("select_cols");
   });
 
+  // ── elspeth-ede84df6b3: component_type threading reaches the rendered ────
+  // chat bullet's phrase, not just the phraseFor call signature.
+  it("threads component_type through to the chat bullet's possessive phrase for a role-less generated id", () => {
+    const injectSystemMessage = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendMessage,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: "source",
+            component_id: "csv_refunds_a1b2",
+            message: "Cannot resolve secret references: SOME_KEY",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    const [message] = injectSystemMessage.mock.calls[0] as [string, string];
+    // A role-less generated CSV id with no live-composition match must
+    // resolve via the component_type hint to the READ-direction phrase, not
+    // the write-direction guess the id substring alone (no role token) would
+    // otherwise fall back to.
+    expect(message).toContain("**read your CSV:**");
+    expect(message).not.toContain("write a CSV");
+  });
+
   it("fires side effects exactly once when the same result reference is set twice (reference-equality guard)", () => {
     const injectSystemMessage = vi.fn();
     useSessionStore.setState({ activeSessionId: "sess-1", injectSystemMessage } as never);

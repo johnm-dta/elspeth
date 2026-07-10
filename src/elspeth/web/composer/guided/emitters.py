@@ -139,9 +139,7 @@ def build_step_1_schema_form_turn(
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
     schema_info = catalog.get_schema("source", plugin)
-    prefilled: dict[str, object] = {"schema": {"mode": "observed"}}
-    if inspection_facts is not None:
-        _merge_inspection_into_prefill(prefilled, inspection_facts)
+    prefilled = build_step_1_source_prefill(plugin, inspection_facts=inspection_facts)
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": plugin,
@@ -155,11 +153,29 @@ def build_step_1_schema_form_turn(
     )
 
 
+def build_step_1_source_prefill(
+    plugin: str,
+    *,
+    inspection_facts: SourceInspectionFacts | None = None,
+) -> dict[str, object]:
+    """Build source schema-form defaults from the selected plugin and blob facts."""
+    prefilled: dict[str, object] = {"schema": {"mode": "observed"}}
+    if inspection_facts is not None:
+        _merge_inspection_into_prefill(prefilled, plugin=plugin, facts=inspection_facts)
+    return prefilled
+
+
 def _merge_inspection_into_prefill(
     prefilled: dict[str, object],
+    *,
+    plugin: str,
     facts: SourceInspectionFacts,
 ) -> None:
     """Conservatively prefill source schema from inspection facts."""
+    blob_id = facts.redacted_identity.get("blob_id")
+    if blob_id and _inspection_matches_source_plugin(plugin, facts):
+        prefilled["path"] = f"{BLOB_REF_PATH_PREFIX}{blob_id}"
+        prefilled["on_validation_failure"] = "discard"
     if facts.observed_headers and facts.inferred_types:
         fields = _schema_field_specs_from_inspection_headers(facts)
         if fields is not None:
@@ -170,6 +186,17 @@ def _merge_inspection_into_prefill(
         prefilled["schema"] = {"mode": "observed"}
     # Delimiter and encoding are deliberately not prefilled here: the live
     # SourceInspectionFacts model does not carry those fields yet.
+
+
+def _inspection_matches_source_plugin(plugin: str, facts: SourceInspectionFacts) -> bool:
+    """Return whether an uploaded blob inspection can safely prefill this source plugin."""
+    if facts.source_kind == "csv":
+        return plugin == "csv"
+    if facts.source_kind in ("json", "jsonl"):
+        return plugin == "json"
+    if facts.source_kind == "text":
+        return plugin == "text"
+    return False
 
 
 def _schema_field_specs_from_inspection_headers(facts: SourceInspectionFacts) -> list[str] | None:

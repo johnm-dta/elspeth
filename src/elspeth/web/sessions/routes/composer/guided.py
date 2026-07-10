@@ -16,6 +16,7 @@ from elspeth.web.composer.tutorial_sample import (
     tutorial_sample_base_url,
 )
 from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
+from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult
 from elspeth.web.sessions.schemas import StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
@@ -70,6 +71,7 @@ from .._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _initial_composition_state_with_guided_session,
+    _inspect_latest_ready_session_blob,
     _persist_chat_turns,
     _persist_llm_calls,
     _persist_tool_invocations,
@@ -88,6 +90,7 @@ from .._helpers import (
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
     build_step_1_schema_form_turn_from_resolved,
+    build_step_1_source_prefill,
     build_step_2_multi_select_turn,
     build_step_2_schema_form_turn,
     build_step_2_schema_form_turn_from_resolved,
@@ -346,6 +349,59 @@ def _step_1_plugin_hint(guided: GuidedSession) -> str | None:
     if guided.step_1_result is not None:
         return guided.step_1_result.plugin
     return None
+
+
+def _step_1_message_mentions_uploaded_input(message: str) -> bool:
+    """Return whether a Step-1 chat message is the upload helper's bind request."""
+    stripped = message.strip()
+    prefix = "I've uploaded \""
+    suffix = '"; please use it as the pipeline input.'
+    if not stripped.startswith(prefix) or not stripped.endswith(suffix):
+        return False
+    filename = stripped[len(prefix) : -len(suffix)]
+    return bool(filename) and '"' not in filename and "\n" not in filename and "\r" not in filename
+
+
+async def _source_from_latest_uploaded_blob_for_step_1_chat(
+    *,
+    message: str,
+    plugin_hint: str | None,
+    blob_service: BlobServiceProtocol,
+    session_id: UUID,
+) -> SourceResolved | None:
+    """Build a source resolution from the newest uploaded blob for upload-hint chat.
+
+    The frontend upload helper currently appends text like "I've uploaded
+    <file>; please use it as the pipeline input." to the chat box. That text
+    carries no blob id, so letting the LLM resolve it invites invented schema.
+    When the session is already on a Step-1 schema form with a concrete plugin,
+    bind the newest ready session blob through the same inspection prefill used
+    by the visible form, then let ``handle_step_1_source`` resolve the masked
+    ``blob:<id>`` sentinel authoritatively.
+    """
+    if plugin_hint is None or not _step_1_message_mentions_uploaded_input(message):
+        return None
+    inspection_facts = await _inspect_latest_ready_session_blob(blob_service, session_id)
+    if inspection_facts is None:
+        return None
+    prefilled = build_step_1_source_prefill(plugin_hint, inspection_facts=inspection_facts)
+    path = prefilled.get("path")
+    if not isinstance(path, str):
+        return None
+    schema = prefilled.get("schema")
+    options: dict[str, Any] = {"path": path}
+    if isinstance(schema, Mapping):
+        options["schema"] = dict(deep_thaw(schema))
+    on_validation_failure = prefilled.get("on_validation_failure")
+    if not isinstance(on_validation_failure, str) or not on_validation_failure:
+        on_validation_failure = "discard"
+    return SourceResolved(
+        plugin=plugin_hint,
+        options=options,
+        observed_columns=tuple(inspection_facts.observed_headers or ()),
+        sample_rows=(),
+        on_validation_failure=on_validation_failure,
+    )
 
 
 def _guided_persisted_validity(state: CompositionState) -> tuple[bool, list[str] | None]:
@@ -2160,24 +2216,170 @@ async def post_guided_chat(
                 and current_turn_type in (TurnType.SINGLE_SELECT, TurnType.SCHEMA_FORM, TurnType.INSPECT_AND_CONFIRM)
             ):
                 plugin_hint = _step_1_plugin_hint(guided)
+                source_chat_result: Step1SourceChatResult | None = None
+                if current_turn_type is TurnType.SCHEMA_FORM:
+                    uploaded_source = await _source_from_latest_uploaded_blob_for_step_1_chat(
+                        message=body.message,
+                        plugin_hint=plugin_hint,
+                        blob_service=request.app.state.blob_service,
+                        session_id=session_id,
+                    )
+                    if uploaded_source is not None:
+                        finished_at = datetime.now(UTC)
+                        latency_ms = int((_perf_counter() - started_perf) * 1000)
+                        uploaded_data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
+                        handler_result = handle_step_1_source(
+                            state=state,
+                            session=guided,
+                            resolved=uploaded_source,
+                            catalog=catalog,
+                            data_dir=uploaded_data_dir,
+                            session_engine=request.app.state.session_engine,
+                            session_id=str(session_id),
+                        )
+                        if not handler_result.tool_result.success:
+                            source_chat_result = Step1SourceChatResult(
+                                source_resolution=None,
+                                fallback_chat=StepChatResult(
+                                    assistant_message=_COMMIT_REJECTED_MESSAGE,
+                                    status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                                    latency_ms=latency_ms,
+                                    error_class="StepHandlerRejected",
+                                ),
+                                prose_chat=None,
+                            )
+                        else:
+                            state = handler_result.state
+                            uploaded_turn_response: TurnResponse = {
+                                "chosen": None,
+                                "edited_values": {
+                                    "plugin": uploaded_source.plugin,
+                                    "options": dict(uploaded_source.options),
+                                    "observed_columns": list(uploaded_source.observed_columns),
+                                    "sample_rows": [dict(row) for row in uploaded_source.sample_rows],
+                                },
+                                "custom_inputs": None,
+                                "accepted_step_index": None,
+                                "edit_step_index": None,
+                                "control_signal": None,
+                            }
+                            response_hash = stable_hash(uploaded_turn_response)
+                            answered_record = _replace(
+                                existing_record_for_chat,
+                                response_hash=response_hash,
+                                summary=_summarize_guided_response(TurnType.SCHEMA_FORM, uploaded_turn_response),
+                            )
+                            answered_history = tuple(answered_record if r is existing_record_for_chat else r for r in guided.history)
+                            guided = _replace(
+                                handler_result.session,
+                                history=answered_history,
+                                step_1_chosen_plugin=None,
+                                step_1_source_intent=None,
+                            )
+                            emit_turn_answered(
+                                recorder,
+                                step=GuidedStep.STEP_1_SOURCE,
+                                turn_type=TurnType.SCHEMA_FORM,
+                                response_hash=response_hash,
+                                response_payload_id=_store_guided_audit_payload(request.app.state.payload_store, uploaded_turn_response),
+                                control_signal=None,
+                                composition_version=state.version,
+                                actor=user.user_id,
+                            )
+                            applied_step_1_result = handler_result.session.step_1_result
+                            if applied_step_1_result is None:
+                                raise InvariantError(
+                                    "step_1_result is None after successful uploaded-blob source commit — "
+                                    "handler set tool_result.success=True but did not set step_1_result"
+                                )
+                            next_turn = build_step_1_schema_form_turn_from_resolved(applied_step_1_result, catalog)
+                            next_turn_type = TurnType(next_turn["type"])
+                            next_payload_hash = stable_hash(next_turn["payload"])
+                            new_record = TurnRecord(
+                                step=GuidedStep.STEP_1_SOURCE,
+                                turn_type=next_turn_type,
+                                payload_hash=next_payload_hash,
+                                response_hash=None,
+                                emitter="server",
+                            )
+                            emit_turn_emitted(
+                                recorder,
+                                step=GuidedStep.STEP_1_SOURCE,
+                                turn_type=next_turn_type,
+                                payload_hash=next_payload_hash,
+                                payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
+                                emitter="server",
+                                composition_version=state.version,
+                                actor=user.user_id,
+                            )
+                            ts_iso = finished_at.isoformat()
+                            user_turn = ChatTurn(
+                                role=ChatRole.USER,
+                                content=body.message,
+                                seq=guided.chat_turn_seq,
+                                step=GuidedStep.STEP_1_SOURCE,
+                                ts_iso=ts_iso,
+                            )
+                            assistant_message = "I found the uploaded file and applied it as the pipeline input."
+                            assistant_turn = ChatTurn(
+                                role=ChatRole.ASSISTANT,
+                                content=assistant_message,
+                                seq=guided.chat_turn_seq + 1,
+                                step=GuidedStep.STEP_1_SOURCE,
+                                ts_iso=ts_iso,
+                                assistant_message_kind="assistant",
+                            )
+                            guided = _replace(
+                                guided,
+                                history=(*guided.history, new_record),
+                                chat_history=(*guided.chat_history, user_turn, assistant_turn),
+                                chat_turn_seq=guided.chat_turn_seq + 2,
+                            )
+                            recorder.record_chat_turn(
+                                ComposerChatTurn(
+                                    step=GuidedStep.STEP_1_SOURCE.value,
+                                    initiator=ComposerChatInitiator.USER,
+                                    chat_turn_seq=user_turn.seq,
+                                    user_message_hash=stable_hash(body.message),
+                                    assistant_message_hash=stable_hash(assistant_message),
+                                    latency_ms=latency_ms,
+                                    model=settings.composer_model,
+                                    status=ComposerChatTurnStatus.SUCCESS,
+                                    started_at=started_at,
+                                    finished_at=finished_at,
+                                    error_class=None,
+                                )
+                            )
+                            response, state_record_out = await _build_guided_chat_apply_response(
+                                guided=guided,
+                                state=state,
+                                next_turn=next_turn,
+                                assistant_message=assistant_message,
+                                service=service,
+                                session_id=session_id,
+                                state_record=state_record,
+                                shield_available=shield_available,
+                            )
+                            return response
 
-                source_chat_result = await resolve_step_1_source_chat_with_auto_drop(
-                    site="post_guided_chat",
-                    session_id=str(session_id),
-                    user_id=user.user_id,
-                    model=settings.composer_model,
-                    user_message=body.message,
-                    plugin_hint=plugin_hint,
-                    current_source=guided.step_1_result,
-                    temperature=settings.composer_temperature,
-                    seed=settings.composer_seed,
-                    recorder=recorder,
-                    # Server-side bound, consistent with freeform compose
-                    # (elspeth-fb4464cdf0): the guided LLM call may not run
-                    # past the composer budget.
-                    timeout_seconds=settings.composer_timeout_seconds,
-                    context_block=chat_context_block,
-                )
+                if source_chat_result is None:
+                    source_chat_result = await resolve_step_1_source_chat_with_auto_drop(
+                        site="post_guided_chat",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        model=settings.composer_model,
+                        user_message=body.message,
+                        plugin_hint=plugin_hint,
+                        current_source=guided.step_1_result,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
+                        recorder=recorder,
+                        # Server-side bound, consistent with freeform compose
+                        # (elspeth-fb4464cdf0): the guided LLM call may not run
+                        # past the composer budget.
+                        timeout_seconds=settings.composer_timeout_seconds,
+                        context_block=chat_context_block,
+                    )
                 # ``prose_chat`` (a declined-to-prose SUCCESS) and
                 # ``fallback_chat`` (an error) are mutually exclusive; either
                 # one here means "use this directly, skip the second call".

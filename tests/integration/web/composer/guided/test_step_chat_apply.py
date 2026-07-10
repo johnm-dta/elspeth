@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from elspeth.web.sessions._guided_step_chat import _COMMIT_REJECTED_MESSAGE, _SYNTHETIC_UNAVAILABLE_MESSAGE
 
@@ -297,6 +297,134 @@ def _fake_resolve_source_response(*, options: dict, assistant_message: str) -> S
             )
         ]
     )
+
+
+def test_step_1_chat_upload_hint_binds_latest_uploaded_csv_without_llm(composer_test_client: TestClient) -> None:
+    """Uploading after the CSV form is open binds the actual blob instead of letting chat infer schema."""
+    client = composer_test_client
+    session_id = _create_session(client)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    upload = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={
+            "filename": "guided_inventory.csv",
+            "content": "sku,color,quantity\nSKU-001,red,2\nSKU-002,blue,5\nSKU-003,green,4\n",
+            "mime_type": "text/csv",
+        },
+    )
+    assert upload.status_code == 201, upload.json()
+    blob_id = upload.json()["id"]
+
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(side_effect=AssertionError("upload hint should bind the latest blob before LLM chat")),
+    ):
+        status, body = _post_chat(
+            client,
+            session_id,
+            message='I\'ve uploaded "guided_inventory.csv"; please use it as the pipeline input.',
+            step_index="step_1_source",
+        )
+
+    assert status == 200, body
+    assert body["assistant_message"] == "I found the uploaded file and applied it as the pipeline input."
+    assert body["next_turn"]["type"] == "schema_form"
+    prefilled = body["next_turn"]["payload"]["prefilled"]
+    assert prefilled["path"] == f"blob:{blob_id}"
+    assert prefilled["on_validation_failure"] == "discard"
+    assert {field.split(":", 1)[0] for field in prefilled["schema"]["fields"]} == {
+        "sku",
+        "color",
+        "quantity",
+    }
+    source = body["composition_state"]["composer_meta"]["guided_session"]["step_1_result"]
+    assert source["options"]["blob_ref"] == blob_id
+    assert source["observed_columns"] == ["sku", "color", "quantity"]
+
+
+def test_step_1_chat_negated_upload_message_stays_advisory_no_mutation(composer_test_client: TestClient) -> None:
+    client = composer_test_client
+    session_id = _create_session(client)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    upload = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={
+            "filename": "guided_inventory.csv",
+            "content": "sku,color,quantity\nSKU-001,red,2\n",
+            "mime_type": "text/csv",
+        },
+    )
+    assert upload.status_code == 201, upload.json()
+    before = _get_guided(client, session_id)
+    prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="I won't change the source.", tool_calls=None))])
+
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_AsyncCompletionFake(prose),
+    ):
+        status, body = _post_chat(
+            client,
+            session_id,
+            message="Don't use the uploaded file as the pipeline input.",
+            step_index="step_1_source",
+        )
+
+    assert status == 200, body
+    assert body["assistant_message"] == "I won't change the source."
+    assert body["next_turn"] is None
+    after = _get_guided(client, session_id)
+    assert before["composition_state"]["composer_meta"]["guided_session"].get("step_1_result") is None
+    assert after["composition_state"]["composer_meta"]["guided_session"].get("step_1_result") is None
+
+
+def test_step_1_chat_upload_fast_path_rejection_degrades_and_audits(composer_test_client: TestClient) -> None:
+    client = composer_test_client
+    session_id = _create_session(client)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    upload = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={
+            "filename": "guided_inventory.csv",
+            "content": "sku,color,quantity\nSKU-001,red,2\n",
+            "mime_type": "text/csv",
+        },
+    )
+    assert upload.status_code == 201, upload.json()
+    before = _get_guided(client, session_id)
+    rejected = SimpleNamespace(tool_result=SimpleNamespace(success=False))
+
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=AssertionError("fast-path rejection should not call LLM")),
+        ),
+        patch(
+            "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",
+            return_value=rejected,
+        ),
+    ):
+        status, body = _post_chat(
+            client,
+            session_id,
+            message='I\'ve uploaded "guided_inventory.csv"; please use it as the pipeline input.',
+            step_index="step_1_source",
+        )
+
+    assert status == 200, body
+    assert body["assistant_message"] == _COMMIT_REJECTED_MESSAGE
+    assert body["next_turn"] is None
+    assistant_turn = body["guided_session"]["chat_history"][-1]
+    assert assistant_turn["assistant_message_kind"] == "synthetic_failure"
+    assert assistant_turn["synthetic_failure_reason"] is None
+    after = _get_guided(client, session_id)
+    assert before["composition_state"]["composer_meta"]["guided_session"].get("step_1_result") is None
+    assert after["composition_state"]["composer_meta"]["guided_session"].get("step_1_result") is None
+    audit = _chat_turn_audit_bodies(client, session_id)
+    assert audit, "expected a chat_turn audit on the upload fast-path degrade path"
+    assert audit[-1]["error_class"] == "StepHandlerRejected"
 
 
 def test_step_1_chat_resend_strips_server_owned_keys_and_recommits(composer_test_client: TestClient) -> None:

@@ -183,6 +183,53 @@ class TestStep1IntraStep:
         assert body["next_turn"]["step_index"] == 0  # STEP_1_SOURCE is index 0
         assert body["guided_session"]["step"] == "step_1_source"
 
+    def test_uploaded_csv_prefills_blob_path_and_commits_observed_schema(self, composer_test_client: TestClient) -> None:
+        """A Step-1 CSV pick after upload is deterministic without asking chat to infer the file."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        upload = composer_test_client.post(
+            f"/api/sessions/{session_id}/blobs/inline",
+            json={
+                "filename": "guided_inventory.csv",
+                "content": "sku,color,quantity\nSKU-001,red,2\nSKU-002,blue,5\nSKU-003,green,4\n",
+                "mime_type": "text/csv",
+            },
+        )
+        assert upload.status_code == 201, upload.json()
+        blob_id = upload.json()["id"]
+
+        body = _respond(composer_test_client, session_id, chosen=["csv"])
+
+        assert body["next_turn"]["type"] == "schema_form"
+        prefilled = body["next_turn"]["payload"]["prefilled"]
+        assert prefilled["path"] == f"blob:{blob_id}"
+        assert prefilled["on_validation_failure"] == "discard"
+        assert prefilled["schema"]["mode"] == "flexible"
+        assert {field.split(":", 1)[0] for field in prefilled["schema"]["fields"]} == {
+            "sku",
+            "color",
+            "quantity",
+        }
+
+        advanced = _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {
+                    "path": prefilled["path"],
+                    "schema": prefilled["schema"],
+                },
+                "observed_columns": ["sku", "color", "quantity"],
+                "sample_rows": [],
+            },
+        )
+
+        assert advanced["guided_session"]["step"] == "step_2_sink"
+        source = _full_guided_session(advanced)["step_1_result"]
+        assert source["options"]["blob_ref"] == blob_id
+        assert source["observed_columns"] == ["sku", "color", "quantity"]
+
 
 # ---------------------------------------------------------------------------
 # Step 1 completing — SCHEMA_FORM → handle_step_1_source → Step 2

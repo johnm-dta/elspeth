@@ -94,6 +94,7 @@ def _fake_response_with_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
     response_model: str = "anthropic/claude-opus-4-7-20260101",
+    content: str | None = None,
 ) -> Any:
     """Build a minimal LiteLLM-shaped response carrying one tool call.
 
@@ -105,6 +106,7 @@ def _fake_response_with_tool_call(
     return _fake_response_with_tool_calls(
         tool_calls=[{"id": tool_call_id, "name": tool_name, "arguments": arguments}],
         response_model=response_model,
+        content=content,
     )
 
 
@@ -116,6 +118,7 @@ def _fake_response_with_tool_calls(
     *,
     tool_calls: list[dict[str, Any]],
     response_model: str = "anthropic/claude-opus-4-7-20260101",
+    content: str | None = None,
 ) -> Any:
     """Build a minimal LiteLLM-shaped response carrying one or more tool calls."""
 
@@ -150,7 +153,7 @@ def _fake_response_with_tool_calls(
                             )
                             for call in tool_calls
                         ],
-                        content=None,
+                        content=content,
                     )
                 )
             ]
@@ -821,6 +824,145 @@ async def test_fresh_session_set_pipeline_then_request_interpretation_review_per
     assert len(pt_events) == 1
     assert pt_events[0].affected_node_id == "rate_node"
     assert pt_events[0].tool_call_id.startswith("backend_auto_surface:")
+
+
+@pytest.mark.asyncio
+async def test_successful_interpretation_review_returns_user_handoff_without_extra_model_turns(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Once a review is pending, the compose turn should hand off to the user.
+
+    Regression for elspeth-e6ff1b8c13: the freeform model successfully staged
+    interpretation review(s), but the loop treated that as an ordinary tool
+    result, asked the model for another turn, and the model kept re-surfacing
+    reviews until the request hit the wall-clock timeout. A pending review is
+    already a user-action boundary; the loop should return a recoverable
+    ComposerResult before consuming another LLM/tool turn.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Review handoff terminates compose turn",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_response_with_tool_call(
+                tool_call_id="call_review",
+                tool_name="request_interpretation_review",
+                content="Surfacing the review card now.",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "kind": "vague_term",
+                    "user_term": "cool",
+                    "llm_draft": "modern, useful, engaging, and clear for the public.",
+                },
+            ),
+            _fake_response_with_tool_call(
+                tool_call_id="call_duplicate_review",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "kind": "vague_term",
+                    "user_term": "cool",
+                    "llm_draft": "modern, useful, engaging, and clear for the public.",
+                },
+            ),
+            _fake_text_response("Done — interpretation review is pending."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="create a workflow that rates how cool pages are",
+    )
+
+    assert [inv.tool_name for inv in result.tool_invocations] == [
+        "set_pipeline",
+        "request_interpretation_review",
+    ]
+    assert result.assistant_message.startswith("Surfacing the review card now.")
+    assert "Interpretation review cards are ready" in result.assistant_message
+    assert result.raw_assistant_content == "Surfacing the review card now."
+    assert "review" in result.assistant_message.lower()
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    vague_events = [e for e in events if e.kind is InterpretationKind.VAGUE_TERM]
+    assert len(vague_events) == 1
+    assert vague_events[0].tool_call_id == "call_review"
+    pt_events = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt_events) == 1
+    assert pt_events[0].tool_call_id.startswith("backend_auto_surface:")
+
+
+@pytest.mark.asyncio
+async def test_interpretation_review_handoff_requires_clean_terminal_review_suffix(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A review call before a later failed tool call is not enough to stop the loop."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_llm_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_calls(
+                tool_calls=[
+                    {
+                        "id": "call_review",
+                        "name": "request_interpretation_review",
+                        "arguments": {
+                            "affected_node_id": "rate_node",
+                            "kind": "vague_term",
+                            "user_term": "cool",
+                            "llm_draft": "modern, useful, engaging, and clear for the public.",
+                        },
+                    },
+                    {
+                        "id": "call_after_review_arg_error",
+                        "name": "set_pipeline",
+                        "arguments": {"nodes": []},
+                    },
+                ],
+                content="I am staging a review and then trying an invalid change.",
+            ),
+            _fake_text_response("Final after later tool failure."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_state=state,
+        message="update the pipeline and stage the interpretation review",
+    )
+
+    assert [inv.tool_name for inv in result.tool_invocations] == [
+        "request_interpretation_review",
+        "set_pipeline",
+    ]
+    assert [inv.status.value for inv in result.tool_invocations] == ["success", "arg_error"]
+    assert "Final after later tool failure." in result.assistant_message
+    assert "Interpretation review cards are ready" not in result.assistant_message
 
 
 @pytest.mark.asyncio
@@ -1514,59 +1656,47 @@ async def test_pending_interpretation_event_with_duplicate_placeholder_forces_pr
     tmp_path: Path,
     sessions_service: SessionServiceImpl,
 ) -> None:
-    """A pending event is still broken if the live prompt has two replacement sites."""
+    """A pre-existing pending event is still broken if the live prompt has two replacement sites."""
 
     composer = _build_composer(tmp_path, sessions_service)
-    session_id = uuid4()
-    with sessions_service._engine.begin() as conn:
-        conn.execute(
-            insert(sessions_table).values(
-                id=str(session_id),
-                user_id="alice",
-                auth_provider_type="local",
-                title="Duplicate placeholder repair session",
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
-        )
+    state = _state_with_llm_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+    await sessions_service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state_id,
+        affected_node_id="rate_node",
+        tool_call_id="seed_review",
+        user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
+        llm_draft="modern, useful, engaging, and clear for the public.",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
 
     duplicate_prompt = (
         "Rate how {{interpretation:cool}} this row is. Use this meaning for {{interpretation:cool}} after the user approves it."
     )
     repaired_prompt = "Rate how {{interpretation:cool}} this row is after the user approves the pending definition."
+
+    def _set_pipeline_args_with_prompt(prompt: str) -> dict[str, Any]:
+        args = _set_pipeline_with_pending_interpretation_args()
+        args["nodes"][0]["options"]["prompt_template"] = prompt
+        return args
+
     llm = _ScriptedLLM(
         [
             _fake_response_with_tool_call(
-                tool_call_id="call_set_pipeline",
-                tool_name="set_pipeline",
-                arguments=_set_pipeline_with_pending_interpretation_args(),
-            ),
-            _fake_response_with_tool_call(
-                tool_call_id="call_review",
-                tool_name="request_interpretation_review",
-                arguments={
-                    "affected_node_id": "rate_node",
-                    "kind": "vague_term",
-                    "user_term": "cool",
-                    "llm_draft": "modern, useful, engaging, and clear for the public.",
-                },
-            ),
-            _fake_response_with_tool_call(
                 tool_call_id="call_duplicate_placeholder",
-                tool_name="patch_node_options",
-                arguments={
-                    "node_id": "rate_node",
-                    "patch": {"prompt_template": duplicate_prompt},
-                },
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_args_with_prompt(duplicate_prompt),
             ),
             _fake_text_response("Done — interpretation review is pending."),
             _fake_response_with_tool_call(
                 tool_call_id="call_repair_duplicate_placeholder",
-                tool_name="patch_node_options",
-                arguments={
-                    "node_id": "rate_node",
-                    "patch": {"prompt_template": repaired_prompt},
-                },
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_args_with_prompt(repaired_prompt),
             ),
             _fake_text_response("Done — interpretation review is still pending."),
         ]
@@ -1575,22 +1705,17 @@ async def test_pending_interpretation_event_with_duplicate_placeholder_forces_pr
     result = await composer._run_one_turn_for_test(
         llm=llm,
         session_id=str(session_id),
-        current_state_id=None,
+        current_state_id=str(state_id),
+        initial_state=state,
         message="create a workflow that rates how cool pages are",
     )
 
     assert [inv.tool_name for inv in result.tool_invocations] == [
         "set_pipeline",
-        "request_interpretation_review",
-        "patch_node_options",
-        "patch_node_options",
+        "set_pipeline",
     ]
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    # One vague_term event (staged by the model); the backend additionally
-    # auto-surfaces the node's llm_prompt_template review at finalization
-    # (elspeth-e51216d305).
     assert len([e for e in events if e.kind is InterpretationKind.VAGUE_TERM]) == 1
-    assert len([e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]) == 1
     state_record = await sessions_service.get_current_state(session_id)
     assert state_record is not None
     [rate_node] = [node for node in state_record.nodes if node["id"] == "rate_node"]

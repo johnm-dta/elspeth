@@ -22,7 +22,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
@@ -417,6 +417,12 @@ def _resolvable_vague_term_count(
 # under its own code with ``completion_ready=False`` keeps the UI from enabling
 # "run"/"continue" on a composition that cannot run.
 _INTERPRETATION_REVIEW_ORPHANED_CODE: Final[str] = "interpretation_review_orphaned"
+_INTERPRETATION_REVIEW_HANDOFF_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "interpretation_review_pending",
+        "interpretation_review_pending_idempotent",
+    }
+)
 # Mirrors ``validation._CHECK_INTERPRETATION_REVIEW`` so the synthetic
 # fail-closed result names the same check as the runtime preflight; kept as a
 # local literal rather than importing a private validation symbol.
@@ -507,6 +513,57 @@ def _orphaned_interpretation_review_validation(
             ],
         ),
     )
+
+
+def _tool_outcome_is_interpretation_review_handoff(outcome: _ToolOutcome) -> bool:
+    response = outcome.response
+    if not isinstance(response, ToolResult):
+        return False
+    data = response.data
+    if not isinstance(data, Mapping):
+        return False
+    return data.get("_kind") in _INTERPRETATION_REVIEW_HANDOFF_KINDS
+
+
+def _tool_batch_staged_terminal_interpretation_review_handoff(tool_outcomes: tuple[_ToolOutcome, ...]) -> bool:
+    """Return True when clean pending-review calls are the batch's terminal suffix."""
+
+    handoff_seen = False
+    for outcome in tool_outcomes:
+        if outcome.error_class is not None:
+            return False
+        response = outcome.response
+        if isinstance(response, ToolResult) and not response.success:
+            return False
+        if _tool_outcome_is_interpretation_review_handoff(outcome):
+            handoff_seen = True
+            continue
+        if handoff_seen:
+            return False
+    return handoff_seen
+
+
+def _append_interpretation_review_handoff_message(result: ComposerResult, raw_content: str | None) -> ComposerResult:
+    """Append the review-handoff suffix while preserving LLM-history provenance."""
+
+    suffix = "Interpretation review cards are ready for this pipeline. Review the pending assumptions to continue."
+    if result.raw_assistant_content is not None:
+        augmented = f"{result.message}\n\n{suffix}" if result.message else suffix
+        _enforce_augmentation_prefix_invariant(
+            branch="interpretation_review_handoff_augmentation",
+            content=result.raw_assistant_content,
+            augmented=augmented,
+        )
+        return replace(result, message=augmented)
+
+    raw = raw_content if raw_content is not None else ""
+    augmented = f"{raw}\n\n{suffix}" if raw else suffix
+    _enforce_augmentation_prefix_invariant(
+        branch="interpretation_review_handoff_augmentation",
+        content=raw,
+        augmented=augmented,
+    )
+    return replace(result, message=augmented, raw_assistant_content=raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -833,6 +890,7 @@ class ComposerServiceImpl:
 
         return ComposeLoopTestResult(
             assistant_message=result.message,
+            raw_assistant_content=result.raw_assistant_content,
             tool_outcomes=tuple(self._phase3_last_tool_outcomes),
             persisted_assistant_tool_calls=tuple(self._phase3_last_redacted_assistant_tool_calls),
             persisted_tool_row_content=tuple(row.content for row in self._phase3_last_redacted_tool_rows),
@@ -2382,6 +2440,69 @@ class ComposerServiceImpl:
         # charge — continue to next turn without incrementing.
         if all_cache_hits:
             return _ClassifyOutcome(action="continue")
+
+        if _tool_batch_staged_terminal_interpretation_review_handoff(dispatch.tool_outcomes):
+            # A pending interpretation review is a user-action boundary, not
+            # another model-planning step. Complete the handoff after P4 has
+            # persisted the tool-call turn so remaining structured review sites
+            # can be surfaced against the frozen state id. This prevents the
+            # model from re-surfacing the same review until the wall-clock timeout.
+            # The branch is intentionally narrower than "any review tool
+            # succeeded": a review followed by another tool call or a mixed
+            # success/error batch is not a terminal user-action boundary.
+            await self.surface_pending_interpretation_reviews(
+                state,
+                session_id=session_id,
+                current_state_id=persist.current_state_id,
+            )
+            runtime_result: ValidationResult | None = last_runtime_preflight
+            if state.version > initial_version:
+                runtime_result = await self._cached_runtime_preflight(
+                    state,
+                    user_id=user_id,
+                    session_id=session_id,
+                    cache=runtime_preflight_cache,
+                    initial_version=initial_version,
+                    session_scope=session_scope,
+                    llm_calls=recorder.llm_calls,
+                )
+
+            if runtime_result is None or runtime_result.is_valid or _is_pending_interpretation_handoff(runtime_result):
+                result = await self._surface_and_finalize_no_tools(
+                    assistant_message=SimpleNamespace(content=dispatch.raw_assistant_content or ""),
+                    state=state,
+                    session_id=session_id,
+                    current_state_id=persist.current_state_id,
+                    progress=progress,
+                    recorder=recorder,
+                    initial_version=initial_version,
+                    user_id=user_id,
+                    last_runtime_preflight=runtime_result,
+                    runtime_preflight_cache=runtime_preflight_cache,
+                    session_scope=session_scope,
+                    message=message,
+                    mutation_success_seen=mutation_success_seen,
+                )
+                handoff_result = (
+                    _append_interpretation_review_handoff_message(result, dispatch.raw_assistant_content)
+                    if (
+                        result.runtime_preflight is None
+                        or result.runtime_preflight.is_valid
+                        or _is_pending_interpretation_handoff(result.runtime_preflight)
+                    )
+                    else result
+                )
+                threaded = replace(
+                    handoff_result,
+                    persisted_assistant_message_id=persisted_assistant_message_id,
+                    persisted_tool_call_turn=persisted_tool_call_turn,
+                )
+                return _ClassifyOutcome(
+                    action="return",
+                    result=threaded,
+                    composition_turns_delta=1 if turn_has_mutation else 0,
+                    discovery_turns_delta=1 if turn_has_discovery else 0,
+                )
 
         # Classify turn and charge the appropriate budget.
         # The current turn has already been executed (tool results
@@ -4685,6 +4806,7 @@ class ComposeLoopTestResult:
     """Structured result returned by the one-turn compose-loop test driver."""
 
     assistant_message: str
+    raw_assistant_content: str | None = None
     tool_outcomes: tuple[Any, ...] = ()
     persisted_assistant_row: Any | None = None
     persisted_assistant_tool_calls: tuple[Any, ...] = ()

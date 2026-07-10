@@ -74,11 +74,15 @@ def _ready_readiness() -> ValidationReadiness:
 
 
 def _valid_state(tmp_path: Path) -> CompositionState:
+    blob_ref = "00000000-0000-4000-8000-000000000001"
+    source_path = tmp_path / "blobs" / "seed" / f"{blob_ref}_input.csv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("id\n1\n")
     return CompositionState(
         source=SourceSpec(
             plugin="csv",
             on_success="out",
-            options={"path": str(tmp_path / "input.csv")},
+            options={"path": str(source_path), "blob_ref": blob_ref},
             on_validation_failure="discard",
         ),
         nodes=(),

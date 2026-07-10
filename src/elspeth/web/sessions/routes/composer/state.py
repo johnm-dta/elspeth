@@ -129,6 +129,31 @@ def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: s
             )
 
 
+@trust_boundary(
+    tier=3,
+    source="pasted/seeded CompositionState carrying web-authored source options",
+    source_param="state",
+    suppresses=("R1",),
+    invariant=(
+        "raises HTTPException 400 for any string source path outside the source allowlist; missing or non-string path values are skipped"
+    ),
+    test_ref="tests/unit/web/sessions/test_routes.py::TestYamlEndpoint::test_post_state_yaml_rejects_source_path_outside_allowed_directories",
+)
+def _reject_disallowed_source_paths(state: CompositionState, *, data_dir: str) -> None:
+    allowed_dirs = allowed_source_directories(data_dir)
+    for source_name, source in state.sources.items():
+        for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+            value = source.options.get(key)
+            if not isinstance(value, str):
+                continue
+            resolved = resolve_data_path(value, data_dir)
+            if not any(resolved.is_relative_to(directory) for directory in allowed_dirs):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Path traversal blocked: source '{source_name}' {key}='{value}' resolves outside allowed directories",
+                )
+
+
 def _reject_fabricated_secret_literals(
     state: CompositionState,
     *,
@@ -459,6 +484,10 @@ async def import_state_yaml(
             imported_state,
             data_dir=str(request.app.state.settings.data_dir),
         )
+        _reject_disallowed_source_paths(
+            imported_state,
+            data_dir=str(request.app.state.settings.data_dir),
+        )
         _reject_fabricated_secret_literals(
             imported_state,
             secret_service=request.app.state.scoped_secret_resolver,
@@ -514,6 +543,10 @@ async def seed_state_for_e2e(
             raise HTTPException(status_code=400, detail="Invalid composition state JSON") from exc
 
         _reject_unbound_blob_storage_sources(
+            seeded_state,
+            data_dir=str(request.app.state.settings.data_dir),
+        )
+        _reject_disallowed_source_paths(
             seeded_state,
             data_dir=str(request.app.state.settings.data_dir),
         )

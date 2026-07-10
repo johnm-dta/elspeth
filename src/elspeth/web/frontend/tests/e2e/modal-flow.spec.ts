@@ -13,7 +13,9 @@
 // Pattern: REST session creation via helpers/api.ts (same as smoke.spec.ts),
 // then UI interaction. No LLM calls.
 
-import { expect, test } from "@playwright/test";
+import { join } from "node:path";
+
+import { expect, test, type APIRequestContext } from "@playwright/test";
 
 import {
   authedContext,
@@ -21,10 +23,22 @@ import {
   deleteSession,
   seedCompositionState,
   tokenFromStorageState,
+  uploadBlob,
 } from "./helpers/api";
 import { ComposerPage } from "./page-objects/composer-page";
 
-function exportableCompositionState() {
+const SEEDED_SOURCE_FILENAME = "modal-flow-input.csv";
+const SEEDED_SOURCE_CONTENT = "id\n1\n";
+
+function storagePathForUploadedBlob(sessionId: string, blobId: string): string {
+  const dataDir = process.env.PLAYWRIGHT_E2E_DATA_DIR;
+  if (!dataDir) {
+    throw new Error("PLAYWRIGHT_E2E_DATA_DIR is required for seeded blob-backed state");
+  }
+  return join(dataDir, "blobs", sessionId, `${blobId}_${SEEDED_SOURCE_FILENAME}`);
+}
+
+function exportableCompositionState(sessionId: string, blobId: string) {
   return {
     version: 1,
     metadata: { name: "E2E exportable pipeline", description: "" },
@@ -32,7 +46,11 @@ function exportableCompositionState() {
       source: {
         plugin: "csv",
         on_success: "results",
-        options: { path: "input.csv" },
+        options: {
+          path: storagePathForUploadedBlob(sessionId, blobId),
+          blob_ref: blobId,
+          schema: { mode: "observed" },
+        },
         on_validation_failure: "discard",
       },
     },
@@ -42,11 +60,24 @@ function exportableCompositionState() {
       {
         name: "results",
         plugin: "csv",
-        options: { path: "output.csv" },
+        options: { path: "outputs/output.csv", schema: { mode: "observed" } },
         on_write_failure: "discard",
       },
     ],
   };
+}
+
+async function seedExportableCompositionState(
+  ctx: APIRequestContext,
+  sessionId: string,
+): Promise<void> {
+  const blob = await uploadBlob(
+    ctx,
+    sessionId,
+    SEEDED_SOURCE_FILENAME,
+    SEEDED_SOURCE_CONTENT,
+  );
+  await seedCompositionState(ctx, sessionId, exportableCompositionState(sessionId, blob.id));
 }
 
 // ── Shared afterEach cleanup ──────────────────────────────────────────────────
@@ -166,7 +197,7 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
       try {
         const session = await createSession(ctx, "pw-3b-yaml-open-close");
         sessionId = session.id;
-        await seedCompositionState(ctx, sessionId, exportableCompositionState());
+        await seedExportableCompositionState(ctx, sessionId);
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();
@@ -204,7 +235,7 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
       try {
         const session = await createSession(ctx, "pw-3b-yaml-deeplink");
         sessionId = session.id;
-        await seedCompositionState(ctx, sessionId, exportableCompositionState());
+        await seedExportableCompositionState(ctx, sessionId);
 
         await page.goto(`/#/${sessionId}/yaml`);
         await new ComposerPage(page).waitForChatReady();
@@ -231,7 +262,7 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
       try {
         const session = await createSession(ctx, "pw-3b-yaml-shortcut");
         sessionId = session.id;
-        await seedCompositionState(ctx, sessionId, exportableCompositionState());
+        await seedExportableCompositionState(ctx, sessionId);
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();

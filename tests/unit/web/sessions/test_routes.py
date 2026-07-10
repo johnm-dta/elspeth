@@ -4630,13 +4630,23 @@ class TestYamlEndpoint:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Replay", "local")
+        blob_id = uuid.uuid4()
+        blob_path = tmp_path / "blobs" / str(session.id) / f"{blob_id}_input.csv"
+        blob_path.parent.mkdir(parents=True)
+        blob_path.write_text("id\n1\n")
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.get_blob.return_value = SimpleNamespace(
+            id=blob_id,
+            session_id=session.id,
+            storage_path=str(blob_path),
+        )
         yaml_text = """
 sources:
   source:
     plugin: csv
     on_success: main
     options:
-      path: /data/blobs/input.csv
+      path: /old/blob.csv
       schema:
         mode: observed
       on_validation_failure: discard
@@ -4654,12 +4664,16 @@ sinks:
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
-            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+            resp = client.post(
+                f"/api/sessions/{session.id}/state/yaml",
+                json={"yaml": yaml_text, "source_blob_ids": {"source": str(blob_id)}},
+            )
 
         assert resp.status_code == 200, resp.text
         record = await service.get_current_state(session.id)
         assert record is not None
         assert record.sources["source"]["plugin"] == "csv"
+        assert record.sources["source"]["options"]["path"] == str(blob_path)
         assert record.outputs[0]["name"] == "main"
 
     @pytest.mark.asyncio
@@ -4678,7 +4692,6 @@ sources:
     plugin: csv
     on_success: main
     options:
-      path: /data/blobs/input.csv
       api_key: {secret_ref: OPENAI_API_KEY}
       on_validation_failure: discard
 sinks:
@@ -4716,7 +4729,6 @@ sources:
     plugin: json
     on_success: main
     options:
-      path: /data/input.json
       data_key: results
       on_validation_failure: discard
 sinks:
@@ -4766,6 +4778,36 @@ sinks:
 
         assert resp.status_code == 400
         assert "source_blob_ids" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_source_path_outside_allowed_directories(self, tmp_path) -> None:
+        """Imports must fail before persistence when a source path cannot run."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  primary:
+    plugin: json
+    on_success: out
+    options:
+      path: examples/json_explode/input.json
+      on_validation_failure: discard
+sinks:
+  out:
+    plugin: json
+    on_write_failure: discard
+"""
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 400
+        assert (
+            resp.json()["detail"]
+            == "Path traversal blocked: source 'primary' path='examples/json_explode/input.json' resolves outside allowed directories"
+        )
+        assert await service.get_current_state(session.id) is None
 
     @pytest.mark.asyncio
     async def test_post_state_yaml_remaps_source_blob_ids_to_owned_blob(self, tmp_path) -> None:
@@ -5035,7 +5077,6 @@ sources:
     plugin: csv
     on_success: main
     options:
-      path: /data/blobs/input.csv
       api_key: {secret_value}
       on_validation_failure: discard
 sinks:
@@ -5074,7 +5115,6 @@ sources:
     plugin: csv
     on_success: main
     options:
-      path: /data/blobs/input.csv
       on_validation_failure: discard
 sinks:
   main:

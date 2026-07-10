@@ -6,6 +6,7 @@ import {
   ImportYamlModalHost,
   buildImportConfirmMessage,
   buildImportSuccessMessage,
+  findImportYamlSourceBindingCandidates,
   IMPORT_YAML_NOT_RUNNABLE_INTRO,
   IMPORT_YAML_422_MESSAGE,
   IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE,
@@ -14,10 +15,13 @@ import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import * as api from "@/api/client";
+import type { BlobMetadata } from "@/types/api";
 import type { CompositionState } from "@/types/index";
 
 vi.mock("@/api/client", () => ({
   importCompositionYaml: vi.fn(),
+  listBlobs: vi.fn(),
+  uploadBlob: vi.fn(),
 }));
 
 function nonEmptyState(): CompositionState {
@@ -53,12 +57,83 @@ const PIPELINE_YAML =
   "    plugin: json\n" +
   "    on_write_failure: fail\n";
 
+const ADVANCED_EXPERIMENT_YAML =
+  "sources:\n" +
+  "  primary:\n" +
+  "    plugin: csv\n" +
+  "    on_success: experiment_in\n" +
+  "    options:\n" +
+  "      path: examples/statistical_batch_plugins/experiment_scores.csv\n" +
+  "      schema:\n" +
+  "        mode: observed\n" +
+  "    on_validation_failure: discard\n" +
+  "aggregations:\n" +
+  "  - name: prompt_experiment\n" +
+  "    plugin: batch_experiment_compare\n" +
+  "    input: experiment_in\n" +
+  "    on_success: output\n" +
+  "    on_error: discard\n" +
+  "    trigger:\n" +
+  "      count: 8\n" +
+  "    output_mode: transform\n" +
+  "    options:\n" +
+  "      variant_field: prompt_variant\n" +
+  "      score_field: score\n" +
+  "      baseline_variant: control\n" +
+  "sinks:\n" +
+  "  output:\n" +
+  "    plugin: json\n" +
+  "    on_write_failure: discard\n" +
+  "    options:\n" +
+  "      path: outputs/experiment_compare.jsonl\n" +
+  "      format: jsonl\n";
+
+function makeBlob(overrides: Partial<BlobMetadata> = {}): BlobMetadata {
+  return {
+    id: "22222222-2222-2222-2222-222222222222",
+    session_id: "sess-1",
+    filename: "experiment_scores.csv",
+    mime_type: "text/csv",
+    size_bytes: 128,
+    content_hash: "hash",
+    created_at: "2026-07-10T00:00:00Z",
+    created_by: "user",
+    source_description: null,
+    status: "ready",
+    creation_modality: "verbatim",
+    created_from_message_id: null,
+    creating_model_identifier: null,
+    creating_model_version: null,
+    creating_provider: null,
+    creating_composer_skill_hash: null,
+    creating_arguments_hash: null,
+    ...overrides,
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("ImportYamlModal", () => {
   const onClose = vi.fn();
 
   beforeEach(() => {
     onClose.mockReset();
     vi.mocked(api.importCompositionYaml).mockReset();
+    vi.mocked(api.listBlobs).mockReset();
+    vi.mocked(api.listBlobs).mockResolvedValue([]);
+    vi.mocked(api.uploadBlob).mockReset();
     useSessionStore.setState({
       activeSessionId: "sess-1",
       compositionState: null,
@@ -428,6 +503,217 @@ describe("ImportYamlModal", () => {
         PIPELINE_YAML,
       ),
     );
+  });
+
+  it("finds file-backed sources that can be rebound to uploaded blobs", () => {
+    expect(
+      findImportYamlSourceBindingCandidates(ADVANCED_EXPERIMENT_YAML),
+    ).toEqual([
+      {
+        sourceName: "primary",
+        optionKey: "path",
+        path: "examples/statistical_batch_plugins/experiment_scores.csv",
+      },
+    ]);
+  });
+
+  it("imports a pasted advanced example with an explicit uploaded source binding", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    const blob = makeBlob();
+    vi.mocked(api.listBlobs).mockResolvedValue([blob]);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-advanced",
+      version: 9,
+      is_valid: true,
+      validation_errors: null,
+    });
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(ADVANCED_EXPERIMENT_YAML);
+
+    const bindingSelect = await screen.findByRole("combobox", {
+      name: /uploaded file for source primary/i,
+    });
+    fireEvent.change(bindingSelect, { target: { value: blob.id } });
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(9))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith(
+      "sess-1",
+      ADVANCED_EXPERIMENT_YAML,
+      { primary: blob.id },
+    );
+  });
+
+  it("clears a selected source binding when the YAML source path changes", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    const blob = makeBlob();
+    vi.mocked(api.listBlobs).mockResolvedValue([blob]);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-path-edited",
+      version: 11,
+      is_valid: true,
+      validation_errors: null,
+    });
+    const editedYaml = ADVANCED_EXPERIMENT_YAML.replace(
+      "examples/statistical_batch_plugins/experiment_scores.csv",
+      "examples/statistical_batch_plugins/other_scores.csv",
+    );
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(ADVANCED_EXPERIMENT_YAML);
+    const bindingSelect = await screen.findByRole("combobox", {
+      name: /uploaded file for source primary/i,
+    });
+    fireEvent.change(bindingSelect, { target: { value: blob.id } });
+    expect(bindingSelect).toHaveValue(blob.id);
+
+    typeYaml(editedYaml);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", {
+          name: /uploaded file for source primary/i,
+        }),
+      ).toHaveValue(""),
+    );
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(11))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", editedYaml);
+  });
+
+  it("uploads a source file from the import modal and uses it as source_blob_ids", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    const blob = makeBlob({ id: "33333333-3333-3333-3333-333333333333" });
+    vi.mocked(api.uploadBlob).mockResolvedValue(blob);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-uploaded",
+      version: 10,
+      is_valid: true,
+      validation_errors: null,
+    });
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(ADVANCED_EXPERIMENT_YAML);
+
+    const sourceFileInput = await screen.findByLabelText(
+      /upload file for source primary/i,
+    );
+    await userEvent.upload(
+      sourceFileInput,
+      new File(["id,prompt_variant,score\n1,control,0.5\n"], "experiment_scores.csv", {
+        type: "text/csv",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(api.uploadBlob).toHaveBeenCalledWith(
+        "sess-1",
+        expect.objectContaining({ name: "experiment_scores.csv" }),
+      ),
+    );
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(10))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith(
+      "sess-1",
+      ADVANCED_EXPERIMENT_YAML,
+      { primary: blob.id },
+    );
+  });
+
+  it("does not bind an upload that finishes after the YAML source path changes", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    const upload = deferred<BlobMetadata>();
+    const blob = makeBlob({ id: "44444444-4444-4444-4444-444444444444" });
+    vi.mocked(api.uploadBlob).mockReturnValue(upload.promise);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-stale-upload",
+      version: 12,
+      is_valid: true,
+      validation_errors: null,
+    });
+    const editedYaml = ADVANCED_EXPERIMENT_YAML.replace(
+      "examples/statistical_batch_plugins/experiment_scores.csv",
+      "examples/statistical_batch_plugins/late_scores.csv",
+    );
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(ADVANCED_EXPERIMENT_YAML);
+    const sourceFileInput = await screen.findByLabelText(
+      /upload file for source primary/i,
+    );
+    await userEvent.upload(
+      sourceFileInput,
+      new File(["id,prompt_variant,score\n1,control,0.5\n"], "experiment_scores.csv", {
+        type: "text/csv",
+      }),
+    );
+    await waitFor(() => expect(api.uploadBlob).toHaveBeenCalledOnce());
+
+    typeYaml(editedYaml);
+    await act(async () => {
+      upload.resolve(blob);
+      await upload.promise;
+    });
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(12))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", editedYaml);
+  });
+
+  it("does not keep Import disabled for an upload tied to a removed source path", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    const upload = deferred<BlobMetadata>();
+    vi.mocked(api.uploadBlob).mockReturnValue(upload.promise);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-stale-pending",
+      version: 13,
+      is_valid: true,
+      validation_errors: null,
+    });
+    const editedYaml = ADVANCED_EXPERIMENT_YAML.replace(
+      "examples/statistical_batch_plugins/experiment_scores.csv",
+      "examples/statistical_batch_plugins/current_scores.csv",
+    );
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(ADVANCED_EXPERIMENT_YAML);
+    const sourceFileInput = await screen.findByLabelText(
+      /upload file for source primary/i,
+    );
+    await userEvent.upload(
+      sourceFileInput,
+      new File(["id,prompt_variant,score\n1,control,0.5\n"], "experiment_scores.csv", {
+        type: "text/csv",
+      }),
+    );
+    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
+
+    typeYaml(editedYaml);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled(),
+    );
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(13))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", editedYaml);
+    await act(async () => {
+      upload.resolve(makeBlob({ id: "55555555-5555-5555-5555-555555555555" }));
+      await upload.promise;
+    });
   });
 
   // ── Happy path (no confirm needed — current composition is empty) ─────────

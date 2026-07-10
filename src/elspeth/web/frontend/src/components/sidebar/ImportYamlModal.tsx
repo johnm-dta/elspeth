@@ -6,6 +6,7 @@ import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import type { BlobMetadata } from "@/types/api";
 import type { ApiError } from "@/types/index";
 import { hasCompositionContent } from "@/utils/compositionState";
 import { plural } from "@/utils/plural";
@@ -113,6 +114,12 @@ interface ImportYamlDraftAnalysis {
   validationMessage: string;
 }
 
+export interface ImportYamlSourceBindingCandidate {
+  sourceName: string;
+  optionKey: "path" | "file";
+  path: string;
+}
+
 type ImportYamlSection =
   | "aggregations"
   | "coalesce"
@@ -131,6 +138,8 @@ const IMPORT_YAML_SECTION_ALIASES: Record<string, ImportYamlSection> = {
   sources: "sources",
   transforms: "transforms",
 };
+
+const IMPORT_YAML_SOURCE_PATH_KEYS = ["path", "file"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -199,6 +208,39 @@ function countParsedSectionEntries(
     return countRecordEntries(value, section);
   }
   return countSequenceEntries(value, section);
+}
+
+export function findImportYamlSourceBindingCandidates(
+  yamlText: string,
+): ImportYamlSourceBindingCandidate[] {
+  if (yamlText.trim().length === 0) return [];
+
+  const parsed = parseDocument(yamlText, { prettyErrors: false });
+  if (parsed.errors.length > 0) return [];
+
+  const parsedRoot = parsed.toJS({}) as unknown;
+  if (!isRecord(parsedRoot)) return [];
+
+  let rawSources = parsedRoot.sources;
+  if (rawSources === undefined && parsedRoot.source !== undefined) {
+    rawSources = { source: parsedRoot.source };
+  }
+  if (!isRecord(rawSources)) return [];
+
+  const candidates: ImportYamlSourceBindingCandidate[] = [];
+  for (const [sourceName, rawSource] of Object.entries(rawSources)) {
+    if (!sourceName || !isRecord(rawSource)) continue;
+    const options = rawSource.options;
+    if (!isRecord(options)) continue;
+    for (const optionKey of IMPORT_YAML_SOURCE_PATH_KEYS) {
+      const path = options[optionKey];
+      if (typeof path === "string" && path.trim().length > 0) {
+        candidates.push({ sourceName, optionKey, path });
+        break;
+      }
+    }
+  }
+  return candidates;
 }
 
 export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysis {
@@ -336,6 +378,118 @@ function ImportYamlDraftPreview({
   );
 }
 
+function sourceBlobBindingLabel(candidate: ImportYamlSourceBindingCandidate): string {
+  return `${candidate.sourceName} ${candidate.optionKey}: ${candidate.path}`;
+}
+
+function sourceBlobBindingKey(candidate: ImportYamlSourceBindingCandidate): string {
+  return `${candidate.sourceName}\u0000${candidate.optionKey}\u0000${candidate.path}`;
+}
+
+function ImportYamlSourceBindings({
+  candidates,
+  readyBlobs,
+  selectedBlobIds,
+  isLoading,
+  loadError,
+  uploadPending,
+  uploadErrors,
+  onSelectBlob,
+  onUploadFile,
+}: {
+  candidates: ImportYamlSourceBindingCandidate[];
+  readyBlobs: BlobMetadata[];
+  selectedBlobIds: Record<string, string>;
+  isLoading: boolean;
+  loadError: string | null;
+  uploadPending: Record<string, boolean>;
+  uploadErrors: Record<string, string>;
+  onSelectBlob: (candidate: ImportYamlSourceBindingCandidate, blobId: string) => void;
+  onUploadFile: (
+    candidate: ImportYamlSourceBindingCandidate,
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => void;
+}): JSX.Element | null {
+  if (candidates.length === 0) return null;
+
+  return (
+    <section
+      className="import-yaml-source-bindings"
+      aria-label="Source file bindings"
+    >
+      <div className="import-yaml-source-bindings-heading">
+        Source file bindings
+      </div>
+      {isLoading && (
+        <p className="field-hint" role="status">
+          Loading uploaded files...
+        </p>
+      )}
+      {loadError && (
+        <div role="alert" className="validation-banner validation-banner-fail">
+          {loadError}
+        </div>
+      )}
+      <div className="import-yaml-source-bindings-list">
+        {candidates.map((candidate) => {
+          const candidateKey = sourceBlobBindingKey(candidate);
+          const selectedBlobId = selectedBlobIds[candidateKey] ?? "";
+          const pending = Boolean(uploadPending[candidateKey]);
+          const uploadError = uploadErrors[candidateKey];
+          return (
+            <div
+              key={candidateKey}
+              className="import-yaml-source-binding-row"
+            >
+              <div className="import-yaml-source-binding-detail">
+                <div className="import-yaml-source-binding-name">
+                  {candidate.sourceName}
+                </div>
+                <code title={sourceBlobBindingLabel(candidate)}>
+                  {candidate.optionKey}: {candidate.path}
+                </code>
+              </div>
+              <select
+                className="input"
+                aria-label={`Uploaded file for source ${candidate.sourceName}`}
+                value={selectedBlobId}
+                onChange={(event) =>
+                  onSelectBlob(candidate, event.target.value)
+                }
+                disabled={isLoading || pending}
+              >
+                <option value="">No uploaded file</option>
+                {readyBlobs.map((blob) => (
+                  <option key={blob.id} value={blob.id}>
+                    {blob.filename}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="file"
+                className="input"
+                aria-label={`Upload file for source ${candidate.sourceName}`}
+                onChange={(event) => onUploadFile(candidate, event)}
+                disabled={pending}
+              />
+              {pending && (
+                <p className="field-hint" role="status">
+                  Uploading...
+                </p>
+              )}
+              {uploadError && (
+                <p className="validation-banner-fail-title" role="alert">
+                  {uploadError}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 /**
  * Import-YAML modal: paste or load-from-file, confirm when replacing a
  * non-trivial pipeline, submit, and render the outcome. Mounted only while
@@ -356,9 +510,16 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   const [phase, setPhase] = useState<ImportPhase>("draft");
   const [error, setError] = useState<ImportErrorInfo | null>(null);
   const [successInfo, setSuccessInfo] = useState<ImportSuccessInfo | null>(null);
+  const [availableBlobs, setAvailableBlobs] = useState<BlobMetadata[]>([]);
+  const [blobsLoading, setBlobsLoading] = useState(false);
+  const [blobsLoadError, setBlobsLoadError] = useState<string | null>(null);
+  const [sourceBlobBindings, setSourceBlobBindings] = useState<Record<string, string>>({});
+  const [sourceUploadPending, setSourceUploadPending] = useState<Record<string, boolean>>({});
+  const [sourceUploadErrors, setSourceUploadErrors] = useState<Record<string, string>>({});
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const successCloseRef = useRef<HTMLButtonElement>(null);
+  const currentSourceBindingKeysRef = useRef<Set<string>>(new Set());
   const titleId = useId();
   const textareaId = useId();
   const fileInputId = useId();
@@ -372,7 +533,24 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
     () => analyseImportYamlDraft(yamlText),
     [yamlText],
   );
+  const sourceBindingCandidates = useMemo(
+    () => findImportYamlSourceBindingCandidates(yamlText),
+    [yamlText],
+  );
+  const sourceBindingCandidateKeys = useMemo(
+    () => new Set(sourceBindingCandidates.map(sourceBlobBindingKey)),
+    [sourceBindingCandidates],
+  );
+  currentSourceBindingKeysRef.current = sourceBindingCandidateKeys;
+  const readyBlobs = useMemo(
+    () => availableBlobs.filter((blob) => blob.status === "ready"),
+    [availableBlobs],
+  );
   const canSubmitYaml = draftAnalysis.canImport;
+  const hasSourceBindingCandidates = sourceBindingCandidates.length > 0;
+  const hasPendingSourceUpload = sourceBindingCandidates.some((candidate) =>
+    Boolean(sourceUploadPending[sourceBlobBindingKey(candidate)]),
+  );
   // Escape/backdrop close while drafting or after a result; NOT while the
   // nested ConfirmDialog owns the keyboard (its own Escape handler applies),
   // and not mid-submit (avoid abandoning the request with no feedback).
@@ -400,6 +578,81 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
     }
   }, [phase]);
 
+  useEffect(() => {
+    if (!activeSessionId || !hasSourceBindingCandidates) {
+      setAvailableBlobs([]);
+      setBlobsLoadError(null);
+      setBlobsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setBlobsLoading(true);
+    setBlobsLoadError(null);
+    void api
+      .listBlobs(activeSessionId)
+      .then((blobs) => {
+        if (!cancelled) {
+          setAvailableBlobs(blobs);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const message =
+            err instanceof Error ? err.message : "Could not load uploaded files.";
+          setBlobsLoadError(message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBlobsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, hasSourceBindingCandidates]);
+
+  useEffect(() => {
+    setSourceBlobBindings((current) => {
+      const next: Record<string, string> = {};
+      let changed = false;
+      for (const [candidateKey, blobId] of Object.entries(current)) {
+        if (sourceBindingCandidateKeys.has(candidateKey)) {
+          next[candidateKey] = blobId;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    setSourceUploadPending((current) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const [candidateKey, pending] of Object.entries(current)) {
+        if (sourceBindingCandidateKeys.has(candidateKey)) {
+          next[candidateKey] = pending;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    setSourceUploadErrors((current) => {
+      const next: Record<string, string> = {};
+      let changed = false;
+      for (const [candidateKey, message] of Object.entries(current)) {
+        if (sourceBindingCandidateKeys.has(candidateKey)) {
+          next[candidateKey] = message;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [sourceBindingCandidateKeys]);
+
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>): void {
     const file = event.target.files?.[0];
     // Reset the input so re-selecting the same file still fires onChange.
@@ -421,6 +674,61 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
     reader.readAsText(file);
   }
 
+  function handleSourceBlobSelect(
+    candidate: ImportYamlSourceBindingCandidate,
+    blobId: string,
+  ): void {
+    const candidateKey = sourceBlobBindingKey(candidate);
+    setSourceBlobBindings((current) => {
+      const next = { ...current };
+      if (blobId) {
+        next[candidateKey] = blobId;
+      } else {
+        delete next[candidateKey];
+      }
+      return next;
+    });
+  }
+
+  async function handleSourceFileUpload(
+    candidate: ImportYamlSourceBindingCandidate,
+    event: React.ChangeEvent<HTMLInputElement>,
+  ): Promise<void> {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !activeSessionId) return;
+    const candidateKey = sourceBlobBindingKey(candidate);
+
+    setSourceUploadPending((current) => ({ ...current, [candidateKey]: true }));
+    setSourceUploadErrors((current) => {
+      const next = { ...current };
+      delete next[candidateKey];
+      return next;
+    });
+    try {
+      const blob = await api.uploadBlob(activeSessionId, file);
+      setAvailableBlobs((current) => [
+        blob,
+        ...current.filter((candidate) => candidate.id !== blob.id),
+      ]);
+      if (currentSourceBindingKeysRef.current.has(candidateKey)) {
+        setSourceBlobBindings((current) => ({ ...current, [candidateKey]: blob.id }));
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Could not upload source file.";
+      if (currentSourceBindingKeysRef.current.has(candidateKey)) {
+        setSourceUploadErrors((current) => ({ ...current, [candidateKey]: message }));
+      }
+    } finally {
+      setSourceUploadPending((current) => {
+        const next = { ...current };
+        delete next[candidateKey];
+        return next;
+      });
+    }
+  }
+
   async function doImport(): Promise<void> {
     if (!activeSessionId) return;
     setError(null);
@@ -440,8 +748,20 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
         binding.yaml.trim() === yamlText.trim()
           ? binding.sourceBlobIds
           : undefined;
-      const result = sourceBlobIds
-        ? await api.importCompositionYaml(activeSessionId, yamlText, sourceBlobIds)
+      const explicitSourceBlobIds =
+        sourceBindingCandidates.reduce<Record<string, string>>((acc, candidate) => {
+          const blobId = sourceBlobBindings[sourceBlobBindingKey(candidate)];
+          if (blobId) {
+            acc[candidate.sourceName] = blobId;
+          }
+          return acc;
+        }, {});
+      const importSourceBlobIds = {
+        ...(sourceBlobIds ?? {}),
+        ...explicitSourceBlobIds,
+      };
+      const result = Object.keys(importSourceBlobIds).length > 0
+        ? await api.importCompositionYaml(activeSessionId, yamlText, importSourceBlobIds)
         : await api.importCompositionYaml(activeSessionId, yamlText);
       setSuccessInfo({
         version: result.version,
@@ -558,6 +878,19 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                 </p>
               </div>
               <ImportYamlDraftPreview analysis={draftAnalysis} id={draftPreviewId} />
+              <ImportYamlSourceBindings
+                candidates={sourceBindingCandidates}
+                readyBlobs={readyBlobs}
+                selectedBlobIds={sourceBlobBindings}
+                isLoading={blobsLoading}
+                loadError={blobsLoadError}
+                uploadPending={sourceUploadPending}
+                uploadErrors={sourceUploadErrors}
+                onSelectBlob={handleSourceBlobSelect}
+                onUploadFile={(candidate, event) => {
+                  void handleSourceFileUpload(candidate, event);
+                }}
+              />
               <div className="import-yaml-actions">
                 <button
                   type="button"
@@ -570,7 +903,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={!canSubmitYaml || isSubmitting}
+                  disabled={!canSubmitYaml || isSubmitting || hasPendingSourceUpload}
                   onClick={handleSubmitClick}
                 >
                   {isSubmitting ? "Importing…" : "Import"}

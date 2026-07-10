@@ -842,6 +842,31 @@ describe("SchemaFormTurn", () => {
   });
 
   describe("edit toggle", () => {
+    it("preserves a nullable string-list through a no-change edit round-trip", async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn();
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload(
+            [field({ name: "columns", label: "Columns", kind: "string-list", nullable: true })],
+            { columns: null },
+          )}
+          onSubmit={onSubmit}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Edit" }));
+      expect(screen.getByRole("textbox", { name: "Columns" })).toHaveValue("");
+      await user.click(screen.getByRole("button", { name: "Done editing" }));
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          edited_values: expect.objectContaining({ options: { columns: null } }),
+        }),
+      );
+    });
+
     it("reveals the editable form on Edit, and returns on Done editing (non-tutorial)", async () => {
       const user = userEvent.setup();
       render(

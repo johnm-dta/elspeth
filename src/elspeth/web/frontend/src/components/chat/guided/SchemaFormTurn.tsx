@@ -334,6 +334,7 @@ function emptyForKind(kind: KnobField["kind"]): unknown {
 function submittedValue(field: KnobField, value: unknown): unknown {
   if (value === undefined) return field.default ?? null;
   if (field.kind === "string-list") {
+    if (value === null && field.nullable) return null;
     if (typeof value === "string") return value.split("\n").filter((line) => line !== "");
     if (Array.isArray(value)) return value;
     return [];

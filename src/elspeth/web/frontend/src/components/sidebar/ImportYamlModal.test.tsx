@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { parseDocument } from "yaml";
 import {
   ImportYamlModal,
   ImportYamlModalHost,
@@ -9,7 +11,7 @@ import {
   findImportYamlSourceBindingCandidates,
   IMPORT_YAML_NOT_RUNNABLE_INTRO,
   IMPORT_YAML_422_MESSAGE,
-  IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE,
+  IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE,
 } from "./ImportYamlModal";
 import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -17,6 +19,14 @@ import { useExecutionStore } from "@/stores/executionStore";
 import * as api from "@/api/client";
 import type { BlobMetadata } from "@/types/api";
 import type { CompositionState } from "@/types/index";
+
+vi.mock("yaml", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("yaml")>();
+  return {
+    ...actual,
+    parseDocument: vi.fn(actual.parseDocument),
+  };
+});
 
 vi.mock("@/api/client", () => ({
   importCompositionYaml: vi.fn(),
@@ -134,6 +144,7 @@ describe("ImportYamlModal", () => {
     vi.mocked(api.listBlobs).mockReset();
     vi.mocked(api.listBlobs).mockResolvedValue([]);
     vi.mocked(api.uploadBlob).mockReset();
+    vi.mocked(parseDocument).mockClear();
     useSessionStore.setState({
       activeSessionId: "sess-1",
       compositionState: null,
@@ -280,7 +291,7 @@ describe("ImportYamlModal", () => {
 
     expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
     expect(screen.getByText("Validation summary")).toBeInTheDocument();
-    expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
+    expect(screen.getByText(IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByText("Parsed preview")).toBeNull();
   });
 
@@ -294,7 +305,7 @@ describe("ImportYamlModal", () => {
     );
 
     expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
-    expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
+    expect(screen.getByText(IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE)).toBeInTheDocument();
   });
 
   it("previews and enables Import for flow-style YAML the backend accepts", () => {
@@ -515,6 +526,27 @@ describe("ImportYamlModal", () => {
         path: "examples/statistical_batch_plugins/experiment_scores.csv",
       },
     ]);
+  });
+
+  it("defers draft YAML analysis through one shared parse", () => {
+    const componentSource = readFileSync(
+      "src/components/sidebar/ImportYamlModal.tsx",
+      "utf8",
+    );
+    expect(componentSource).toContain("useDeferredValue");
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(ADVANCED_EXPERIMENT_YAML);
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: /uploaded file for source primary/i }),
+    ).toBeInTheDocument();
+    expect(parseDocument).toHaveBeenCalledTimes(1);
+    expect(parseDocument).toHaveBeenCalledWith(
+      ADVANCED_EXPERIMENT_YAML,
+      { prettyErrors: false },
+    );
   });
 
   it("imports a pasted advanced example with an explicit uploaded source binding", async () => {

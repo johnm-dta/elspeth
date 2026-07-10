@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import { parseDocument } from "yaml";
 import * as api from "@/api/client";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -56,7 +56,7 @@ const IMPORT_YAML_GENERIC_ERROR_DETAIL = "Failed to import YAML. Please try agai
 // Client-side import preflight mirrors only the backend's first hard gates:
 // syntactically valid YAML, mapping root, and at least one runtime pipeline
 // section. Plugin/schema validation remains server-owned.
-export const IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE =
+export const IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE =
   "Pipeline YAML must define at least one pipeline section: sources, source, transforms, gates, aggregations, coalesce, or sinks.";
 
 interface ImportErrorInfo {
@@ -210,15 +210,33 @@ function countParsedSectionEntries(
   return countSequenceEntries(value, section);
 }
 
-export function findImportYamlSourceBindingCandidates(
-  yamlText: string,
+type ImportYamlParsedDocument = ReturnType<typeof parseDocument>;
+
+interface ParsedImportYamlDraft {
+  hasText: boolean;
+  document: ImportYamlParsedDocument | null;
+  root: unknown;
+}
+
+function parseImportYamlDraft(yamlText: string): ParsedImportYamlDraft {
+  if (yamlText.trim().length === 0) {
+    return { hasText: false, document: null, root: null };
+  }
+  const document = parseDocument(yamlText, { prettyErrors: false });
+  return {
+    hasText: true,
+    document,
+    root: document.errors.length > 0 ? null : document.toJS({}),
+  };
+}
+
+function findImportYamlSourceBindingCandidatesFromParsed(
+  parsedDraft: ParsedImportYamlDraft,
 ): ImportYamlSourceBindingCandidate[] {
-  if (yamlText.trim().length === 0) return [];
+  if (!parsedDraft.hasText || parsedDraft.document === null) return [];
+  if (parsedDraft.document.errors.length > 0) return [];
 
-  const parsed = parseDocument(yamlText, { prettyErrors: false });
-  if (parsed.errors.length > 0) return [];
-
-  const parsedRoot = parsed.toJS({}) as unknown;
+  const parsedRoot = parsedDraft.root;
   if (!isRecord(parsedRoot)) return [];
 
   let rawSources = parsedRoot.sources;
@@ -243,9 +261,19 @@ export function findImportYamlSourceBindingCandidates(
   return candidates;
 }
 
-export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysis {
-  const hasText = yamlText.trim().length > 0;
-  if (!hasText) {
+export function findImportYamlSourceBindingCandidates(
+  yamlText: string,
+): ImportYamlSourceBindingCandidate[] {
+  return findImportYamlSourceBindingCandidatesFromParsed(
+    parseImportYamlDraft(yamlText),
+  );
+}
+
+function analyseImportYamlDraftFromParsed(
+  yamlText: string,
+  parsedDraft: ParsedImportYamlDraft,
+): ImportYamlDraftAnalysis {
+  if (!parsedDraft.hasText) {
     return {
       hasText: false,
       canImport: false,
@@ -257,7 +285,18 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
     };
   }
 
-  const parsed = parseDocument(yamlText, { prettyErrors: false });
+  const parsed = parsedDraft.document;
+  if (parsed === null) {
+    return {
+      hasText: false,
+      canImport: false,
+      sectionsParsed: false,
+      sourceCount: 0,
+      stepCount: 0,
+      outputCount: 0,
+      validationMessage: "Paste YAML to preview it.",
+    };
+  }
   if (parsed.errors.length > 0) {
     return {
       hasText: true,
@@ -270,7 +309,7 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
     };
   }
 
-  const parsedRoot = parsed.toJS({}) as unknown;
+  const parsedRoot = parsedDraft.root;
   if (!isRecord(parsedRoot)) {
     return {
       hasText: true,
@@ -294,7 +333,7 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
       sourceCount: 0,
       stepCount: 0,
       outputCount: 0,
-      validationMessage: IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE,
+      validationMessage: IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE,
     };
   }
 
@@ -334,6 +373,13 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
     outputCount: parsedOutputCount,
     validationMessage: "Ready for server validation.",
   };
+}
+
+export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysis {
+  return analyseImportYamlDraftFromParsed(
+    yamlText,
+    parseImportYamlDraft(yamlText),
+  );
 }
 
 function importYamlCountLine(analysis: ImportYamlDraftAnalysis): string {
@@ -529,13 +575,22 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   useFocusTrap(dialogRef, true, ".import-yaml-textarea");
 
   const isSubmitting = phase === "submitting";
+  // Parse the deferred text once per settled draft. The preview and source
+  // binding discovery both consume this shared result; submit still sends the
+  // live textarea value from yamlText.
+  const deferredYamlText = useDeferredValue(yamlText);
+  const isDraftAnalysisPending = yamlText !== deferredYamlText;
+  const parsedDraft = useMemo(
+    () => parseImportYamlDraft(deferredYamlText),
+    [deferredYamlText],
+  );
   const draftAnalysis = useMemo(
-    () => analyseImportYamlDraft(yamlText),
-    [yamlText],
+    () => analyseImportYamlDraftFromParsed(deferredYamlText, parsedDraft),
+    [deferredYamlText, parsedDraft],
   );
   const sourceBindingCandidates = useMemo(
-    () => findImportYamlSourceBindingCandidates(yamlText),
-    [yamlText],
+    () => findImportYamlSourceBindingCandidatesFromParsed(parsedDraft),
+    [parsedDraft],
   );
   const sourceBindingCandidateKeys = useMemo(
     () => new Set(sourceBindingCandidates.map(sourceBlobBindingKey)),
@@ -546,7 +601,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
     () => availableBlobs.filter((blob) => blob.status === "ready"),
     [availableBlobs],
   );
-  const canSubmitYaml = draftAnalysis.canImport;
+  const canSubmitYaml = !isDraftAnalysisPending && draftAnalysis.canImport;
   const hasSourceBindingCandidates = sourceBindingCandidates.length > 0;
   const hasPendingSourceUpload = sourceBindingCandidates.some((candidate) =>
     Boolean(sourceUploadPending[sourceBlobBindingKey(candidate)]),

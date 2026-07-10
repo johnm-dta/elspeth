@@ -123,6 +123,7 @@ export function ComposerPreferencesForm({
 
 interface ComposerPreferencesPanelProps {
   onClose: () => void;
+  onResetTutorialComplete?: () => void;
 }
 
 /**
@@ -133,6 +134,7 @@ interface ComposerPreferencesPanelProps {
  */
 export function ComposerPreferencesPanel({
   onClose,
+  onResetTutorialComplete,
 }: ComposerPreferencesPanelProps): JSX.Element {
   const modalRef = useRef<HTMLDivElement>(null);
   useFocusTrap(
@@ -209,7 +211,9 @@ export function ComposerPreferencesPanel({
           </button>
         </div>
         <div className="secrets-panel-body">
-          <ComposerPreferencesForm onResetTutorialComplete={onClose} />
+          <ComposerPreferencesForm
+            onResetTutorialComplete={onResetTutorialComplete ?? onClose}
+          />
         </div>
       </div>
     </>

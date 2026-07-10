@@ -70,6 +70,7 @@ function App() {
   const [showPalette, setShowPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showComposerSettings, setShowComposerSettings] = useState(false);
+  const [tutorialResetEpoch, setTutorialResetEpoch] = useState(0);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const logout = useAuthStore((s) => s.logout);
   const openComposerSettings = useCallback(
@@ -80,6 +81,10 @@ function App() {
     () => setShowComposerSettings(false),
     [],
   );
+  const handleResetTutorialComplete = useCallback(() => {
+    setShowComposerSettings(false);
+    setTutorialResetEpoch((epoch) => epoch + 1);
+  }, []);
   const healthCheckRef = useRef<number | null>(null);
 
   // Phase 6B Task 8: shared-inspect route detection. When the URL hash is
@@ -452,6 +457,7 @@ function App() {
         />
         {showTutorial ? (
           <HelloWorldTutorial
+            key={tutorialResetEpoch}
             composerAvailable={systemStatus?.composer_available ?? true}
             composerUnavailableReason={systemStatus?.composer_reason ?? null}
           />
@@ -533,7 +539,10 @@ function App() {
           onClose={() => setCatalogOpen(false)}
         />
         {showComposerSettings && (
-          <ComposerPreferencesPanel onClose={closeComposerSettings} />
+          <ComposerPreferencesPanel
+            onClose={closeComposerSettings}
+            onResetTutorialComplete={handleResetTutorialComplete}
+          />
         )}
         <CommandPalette isOpen={showPalette} onClose={closePalette} />
         {showShortcuts && (

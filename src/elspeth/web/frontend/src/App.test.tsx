@@ -23,6 +23,8 @@ import type {
 // App renders many heavy children (Layout, ChatPanel, …).
 // Stub them out so the test focuses solely on App's own banner DOM.
 
+const tutorialMountSpy = vi.hoisted(() => vi.fn());
+
 vi.mock("./components/common/Layout", () => ({
   Layout: ({
     chat,
@@ -57,9 +59,17 @@ vi.mock("./components/settings/SecretsPanel", () => ({
   SecretsPanel: () => <div data-testid="secrets-panel-stub" />,
 }));
 
-vi.mock("./components/tutorial", () => ({
-  HelloWorldTutorial: () => <div data-testid="tutorial-stub" />,
-}));
+vi.mock("./components/tutorial", async () => {
+  const React = await import("react");
+  return {
+    HelloWorldTutorial: () => {
+      React.useEffect(() => {
+        tutorialMountSpy();
+      }, []);
+      return <div data-testid="tutorial-stub" />;
+    },
+  };
+});
 
 vi.mock("./components/audit/AuditReadinessPanel", () => ({
   AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
@@ -213,6 +223,7 @@ describe("App banner roles", () => {
     } satisfies SystemStatus);
     vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
     vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
+    tutorialMountSpy.mockClear();
   });
 
   it("uses role=alert for the backend-unavailable banner (hard outage)", async () => {
@@ -740,6 +751,56 @@ describe("App preferences bootstrap (Phase 1B)", () => {
 
     expect(screen.getByTestId("tutorial-stub")).toBeInTheDocument();
     expect(screen.queryByTestId("layout-stub")).not.toBeInTheDocument();
+  });
+
+  it("remounts the tutorial shell after Reset tutorial succeeds", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-in-progress",
+      tutorialRunId: null,
+      tutorialSourceDataHash: null,
+      writeError: null,
+    });
+    vi.spyOn(usePreferencesStore.getState(), "bootstrap").mockResolvedValueOnce(
+      undefined,
+    );
+    vi.spyOn(api, "updateUserComposerPreferences").mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-10T07:30:00Z",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(tutorialMountSpy).toHaveBeenCalledTimes(1);
+    });
+    await userEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    await userEvent.click(screen.getByRole("button", { name: /composer preferences/i }));
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    await waitFor(() => {
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: null,
+        tutorial_stage: null,
+        tutorial_session_id: null,
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
+      });
+    });
+    await waitFor(() => {
+      expect(tutorialMountSpy).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

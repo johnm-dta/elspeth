@@ -21,6 +21,7 @@ import {
   JUDGE_RUBRIC,
 } from "./harness/prompt-and-rubric";
 import { classifyOutcome, type StepSignal } from "./harness/classify";
+import { ACKNOWLEDGEMENT_PRIMARY_ACTION_NAMES } from "./harness/guided-driver";
 import type { RunRecord } from "./harness/types";
 import {
   fetchComposition,
@@ -40,29 +41,28 @@ const BATCH_SIZE = Number(process.env.HARNESS_BATCH_SIZE ?? "1");
 // return how many were acknowledged this pass.
 //
 // Post-redesign (acknowledge card-stack): the cards render in the pinned
-// AcknowledgementStack. The primary is "Acknowledge" (aria-label
-// "Acknowledge the …"), NOT the old "Accept …". The LLM-prompt-template REVIEW
-// GATE still applies but its surface moved BEHIND a "View" expander: the
-// Acknowledge button stays `disabled` until the prompt region
-// (role="region" name="Prompt template review", revealed by clicking "View")
-// is scrolled to the end (AcknowledgementCard: requiresPromptScroll + expanded
-// + hasScrolledToEnd). So each pass: open any collapsed "View" expanders,
-// scroll any revealed prompt regions to the end, then click an enabled
-// Acknowledge.
+// AcknowledgementStack. Most cards resolve through an "Acknowledge …" primary.
+// Prompt-template cards are two-stage: the same primary first says
+// "View prompt", then flips to "Approve the LLM prompt template". Drive those
+// primary actions as first-class unblockers; otherwise the prompt review stays
+// pending and "Confirm wiring" never enables.
 async function resolveVisibleReviews(page: Page): Promise<number> {
-  const ackButtons = page.getByRole("button", { name: /^Acknowledge/i });
-  const viewToggles = page.getByRole("button", { name: /^View$/ });
+  const primaryButtons = ACKNOWLEDGEMENT_PRIMARY_ACTION_NAMES.map((name) =>
+    page.getByRole("button", { name }),
+  );
+  const legacyViewToggles = page.getByRole("button", { name: /^View$/ });
   const promptRegions = page.getByRole("region", {
     name: "Prompt template review",
   });
-  let accepted = 0;
+  let actions = 0;
   // Bounded inner loop: each acknowledged card unmounts, shrinking the list.
+  // Prompt-template cards take two iterations (View prompt -> Approve).
   for (let guard = 0; guard < 12; guard++) {
-    // Open any collapsed value expanders so the prompt scroll region (and its
-    // gate) exists. An opened toggle relabels to "Hide", so it is not reopened.
-    const toggleCount = await viewToggles.count().catch(() => 0);
+    // Keep the retired exact-"View" path for old staging bundles while the
+    // current bundle uses the two-stage primary handled below.
+    const toggleCount = await legacyViewToggles.count().catch(() => 0);
     for (let i = 0; i < toggleCount; i++) {
-      await viewToggles.nth(i).click().catch(() => {});
+      await legacyViewToggles.nth(i).click().catch(() => {});
     }
     const regionCount = await promptRegions.count().catch(() => 0);
     for (let i = 0; i < regionCount; i++) {
@@ -74,23 +74,25 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
         })
         .catch(() => {});
     }
-    const total = await ackButtons.count().catch(() => 0);
-    if (total === 0) break;
     let clicked = false;
-    for (let i = 0; i < total; i++) {
-      const btn = ackButtons.nth(i);
-      if (await btn.isEnabled().catch(() => false)) {
-        await btn.click().catch(() => {});
-        accepted += 1;
-        clicked = true;
-        break;
+    for (const buttons of primaryButtons) {
+      const total = await buttons.count().catch(() => 0);
+      for (let i = 0; i < total; i++) {
+        const btn = buttons.nth(i);
+        if (await btn.isEnabled().catch(() => false)) {
+          await btn.click().catch(() => {});
+          actions += 1;
+          clicked = true;
+          break;
+        }
       }
+      if (clicked) break;
     }
     if (!clicked) {
       await page.waitForTimeout(300);
     }
   }
-  return accepted;
+  return actions;
 }
 
 // Drive the staged guided walk (source → sink → recipe/transforms → wire) to

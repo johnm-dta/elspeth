@@ -1,4 +1,5 @@
-import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { parseDocument } from "yaml";
 import * as api from "@/api/client";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -50,14 +51,11 @@ export const IMPORT_YAML_422_MESSAGE =
 
 const IMPORT_YAML_GENERIC_ERROR_DETAIL = "Failed to import YAML. Please try again.";
 
-// The client-side line scanner (analyseImportYamlDraft) is advisory only --
-// it cannot parse arbitrary YAML (no flow-style mappings, no full grammar),
-// so a scan miss must not block Import. Server-side validation, which does
-// run a real YAML parser, is the only hard gate. Pinned as a constant so
-// tests assert the exact string.
+// Client-side import preflight mirrors only the backend's first hard gates:
+// syntactically valid YAML, mapping root, and at least one runtime pipeline
+// section. Plugin/schema validation remains server-owned.
 export const IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE =
-  "Preview unavailable: couldn't parse pipeline sections client-side. " +
-  "The server will validate this document when you import it.";
+  "Pipeline YAML must define at least one pipeline section: sources, source, transforms, gates, aggregations, coalesce, or sinks.";
 
 interface ImportErrorInfo {
   title: string;
@@ -103,11 +101,10 @@ interface ImportYamlModalProps {
 
 interface ImportYamlDraftAnalysis {
   hasText: boolean;
-  // Whether the client-side line scanner recognised pipeline sections and
-  // produced a real preview -- purely informational. It does NOT gate
-  // Import: the scanner has no real YAML grammar (e.g. flow-style mappings
-  // defeat it), so server-side validation is the only hard gate. See
-  // IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE.
+  canImport: boolean;
+  // Whether client-side YAML preflight recognised pipeline sections and
+  // produced a real preview. Import stays disabled for syntax/root-section
+  // failures; deeper plugin/schema validation remains server-owned.
   sectionsParsed: boolean;
   sourceCount: number;
   stepCount: number;
@@ -134,11 +131,81 @@ const IMPORT_YAML_SECTION_ALIASES: Record<string, ImportYamlSection> = {
   transforms: "transforms",
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function offsetToLineColumn(text: string, offset: number): { line: number; column: number } {
+  let line = 1;
+  let column = 1;
+  const cappedOffset = Math.max(0, Math.min(offset, text.length));
+  for (let index = 0; index < cappedOffset; index += 1) {
+    if (text[index] === "\n") {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+  return { line, column };
+}
+
+function yamlParseFailureMessage(yamlText: string, error: unknown): string {
+  const detail =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+      ? error.message
+      : "Invalid YAML syntax.";
+  const offset =
+    typeof error === "object" &&
+    error !== null &&
+    "pos" in error &&
+    Array.isArray(error.pos) &&
+    typeof error.pos[0] === "number"
+      ? error.pos[0]
+      : null;
+  if (offset === null) {
+    return `YAML parse failed: ${detail}`;
+  }
+  const location = offsetToLineColumn(yamlText, offset);
+  return `YAML parse failed near line ${location.line}, column ${location.column}: ${detail}`;
+}
+
+function countRecordEntries(value: unknown, sectionName: string): number | string {
+  if (!isRecord(value)) {
+    return `Section "${sectionName}" must be a mapping.`;
+  }
+  return Object.keys(value).length;
+}
+
+function countSequenceEntries(value: unknown, sectionName: string): number | string {
+  if (!Array.isArray(value)) {
+    return `Section "${sectionName}" must be a list.`;
+  }
+  return value.length;
+}
+
+function countParsedSectionEntries(
+  section: ImportYamlSection,
+  value: unknown,
+): number | string {
+  if (section === "source") {
+    return isRecord(value) ? 1 : 'Section "source" must be a mapping.';
+  }
+  if (section === "sources" || section === "sinks") {
+    return countRecordEntries(value, section);
+  }
+  return countSequenceEntries(value, section);
+}
+
 export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysis {
   const hasText = yamlText.trim().length > 0;
   if (!hasText) {
     return {
       hasText: false,
+      canImport: false,
       sectionsParsed: false,
       sourceCount: 0,
       stepCount: 0,
@@ -147,51 +214,39 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
     };
   }
 
-  const lines = normaliseYamlPreviewIndent(yamlText.replace(/\r\n/g, "\n").split("\n"));
-  const sectionStarts: Array<{
-    section: ImportYamlSection;
-    lineIndex: number;
-    indent: number;
-    inlineValue: string;
-  }> = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const rawLine = lines[index];
-    if (leadingSpaces(rawLine) !== 0) continue;
-    const trimmed = rawLine.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-    const mapping = parseYamlMappingLine(trimmed);
-    if (mapping === null) continue;
-    const section = IMPORT_YAML_SECTION_ALIASES[mapping.key];
-    if (section === undefined) continue;
-    sectionStarts.push({
-      section,
-      lineIndex: index,
-      indent: leadingSpaces(rawLine),
-      inlineValue: mapping.inlineValue,
-    });
-  }
-
-  let sourceCount = 0;
-  let stepCount = 0;
-  let outputCount = 0;
-  const foundSections = new Set<ImportYamlSection>();
-  for (const start of sectionStarts) {
-    foundSections.add(start.section);
-    if (start.section === "source") {
-      sourceCount += 1;
-    } else if (start.section === "sources") {
-      sourceCount += countYamlSectionEntries(lines, start);
-    } else if (start.section === "sinks") {
-      outputCount += countYamlSectionEntries(lines, start);
-    } else {
-      stepCount += countYamlSectionEntries(lines, start);
-    }
-  }
-
-  if (foundSections.size === 0) {
+  const parsed = parseDocument(yamlText, { prettyErrors: false });
+  if (parsed.errors.length > 0) {
     return {
       hasText: true,
+      canImport: false,
+      sectionsParsed: false,
+      sourceCount: 0,
+      stepCount: 0,
+      outputCount: 0,
+      validationMessage: yamlParseFailureMessage(yamlText, parsed.errors[0]),
+    };
+  }
+
+  const parsedRoot = parsed.toJS({}) as unknown;
+  if (!isRecord(parsedRoot)) {
+    return {
+      hasText: true,
+      canImport: false,
+      sectionsParsed: false,
+      sourceCount: 0,
+      stepCount: 0,
+      outputCount: 0,
+      validationMessage: "Pipeline YAML must be a mapping.",
+    };
+  }
+
+  const parsedSectionKeys = Object.keys(parsedRoot)
+    .map((key) => IMPORT_YAML_SECTION_ALIASES[key])
+    .filter((section): section is ImportYamlSection => section !== undefined);
+  if (parsedSectionKeys.length === 0) {
+    return {
+      hasText: true,
+      canImport: false,
       sectionsParsed: false,
       sourceCount: 0,
       stepCount: 0,
@@ -200,155 +255,42 @@ export function analyseImportYamlDraft(yamlText: string): ImportYamlDraftAnalysi
     };
   }
 
+  let parsedSourceCount = 0;
+  let parsedStepCount = 0;
+  let parsedOutputCount = 0;
+  for (const [key, value] of Object.entries(parsedRoot)) {
+    const section = IMPORT_YAML_SECTION_ALIASES[key];
+    if (section === undefined) continue;
+    const count = countParsedSectionEntries(section, value);
+    if (typeof count === "string") {
+      return {
+        hasText: true,
+        canImport: false,
+        sectionsParsed: false,
+        sourceCount: 0,
+        stepCount: 0,
+        outputCount: 0,
+        validationMessage: count,
+      };
+    }
+    if (section === "source" || section === "sources") {
+      parsedSourceCount += count;
+    } else if (section === "sinks") {
+      parsedOutputCount += count;
+    } else {
+      parsedStepCount += count;
+    }
+  }
+
   return {
     hasText: true,
+    canImport: true,
     sectionsParsed: true,
-    sourceCount,
-    stepCount,
-    outputCount,
+    sourceCount: parsedSourceCount,
+    stepCount: parsedStepCount,
+    outputCount: parsedOutputCount,
     validationMessage: "Ready for server validation.",
   };
-}
-
-function leadingSpaces(value: string): number {
-  return value.length - value.trimStart().length;
-}
-
-function parseYamlMappingLine(
-  trimmedLine: string,
-): { key: string; inlineValue: string } | null {
-  if (trimmedLine.startsWith('"') || trimmedLine.startsWith("'")) {
-    const quote = trimmedLine[0];
-    let key = "";
-    let index = 1;
-    for (; index < trimmedLine.length; index += 1) {
-      const char = trimmedLine[index];
-      if (quote === '"' && char === "\\" && index + 1 < trimmedLine.length) {
-        key += trimmedLine[index + 1];
-        index += 1;
-        continue;
-      }
-      if (quote === "'" && char === "'" && trimmedLine[index + 1] === "'") {
-        key += "'";
-        index += 1;
-        continue;
-      }
-      if (char === quote) break;
-      key += char;
-    }
-    if (index >= trimmedLine.length) return null;
-    const remainder = trimmedLine.slice(index + 1).trimStart();
-    if (!remainder.startsWith(":")) return null;
-    return { key, inlineValue: yamlInlineValue(remainder.slice(1).trim()) };
-  }
-
-  const plainKey = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(trimmedLine);
-  if (!plainKey) return null;
-  return { key: plainKey[1], inlineValue: yamlInlineValue(plainKey[2].trim()) };
-}
-
-function yamlInlineValue(value: string): string {
-  return value.startsWith("#") ? "" : value;
-}
-
-function normaliseYamlPreviewIndent(lines: string[]): string[] {
-  const significantIndents = lines
-    .map((line) => ({ line, trimmed: line.trim() }))
-    .filter(
-      ({ trimmed }) =>
-        trimmed.length > 0 &&
-        !trimmed.startsWith("#") &&
-        trimmed !== "---" &&
-        trimmed !== "...",
-    )
-    .map(({ line }) => leadingSpaces(line));
-  if (significantIndents.length === 0) {
-    return lines;
-  }
-  // Reduce with an accumulator rather than Math.min(...significantIndents):
-  // spreading one array element per line into a call's argument list blows
-  // the engine's argument/stack limit on very large pastes (no textarea
-  // maxLength; multi-MB exports are a supported scenario). This is O(n)
-  // time, O(1) stack.
-  let commonIndent = significantIndents[0];
-  for (let index = 1; index < significantIndents.length; index += 1) {
-    if (significantIndents[index] < commonIndent) {
-      commonIndent = significantIndents[index];
-    }
-  }
-  if (commonIndent === 0) {
-    return lines;
-  }
-  return lines.map((line) => {
-    if (line.trim().length === 0) {
-      return line;
-    }
-    return line.slice(Math.min(commonIndent, leadingSpaces(line)));
-  });
-}
-
-function countYamlSectionEntries(
-  lines: string[],
-  start: {
-    lineIndex: number;
-    indent: number;
-    inlineValue: string;
-    section: ImportYamlSection;
-  },
-): number {
-  if (start.inlineValue.length > 0) {
-    if (start.inlineValue === "{}" || start.inlineValue === "[]") {
-      return 0;
-    }
-    return 1;
-  }
-
-  let count = 0;
-  let childIndent: number | null = null;
-  for (let index = start.lineIndex + 1; index < lines.length; index += 1) {
-    const rawLine = lines[index];
-    const trimmed = rawLine.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-    const indent = leadingSpaces(rawLine);
-    // A YAML block sequence's '-' marker may sit at the SAME indent as its
-    // parent key (an "indentless sequence" -- valid YAML, and PyYAML's
-    // default emitter style). Only a '- ' item at the section's own indent
-    // continues the section; any other line at that indent is the next
-    // sibling top-level key and still ends the scan.
-    const isIndentlessSequenceItem =
-      isRuntimeListSection(start.section) &&
-      indent === start.indent &&
-      trimmed.startsWith("- ");
-    if (indent < start.indent) break;
-    if (indent === start.indent && !isIndentlessSequenceItem) break;
-    if (childIndent !== null && indent !== childIndent) continue;
-
-    if (isRuntimeListSection(start.section)) {
-      if (trimmed.startsWith("- ")) {
-        childIndent = indent;
-        count += 1;
-      } else if (childIndent === null && parseYamlMappingLine(trimmed) !== null) {
-        childIndent = indent;
-        count += 1;
-      }
-      continue;
-    }
-
-    if (parseYamlMappingLine(trimmed) !== null) {
-      childIndent = indent;
-      count += 1;
-    }
-  }
-  return count;
-}
-
-function isRuntimeListSection(section: ImportYamlSection): boolean {
-  return (
-    section === "aggregations" ||
-    section === "coalesce" ||
-    section === "gates" ||
-    section === "transforms"
-  );
 }
 
 function importYamlCountLine(analysis: ImportYamlDraftAnalysis): string {
@@ -427,22 +369,11 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   useFocusTrap(dialogRef, true, ".import-yaml-textarea");
 
   const isSubmitting = phase === "submitting";
-  // Deferred so the O(lines) indent-normalisation + section/entry scan
-  // doesn't re-run synchronously on every keystroke (large pasted pipelines
-  // would otherwise block typing and re-fire the aria-live preview region
-  // per keypress). This only affects the advisory preview -- Import gating
-  // below reads the live, non-deferred yamlText, matching what doImport()
-  // actually submits.
-  const deferredYamlText = useDeferredValue(yamlText);
   const draftAnalysis = useMemo(
-    () => analyseImportYamlDraft(deferredYamlText),
-    [deferredYamlText],
+    () => analyseImportYamlDraft(yamlText),
+    [yamlText],
   );
-  // Server-side validation is the only hard gate (see
-  // IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE); Import is enabled for any
-  // non-empty paste, independent of whether the client-side scanner (or its
-  // deferred preview) recognised pipeline sections.
-  const hasYamlText = yamlText.trim().length > 0;
+  const canSubmitYaml = draftAnalysis.canImport;
   // Escape/backdrop close while drafting or after a result; NOT while the
   // nested ConfirmDialog owns the keyboard (its own Escape handler applies),
   // and not mid-submit (avoid abandoning the request with no feedback).
@@ -538,7 +469,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
   }
 
   function handleSubmitClick(): void {
-    if (!hasYamlText) return;
+    if (!canSubmitYaml) return;
     // Confirm before a destructive replace when the session HAS content, and
     // also when its state is not yet known (mid-refetch, or a failed load
     // that left compositionState null): treating "unknown" as "empty" would
@@ -640,7 +571,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={!hasYamlText || isSubmitting}
+                  disabled={!canSubmitYaml || isSubmitting}
                   onClick={handleSubmitClick}
                 >
                   {isSubmitting ? "Importing…" : "Import"}

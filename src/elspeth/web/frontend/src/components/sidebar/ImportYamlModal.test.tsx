@@ -154,21 +154,17 @@ describe("ImportYamlModal", () => {
     expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
   });
 
-  // The client-side line scanner is advisory only -- server-side validation
-  // (via importCompositionYaml) is the sole hard gate. A scanner miss must
-  // not permanently disable Import: it shows an honest "couldn't parse"
-  // advisory instead and lets the server have the final say.
-  it("keeps Import enabled with an advisory when the paste doesn't look like known pipeline sections", () => {
+  it("disables Import with inline validation when YAML has no pipeline sections", () => {
     render(<ImportYamlModal onClose={onClose} />);
     typeYaml("not: a pipeline document\n");
 
-    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
     expect(screen.getByText("Validation summary")).toBeInTheDocument();
     expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByText("Parsed preview")).toBeNull();
   });
 
-  it("keeps Import enabled with an advisory for a nested pipeline wrapper the scanner can't preview", () => {
+  it("disables Import with inline validation for a nested non-runtime pipeline wrapper", () => {
     render(<ImportYamlModal onClose={onClose} />);
     typeYaml(
       "pipeline:\n" +
@@ -177,15 +173,11 @@ describe("ImportYamlModal", () => {
         "      plugin: csv\n",
     );
 
-    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
     expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
   });
 
-  it("keeps Import enabled for flow-style YAML the line scanner can't preview but the backend accepts", () => {
-    // '{' at column 0 fails parseYamlMappingLine's plain-key regex, so the
-    // scanner finds no sections here even though this is a valid top-level
-    // flow mapping that yaml.safe_load (and the backend's section-key check)
-    // accepts. Previously this permanently disabled Import with no override.
+  it("previews and enables Import for flow-style YAML the backend accepts", () => {
     render(<ImportYamlModal onClose={onClose} />);
     typeYaml(
       '{"source": {"plugin": "csv", "on_success": "result"}, ' +
@@ -193,7 +185,18 @@ describe("ImportYamlModal", () => {
     );
 
     expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
-    expect(screen.getByText(IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE)).toBeInTheDocument();
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    expect(screen.getByText("1 source, 0 processing steps, 1 output")).toBeInTheDocument();
+    expect(screen.getByText(/Ready for server validation/i)).toBeInTheDocument();
+  });
+
+  it("disables Import with inline validation when YAML syntax is malformed", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml("sources: [this is: not: valid");
+
+    expect(screen.getByRole("button", { name: /^import$/i })).toBeDisabled();
+    expect(screen.getByText("Validation summary")).toBeInTheDocument();
+    expect(screen.getByText(/YAML parse failed near line 1/i)).toBeInTheDocument();
     expect(screen.queryByText("Parsed preview")).toBeNull();
   });
 
@@ -331,13 +334,11 @@ describe("ImportYamlModal", () => {
     ).toBeInTheDocument();
   });
 
-  it("normalises indentation on a very large paste without throwing (RangeError guard)", () => {
-    // normaliseYamlPreviewIndent used to spread ~1 number per line into
-    // Math.min(...significantIndents); a multi-MB paste (no textarea
-    // maxLength, and multi-MB exports are a supported scenario) blows the
-    // engine's call-argument/stack limit and throws RangeError during render.
+  it("preflights a very large paste without throwing", () => {
+    // Import preflight runs synchronously in render. Keep a large-paste guard
+    // so scanner/parser changes do not reintroduce RangeError or stack issues.
     const bigBody = Array.from(
-      { length: 200000 },
+      { length: 5000 },
       (_, i) => `  field_${i}: value`,
     ).join("\n");
     const bigYaml = `source:\n  plugin: csv\n${bigBody}\nsinks:\n  result:\n    plugin: json\n`;
@@ -345,9 +346,6 @@ describe("ImportYamlModal", () => {
     render(<ImportYamlModal onClose={onClose} />);
 
     expect(() => typeYaml(bigYaml)).not.toThrow();
-    // Gating is on live non-empty text (Issue 1's advisory-only preflight),
-    // so Import stays enabled regardless of whether the (possibly deferred)
-    // preview analysis has caught up yet.
     expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
   });
 

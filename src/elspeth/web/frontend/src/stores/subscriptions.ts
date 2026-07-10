@@ -121,16 +121,22 @@ function validationFingerprint(result: ValidationResult | null): string | null {
  * mirrors formatFindingBody (elspeth-901a404926). Interpretation-review-pending
  * findings never reach here (handled by isPendingInterpretationReviewResult
  * above), so no stepLabelFor is needed.
+ *
+ * `componentType` is the SAME finding's structured `component_type` —
+ * required (not optional) so this can't silently drop the hint that lets
+ * `phraseFor` resolve a role-less generated id in the right direction
+ * (elspeth-ede84df6b3). Pass `null` when the caller has none.
  */
 function humanisedValidationBullet(
   message: string,
   componentId: string | null,
-  phraseFor: (componentId: string | null) => string,
+  componentType: string | null,
+  phraseFor: (componentId: string | null, componentType?: string | null) => string,
 ): string {
   const finding = humaniseValidationMessage(message, phraseFor);
   const attributed = finding.raw === null && componentId !== null;
   return attributed
-    ? `- **${phraseFor(componentId)}:** ${finding.headline}`
+    ? `- **${phraseFor(componentId, componentType)}:** ${finding.headline}`
     : `- ${finding.headline}`;
 }
 
@@ -308,7 +314,9 @@ export function initStoreSubscriptions(): void {
       const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation failed** — fix the following errors before running:"];
       for (const err of result.errors) {
-        lines.push(humanisedValidationBullet(err.message, err.component_id ?? null, phraseFor));
+        lines.push(
+          humanisedValidationBullet(err.message, err.component_id ?? null, err.component_type ?? null, phraseFor),
+        );
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
@@ -316,7 +324,9 @@ export function initStoreSubscriptions(): void {
       const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation passed with warnings:**"];
       for (const warn of result.warnings) {
-        lines.push(humanisedValidationBullet(warn.message, warn.component_id ?? null, phraseFor));
+        lines.push(
+          humanisedValidationBullet(warn.message, warn.component_id ?? null, warn.component_type ?? null, phraseFor),
+        );
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && previousWasPendingReview) {

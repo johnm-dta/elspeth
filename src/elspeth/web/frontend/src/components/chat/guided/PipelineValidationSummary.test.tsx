@@ -260,6 +260,32 @@ describe("PipelineValidationSummary", () => {
     expect(screen.getByText("Technical details")).toBeInTheDocument();
   });
 
+  // ── elspeth-ede84df6b3: component_type threading actually reaches the ────
+  // rendered phrase, not just the phraseFor call signature. A passthrough
+  // (non-contract-violation) message with a role-less generated CSV id and a
+  // "source" component_type must render the READ-direction possessive
+  // phrase, not the write-direction guess the id substring alone would
+  // produce with no role token.
+  it("threads component_type through to the rendered possessive phrase for a role-less generated id", () => {
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "csv_refunds_a1b2",
+          component_type: "source",
+          message: "Cannot resolve secret references: SOME_KEY",
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("'read your CSV':");
+    expect(status.textContent).not.toContain("'write a CSV':");
+  });
+
   it("does not assign a short unmapped id to a substring-matching component", () => {
     const rawDump =
       "Schema contract violation: edge 'a' → 'out'\n" +

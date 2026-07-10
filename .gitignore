@@ -77,6 +77,13 @@ lib64/
 # Tests for evals/lib mirror the source tree; same hide-by-default issue.
 !tests/unit/evals/lib/
 !tests/unit/evals/lib/**
+# src/elspeth/web/frontend/src/lib/ is the frontend's shared TS helper
+# directory (validationHumaniser.ts, composer-events.ts, …) — a real, tracked
+# source tree, not a Python build artefact. Found 2026-07-10 when a new file
+# added there (validationHumaniser.test.ts) silently failed to show up as
+# untracked under the generic `lib/` rule above.
+!src/elspeth/web/frontend/src/lib/
+!src/elspeth/web/frontend/src/lib/**
 parts/
 sdist/
 var/

@@ -14,7 +14,19 @@
 // imports only types/utils, so there is no import cycle.
 // ============================================================================
 
-import { buildPlainPhraseMap, UNKNOWN_COMPONENT_PHRASE } from "@/components/chat/guided/pipelineGloss";
+import {
+  buildPlainPhraseMap,
+  PROCESS_ROW_PHRASE,
+  READ_API_PHRASE,
+  READ_CSV_PHRASE,
+  READ_DATA_PHRASE,
+  READ_JSON_PHRASE,
+  SCRAPE_PAGE_PHRASE,
+  UNKNOWN_COMPONENT_PHRASE,
+  WRITE_CSV_PHRASE,
+  WRITE_JSON_PHRASE,
+  WRITE_RESULTS_PHRASE,
+} from "@/components/chat/guided/pipelineGloss";
 import type { CompositionState } from "@/types/index";
 
 /**
@@ -104,97 +116,228 @@ export function humaniseValidationMessage(
  * the resolver tries verbatim first, then the stripped form. Shared by the
  * summary headline, the wire-stage blockers list (ChatPanel), the audit panel
  * and the chat injection so every surface names steps identically.
+ *
+ * `componentType` is an OPTIONAL hint — the structured `component_type` a
+ * Stage-2 ValidationError/ValidationWarning carries alongside its
+ * `component_id` (types/index.ts). It is consulted only as the LAST resort,
+ * after an exact/stripped/fuzzy match against the live composition has
+ * already failed (elspeth-ede84df6b3): a real, currently-wired component's
+ * phrase always wins over a guess derived from the id text or the type hint.
  */
 export function makePhraseFor(
   compositionState: CompositionState | null | undefined,
-): (componentId: string | null) => string {
+): (componentId: string | null, componentType?: string | null) => string {
   const phraseMap = buildPlainPhraseMap(compositionState);
-  return (componentId: string | null): string => {
+  // Precomputed once per makePhraseFor() call (not per phraseFor()
+  // invocation / per unresolved lookup) — elspeth-40d6efac2b: a validation
+  // result can carry many findings, each triggering a fuzzy lookup over the
+  // SAME phraseMap, so re-tokenising every known id on every lookup was
+  // wasted, repeated work.
+  const fuzzyIndex = buildFuzzyIndex(phraseMap);
+  return (componentId: string | null, componentType?: string | null): string => {
     if (componentId === null) return UNKNOWN_COMPONENT_PHRASE;
     const direct = phraseMap.get(componentId);
     if (direct !== undefined) return direct;
     const stripped = componentId.replace(/^(node|source|output):/, "");
     const strippedPhrase = phraseMap.get(stripped);
     if (strippedPhrase !== undefined) return strippedPhrase;
-    const generatedPhrase = fallbackPhraseForGeneratedId(stripped);
+    // Try the fuzzy known-component match BEFORE the generic role/format
+    // guess (elspeth-66f50ba810): a specific phrase for a real, currently
+    // -wired component must not be shadowed by a generic guess just because
+    // the unresolved id happens to contain a role token too.
+    const fuzzyPhrase = bestFuzzyMatch(stripped, fuzzyIndex);
+    if (fuzzyPhrase !== null) return fuzzyPhrase;
+    const generatedPhrase = fallbackPhraseForGeneratedId(stripped, componentType);
     if (generatedPhrase !== null) return generatedPhrase;
-    for (const [knownId, phrase] of phraseMap.entries()) {
-      if (componentIdHasKnownToken(stripped, knownId)) {
-        return phrase;
-      }
-    }
     return UNKNOWN_COMPONENT_PHRASE;
   };
 }
 
 const MIN_FUZZY_COMPONENT_TOKEN_LENGTH = 4;
-const COMPONENT_ROLE_TOKENS = new Set([
-  "source",
-  "input",
-  "read",
-  "sink",
-  "output",
-  "write",
-  "node",
-  "transform",
-  "xform",
-]);
 
-function componentIdHasKnownToken(componentId: string, knownId: string): boolean {
-  const componentTokens = new Set(componentIdTokens(componentId));
-  if (componentTokens.size === 0) return false;
-  const meaningfulKnownTokens = componentIdTokens(knownId).filter(
-    (token) =>
-      token.length >= MIN_FUZZY_COMPONENT_TOKEN_LENGTH &&
-      !COMPONENT_ROLE_TOKENS.has(token),
-  );
-  if (meaningfulKnownTokens.length === 0) return false;
-  return meaningfulKnownTokens.every((token) => componentTokens.has(token));
+type GeneratedRole = "source" | "output" | "transform";
+
+// Single source of truth for the role vocabulary (elspeth-20bb1c3ac4):
+// firstGeneratedRole() used to re-declare these same words as a parallel
+// regex alternation. COMPONENT_ROLE_TOKENS (which also filters role words
+// out of fuzzy-match "meaningful" tokens, below) is derived from this map's
+// keys rather than hand-duplicated.
+const ROLE_TOKEN_ROLE: Readonly<Record<string, GeneratedRole>> = {
+  source: "source",
+  input: "source",
+  read: "source",
+  sink: "output",
+  output: "output",
+  write: "output",
+  transform: "transform",
+  xform: "transform",
+};
+
+const COMPONENT_ROLE_TOKENS = new Set([...Object.keys(ROLE_TOKEN_ROLE), "node"]);
+
+// Content words that imply a "transform" role even without an explicit role
+// token — matched per-token (anchored) when scanning an id for its role.
+const TRANSFORM_CONTENT_TOKEN_RE = /^(transform|xform|llm|rate|score|classif.*|summari[sz]e.*)$/;
+// Same content-word family, matched as a substring against the whole id —
+// used only once a role could not be determined any other way (see
+// fallbackPhraseForGeneratedId below).
+const TRANSFORM_CONTENT_SUBSTRING_RE = /(llm|rate|score|classif|summari[sz]e|xform|transform)/;
+
+const CSV_RE = /csv/;
+const JSON_RE = /json/;
+// The source and transform/roleless web-format ladders were never identical
+// in the original code (source's included "api", transform's included
+// "fetch") — kept distinct here rather than force-unified, which would
+// silently change which generated ids each role treats as "web" format.
+const SOURCE_WEB_RE = /(api|http|url|web|scrape)/;
+const TRANSFORM_WEB_RE = /(scrape|fetch|web|http|url)/;
+
+type ComponentFormat = "csv" | "json" | "web" | null;
+
+function detectFormat(id: string, webRe: RegExp): ComponentFormat {
+  if (CSV_RE.test(id)) return "csv";
+  if (JSON_RE.test(id)) return "json";
+  if (webRe.test(id)) return "web";
+  return null;
+}
+
+interface RolePhraseEntry {
+  webRe: RegExp;
+  default: string;
+  csv?: string;
+  json?: string;
+  web?: string;
+}
+
+// The {role x format -> phrase} table (elspeth-20bb1c3ac4) replacing the
+// three separate role-branch ladders (source/output/transform) that used to
+// repeat the same csv/json/web checks with independently-drifting copies.
+const ROLE_PHRASE_TABLE: Readonly<Record<GeneratedRole, RolePhraseEntry>> = {
+  source: {
+    webRe: SOURCE_WEB_RE,
+    default: READ_DATA_PHRASE,
+    csv: READ_CSV_PHRASE,
+    json: READ_JSON_PHRASE,
+    web: READ_API_PHRASE,
+  },
+  output: {
+    webRe: TRANSFORM_WEB_RE,
+    default: WRITE_RESULTS_PHRASE,
+    csv: WRITE_CSV_PHRASE,
+    json: WRITE_JSON_PHRASE,
+  },
+  transform: {
+    webRe: TRANSFORM_WEB_RE,
+    default: PROCESS_ROW_PHRASE,
+    web: SCRAPE_PAGE_PHRASE,
+  },
+};
+
+function phraseForRoleFormat(role: GeneratedRole, id: string): string {
+  const entry = ROLE_PHRASE_TABLE[role];
+  const format = detectFormat(id, entry.webRe);
+  const specific = format === "csv" ? entry.csv : format === "json" ? entry.json : format === "web" ? entry.web : undefined;
+  return specific ?? entry.default;
+}
+
+/** Maps a Stage-2 ValidationError/Warning's structured `component_type`
+ *  (e.g. "source", "sink", "output", "transform", "node", "graph", …) onto
+ *  the same three-way role vocabulary the id-substring guess uses. Values
+ *  outside this vocabulary (e.g. "graph", "pipeline") carry no directional
+ *  signal and are treated as unknown rather than guessed at. */
+function roleFromComponentType(componentType: string | null | undefined): GeneratedRole | null {
+  if (componentType === null || componentType === undefined) return null;
+  const t = componentType.toLowerCase();
+  if (t === "source") return "source";
+  if (t === "sink" || t === "output") return "output";
+  if (t === "transform" || t === "node" || t === "gate" || t === "aggregation" || t === "coalesce") {
+    return "transform";
+  }
+  return null;
 }
 
 function componentIdTokens(componentId: string): string[] {
   return componentId.toLowerCase().split(/[_:-]+/).filter(Boolean);
 }
 
-function fallbackPhraseForGeneratedId(componentId: string): string | null {
+function fallbackPhraseForGeneratedId(
+  componentId: string,
+  componentType?: string | null,
+): string | null {
   const id = componentId.toLowerCase();
-  const role = firstGeneratedRole(id);
-  if (role === "source") {
-    if (/csv/.test(id)) return "read your CSV";
-    if (/json/.test(id)) return "read your JSON file";
-    if (/(api|http|url|web|scrape)/.test(id)) return "read from an API";
-    return "read your data";
-  }
-  if (role === "output") {
-    if (/csv/.test(id)) return "write a CSV";
-    if (/json/.test(id)) return "write a JSON file";
-    return "write the results";
-  }
-  if (role === "transform") {
-    if (/(scrape|fetch|web|http|url)/.test(id)) return "scrape each page";
-    return "process each row";
-  }
-  if (/(scrape|fetch|web|http|url)/.test(id)) return "scrape each page";
-  if (/csv/.test(id)) return "write a CSV";
-  if (/json/.test(id)) return "write a JSON file";
-  if (/(llm|rate|score|classif|summari[sz]e|xform|transform)/.test(id)) {
-    return "process each row";
-  }
+  // The id's own role token takes precedence over the structured hint — an
+  // explicit token in the id is a stronger signal than a caller-supplied
+  // type. The hint fills the gap only when the id carries no role token of
+  // its own (elspeth-ede84df6b3).
+  const role = firstGeneratedRole(id) ?? roleFromComponentType(componentType);
+  if (role !== null) return phraseForRoleFormat(role, id);
+  // No role signal at all (neither an id token nor a usable component_type
+  // hint). CSV/JSON carry no direction of their own — guessing write-vs-read
+  // here previously defaulted to a write-direction phrase and pointed at the
+  // wrong end of the pipeline for role-less SOURCE ids (elspeth-ede84df6b3).
+  // Only resolve the role-neutral cases; let the caller fall back to the
+  // neutral UNKNOWN_COMPONENT_PHRASE for csv/json.
+  if (TRANSFORM_WEB_RE.test(id)) return SCRAPE_PAGE_PHRASE;
+  if (TRANSFORM_CONTENT_SUBSTRING_RE.test(id)) return PROCESS_ROW_PHRASE;
   return null;
 }
-
-type GeneratedRole = "source" | "output" | "transform";
 
 function firstGeneratedRole(id: string): GeneratedRole | null {
   const tokens = componentIdTokens(id);
   for (const token of tokens) {
-    if (/^(source|input|read)$/.test(token)) return "source";
-    if (/^(sink|output|write)$/.test(token)) return "output";
-    if (/^(transform|xform|llm|rate|score|classif.*|summari[sz]e.*)$/.test(token)) {
-      return "transform";
-    }
+    const mapped = ROLE_TOKEN_ROLE[token];
+    if (mapped !== undefined) return mapped;
+    if (TRANSFORM_CONTENT_TOKEN_RE.test(token)) return "transform";
   }
   return null;
+}
+
+// ── Fuzzy known-component matching (elspeth-8f89b0ba34 / elspeth-40d6efac2b) ─
+//
+// An unresolved id (e.g. a backend-generated id for a component that no
+// longer exists, or one the composer hasn't wired into the gloss map yet)
+// can still share meaningful tokens with a REAL known component. Score each
+// candidate by how many of the known id's meaningful (>=4-char, non-role)
+// tokens appear in the unresolved id, so a specific match ("refunds_clean",
+// 2 tokens) beats a coincidental partial one ("refunds_raw", 1 token —
+// "raw" is dropped for being under the length floor) regardless of which
+// entry the phrase map happens to iterate first.
+
+interface FuzzyIndexEntry {
+  phrase: string;
+  meaningfulTokens: readonly string[];
+  totalTokens: number;
+}
+
+function buildFuzzyIndex(phraseMap: ReadonlyMap<string, string>): FuzzyIndexEntry[] {
+  const index: FuzzyIndexEntry[] = [];
+  for (const [knownId, phrase] of phraseMap.entries()) {
+    const allTokens = componentIdTokens(knownId);
+    const meaningfulTokens = allTokens.filter(
+      (token) => token.length >= MIN_FUZZY_COMPONENT_TOKEN_LENGTH && !COMPONENT_ROLE_TOKENS.has(token),
+    );
+    if (meaningfulTokens.length === 0) continue;
+    index.push({ phrase, meaningfulTokens, totalTokens: allTokens.length });
+  }
+  return index;
+}
+
+function bestFuzzyMatch(componentId: string, index: readonly FuzzyIndexEntry[]): string | null {
+  const componentTokens = new Set(componentIdTokens(componentId));
+  if (componentTokens.size === 0) return null;
+  let best: { score: number; totalTokens: number; phrase: string } | null = null;
+  for (const entry of index) {
+    if (!entry.meaningfulTokens.every((token) => componentTokens.has(token))) continue;
+    const score = entry.meaningfulTokens.length;
+    if (
+      best === null ||
+      score > best.score ||
+      (score === best.score && entry.totalTokens > best.totalTokens)
+    ) {
+      best = { score, totalTokens: entry.totalTokens, phrase: entry.phrase };
+    }
+  }
+  return best?.phrase ?? null;
 }
 
 /**
@@ -205,16 +348,24 @@ function firstGeneratedRole(id: string): GeneratedRole | null {
  * missing source/output reframe or empty_pipeline) owns no step, so the
  * possessive prefix would render a bare "'this step':" — omit it there
  * (elspeth-901a404926).
+ *
+ * `componentType` is the SAME finding's structured `component_type`
+ * (ValidationError/ValidationWarning) — required (not optional) so a caller
+ * that has the field on hand cannot forget to thread it through to
+ * `phraseFor` (elspeth-ede84df6b3). Pass `null` explicitly when the caller
+ * genuinely has no structured type for this id (e.g. Stage-1 string-only
+ * errors with no component attribution at all).
  */
 export function formatFindingBody(
   count: number,
   label: string,
   finding: HumanisedFinding,
   componentId: string | null,
-  phraseFor: (componentId: string | null) => string,
+  componentType: string | null,
+  phraseFor: (componentId: string | null, componentType?: string | null) => string,
 ): string {
   const attributed = finding.raw === null && componentId !== null;
   return attributed
-    ? `${count} ${label} — '${phraseFor(componentId)}': ${finding.headline}`
+    ? `${count} ${label} — '${phraseFor(componentId, componentType)}': ${finding.headline}`
     : `${count} ${label} — ${finding.headline}`;
 }

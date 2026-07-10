@@ -3,12 +3,14 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import {
   ImportYamlModal,
+  ImportYamlModalHost,
   buildImportConfirmMessage,
   buildImportSuccessMessage,
   IMPORT_YAML_NOT_RUNNABLE_INTRO,
   IMPORT_YAML_422_MESSAGE,
   IMPORT_YAML_SECTIONS_ADVISORY_MESSAGE,
 } from "./ImportYamlModal";
+import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import * as api from "@/api/client";
@@ -120,6 +122,49 @@ describe("ImportYamlModal", () => {
     const textarea = screen.getByLabelText(/pipeline yaml/i);
     expect(textarea).toBeInTheDocument();
     expect(textarea).toHaveFocus();
+  });
+
+  it("host opens on the app-level import event and closes through the modal action", () => {
+    render(<ImportYamlModalHost />);
+
+    expect(screen.queryByRole("dialog", { name: /import yaml/i })).toBeNull();
+
+    fireEvent(window, new CustomEvent(OPEN_IMPORT_YAML_MODAL_EVENT));
+
+    expect(
+      screen.getByRole("dialog", { name: /import yaml/i }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    expect(screen.queryByRole("dialog", { name: /import yaml/i })).toBeNull();
+  });
+
+  it("host ignores the app-level import event without an active session", () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+    } as never);
+    render(<ImportYamlModalHost />);
+
+    fireEvent(window, new CustomEvent(OPEN_IMPORT_YAML_MODAL_EVENT));
+
+    expect(screen.queryByRole("dialog", { name: /import yaml/i })).toBeNull();
+  });
+
+  it("host closes when the active session is cleared", () => {
+    render(<ImportYamlModalHost />);
+    fireEvent(window, new CustomEvent(OPEN_IMPORT_YAML_MODAL_EVENT));
+    expect(
+      screen.getByRole("dialog", { name: /import yaml/i }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      useSessionStore.setState({
+        activeSessionId: null,
+      } as never);
+    });
+
+    expect(screen.queryByRole("dialog", { name: /import yaml/i })).toBeNull();
   });
 
   it("closes on Escape while drafting", () => {

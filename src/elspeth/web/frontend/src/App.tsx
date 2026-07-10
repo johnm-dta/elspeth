@@ -8,6 +8,7 @@ import { SideRail } from "./components/sidebar/SideRail";
 import { GraphMiniView } from "./components/sidebar/GraphMiniView";
 import { GraphModal } from "./components/sidebar/GraphModal";
 import { ExportYamlModal } from "./components/sidebar/ExportYamlModal";
+import { ImportYamlModalHost } from "./components/sidebar/ImportYamlModal";
 import { CatalogButton } from "./components/sidebar/CatalogButton";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
@@ -529,6 +530,7 @@ function App() {
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
         <GraphModal />
         <ExportYamlModal />
+        <ImportYamlModalHost />
         {/* Phase 6B Task 4: mount the SaveForReviewDialog at app-root level so
          *  CompletionBar's Save-for-review verb can open it regardless of
          *  which view is currently focused. The dialog reads its state from

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { ImportYamlButton } from "./ImportYamlButton";
 import { useSessionStore } from "@/stores/sessionStore";
+import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
 
 vi.mock("@/api/client", () => ({
   importCompositionYaml: vi.fn(),
@@ -31,32 +32,23 @@ describe("ImportYamlButton", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens the import modal on click", () => {
+  it("dispatches the app-level open event instead of mounting a side-rail dialog", () => {
     useSessionStore.setState({
       activeSessionId: "sess-1",
       compositionState: null,
     } as never);
+    const handler = vi.fn();
+    window.addEventListener(OPEN_IMPORT_YAML_MODAL_EVENT, handler);
 
-    render(<ImportYamlButton />);
-    expect(screen.queryByRole("dialog")).toBeNull();
+    try {
+      render(<ImportYamlButton />);
 
-    fireEvent.click(screen.getByRole("button", { name: /import yaml/i }));
+      fireEvent.click(screen.getByRole("button", { name: /import yaml/i }));
 
-    expect(
-      screen.getByRole("dialog", { name: /import yaml/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("closes the modal when the modal's Cancel action fires", () => {
-    useSessionStore.setState({
-      activeSessionId: "sess-1",
-      compositionState: null,
-    } as never);
-
-    render(<ImportYamlButton />);
-    fireEvent.click(screen.getByRole("button", { name: /import yaml/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
-
-    expect(screen.queryByRole("dialog")).toBeNull();
+      expect(handler).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog", { name: /import yaml/i })).toBeNull();
+    } finally {
+      window.removeEventListener(OPEN_IMPORT_YAML_MODAL_EVENT, handler);
+    }
   });
 });

@@ -3,6 +3,7 @@ import { parseDocument } from "yaml";
 import * as api from "@/api/client";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { ApiError } from "@/types/index";
@@ -338,10 +339,8 @@ function ImportYamlDraftPreview({
 /**
  * Import-YAML modal: paste or load-from-file, confirm when replacing a
  * non-trivial pipeline, submit, and render the outcome. Mounted only while
- * open (by ImportYamlButton), so `useFocusTrap`'s `active` is always true --
- * mount IS open, matching ExportYamlModal's focus/Escape/backdrop idiom but
- * without the always-mounted + internal-isOpen shape (see ImportYamlButton
- * for why).
+ * open (by ImportYamlModalHost), so `useFocusTrap`'s `active` is always true:
+ * mount IS open, matching ExportYamlModal's focus/Escape/backdrop idiom.
  */
 export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -628,4 +627,31 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
       </div>
     </>
   );
+}
+
+export function ImportYamlModalHost(): JSX.Element | null {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const [isOpen, setIsOpen] = useState(false);
+
+  useEffect(() => {
+    function handleOpen() {
+      if (useSessionStore.getState().activeSessionId) {
+        setIsOpen(true);
+      }
+    }
+
+    window.addEventListener(OPEN_IMPORT_YAML_MODAL_EVENT, handleOpen);
+    return () =>
+      window.removeEventListener(OPEN_IMPORT_YAML_MODAL_EVENT, handleOpen);
+  }, []);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      setIsOpen(false);
+    }
+  }, [activeSessionId]);
+
+  if (!activeSessionId || !isOpen) return null;
+
+  return <ImportYamlModal onClose={() => setIsOpen(false)} />;
 }

@@ -1313,6 +1313,27 @@
   color: var(--color-text-secondary);
 }
 
+/* A blob-backed source is an immutable binding, not an editable Path value.
+   Keep it visually static while showing both the friendly meaning and the
+   exact blob:<ref> target an operator is reviewing. */
+.guided-schema-bound-value {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  color: var(--color-text);
+}
+
+.guided-schema-bound-reference {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.guided-schema-bound-reference code {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+}
+
 /* Required-field asterisk (WCAG 3.3.2). aria-hidden in the markup — the
    accessible cue rides the visually-hidden "(required)" + aria-required; this
    is the sighted-only signal, tinted with the error colour to stand out. */

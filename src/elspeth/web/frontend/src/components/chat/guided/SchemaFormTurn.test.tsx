@@ -622,7 +622,7 @@ describe("SchemaFormTurn", () => {
       expect(screen.queryByText(blobSentinel)).not.toBeInTheDocument();
     });
 
-    it("masks a blob:<ref> path in the edit view (read-only), outside tutorial mode too", async () => {
+    it("renders a blob-bound path as a static binding with the target visible in edit view", async () => {
       const user = userEvent.setup();
       render(
         <SchemaFormTurn
@@ -633,9 +633,9 @@ describe("SchemaFormTurn", () => {
         />,
       );
       await user.click(screen.getByRole("button", { name: "Edit" }));
-      const input = screen.getByLabelText(/path/) as HTMLInputElement;
-      expect(input.value).toBe("Uploaded sample data");
-      expect(input).toHaveAttribute("readonly");
+      expect(screen.queryByRole("textbox", { name: /path/i })).not.toBeInTheDocument();
+      expect(screen.getByText("Uploaded sample data")).toBeInTheDocument();
+      expect(screen.getByText(blobSentinel)).toBeInTheDocument();
     });
 
     it("submits the REAL blob:<ref> sentinel (not the label) on Continue", async () => {

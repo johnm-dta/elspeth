@@ -438,16 +438,30 @@ function KnobFieldRenderer({
       // blob:<ref> sentinel mask (all modes, not just tutorial): the guided
       // emitter already masks a blob-backed source's absolute storage_path as
       // `blob:<blob_ref>` on the wire, but a raw UUID means nothing to the
-      // user. Render the friendly label; the sentinel stays in form state and
-      // flows to submit unchanged (handleContinue reads `values`, never this
-      // DOM string). readOnly so the label can never overwrite the sentinel.
+      // user. Render it as a static bound-upload value, including the exact
+      // sentinel for review; the sentinel stays in form state and flows to
+      // submit unchanged (handleContinue reads `values`).
       const maskBlobRef =
         field.name === "path" && rawString.startsWith(BLOB_REF_PATH_PREFIX);
-      const displayString = maskBlobRef
-        ? BLOB_REF_FRIENDLY_LABEL
-        : maskPathLeak
-          ? friendlyBlobRef(rawString)
-          : rawString;
+      if (maskBlobRef) {
+        return (
+          <div className="guided-schema-field-row">
+            <span className="guided-schema-label">{field.label}</span>
+            <div className="guided-schema-bound-value">
+              <span>Uploaded sample data</span>
+              <span className="guided-schema-bound-reference">
+                Bound reference: <code>{rawString}</code>
+              </span>
+            </div>
+            {field.description && (
+              <p id={descriptionId} className="guided-schema-hint">
+                {field.description}
+              </p>
+            )}
+          </div>
+        );
+      }
+      const displayString = maskPathLeak ? friendlyBlobRef(rawString) : rawString;
       return (
         <div className="guided-schema-field-row">
           <FieldLabel field={field} htmlFor={id} />
@@ -462,7 +476,7 @@ function KnobFieldRenderer({
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
-            readOnly={maskPathLeak || maskBlobRef}
+            readOnly={maskPathLeak}
           />
           {field.description && (
             <p id={descriptionId} className="guided-schema-hint">

@@ -381,6 +381,9 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     // returns version 2 with the inline_blob source attached.
     useSessionStore.setState({
       activeSessionId: SESSION_ID,
+      // Post-boot: the backend wall clock has landed, so the compose-timeout
+      // readiness gate is open and the freeform Send drives a real request.
+      composeTimeoutReady: true,
       sessions: [
         {
           id: SESSION_ID,

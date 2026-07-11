@@ -210,6 +210,23 @@ describe("sessionStore", () => {
     });
   });
 
+  describe("compose timeout readiness", () => {
+    it("starts not ready so every send is gated until the backend wall clock lands", () => {
+      // Fail-closed default: the reactive mirror of config/composer's
+      // isComposeTimeoutReady. Until App.checkHealth applies the server wall
+      // clock, the composer Send affordances stay disabled so no request is
+      // scheduled against the stale default ceiling (bootstrap race).
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    });
+
+    it("setComposeTimeoutReady flips the reactive gate", () => {
+      useSessionStore.getState().setComposeTimeoutReady(true);
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
+      useSessionStore.getState().setComposeTimeoutReady(false);
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    });
+  });
+
   describe("loaded-ness flags", () => {
     it("loadSessions marks sessionsLoaded on success", async () => {
       const apiMod = await import("@/api/client");

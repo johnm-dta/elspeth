@@ -248,6 +248,9 @@ describe("SideRailValidationBanner", () => {
           validation_suggestions: [SUGGESTION],
         }),
         isComposing: false,
+        // Post-boot: the backend wall clock has landed, so the readiness gate
+        // is open and Apply reflects only the composing state.
+        composeTimeoutReady: true,
       } as never);
 
       const { unmount } = render(<SideRailValidationBanner />);
@@ -266,6 +269,7 @@ describe("SideRailValidationBanner", () => {
           validation_suggestions: [SUGGESTION],
         }),
         isComposing: true,
+        composeTimeoutReady: true,
       } as never);
 
       render(<SideRailValidationBanner />);
@@ -287,6 +291,7 @@ describe("SideRailValidationBanner", () => {
         }),
         sendMessage,
         isComposing: false,
+        composeTimeoutReady: true,
       } as never);
 
       render(<SideRailValidationBanner />);
@@ -309,6 +314,7 @@ describe("SideRailValidationBanner", () => {
         }),
         sendMessage,
         isComposing: false,
+        composeTimeoutReady: true,
       } as never);
 
       render(<SideRailValidationBanner />);
@@ -317,6 +323,28 @@ describe("SideRailValidationBanner", () => {
       await user.keyboard("{Enter}");
 
       expect(sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("holds Apply closed until the compose timeout is ready (bootstrap race)", async () => {
+      // composeTimeoutReady defaults false via resetStore — the boot window.
+      // The side-rail Apply is a programmatic freeform sender; it must not
+      // start a compose against the stale default ceiling any more than the
+      // main Send may.
+      const user = userEvent.setup();
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        sendMessage,
+        isComposing: false,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+      const applyBtn = screen.getByRole("button", { name: "Apply" });
+      expect(applyBtn).toBeDisabled();
+      await user.click(applyBtn);
+      expect(sendMessage).not.toHaveBeenCalled();
     });
 
     it("collapses by default when more than 2 suggestions are present, expands on header click", async () => {

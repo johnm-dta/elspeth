@@ -16,9 +16,18 @@ interface SuggestionListProps {
 
 function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
   const { sendMessage, isComposing } = useComposer();
+  // Apply is a programmatic freeform sender (routes through useComposer →
+  // runComposeWithTimeout). Hold it closed until the backend compose wall
+  // clock has landed at boot, same as the main Send — a send started against
+  // the stale default ceiling could be aborted before the backend's 422
+  // (bootstrap race). The underlying runComposeWithTimeout also no-ops when
+  // not ready; disabling the button keeps it from reading as a dead click.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  const applyDisabled = isComposing || !composeTimeoutReady;
   const [expanded, setExpanded] = useState(suggestions.length <= 2);
 
   function handleApply(suggestion: ValidationEntryDTO): void {
+    if (applyDisabled) return;
     const prompt = `Please apply this suggestion to the pipeline:\n\n**${suggestion.component}:** ${suggestion.message}`;
     void sendMessage(prompt);
   }
@@ -54,7 +63,12 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
               </span>
               <button
                 className="side-rail-suggestion-apply-btn"
-                disabled={isComposing}
+                disabled={applyDisabled}
+                title={
+                  !isComposing && !composeTimeoutReady
+                    ? "Connecting to the composer…"
+                    : undefined
+                }
                 onClick={() => handleApply(s)}
               >
                 {isComposing ? "Applying..." : "Apply"}

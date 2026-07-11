@@ -419,6 +419,11 @@ describe("ChatPanel mode discriminator", () => {
     // Slice C: the verification-panel tests seed validationResult; reset the
     // execution store so a seeded result does not leak into sibling tests.
     resetStore(useExecutionStore);
+    // Post-boot: the backend wall clock has landed, so the compose-timeout
+    // readiness gate is open and guided sends (sendGuidedChat →
+    // runComposeWithTimeout) proceed. resetStore clears it to the fail-closed
+    // false default; the per-test setState calls merge over this.
+    useSessionStore.setState({ composeTimeoutReady: true });
     (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
       sendMessage: vi.fn(),
       retryMessage: vi.fn(),
@@ -2003,6 +2008,32 @@ describe("ChatPanel mode discriminator", () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it("does not invoke chatGuided while the readiness gate is closed (bootstrap race)", async () => {
+    // ChatPanel must thread composeTimeoutReady into the shared
+    // runComposeWithTimeout so the guided path is gated exactly like freeform:
+    // before the backend wall clock lands, no guided send may schedule an
+    // abort from the stale default ceiling. Override the beforeEach post-boot
+    // default to reproduce the boot window.
+    const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      chatGuided: chatGuidedSpy,
+      composeTimeoutReady: false,
+    });
+
+    render(<ChatPanel />);
+
+    await act(async () => {
+      screen.getByTestId("chat-input").click();
+    });
+
+    expect(chatGuidedSpy).not.toHaveBeenCalled();
   });
 
   it("decision card offers Explain — one click sends the canned question down the chat path", async () => {

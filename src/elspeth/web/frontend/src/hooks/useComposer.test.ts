@@ -6,6 +6,7 @@ import {
   COMPOSE_CLIENT_GRACE_MS,
   getComposeTimeoutMs,
   applyServerComposerTimeout,
+  resetComposeTimeoutForTests,
   COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
@@ -15,9 +16,9 @@ import { resetStore } from "@/test/store-helpers";
 
 describe("compose timeout ceiling", () => {
   afterEach(() => {
-    // The ceiling is module-level state: restore the default-equivalent
-    // derivation (backend 270s + grace = 295s) so tests stay independent.
-    applyServerComposerTimeout(DEFAULT_COMPOSE_TIMEOUT_MS / 1000 - COMPOSE_CLIENT_GRACE_MS / 1000);
+    // The ceiling is module-level state; the readiness gate lives in the
+    // store. Restore both so tests stay independent.
+    resetComposeTimeoutForTests();
     resetStore(useSessionStore);
     vi.useRealTimers();
   });
@@ -66,6 +67,9 @@ describe("compose timeout ceiling", () => {
     applyServerComposerTimeout(1);
     let captured: AbortSignal | undefined;
     useSessionStore.setState({
+      // Post-boot: the readiness gate is open, so the send proceeds and the
+      // hook schedules the abort at the derived ceiling.
+      composeTimeoutReady: true,
       sendMessage: vi.fn(async (_content: string, signal?: AbortSignal) => {
         captured = signal;
         await new Promise<void>((resolve) => {
@@ -87,5 +91,46 @@ describe("compose timeout ceiling", () => {
 
   it("uses distinct abort reasons for timeout and user cancel paths", () => {
     expect(COMPOSE_TIMEOUT_ABORT_REASON).not.toBe(COMPOSE_USER_CANCEL_ABORT_REASON);
+  });
+
+  it("does not start a send while the readiness gate is closed (bootstrap window)", async () => {
+    // The gate is the client-outlives-server invariant during boot: before
+    // GET /api/system/status supplies the wall clock, no request may start —
+    // it would schedule an abort from the stale default ceiling.
+    const storeSend = vi.fn();
+    useSessionStore.setState({ composeTimeoutReady: false, sendMessage: storeSend });
+
+    const { result } = renderHook(() => useComposer());
+    await result.current.sendMessage("hello");
+
+    expect(storeSend).not.toHaveBeenCalled();
+  });
+
+  it("does not start a retry while the readiness gate is closed", async () => {
+    const storeRetry = vi.fn();
+    useSessionStore.setState({ composeTimeoutReady: false, retryMessage: storeRetry });
+
+    const { result } = renderHook(() => useComposer());
+    await result.current.retryMessage("msg-1");
+
+    expect(storeRetry).not.toHaveBeenCalled();
+  });
+
+  it("starts send and retry once the readiness gate opens", async () => {
+    applyServerComposerTimeout(300);
+    const storeSend = vi.fn().mockResolvedValue(undefined);
+    const storeRetry = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      composeTimeoutReady: true,
+      sendMessage: storeSend,
+      retryMessage: storeRetry,
+    });
+
+    const { result } = renderHook(() => useComposer());
+    await result.current.sendMessage("hello");
+    await result.current.retryMessage("msg-1");
+
+    expect(storeSend).toHaveBeenCalledWith("hello", expect.any(AbortSignal));
+    expect(storeRetry).toHaveBeenCalledWith("msg-1", expect.any(AbortSignal));
   });
 });

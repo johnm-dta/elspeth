@@ -607,6 +607,15 @@ interface SessionState {
   proposalActionPendingIds: string[];
   composerProgress: ComposerProgressSnapshot | null;
   isComposing: boolean;
+  /**
+   * Reactive mirror of config/composer's isComposeTimeoutReady, set by
+   * App.checkHealth once GET /api/system/status supplies the backend compose
+   * wall clock. FALSE until then, gating every Send affordance (freeform,
+   * guided, side-rail Apply) so no compose request is scheduled against the
+   * stale default abort ceiling during the boot window (bootstrap race).
+   */
+  composeTimeoutReady: boolean;
+  setComposeTimeoutReady: (ready: boolean) => void;
   stateVersions: CompositionStateVersion[];
   error: string | null;
   /**
@@ -772,6 +781,7 @@ const initialState = {
   proposalActionPendingIds: [] as string[],
   composerProgress: null as ComposerProgressSnapshot | null,
   isComposing: false,
+  composeTimeoutReady: false,
   stateVersions: [] as CompositionStateVersion[],
   isLoadingVersions: false,
   error: null as string | null,
@@ -786,6 +796,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setExportedYamlBlobBinding(binding) {
     set({ exportedYamlBlobBinding: binding });
+  },
+
+  setComposeTimeoutReady(ready) {
+    set({ composeTimeoutReady: ready });
   },
 
   async loadSessions() {

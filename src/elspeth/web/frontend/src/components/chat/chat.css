@@ -412,6 +412,16 @@
   border: 1px solid var(--color-error-border);
 }
 
+/* Compose-timeout bootstrap notice: a soft, transient "connecting" status
+   shown while the backend wall clock is still landing. Muted (not error)
+   register — it explains why Send is briefly disabled without alarming. */
+.chat-input-bootstrapping {
+  padding: var(--space-1-5) var(--space-2-5);
+  margin-bottom: var(--space-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
 .chat-input-row {
   display: flex;
   gap: var(--space-sm);

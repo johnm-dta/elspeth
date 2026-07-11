@@ -2,9 +2,8 @@
 import { useCallback, useRef } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import {
-  COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
-  getComposeTimeoutMs,
+  runComposeWithTimeout,
 } from "@/config/composer";
 
 /**
@@ -24,28 +23,22 @@ export function useComposer() {
   const compositionState = useSessionStore((s) => s.compositionState);
   const error = useSessionStore((s) => s.error);
   const errorDetails = useSessionStore((s) => s.errorDetails);
+  // Single source of truth for the bootstrap-race gate; passed to the shared
+  // primitive so freeform and guided (ChatPanel.sendGuidedChat) read the same
+  // readiness signal.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
   const activeControllerRef = useRef<AbortController | null>(null);
 
+  // Delegates to the shared compose-timeout primitive so freeform and guided
+  // (ChatPanel.sendGuidedChat) sends share ONE timer + readiness guard and
+  // cannot drift apart. The guard means a send started before the backend
+  // wall clock has landed (bootstrap window) does not run at all — the Send
+  // affordance is disabled until readiness, so this only backstops
+  // programmatic callers (SideRailValidationBanner).
   const runWithTimeout = useCallback(
-    async (runner: (signal: AbortSignal) => Promise<void>) => {
-      const controller = new AbortController();
-      activeControllerRef.current = controller;
-      const timer = setTimeout(
-        () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-        // Read at call time: the ceiling is derived from the backend's
-        // configured wall clock once /api/system/status lands at boot.
-        getComposeTimeoutMs(),
-      );
-      try {
-        await runner(controller.signal);
-      } finally {
-        clearTimeout(timer);
-        if (activeControllerRef.current === controller) {
-          activeControllerRef.current = null;
-        }
-      }
-    },
-    [],
+    (runner: (signal: AbortSignal) => Promise<void>) =>
+      runComposeWithTimeout(activeControllerRef, composeTimeoutReady, runner),
+    [composeTimeoutReady],
   );
 
   const sendMessage = useCallback(

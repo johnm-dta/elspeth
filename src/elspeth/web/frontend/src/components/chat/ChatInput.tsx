@@ -101,6 +101,15 @@ export function ChatInput({
   const setTextRef = useRef(setText);
   setTextRef.current = setText;
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  // Compose-timeout bootstrap gate (elspeth bootstrap race). FALSE until
+  // App.checkHealth has applied the backend wall clock; sending before then
+  // would schedule a compose-abort timer from the stale default ceiling and
+  // could abort a healthy turn before the backend's structured 422. Send is
+  // held closed until readiness with a visible reason (dead-button doctrine —
+  // a silently inert Send reads as a bug). Both freeform and guided render
+  // this input, so this one gate covers both paths.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  const awaitingComposeTimeout = !composeTimeoutReady;
   // Phase 5a Task 1 — empty-state placeholder primes the user to type data
   // directly into chat (URL / a few rows / a short brief).  Reads two
   // singleton fields on sessionStore (verified: sessionStore.ts:154-155):
@@ -170,7 +179,9 @@ export function ChatInput({
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
+    // awaitingComposeTimeout gates the Enter-key path too, not just the
+    // button: no send may start before a known-good abort ceiling exists.
+    if (!trimmed || disabled || awaitingComposeTimeout) return;
     onSend(trimmed);
     // Clear input after send
     if (isControlled) {
@@ -178,7 +189,14 @@ export function ChatInput({
     } else {
       setInternalText("");
     }
-  }, [text, disabled, onSend, isControlled, controlledOnChange]);
+  }, [
+    text,
+    disabled,
+    awaitingComposeTimeout,
+    onSend,
+    isControlled,
+    controlledOnChange,
+  ]);
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -215,7 +233,7 @@ export function ChatInput({
     }
   }
 
-  const canSend = !disabled && text.trim().length > 0;
+  const canSend = !disabled && !awaitingComposeTimeout && text.trim().length > 0;
 
   // Read-only (tutorial locked prompt) content is static and multi-line (the
   // worked-example prompt + the sample URLs). A fixed 2-row box clipped it; size
@@ -259,6 +277,16 @@ export function ChatInput({
       {uploadStatus && (
         <div role="alert" className="chat-input-upload-alert">
           {uploadStatus}
+        </div>
+      )}
+      {/* Bootstrap gate reason. role=status (polite): a soft, transient
+          startup condition, not an error. Shown only while NOT composing so it
+          never collides with the Stop affordance. Explains why Send is
+          disabled during the (usually sub-second) window before
+          GET /api/system/status supplies the backend compose wall clock. */}
+      {awaitingComposeTimeout && !disabled && (
+        <div role="status" className="chat-input-bootstrapping">
+          Connecting to the composer…
         </div>
       )}
       <div className="chat-input-row" role="group" aria-label="Message composition">

@@ -18,6 +18,11 @@ import type {
   SystemStatus,
   UserProfile,
 } from "./types/index";
+import {
+  COMPOSE_CLIENT_GRACE_MS,
+  getComposeTimeoutMs,
+  resetComposeTimeoutForTests,
+} from "@/config/composer";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
 // App renders many heavy children (Layout, ChatPanel, …).
@@ -504,6 +509,61 @@ function makeAssistantMessage(): ChatMessage {
     created_at: "2026-05-14T00:00:00Z",
   };
 }
+
+describe("App compose timeout readiness (bootstrap race)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    resetComposeTimeoutForTests();
+    useExecutionStore.getState().reset();
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
+    vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
+  });
+
+  it("marks the composer ready and adopts the backend ceiling once system status lands", async () => {
+    // A deployment configured ABOVE the checked-in default (300s wall clock)
+    // is the exact case the stale 295s default would abort early. Readiness
+    // must flip only after applyServerComposerTimeout adopts 300s → 325s.
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+      composer_timeout_seconds: 300,
+    } satisfies SystemStatus);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(true),
+    );
+    expect(getComposeTimeoutMs()).toBe(300_000 + COMPOSE_CLIENT_GRACE_MS);
+  });
+
+  it("leaves the composer unready when system status fails, so no send starts against the unsafe default", async () => {
+    vi.spyOn(api, "fetchSystemStatus").mockRejectedValue(new Error("down"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<App />);
+
+    await screen.findByText(/Backend unavailable/i);
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    errorSpy.mockRestore();
+  });
+});
 
 describe("App composer recovery panel", () => {
   beforeEach(() => {

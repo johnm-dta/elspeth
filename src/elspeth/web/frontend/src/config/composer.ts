@@ -42,18 +42,75 @@ export function getComposeTimeoutMs(): number {
  * clock (seconds, from GET /api/system/status). Non-finite or non-positive
  * values are ignored — the current ceiling (default 295s) is a safe floor,
  * and a garbage value must not shrink the guard below the backend wall.
+ *
+ * Returns whether a valid value was applied. App.checkHealth uses the return
+ * to latch sessionStore.composeTimeoutReady — the SINGLE source of truth for
+ * "a known-good ceiling exists" — so a garbage value leaves BOTH the ceiling
+ * and readiness untouched.
  */
 export function applyServerComposerTimeout(
   backendTimeoutSeconds: number,
-): void {
+): boolean {
   if (
     !Number.isFinite(backendTimeoutSeconds) ||
     backendTimeoutSeconds <= 0
   ) {
-    return;
+    return false;
   }
   composeTimeoutMs =
     Math.round(backendTimeoutSeconds * 1000) + COMPOSE_CLIENT_GRACE_MS;
+  return true;
+}
+
+/** Test-only: restore the ceiling to its boot default. */
+export function resetComposeTimeoutForTests(): void {
+  composeTimeoutMs = DEFAULT_COMPOSE_TIMEOUT_MS;
+}
+
+/**
+ * Run a compose request under the client abort ceiling — the single shared
+ * primitive for BOTH freeform (useComposer) and guided (ChatPanel) sends, so
+ * the two paths cannot drift the timer/guard logic apart again.
+ *
+ * INVARIANT: a compose-abort setTimeout is only ever scheduled from a
+ * known-good ceiling. `ready` is sessionStore.composeTimeoutReady, the single
+ * reactive source of truth (set true by App.checkHealth once the backend wall
+ * clock lands). While NOT ready the runner is not invoked at all (no API
+ * request, no controller, no timer) — the Send affordances are disabled until
+ * readiness, so reaching here un-ready is the programmatic-caller (e.g.
+ * SideRailValidationBanner) defense-in-depth path. Readiness is a parameter,
+ * not a module read, so the primitive stays pure and the caller owns the one
+ * source.
+ *
+ * The controllerRef is assigned BEFORE the runner awaits (so a concurrent
+ * Stop can abort the in-flight fetch) and released with an identity check
+ * after it settles (so a later send's controller is never clobbered).
+ */
+export async function runComposeWithTimeout(
+  controllerRef: { current: AbortController | null },
+  ready: boolean,
+  runner: (signal: AbortSignal) => Promise<void>,
+): Promise<void> {
+  if (!ready) {
+    return;
+  }
+  const controller = new AbortController();
+  controllerRef.current = controller;
+  const timer = setTimeout(
+    () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
+    // Read at call time: the ceiling is derived from the backend's configured
+    // wall clock once /api/system/status lands at boot, and readiness above
+    // guarantees that has happened before we reach here.
+    getComposeTimeoutMs(),
+  );
+  try {
+    await runner(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    if (controllerRef.current === controller) {
+      controllerRef.current = null;
+    }
+  }
 }
 
 // Abort reasons are internal frontend control-plane values. They let

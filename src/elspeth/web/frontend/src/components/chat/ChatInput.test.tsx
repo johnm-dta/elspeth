@@ -527,6 +527,9 @@ describe("ChatInput — tutorial readOnly lock (prepopulated + locked prompt)", 
     resetStore(useSessionStore);
     resetStore(useBlobStore);
     resetStore(useInterpretationEventsStore);
+    // Post-boot: the backend wall clock has landed, so the readiness gate is
+    // open and the learner can press Send on the locked prompt.
+    useSessionStore.setState({ composeTimeoutReady: true });
   });
 
   const LOCKED = "Scrape these three synthetic project-brief pages.";
@@ -570,5 +573,50 @@ describe("ChatInput — tutorial readOnly lock (prepopulated + locked prompt)", 
     render(<LockedHarness onSend={(c) => sent.push(c)} />);
     await userEvent.click(screen.getByLabelText(/send message/i));
     expect(sent).toEqual([LOCKED]);
+  });
+});
+
+describe("ChatInput — compose timeout readiness gate (bootstrap race)", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  function renderInput(onSend: (c: string) => void) {
+    const inputRef = { current: null } as RefObject<HTMLTextAreaElement>;
+    render(<ChatInput onSend={onSend} disabled={false} inputRef={inputRef} />);
+  }
+
+  it("gates Send behind a visible connecting reason until the timeout is ready", async () => {
+    // composeTimeoutReady defaults false (boot). No send may schedule a
+    // compose-abort timer from the stale default ceiling; the disabled Send
+    // is not a dead button — a visible status says why (dead-button doctrine).
+    const onSend = vi.fn();
+    renderInput(onSend);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/message input/i), "build a pipeline");
+
+    expect(screen.getByLabelText(/send message/i)).toBeDisabled();
+    expect(
+      screen.getByText(/connecting to the composer/i),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("enables Send once the backend wall clock has landed", async () => {
+    useSessionStore.setState({ composeTimeoutReady: true });
+    const onSend = vi.fn();
+    renderInput(onSend);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/message input/i), "build a pipeline");
+
+    expect(screen.getByLabelText(/send message/i)).toBeEnabled();
+    expect(screen.queryByText(/connecting to the composer/i)).toBeNull();
+
+    await user.keyboard("{Enter}");
+    expect(onSend).toHaveBeenCalledWith("build a pipeline");
   });
 });

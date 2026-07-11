@@ -52,9 +52,8 @@ import {
 import { acknowledgementCardTitle } from "./AcknowledgementCard";
 import { humaniseStepLabel } from "./interpretationStepLabel";
 import {
-  COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
-  getComposeTimeoutMs,
+  runComposeWithTimeout,
 } from "@/config/composer";
 import type { WireBlockerLink } from "./guided/WireStageTurn";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
@@ -612,6 +611,9 @@ export function ChatPanel({
   const startGuided = useSessionStore((s) => s.startGuided);
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
   const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
+  // Bootstrap-race gate (single source of truth): guided sends read the same
+  // readiness the shared runComposeWithTimeout enforces for freeform.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
   const guidedSelfHealNotice = useSessionStore((s) => s.guidedSelfHealNotice);
   // Whether the CURRENT chat has any work — gates the mode-switch confirmation
   // (ModeSwitchButton). Freeform work = messages or a non-empty composition;
@@ -686,25 +688,15 @@ export function ChatPanel({
   // guidedChatPending so the turn can be retried.
   const guidedChatControllerRef = useRef<AbortController | null>(null);
   const sendGuidedChat = useCallback(
-    async (content: string) => {
-      const controller = new AbortController();
-      guidedChatControllerRef.current = controller;
-      const timer = setTimeout(
-        () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-        // Read at call time: the ceiling is derived from the backend's
-        // configured wall clock once /api/system/status lands at boot.
-        getComposeTimeoutMs(),
-      );
-      try {
-        await chatGuided(content, controller.signal);
-      } finally {
-        clearTimeout(timer);
-        if (guidedChatControllerRef.current === controller) {
-          guidedChatControllerRef.current = null;
-        }
-      }
-    },
-    [chatGuided],
+    (content: string) =>
+      // Same shared primitive freeform's useComposer.runWithTimeout uses: one
+      // timer + readiness guard for both paths. Until the backend wall clock
+      // has landed at boot the guided send does not run (no request, no
+      // timer) — the guided input is disabled until readiness.
+      runComposeWithTimeout(guidedChatControllerRef, composeTimeoutReady, (signal) =>
+        chatGuided(content, signal),
+      ),
+    [chatGuided, composeTimeoutReady],
   );
   const cancelGuidedChat = useCallback(() => {
     guidedChatControllerRef.current?.abort(COMPOSE_USER_CANCEL_ABORT_REASON);

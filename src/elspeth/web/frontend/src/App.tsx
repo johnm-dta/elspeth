@@ -215,8 +215,18 @@ function App() {
       // Derive the compose abort ceiling from the deployment's configured
       // wall clock — a hard-coded client cap only satisfies the
       // client-outlives-server invariant for the checked-in defaults.
-      if (status.composer_timeout_seconds !== undefined) {
-        applyServerComposerTimeout(status.composer_timeout_seconds);
+      // Latch the store readiness gate (the single source of truth) true once
+      // a known-good ceiling is applied: the Send affordances (freeform,
+      // guided, side-rail Apply) ungate only then, closing the bootstrap race
+      // where a send started before this fetch would schedule an abort from
+      // the stale default. Only ever set true — the backend wall clock does
+      // not change mid-session, so a later partial health response must not
+      // un-ready a composer that already knows its ceiling.
+      if (
+        status.composer_timeout_seconds !== undefined &&
+        applyServerComposerTimeout(status.composer_timeout_seconds)
+      ) {
+        useSessionStore.getState().setComposeTimeoutReady(true);
       }
       setBackendAvailable(true);
       setLastHealthCheckAt(null);

@@ -194,6 +194,28 @@ async def _await_tool_turn_with_deferred_cancellation[T](
                     return task.result(), deferred
                 except _ToolBatchCancellationRequested:
                     raise deferred from None
+                except Exception as child_exc:
+                    slog.warning(
+                        "tool_turn_child_failed_during_deferred_cancellation",
+                        exc_class=type(child_exc).__name__,
+                    )
+                    raise deferred from child_exc
+        except Exception as child_exc:
+            # The child failed AFTER a cancellation was caught and deferred.
+            # Python never redelivers the caught CancelledError on its own:
+            # letting the child exception propagate would finish the route
+            # on its error path with the task's cancellation requests still
+            # pending — swallowing an operator/shutdown cancel (and the
+            # disconnect watcher's except-CancelledError bookkeeping would
+            # never run). Cancellation wins; the child failure rides along
+            # as ``__cause__`` so the audit/log trail keeps the diagnosis.
+            if deferred is None:
+                raise
+            slog.warning(
+                "tool_turn_child_failed_during_deferred_cancellation",
+                exc_class=type(child_exc).__name__,
+            )
+            raise deferred from child_exc
 
 
 _blocking_result_from_tool_invocations = _no_tool_policy.blocking_result_from_tool_invocations

@@ -559,6 +559,58 @@ async def test_cancellation_during_sync_tool_waits_for_result_audit_persist(
 
 
 @pytest.mark.asyncio
+async def test_deferred_cancellation_survives_child_failure() -> None:
+    """A child failure after cancellation is deferred must not swallow the cancel.
+
+    When a disconnect or external cancellation arrives while the shielded
+    dispatch/persist section runs and the child then raises (e.g. an audit
+    persistence failure), the exception from ``asyncio.shield(task)`` would
+    bypass ``deferred``. Python never redelivers a caught CancelledError on
+    its own, so the route would finish on the child's error path with the
+    task's cancellation requests still pending — swallowing an operator or
+    shutdown cancel. Cancellation must win; the child failure rides along
+    as ``__cause__`` for diagnosis.
+    """
+    from elspeth.web.composer.service import _await_tool_turn_with_deferred_cancellation
+
+    cancellation_requested = asyncio.Event()
+    proceed_to_fail = asyncio.Event()
+
+    async def child() -> str:
+        await proceed_to_fail.wait()
+        raise RuntimeError("audit persistence failed")
+
+    captured: dict[str, BaseException] = {}
+
+    async def awaiter() -> None:
+        try:
+            await _await_tool_turn_with_deferred_cancellation(
+                child(),
+                cancellation_requested=cancellation_requested,
+            )
+        except BaseException as exc:
+            captured["exc"] = exc
+            raise
+        raise AssertionError("unreachable — the child never succeeds")
+
+    task = asyncio.get_running_loop().create_task(awaiter())
+    await asyncio.sleep(0)  # awaiter parked on the shield
+    task.cancel()
+    # The helper catches the CancelledError, defers it, and re-awaits the
+    # shielded child; cancellation_requested is the deterministic sync point.
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=2.0)
+    proceed_to_fail.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+    exc = captured["exc"]
+    assert isinstance(exc, asyncio.CancelledError), f"the child failure replaced the deferred cancellation: {exc!r}"
+    assert isinstance(exc.__cause__, RuntimeError), "the child failure must stay diagnosable as the cancellation's __cause__"
+    assert task.cancelled(), "the awaiting task must finish as genuinely cancelled"
+
+
+@pytest.mark.asyncio
 async def test_step2_does_not_call_legacy_add_message_inside_loop(
     composer_service_with_real_sessions: ComposerServiceImpl,
     fake_llm_two_tool_calls: Any,

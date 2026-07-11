@@ -14,7 +14,15 @@ const TOKEN_KEY = "auth_token";
 const DEFAULT_BASE_URL = "https://elspeth.foundryside.dev";
 const DEFAULT_RUNS = 20;
 const DEFAULT_BUILD_TIMEOUT_MS = 420_000;
-const BASE_EXPECTED_TUTORIAL_KINDS = ["invented_source", "llm_prompt_template", "pipeline_decision"];
+// The tutorial seeds an uploaded sample; the guided source binds it via the
+// upload fast-path (blob:<ref>, server_storage_bound) rather than authoring an
+// LLM-invented source, so it stages NO invented_source review on the source
+// node (parity with the normal guided seeded-upload flow — see
+// _source_from_latest_uploaded_blob_for_step_1_chat and chat_solver
+// server_storage_bound). The invented_source expectation therefore no longer
+// holds; the bound-source invariant is asserted positively below
+// (elspeth-52f42d09a2).
+const BASE_EXPECTED_TUTORIAL_KINDS = ["llm_prompt_template", "pipeline_decision"];
 const RAW_HTML_CLEANUP_TERM = "drop_raw_html_fields";
 const PROMPT_SHIELD_RECOMMENDATION_TERM = "prompt_injection_shield_recommendation";
 
@@ -288,12 +296,13 @@ async function fetchSessionEvidence(token, sessionId) {
   const blockingToolValidationDiagnostics = latestBlockingToolValidationDiagnostics(messages);
   const hasExpectedTutorialAssumptions =
     expectedKinds.every((kind) => reviewKinds.includes(kind)) &&
-    reviewEvents.some(
-      (event) =>
-        event.kind === "invented_source" &&
-        event.affected_node_id === "source" &&
-        typeof event.user_term === "string" &&
-        event.user_term.length > 0,
+    // Bound-source invariant (elspeth-52f42d09a2): the seeded upload binds the
+    // source via the fast-path, so the tutorial must NOT stage an
+    // invented_source review on the source node. Its presence would mean the
+    // source regressed to the LLM-invented path (or the seeded blob failed to
+    // bind), which the pre-9f425de3d contract wrongly required.
+    !reviewEvents.some(
+      (event) => event.kind === "invented_source" && event.affected_node_id === "source",
     ) &&
     (!expectedVagueTerm ||
       reviewEvents.some(

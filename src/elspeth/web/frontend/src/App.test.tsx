@@ -21,7 +21,7 @@ import type {
 import {
   COMPOSE_CLIENT_GRACE_MS,
   getComposeTimeoutMs,
-  resetComposeTimeout,
+  resetComposeTimeoutForTests,
 } from "@/config/composer";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
@@ -514,7 +514,7 @@ describe("App compose timeout readiness (bootstrap race)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(useSessionStore);
-    resetComposeTimeout();
+    resetComposeTimeoutForTests();
     useExecutionStore.getState().reset();
     useAuthStore.setState({
       token: "test-token",
@@ -591,7 +591,7 @@ describe("App compose timeout readiness (bootstrap race)", () => {
   });
 
   it("a partial poll AFTER a good ceiling keeps ready and does not re-flag or re-log (else-guard)", async () => {
-    // The else-guard (!isComposeTimeoutReady()) across two polls: once a real
+    // The else-guard (!composeTimeoutReady) across two polls: once a real
     // ceiling latches, a later partial/absent response is a transient — it must
     // not un-ready, flag unavailable, or spam a false "no usable timeout" error.
     vi.useFakeTimers();

@@ -38,11 +38,6 @@ export const COMPOSE_UNAVAILABLE_MESSAGE =
   "Composer unavailable — the server did not report a compose timeout.";
 
 let composeTimeoutMs = DEFAULT_COMPOSE_TIMEOUT_MS;
-// Whether a backend wall clock has been applied to the ceiling above. Set
-// together with composeTimeoutMs in applyServerComposerTimeout so readiness
-// and the ceiling can never disagree — a ready gate that outran the ceiling
-// would schedule an abort from the stale default, the exact bug this guards.
-let composeTimeoutApplied = false;
 
 /** Current compose abort ceiling. Read at CALL time (useComposer), never
  * cached at module load, so the boot-applied server value governs every
@@ -52,29 +47,15 @@ export function getComposeTimeoutMs(): number {
 }
 
 /**
- * Whether a valid backend wall clock has been applied, i.e. a compose-abort
- * timer scheduled now would use the deployment's configured ceiling rather
- * than the boot default. Because this flag is set in the SAME
- * applyServerComposerTimeout call that sets the ceiling, readiness can never
- * outrun the ceiling. sessionStore.composeTimeoutReady is the reactive mirror
- * of this predicate (latched by App.checkHealth) — components subscribe to the
- * store; this module function is the non-reactive source of truth it mirrors.
- */
-export function isComposeTimeoutReady(): boolean {
-  return composeTimeoutApplied;
-}
-
-/**
  * Derive the abort ceiling from the backend's configured compose wall
  * clock (seconds, from GET /api/system/status). Non-finite or non-positive
  * values are ignored — the current ceiling (default 295s) is a safe floor,
  * and a garbage value must not shrink the guard below the backend wall.
  *
- * Returns whether a valid value was applied, and sets isComposeTimeoutReady()
- * (this module's authoritative "a known-good ceiling exists" predicate) in the
- * same call. App.checkHealth mirrors that predicate into
- * sessionStore.composeTimeoutReady — the reactive gate the UI subscribes to —
- * so a garbage value leaves BOTH the ceiling and readiness untouched.
+ * Returns whether a valid value was applied. App.checkHealth uses the return to
+ * latch sessionStore.composeTimeoutReady — the single reactive source of truth
+ * for "a known-good ceiling exists" — so a garbage value leaves BOTH the ceiling
+ * and readiness untouched.
  */
 export function applyServerComposerTimeout(
   backendTimeoutSeconds: number,
@@ -87,19 +68,12 @@ export function applyServerComposerTimeout(
   }
   composeTimeoutMs =
     Math.round(backendTimeoutSeconds * 1000) + COMPOSE_CLIENT_GRACE_MS;
-  composeTimeoutApplied = true;
   return true;
 }
 
-/**
- * Restore the ceiling AND readiness to their boot defaults, together. Called on
- * logout (sessionStore.reset) so the module predicate and the store gate reset
- * in lockstep — otherwise the module would retain readiness the reset store no
- * longer reflects — and by tests for isolation.
- */
-export function resetComposeTimeout(): void {
+/** Test-only: restore the ceiling to its boot default. */
+export function resetComposeTimeoutForTests(): void {
   composeTimeoutMs = DEFAULT_COMPOSE_TIMEOUT_MS;
-  composeTimeoutApplied = false;
 }
 
 /**

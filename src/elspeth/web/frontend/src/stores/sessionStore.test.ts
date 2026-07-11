@@ -2,10 +2,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
-import {
-  applyServerComposerTimeout,
-  isComposeTimeoutReady,
-} from "@/config/composer";
 import type {
   ChatMessage,
   ComposerPreferences,
@@ -216,10 +212,10 @@ describe("sessionStore", () => {
 
   describe("compose timeout readiness", () => {
     it("starts not ready so every send is gated until the backend wall clock lands", () => {
-      // Fail-closed default: the reactive mirror of config/composer's
-      // isComposeTimeoutReady. Until App.checkHealth applies the server wall
-      // clock, the composer Send affordances stay disabled so no request is
-      // scheduled against the stale default ceiling (bootstrap race).
+      // Fail-closed default: the single reactive source of truth for the
+      // compose gate. Until App.checkHealth applies the server wall clock, the
+      // composer Send affordances stay disabled so no request is scheduled
+      // against the stale default ceiling (bootstrap race).
       expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
     });
 
@@ -238,19 +234,6 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true);
       useSessionStore.getState().setComposerTimeoutUnavailable(false);
       expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
-    });
-
-    it("reset() clears the module compose-timeout readiness in lockstep (logout invariant)", () => {
-      // On logout the store resets composeTimeoutReady=false; the module
-      // predicate must reset in lockstep, or the two disagree (store un-ready,
-      // module still ready) until the next health poll re-mirrors.
-      applyServerComposerTimeout(300);
-      expect(isComposeTimeoutReady()).toBe(true);
-
-      useSessionStore.getState().reset();
-
-      expect(isComposeTimeoutReady()).toBe(false);
-      expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
     });
   });
 

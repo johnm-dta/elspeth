@@ -49,10 +49,7 @@ import {
   OPEN_CATALOG_EVENT,
 } from "./lib/composer-events";
 import type { SystemStatus } from "./types/index";
-import {
-  applyServerComposerTimeout,
-  isComposeTimeoutReady,
-} from "./config/composer";
+import { applyServerComposerTimeout } from "./config/composer";
 
 // Health check interval in milliseconds (30 seconds)
 const HEALTH_CHECK_INTERVAL = 30_000;
@@ -229,26 +226,25 @@ function App() {
         status.composer_timeout_seconds !== undefined &&
         applyServerComposerTimeout(status.composer_timeout_seconds)
       ) {
-        // Mirror the module readiness predicate (set atomically with the
-        // ceiling inside applyServerComposerTimeout) into the reactive store,
-        // so the store gate can never claim readiness the ceiling has not.
-        useSessionStore
-          .getState()
-          .setComposeTimeoutReady(isComposeTimeoutReady());
+        // Latch the reactive readiness gate — the single source of truth the
+        // Send affordances subscribe to — now that a known-good ceiling is
+        // applied. Only ever set true: the backend wall clock does not change
+        // mid-session, so a later partial poll must not un-ready a composer that
+        // already knows its ceiling (the else-guard below enforces that).
+        useSessionStore.getState().setComposeTimeoutReady(true);
         useSessionStore.getState().setComposerTimeoutUnavailable(false);
-      } else if (!isComposeTimeoutReady()) {
+      } else if (!useSessionStore.getState().composeTimeoutReady) {
         // Backend reachable but no usable composer_timeout_seconds AND no good
-        // ceiling was ever latched — genuinely stuck. The gate must stay closed
-        // (a send would schedule an abort from the stale default ceiling), so
-        // latch a distinct diagnostic: the Send affordance stops saying
-        // "Connecting…" and the misconfiguration is visible. Log once on the
-        // false→true transition, not every poll.
+        // ceiling was ever latched this session — genuinely stuck. The gate must
+        // stay closed (a send would schedule an abort from the stale default
+        // ceiling), so latch a distinct diagnostic: the Send affordance stops
+        // saying "Connecting…" and the misconfiguration is visible. Log once on
+        // the false→true transition, not every poll.
         //
-        // The `!isComposeTimeoutReady()` guard is load-bearing: a partial or
-        // absent response that arrives AFTER a good ceiling was latched is a
-        // transient (the known ceiling stands, readiness holds), so we must not
-        // flag unavailable or spam a false "no usable timeout" error on a
-        // genuinely healthy composer.
+        // The `!composeTimeoutReady` guard is load-bearing: a partial or absent
+        // response that arrives AFTER a good ceiling was latched is a transient
+        // (readiness holds), so we must not flag unavailable or spam a false "no
+        // usable timeout" error on a genuinely healthy composer.
         const sessionState = useSessionStore.getState();
         if (!sessionState.composerTimeoutUnavailable) {
           console.error(

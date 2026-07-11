@@ -25,7 +25,6 @@ import * as api from "@/api/client";
 import {
   COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
-  resetComposeTimeout,
 } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
@@ -609,11 +608,12 @@ interface SessionState {
   composerProgress: ComposerProgressSnapshot | null;
   isComposing: boolean;
   /**
-   * Reactive mirror of config/composer's isComposeTimeoutReady, set by
-   * App.checkHealth once GET /api/system/status supplies the backend compose
-   * wall clock. FALSE until then, gating every Send affordance (freeform,
-   * guided, side-rail Apply) so no compose request is scheduled against the
-   * stale default abort ceiling during the boot window (bootstrap race).
+   * The single reactive source of truth for "a known-good compose abort ceiling
+   * exists". Set true by App.checkHealth once GET /api/system/status supplies a
+   * valid backend compose wall clock (applyServerComposerTimeout applied). FALSE
+   * until then, gating every Send affordance (freeform, guided, side-rail Apply)
+   * so no compose request is scheduled against the stale default abort ceiling
+   * during the boot window (bootstrap race).
    */
   composeTimeoutReady: boolean;
   setComposeTimeoutReady: (ready: boolean) => void;
@@ -2398,12 +2398,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset() {
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
-    // Reset the module compose-timeout predicate in lockstep with the store
-    // gate: initialState sets composeTimeoutReady=false, and the module's
-    // composeTimeoutApplied must go false too or the two would disagree after
-    // logout (the store gate would report un-ready while isComposeTimeoutReady()
-    // still returned true). App.checkHealth re-latches both on re-auth.
-    resetComposeTimeout();
+    // composeTimeoutReady resets to false via initialState; App.checkHealth
+    // re-latches it on re-authentication. The module ceiling (composeTimeoutMs)
+    // is a backend property that harmlessly persists — it is only read while
+    // ready, which a fresh checkHealth re-establishes before any send.
     // Fresh array (not initialState.sessions) so loadSessions' reference
     // guard can't mistake a post-reset store for the pre-reset one it
     // captured before a still-in-flight fetch (logout/login ABA).

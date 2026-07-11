@@ -6,19 +6,18 @@ import {
   COMPOSE_TIMEOUT_ABORT_REASON,
   getComposeTimeoutMs,
   applyServerComposerTimeout,
-  isComposeTimeoutReady,
-  resetComposeTimeout,
+  resetComposeTimeoutForTests,
   runComposeWithTimeout,
 } from "@/config/composer";
 
-// The compose abort ceiling is module-level state; resetComposeTimeout
+// The compose abort ceiling is module-level state; resetComposeTimeoutForTests
 // restores it to the boot default so tests stay independent.
 describe("compose timeout ceiling derivation", () => {
   beforeEach(() => {
-    resetComposeTimeout();
+    resetComposeTimeoutForTests();
   });
   afterEach(() => {
-    resetComposeTimeout();
+    resetComposeTimeoutForTests();
     vi.useRealTimers();
   });
 
@@ -45,60 +44,26 @@ describe("compose timeout ceiling derivation", () => {
     // let readiness latch — the store gate stays closed.
     expect(getComposeTimeoutMs()).toBe(DEFAULT_COMPOSE_TIMEOUT_MS);
   });
-});
 
-// Readiness and the ceiling are set by the SAME applyServerComposerTimeout
-// call, so they cannot drift: a ready gate can never outrun the ceiling and
-// schedule an abort from the stale default. sessionStore.composeTimeoutReady
-// is the reactive mirror of this predicate.
-describe("isComposeTimeoutReady — readiness coupled to the applied ceiling", () => {
-  beforeEach(() => {
-    resetComposeTimeout();
-  });
-  afterEach(() => {
-    resetComposeTimeout();
-  });
-
-  it("is false at boot (no backend wall clock applied yet)", () => {
-    expect(isComposeTimeoutReady()).toBe(false);
-  });
-
-  it("becomes true only when a valid ceiling is applied, and false again on reset", () => {
-    expect(applyServerComposerTimeout(300)).toBe(true);
-    expect(isComposeTimeoutReady()).toBe(true);
-    resetComposeTimeout();
-    expect(isComposeTimeoutReady()).toBe(false);
-  });
-
-  it("stays false when only garbage values are offered — ceiling AND readiness untouched", () => {
-    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(applyServerComposerTimeout(bad)).toBe(false);
-    }
-    expect(isComposeTimeoutReady()).toBe(false);
-    expect(getComposeTimeoutMs()).toBe(DEFAULT_COMPOSE_TIMEOUT_MS);
-  });
-
-  it("a garbage value AFTER a good ceiling does NOT un-ready — the known ceiling stands", () => {
-    // Deliberate asymmetry that App.checkHealth's else-guard relies on: a
-    // transient partial/garbage health response must never wedge a composer
-    // that already latched a real ceiling. If a future refactor added
-    // `composeTimeoutApplied = false` to the early-return path, this fails.
+  it("a garbage value AFTER a good ceiling leaves the applied ceiling intact", () => {
+    // Deliberate asymmetry App.checkHealth's else-guard relies on: a transient
+    // partial/garbage health response must never shrink a ceiling already
+    // derived from a real backend wall clock back toward the stale default.
     expect(applyServerComposerTimeout(300)).toBe(true);
     const goodCeiling = getComposeTimeoutMs();
     for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(applyServerComposerTimeout(bad)).toBe(false);
     }
-    expect(isComposeTimeoutReady()).toBe(true);
     expect(getComposeTimeoutMs()).toBe(goodCeiling);
   });
 });
 
 describe("runComposeWithTimeout — the shared freeform/guided send primitive", () => {
   beforeEach(() => {
-    resetComposeTimeout();
+    resetComposeTimeoutForTests();
   });
   afterEach(() => {
-    resetComposeTimeout();
+    resetComposeTimeoutForTests();
     vi.useRealTimers();
   });
 

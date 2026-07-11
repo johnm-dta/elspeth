@@ -49,6 +49,14 @@ class ComposerProgressSnapshot(ComposerProgressEvent):
     session_id: str
     request_id: str | None
     updated_at: datetime
+    # Live count of compose requests (send_message / recompose) currently
+    # inside the route for this session — including time spent queued on
+    # the per-session compose lock, before any progress is published.
+    # Enriched at read time by the registry (see get_latest); the SPA's
+    # post-abort reconciliation treats zero as its only settlement signal
+    # (elspeth-06a23adfcc) because the phase alone cannot distinguish an
+    # aborted-but-still-running request from full quiescence.
+    inflight_requests: int = 0
 
 
 class ComposerProgressRegistry:
@@ -70,7 +78,27 @@ class ComposerProgressRegistry:
     def __init__(self) -> None:
         self._snapshots: dict[str, ComposerProgressSnapshot] = {}
         self._user_index: dict[str, str] = {}
+        self._inflight: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def begin_request(self, session_id: str) -> None:
+        """Count one compose request as in flight for ``session_id``.
+
+        Called at route entry (before the compose-lock wait) by the
+        ``_track_compose_inflight`` dependency; paired with
+        :meth:`end_request` at request teardown.
+        """
+        with self._lock:
+            self._inflight[session_id] = self._inflight.get(session_id, 0) + 1
+
+    def end_request(self, session_id: str) -> None:
+        """Release one in-flight compose request for ``session_id``."""
+        with self._lock:
+            remaining = self._inflight.get(session_id, 0) - 1
+            if remaining > 0:
+                self._inflight[session_id] = remaining
+            else:
+                self._inflight.pop(session_id, None)
 
     async def publish(
         self,
@@ -104,11 +132,18 @@ class ComposerProgressRegistry:
             return snapshot
 
     async def get_latest(self, session_id: str) -> ComposerProgressSnapshot:
-        """Return latest progress or a neutral idle snapshot."""
+        """Return latest progress or a neutral idle snapshot.
+
+        The snapshot is enriched with the CURRENT in-flight request count —
+        not the count at publish time — so a poller always observes the
+        live quiescence state alongside the last narrative phase.
+        """
         with self._lock:
-            if session_id in self._snapshots:
-                return self._snapshots[session_id]
-            return _idle_snapshot(session_id)
+            inflight = self._inflight.get(session_id, 0)
+            snapshot = self._snapshots.get(session_id) or _idle_snapshot(session_id)
+            if snapshot.inflight_requests == inflight:
+                return snapshot
+            return snapshot.model_copy(update={"inflight_requests": inflight})
 
     async def list_active(self, *, user_id: str) -> tuple[ComposerProgressSnapshot, ...]:
         """Return non-terminal snapshots for one user's sessions.

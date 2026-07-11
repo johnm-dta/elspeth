@@ -48,6 +48,7 @@ from .._helpers import (
     _state_data_from_composer_state,
     _state_from_record,
     _state_response,
+    _track_compose_inflight,
     _verify_session_ownership,
     asyncio,
     client_cancelled_progress_event,
@@ -71,6 +72,9 @@ async def recompose(
     request: Request,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
     rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
+    # In-flight compose tally for the SPA's post-abort settlement signal
+    # (elspeth-06a23adfcc); decrements only after the route fully unwinds.
+    _inflight_tally: None = Depends(_track_compose_inflight),
 ) -> MessageWithStateResponse:
     """Re-run the composer without inserting a new user message.
 

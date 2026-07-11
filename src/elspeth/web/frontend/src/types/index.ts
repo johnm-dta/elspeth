@@ -269,6 +269,15 @@ export interface ComposerProgressSnapshot {
   likely_next: string | null;
   reason: ComposerProgressReason | null;
   updated_at: string;
+  /**
+   * Live count of compose requests (send/recompose) currently inside the
+   * route for this session — including time queued on the server's
+   * per-session compose lock, before any progress is published. Zero is
+   * the post-abort resync's only settlement signal (the phase cannot
+   * distinguish an aborted-but-still-running request from quiescence).
+   * Optional only for fixture tolerance; the server always sends it.
+   */
+  inflight_requests?: number;
 }
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────

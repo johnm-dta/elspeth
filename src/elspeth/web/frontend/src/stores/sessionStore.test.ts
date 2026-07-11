@@ -699,12 +699,12 @@ describe("sessionStore", () => {
       >;
       progressMock
         // sendMessage's initial progress poll.
-        .mockResolvedValueOnce({ phase: "using_tools" })
+        .mockResolvedValueOnce({ phase: "using_tools", inflight_requests: 1 })
         // First settle check: the cancelled turn is still unwinding
         // (shielded tool + P4 publish in flight).
-        .mockResolvedValueOnce({ phase: "using_tools" })
-        // Second settle check onward: the unwind has published terminal.
-        .mockResolvedValue({ phase: "cancelled" });
+        .mockResolvedValueOnce({ phase: "using_tools", inflight_requests: 1 })
+        // Second settle check onward: the route has fully unwound.
+        .mockResolvedValue({ phase: "cancelled", inflight_requests: 0 });
       (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           id: "user-1",
@@ -763,10 +763,15 @@ describe("sessionStore", () => {
             }),
         );
         // Mutable registry: still unwinding until the test flips it.
-        const registry = { phase: "using_tools" };
+        const registry = { phase: "using_tools", inflight_requests: 1 };
         (
           apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
-        ).mockImplementation(() => Promise.resolve({ phase: registry.phase }));
+        ).mockImplementation(() =>
+          Promise.resolve({
+            phase: registry.phase,
+            inflight_requests: registry.inflight_requests,
+          }),
+        );
         (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
           {
             id: "user-1",
@@ -801,6 +806,7 @@ describe("sessionStore", () => {
 
         // The server finally settles; the resync now proceeds.
         registry.phase = "cancelled";
+        registry.inflight_requests = 0;
         await vi.advanceTimersByTimeAsync(1_000);
         await sendPromise;
         expect(stateMock).toHaveBeenCalled();
@@ -830,7 +836,7 @@ describe("sessionStore", () => {
         );
         (
           apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
-        ).mockResolvedValue({ phase: "using_tools" });
+        ).mockResolvedValue({ phase: "using_tools", inflight_requests: 1 });
         (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
           [],
         );
@@ -854,6 +860,147 @@ describe("sessionStore", () => {
         await sendPromise;
 
         expect(stateMock).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not treat a previous turn's terminal snapshot as settlement", async () => {
+      // Immediate Stop / multi-tab queued-on-lock: the aborted route has
+      // not published any progress yet, so the registry still holds the
+      // PREVIOUS turn's terminal snapshot (or idle). The phase says
+      // "settled"; the in-flight request count says the aborted route is
+      // still running — and it will still write the user row (and possibly
+      // state) once it reaches/acquires the lock. Only quiescence — zero
+      // in-flight compose requests for the session — is settlement.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        // Previous turn's terminal snapshot, but OUR aborted route is
+        // still counted in flight.
+        const registry = { phase: "complete", inflight_requests: 1 };
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockImplementation(() =>
+          Promise.resolve({
+            phase: registry.phase,
+            inflight_requests: registry.inflight_requests,
+          }),
+        );
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+          {
+            id: "user-1",
+            session_id: "session-1",
+            role: "user",
+            content: "hello",
+            tool_calls: null,
+            created_at: "2026-07-11T00:00:00Z",
+          },
+        ]);
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+
+        // The aborted route is still in flight (queued / unwinding): the
+        // resync must hold even though the visible phase is terminal.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(stateMock).not.toHaveBeenCalled();
+
+        // The route unwinds; quiescence reached; the resync proceeds.
+        registry.phase = "cancelled";
+        registry.inflight_requests = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+        await sendPromise;
+        expect(useSessionStore.getState().compositionState?.version).toBe(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not tear down a newer turn's pollers when the aborted turn settles", async () => {
+      // Turn A aborts and its settle wait parks. The user then sends turn B
+      // in the same session: B starts the module-global progress/message
+      // pollers, A's waiter exits (isComposing), and A's finally runs its
+      // teardown. That teardown must not stop the pollers B now owns —
+      // otherwise B runs with no live progress or transcript polling.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controllerA = new AbortController();
+        (apiMod.sendMessage as ReturnType<typeof vi.fn>)
+          .mockImplementationOnce(
+            () =>
+              new Promise((_resolve, reject) => {
+                controllerA.signal.addEventListener("abort", () =>
+                  reject(controllerA.signal.reason),
+                );
+              }),
+          )
+          // Turn B stays in flight for the remainder of the test.
+          .mockImplementationOnce(() => new Promise(() => {}));
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockResolvedValue({ phase: "using_tools", inflight_requests: 1 });
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        (
+          apiMod.fetchCompositionState as ReturnType<typeof vi.fn>
+        ).mockResolvedValue(null);
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({ activeSessionId: "session-1" });
+        const sendA = useSessionStore
+          .getState()
+          .sendMessage("hello", controllerA.signal);
+        controllerA.abort("compose_user_cancel");
+        await vi.advanceTimersByTimeAsync(1_000); // A's waiter is parked
+
+        const sendB = useSessionStore.getState().sendMessage("again");
+        await vi.advanceTimersByTimeAsync(1_000); // A's waiter sees isComposing
+        await sendA;
+
+        // B's pollers must still tick after A's teardown ran.
+        const progressMock = apiMod.fetchComposerProgress as ReturnType<
+          typeof vi.fn
+        >;
+        const messagesMock = apiMod.fetchMessages as ReturnType<typeof vi.fn>;
+        const progressBaseline = progressMock.mock.calls.length;
+        const messagesBaseline = messagesMock.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(progressMock.mock.calls.length).toBeGreaterThanOrEqual(
+          progressBaseline + 2,
+        );
+        expect(messagesMock.mock.calls.length).toBeGreaterThanOrEqual(
+          messagesBaseline + 2,
+        );
+        void sendB;
       } finally {
         vi.useRealTimers();
       }

@@ -2886,6 +2886,59 @@ class TestMessageRoutes:
         )
         assert cancelled is True, "the task must finish as genuinely cancelled"
 
+    def test_composer_progress_reports_inflight_request_count(self, tmp_path) -> None:
+        """GET /composer-progress carries the live in-flight compose count.
+
+        The count is the SPA's correlated settlement signal after a client
+        abort (elspeth-06a23adfcc): the snapshot phase cannot distinguish
+        "the aborted route is still running but has not published progress
+        yet" (queued on the compose lock, immediate Stop) from "everything
+        settled" — the registry may hold the previous turn's terminal
+        snapshot in both. The count spans the whole request and drops to
+        zero only after the route fully unwinds.
+        """
+        app, _service = _make_app(tmp_path)
+        client = TestClient(app)
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = resp.json()["id"]
+
+        async def drive() -> None:
+            compose_started = asyncio.Event()
+            release = asyncio.Event()
+            inner = _make_composer_mock(response_text="Done")
+
+            class _ParkedComposer:
+                async def compose(self, *args: Any, **kwargs: Any) -> Any:
+                    compose_started.set()
+                    await release.wait()
+                    return await inner.compose(*args, **kwargs)
+
+            app.state.composer_service = _ParkedComposer()
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://testserver") as http:
+                send_task = asyncio.create_task(
+                    http.post(
+                        f"/api/sessions/{session_id}/messages",
+                        json={"content": "build a pipeline"},
+                    )
+                )
+                await asyncio.wait_for(compose_started.wait(), timeout=5.0)
+                parked = await http.get(f"/api/sessions/{session_id}/composer-progress")
+                assert parked.status_code == 200
+                assert parked.json()["inflight_requests"] == 1
+
+                release.set()
+                send_resp = await asyncio.wait_for(send_task, timeout=10.0)
+                assert send_resp.status_code == 200
+                settled = await http.get(f"/api/sessions/{session_id}/composer-progress")
+                assert settled.json()["inflight_requests"] == 0
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(drive())
+        finally:
+            loop.close()
+
     def test_get_messages(self, tmp_path) -> None:
         mock_composer = _make_composer_mock()
 

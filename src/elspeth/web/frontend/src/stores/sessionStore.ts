@@ -103,6 +103,12 @@ let composerProgressPollSessionId: string | null = null;
 // exactly the backward-jump class the calling_model/using_tools remap was
 // meant to prevent (elspeth-a8eeebb3aa review follow-up).
 let composerProgressPollSeenNonTerminal = false;
+// Ownership generations for the module-global pollers: each start* bumps
+// its counter and returns it; stop* called with a stale generation no-ops.
+// Prevents an aborted turn's delayed teardown (its settle wait yields the
+// loop) from stopping the pollers a newer same-session turn now owns.
+let composerProgressPollGeneration = 0;
+let inflightMessagesPollGeneration = 0;
 const TERMINAL_COMPOSER_PROGRESS_PHASES = new Set<ComposerProgressPhase>([
   "complete",
   "failed",
@@ -202,30 +208,32 @@ function sleep(ms: number): Promise<void> {
  * Block until the server side of a cancelled compose turn has settled.
  *
  * The client's abort rejects the fetch immediately, but the server is
- * still working: the compose loop's dispatch+persist critical section is
- * shielded (deferred cancellation — see _await_tool_turn_with_deferred_
- * cancellation in composer/service.py), so the in-flight tool finishes and
- * P4 publishes its results BEFORE the CancelledError resumes, and the
- * route's cancelled unwind publishes the terminal 'cancelled' progress
- * snapshot strictly AFTER those persists. Terminal (or idle) progress is
- * therefore the happens-after signal that every durable write of the
- * cancelled turn is visible to the resync GETs. Resyncing without this
- * wait deterministically misses commits whenever the abort lands mid-tool.
+ * still working: the aborted route may be queued on the per-session
+ * compose lock with nothing published yet, and once composing, the
+ * dispatch+persist critical section is shielded (deferred cancellation —
+ * see _await_tool_turn_with_deferred_cancellation in composer/service.py),
+ * so the in-flight tool finishes and P4 publishes its results BEFORE the
+ * CancelledError resumes. Resyncing before all of that lands misses
+ * durable writes (user row, state advances) with no later refresh.
+ *
+ * Settlement is QUIESCENCE, not phase: `inflight_requests === 0` on the
+ * progress snapshot — the count of compose requests currently inside the
+ * route for this session, maintained by the server across the whole
+ * request lifecycle (see _track_compose_inflight). The narrative phase
+ * cannot carry this signal: after an immediate Stop or for a request
+ * queued behind another turn, the registry still holds the PREVIOUS
+ * turn's terminal snapshot, which is indistinguishable from real
+ * settlement by phase alone.
  *
  * The wait ends on SEMANTIC conditions only, matching the server's own
  * unboundedness (a wall-clock budget would silently reopen the race for
  * any tool that outruns it):
- * - the server settles (terminal or idle progress) — the normal exit;
+ * - quiescence: zero in-flight compose requests — the normal exit;
  * - the user navigated to a different session — the resync is moot;
  * - a newer compose turn started in this session — its completion handler
  *   owns the state sync now and this resync would be redundant;
- * - the progress endpoint fails — progress is advisory, degrade to an
- *   immediate best-effort resync.
- *
- * Known benign edge: if the abort fires before this turn engaged compose
- * (e.g. still queued on the compose lock), the registry may hold the
- * PREVIOUS turn's terminal snapshot and the wait returns immediately —
- * an early resync equal to the unwaited behaviour, never worse.
+ * - the progress endpoint fails or predates the count field — progress is
+ *   advisory, degrade to an immediate best-effort resync.
  */
 async function waitForCancelledComposeToSettle(
   sessionId: string,
@@ -235,14 +243,15 @@ async function waitForCancelledComposeToSettle(
     if (current.activeSessionId !== sessionId || current.isComposing) {
       return;
     }
-    let phase: ComposerProgressPhase;
+    let inflightRequests: number;
     try {
-      phase = (await api.fetchComposerProgress(sessionId)).phase;
+      const snapshot = await api.fetchComposerProgress(sessionId);
+      inflightRequests = snapshot.inflight_requests ?? 0;
     } catch {
       // Progress is advisory — settle best-effort and resync now.
       return;
     }
-    if (phase === "idle" || TERMINAL_COMPOSER_PROGRESS_PHASES.has(phase)) {
+    if (inflightRequests === 0) {
       return;
     }
     await sleep(ABORT_RESYNC_SETTLE_POLL_MS);
@@ -580,11 +589,18 @@ interface SessionState {
     sessionId?: string,
     options?: { discardStaleTerminal?: boolean },
   ) => Promise<void>;
-  startComposerProgressPolling: (sessionId: string) => void;
-  stopComposerProgressPolling: (sessionId?: string) => void;
+  /**
+   * The pollers are MODULE-GLOBAL singletons, so ownership must be
+   * explicit: start* returns a generation token, and stop* with that token
+   * no-ops when a newer turn has since claimed the poller. Without the
+   * token, an aborted turn whose settle wait outlived it would tear down
+   * the pollers of the turn the user started in the meantime.
+   */
+  startComposerProgressPolling: (sessionId: string) => number;
+  stopComposerProgressPolling: (sessionId?: string, generation?: number) => void;
   loadInflightMessages: (sessionId: string) => Promise<void>;
-  startInflightMessagesPolling: (sessionId: string) => void;
-  stopInflightMessagesPolling: (sessionId?: string) => void;
+  startInflightMessagesPolling: (sessionId: string) => number;
+  stopInflightMessagesPolling: (sessionId?: string, generation?: number) => void;
   retryMessage: (messageId: string, signal?: AbortSignal) => Promise<void>;
   forkFromMessage: (messageId: string, newContent: string) => Promise<void>;
   openRecoveryFromError: (
@@ -1047,8 +1063,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       composerProgress: null,
       messages: [...state.messages, optimisticMessage],
     }));
-    get().startComposerProgressPolling(activeSessionId);
-    get().startInflightMessagesPolling(activeSessionId);
+    const progressPollGeneration =
+      get().startComposerProgressPolling(activeSessionId);
+    const inflightPollGeneration =
+      get().startInflightMessagesPolling(activeSessionId);
 
     try {
       const stateId = get().compositionState?.id;
@@ -1187,9 +1205,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         await resyncAfterAbortedComposeTurn(activeSessionId);
       }
     } finally {
-      get().stopInflightMessagesPolling(activeSessionId);
-      get().stopComposerProgressPolling(activeSessionId);
-      await get().loadComposerProgress(activeSessionId);
+      get().stopInflightMessagesPolling(activeSessionId, inflightPollGeneration);
+      get().stopComposerProgressPolling(activeSessionId, progressPollGeneration);
+      // One-shot terminal pickup — only while this turn still owns the
+      // poller; a newer turn's own polling handles it otherwise.
+      if (progressPollGeneration === composerProgressPollGeneration) {
+        await get().loadComposerProgress(activeSessionId);
+      }
     }
   },
 
@@ -1390,6 +1412,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   startComposerProgressPolling(sessionId: string) {
     clearComposerProgressPollTimer();
+    composerProgressPollGeneration += 1;
     composerProgressPollSessionId = sessionId;
     composerProgressPollSeenNonTerminal = false;
     set({ composerProgress: null });
@@ -1400,9 +1423,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         .getState()
         .loadComposerProgress(sessionId, { discardStaleTerminal: true });
     }, COMPOSER_PROGRESS_POLL_INTERVAL_MS);
+    return composerProgressPollGeneration;
   },
 
-  stopComposerProgressPolling(sessionId?: string) {
+  stopComposerProgressPolling(sessionId?: string, generation?: number) {
+    if (generation !== undefined && generation !== composerProgressPollGeneration) {
+      // A newer turn claimed the poller after this caller's start — the
+      // teardown belongs to that turn now.
+      return;
+    }
     if (
       sessionId !== undefined &&
       composerProgressPollSessionId !== null &&
@@ -1452,14 +1481,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   startInflightMessagesPolling(sessionId: string) {
     clearInflightMessagesPollTimer();
+    inflightMessagesPollGeneration += 1;
     inflightMessagesPollSessionId = sessionId;
     inflightMessagesPollTimer = setInterval(() => {
       if (inflightMessagesPollSessionId !== sessionId) return;
       void useSessionStore.getState().loadInflightMessages(sessionId);
     }, INFLIGHT_MESSAGES_POLL_INTERVAL_MS);
+    return inflightMessagesPollGeneration;
   },
 
-  stopInflightMessagesPolling(sessionId?: string) {
+  stopInflightMessagesPolling(sessionId?: string, generation?: number) {
+    if (generation !== undefined && generation !== inflightMessagesPollGeneration) {
+      // A newer turn claimed the poller after this caller's start — the
+      // teardown belongs to that turn now.
+      return;
+    }
     if (
       sessionId !== undefined &&
       inflightMessagesPollSessionId !== null &&
@@ -1489,8 +1525,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           : existing,
       ),
     }));
-    get().startComposerProgressPolling(activeSessionId);
-    get().startInflightMessagesPolling(activeSessionId);
+    const progressPollGeneration =
+      get().startComposerProgressPolling(activeSessionId);
+    const inflightPollGeneration =
+      get().startInflightMessagesPolling(activeSessionId);
 
     try {
       // Use recompose (not sendMessage) — the user message is already
@@ -1599,9 +1637,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         await resyncAfterAbortedComposeTurn(activeSessionId);
       }
     } finally {
-      get().stopInflightMessagesPolling(activeSessionId);
-      get().stopComposerProgressPolling(activeSessionId);
-      await get().loadComposerProgress(activeSessionId);
+      get().stopInflightMessagesPolling(activeSessionId, inflightPollGeneration);
+      get().stopComposerProgressPolling(activeSessionId, progressPollGeneration);
+      // One-shot terminal pickup — only while this turn still owns the
+      // poller; a newer turn's own polling handles it otherwise.
+      if (progressPollGeneration === composerProgressPollGeneration) {
+        await get().loadComposerProgress(activeSessionId);
+      }
     }
   },
 
@@ -2040,7 +2082,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // tutorial's step-2 substep indicator (composerProgress-derived) never
     // advanced in production (elspeth-a8eeebb3aa) — tests only ever passed
     // because they injected composerProgress directly via setState.
-    get().startComposerProgressPolling(requestedSessionId);
+    const progressPollGeneration =
+      get().startComposerProgressPolling(requestedSessionId);
 
     try {
       const response = await api.chatGuided(
@@ -2104,8 +2147,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // extra loadComposerProgress picks up the backend's final
       // complete/failed/cancelled snapshot for the brief window before
       // guidedChatPending flips the pending strip away.
-      get().stopComposerProgressPolling(requestedSessionId);
-      await get().loadComposerProgress(requestedSessionId);
+      get().stopComposerProgressPolling(requestedSessionId, progressPollGeneration);
+      if (progressPollGeneration === composerProgressPollGeneration) {
+        await get().loadComposerProgress(requestedSessionId);
+      }
     }
   },
 

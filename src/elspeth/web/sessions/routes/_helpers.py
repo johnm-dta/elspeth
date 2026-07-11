@@ -1646,6 +1646,40 @@ async def _cancel_on_client_disconnect(request: Request) -> AsyncIterator[None]:
             watcher.cancel()
 
 
+async def _track_compose_inflight(
+    session_id: UUID,
+    request: Request,
+) -> AsyncIterator[None]:
+    """Count this request in the session's in-flight compose tally.
+
+    FastAPI yield-dependency wired into ``send_message`` and ``/recompose``.
+    The count spans the ENTIRE request — including the wait on the
+    per-session compose lock, before any progress snapshot is published —
+    and is decremented only when the request's exit stack closes, i.e.
+    after the route has fully unwound (success, HTTP error, or the
+    disconnect-cancel path).
+
+    The SPA's post-abort reconciliation treats a zero count on the
+    ``/composer-progress`` snapshot as its ONLY settlement signal
+    (elspeth-06a23adfcc): phase-based inference races requests that have
+    not yet published progress (queued on the lock, immediate Stop), where
+    the registry still holds the previous turn's terminal snapshot.
+
+    Keyed by the raw path ``session_id`` (pre-ownership-check): a request
+    rejected by the ownership guard still transits the counter briefly,
+    which is harmless — the counter only ever delays a resync while
+    non-zero, and rejected requests decrement within the same request
+    lifecycle.
+    """
+    registry = _get_composer_progress_registry(request)
+    sid = str(session_id)
+    registry.begin_request(sid)
+    try:
+        yield
+    finally:
+        registry.end_request(sid)
+
+
 async def _persist_chat_turns(
     service: SessionServiceProtocol,
     session_id: UUID,
@@ -4442,6 +4476,7 @@ __all__ = [
     "_state_response",
     "_store_guided_audit_payload",
     "_summarize_guided_response",
+    "_track_compose_inflight",
     "_validate_blob_ref_submission",
     "_validate_control_signal",
     "_validate_run_status_accounting_for_list",

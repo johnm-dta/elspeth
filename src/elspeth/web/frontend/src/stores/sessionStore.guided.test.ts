@@ -1225,6 +1225,75 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.guidedSession).toEqual(sampleGuidedSession);
     });
 
+    it("resyncs durable guided state after an aborted guided chat (elspeth-b2d9e4d084)", async () => {
+      // A client-side abort only rejects the local fetch — the guided turn
+      // keeps running server-side until the disconnect watcher cancels it,
+      // and whatever it committed before the cancel (chat_history turns,
+      // step results, composition-state advances from the step-1 upload
+      // commit path) is durable. Guided state is server-authoritative, so
+      // the abort branch must refetch GET /guided once the session
+      // quiesces, or the client renders the pre-send snapshot until the
+      // next successful guided action.
+      const { chatGuided, getGuided, fetchComposerProgress } = await import(
+        "@/api/client"
+      );
+      (chatGuided as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(signal.reason));
+          }),
+      );
+      // The aborted route has fully unwound: quiescent registry.
+      (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+        phase: "cancelled",
+        inflight_requests: 0,
+      });
+      const durableGuided = {
+        ...sampleGuidedSession,
+        chat_turn_seq: 2,
+        chat_history: [
+          {
+            role: "user",
+            content: "What columns are available?",
+            seq: 0,
+            step: "step_1_source",
+            ts_iso: "2026-07-11T00:00:00Z",
+          },
+          {
+            role: "assistant",
+            content: "Partial reply persisted before the cancel.",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-07-11T00:00:01Z",
+          },
+        ],
+      };
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: durableGuided,
+        next_turn: null,
+        terminal: null,
+        composition_state: null,
+      });
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const controller = new AbortController();
+      const chatPromise = useSessionStore
+        .getState()
+        .chatGuided("What columns are available?", controller.signal);
+      controller.abort("compose_user_cancel");
+      await chatPromise;
+
+      const state = useSessionStore.getState();
+      expect(getGuided).toHaveBeenCalledWith("sess-1");
+      expect(state.guidedSession).toEqual(durableGuided);
+      expect(state.error).toBe(
+        "Composition stopped. You can revise your request and send it again.",
+      );
+    });
+
     it("starts composer-progress polling on send and applies the loaded snapshot (elspeth-a8eeebb3aa)", async () => {
       // The REAL production seam, not composerProgress injected via setState:
       // previously chatGuided never called startComposerProgressPolling at

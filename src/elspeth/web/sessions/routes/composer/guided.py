@@ -66,12 +66,14 @@ from .._helpers import (
     TurnResponse,
     TurnType,
     UserIdentity,
+    _cancel_on_client_disconnect,
     _composer_progress_sink,
     _dispatch_guided_respond,
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _initial_composition_state_with_guided_session,
     _inspect_latest_ready_session_blob,
+    _is_client_disconnect_cancel,
     _persist_chat_turns,
     _persist_llm_calls,
     _persist_tool_invocations,
@@ -2402,23 +2404,31 @@ async def post_guided_chat(
                             return response
 
                 if source_chat_result is None:
-                    source_chat_result = await resolve_step_1_source_chat_with_auto_drop(
-                        site="post_guided_chat",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        model=settings.composer_model,
-                        user_message=body.message,
-                        plugin_hint=plugin_hint,
-                        current_source=guided.step_1_result,
-                        temperature=settings.composer_temperature,
-                        seed=settings.composer_seed,
-                        recorder=recorder,
-                        # Server-side bound, consistent with freeform compose
-                        # (elspeth-fb4464cdf0): the guided LLM call may not run
-                        # past the composer budget.
-                        timeout_seconds=settings.composer_timeout_seconds,
-                        context_block=chat_context_block,
-                    )
+                    # Cancel the turn if the client disconnects during the
+                    # LLM-bearing resolve — the guided sibling of
+                    # send_message's compose watcher (elspeth-b2d9e4d084).
+                    # The watcher must enclose ONLY the long-running await:
+                    # the marked CancelledError exits this scope (where the
+                    # watcher's uncancel/mark bookkeeping runs) and is then
+                    # converted to a quiet 499 by the route-level except.
+                    async with _cancel_on_client_disconnect(request):
+                        source_chat_result = await resolve_step_1_source_chat_with_auto_drop(
+                            site="post_guided_chat",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            model=settings.composer_model,
+                            user_message=body.message,
+                            plugin_hint=plugin_hint,
+                            current_source=guided.step_1_result,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
+                            recorder=recorder,
+                            # Server-side bound, consistent with freeform compose
+                            # (elspeth-fb4464cdf0): the guided LLM call may not run
+                            # past the composer budget.
+                            timeout_seconds=settings.composer_timeout_seconds,
+                            context_block=chat_context_block,
+                        )
                 # ``prose_chat`` (a declined-to-prose SUCCESS) and
                 # ``fallback_chat`` (an error) are mutually exclusive; either
                 # one here means "use this directly, skip the second call".
@@ -2652,26 +2662,29 @@ async def post_guided_chat(
                     return response
 
             elif guided.step is GuidedStep.STEP_2_SINK:
-                sink_chat_result = await resolve_step_2_sink_chat_with_auto_drop(
-                    site="post_guided_chat",
-                    session_id=str(session_id),
-                    user_id=user.user_id,
-                    model=settings.composer_model,
-                    user_message=body.message,
-                    current_sink=guided.step_2_result,
-                    temperature=settings.composer_temperature,
-                    seed=settings.composer_seed,
-                    recorder=recorder,
-                    # Activate the sink discovery loop: the composer model can
-                    # list_sinks / get_plugin_schema before it resolves.
-                    state=state,
-                    catalog=catalog,
-                    secret_service=request.app.state.scoped_secret_resolver,
-                    max_discovery_iters=settings.composer_max_discovery_turns,
-                    timeout_seconds=settings.composer_timeout_seconds,
-                    context_block=chat_context_block,
-                    progress=progress_sink,
-                )
+                # Disconnect watcher on the LLM-bearing resolve — see the
+                # STEP_1 site above (elspeth-b2d9e4d084).
+                async with _cancel_on_client_disconnect(request):
+                    sink_chat_result = await resolve_step_2_sink_chat_with_auto_drop(
+                        site="post_guided_chat",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        model=settings.composer_model,
+                        user_message=body.message,
+                        current_sink=guided.step_2_result,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
+                        recorder=recorder,
+                        # Activate the sink discovery loop: the composer model can
+                        # list_sinks / get_plugin_schema before it resolves.
+                        state=state,
+                        catalog=catalog,
+                        secret_service=request.app.state.scoped_secret_resolver,
+                        max_discovery_iters=settings.composer_max_discovery_turns,
+                        timeout_seconds=settings.composer_timeout_seconds,
+                        context_block=chat_context_block,
+                        progress=progress_sink,
+                    )
                 # ``prose_chat`` (a declined-to-prose SUCCESS) and
                 # ``fallback_chat`` (an error) are mutually exclusive; either
                 # one here means "use this directly, skip the second call".
@@ -3063,24 +3076,29 @@ async def post_guided_chat(
             # original gap surfaced by elspeth-obs-ac603d4e03.
             if chat_result is None:
                 try:
-                    chat_result = await solve_step_chat_with_auto_drop(
-                        site="post_guided_chat",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        model=settings.composer_model,
-                        step=guided.step,
-                        user_message=body.message,
-                        temperature=settings.composer_temperature,
-                        seed=settings.composer_seed,
-                        recorder=recorder,
-                        timeout_seconds=settings.composer_timeout_seconds,
-                        # LLM-safe current-build context so "explain what I'm
-                        # seeing / why" gets a grounded answer (the decision
-                        # card's Explain affordance rides this same path) —
-                        # the SAME block already computed above for the
-                        # STEP_1/STEP_2 resolve calls.
-                        context_block=chat_context_block,
-                    )
+                    # Disconnect watcher on the LLM-bearing solve — see the
+                    # STEP_1 site above (elspeth-b2d9e4d084). The marked
+                    # CancelledError passes the InvariantError except below
+                    # untouched and reaches the route-level 499 conversion.
+                    async with _cancel_on_client_disconnect(request):
+                        chat_result = await solve_step_chat_with_auto_drop(
+                            site="post_guided_chat",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            model=settings.composer_model,
+                            step=guided.step,
+                            user_message=body.message,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
+                            recorder=recorder,
+                            timeout_seconds=settings.composer_timeout_seconds,
+                            # LLM-safe current-build context so "explain what I'm
+                            # seeing / why" gets a grounded answer (the decision
+                            # card's Explain affordance rides this same path) —
+                            # the SAME block already computed above for the
+                            # STEP_1/STEP_2 resolve calls.
+                            context_block=chat_context_block,
+                        )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)
                     latency_ms = int((_perf_counter() - started_perf) * 1000)
@@ -3245,6 +3263,22 @@ async def post_guided_chat(
                 terminal=None,
                 composition_state=_state_response(state_record_out),
             )
+        except asyncio.CancelledError as exc:
+            # Disconnect-initiated cancellation (the watcher on the
+            # compose-lock section above): the client is gone, so the
+            # response body is discarded either way — converting to a 499
+            # lets the task unwind as a handled request instead of
+            # escaping as a CancelledError that uvicorn logs as an ASGI
+            # crash on every Stop click. The finally below discriminates
+            # this conversion by status code for its cancelled-path
+            # bookkeeping. A real external cancel (server shutdown) takes
+            # the bare ``raise`` and keeps unwinding.
+            if _is_client_disconnect_cancel(exc):
+                raise HTTPException(
+                    status_code=499,
+                    detail="Client disconnected while the guided chat turn was running.",
+                ) from exc
+            raise
         finally:
             # Drain the recorder unconditionally — same B3 pattern as
             # post_guided_respond.  Success-path audit persist failures
@@ -3283,7 +3317,14 @@ async def post_guided_chat(
                             reason="composer_complete",
                         ),
                     )
-                elif isinstance(primary_exc, asyncio.CancelledError):
+                elif isinstance(primary_exc, asyncio.CancelledError) or (
+                    # The except above converts disconnect-initiated
+                    # cancellation to a 499 BEFORE this finally observes
+                    # sys.exception(); 499 in this route only originates
+                    # from that conversion, so it selects the same
+                    # cancelled-path bookkeeping.
+                    isinstance(primary_exc, HTTPException) and primary_exc.status_code == 499
+                ):
                     # asyncio.shield, exactly like messages.py's
                     # client_cancelled publish (messages.py:797-821): the
                     # task is being torn down, so a bare await here risks

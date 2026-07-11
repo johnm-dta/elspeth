@@ -352,6 +352,59 @@ async function resyncAfterAbortedComposeTurn(
   void refreshInterpretationEventsForSession(sessionId);
 }
 
+/**
+ * Guided sibling of resyncAfterAbortedComposeTurn (elspeth-b2d9e4d084): an
+ * aborted guided chat turn keeps running server-side until the disconnect
+ * watcher cancels it, and everything it committed before the cancel
+ * (chat_history turns, step results, composition-state advances from the
+ * step-1 upload commit path) is durable. Guided state is
+ * server-authoritative, so the resync is a single GET /guided refetch —
+ * applied under the same quiescence wait and poller-generation fence as
+ * the freeform resync, and best-effort for the same reasons.
+ */
+async function resyncAfterAbortedGuidedTurn(
+  sessionId: string,
+  ownerGeneration: number,
+): Promise<void> {
+  const superseded = () =>
+    useSessionStore.getState().activeSessionId !== sessionId ||
+    composerProgressPollGeneration !== ownerGeneration;
+  await waitForCancelledComposeToSettle(sessionId, ownerGeneration);
+  if (superseded()) {
+    return;
+  }
+  let guided: GetGuidedResponse | undefined;
+  try {
+    guided = await api.getGuided(sessionId);
+  } catch {
+    // Best-effort: the abort copy is already on screen.
+    return;
+  }
+  const resynced = guided;
+  if (resynced == null || superseded()) {
+    return;
+  }
+  useSessionStore.setState((s) => {
+    const previousVersion = s.compositionState?.version ?? null;
+    const newVersion = resynced.composition_state?.version ?? null;
+    // R4-H3 mirror of the compose branches: a new state version
+    // invalidates any validation verdict rendered against the old one.
+    if (newVersion !== null && newVersion !== previousVersion) {
+      getExecutionStore().clearValidation();
+    }
+    return {
+      guidedSession: resynced.guided_session,
+      guidedNextTurn: resynced.next_turn ?? s.guidedNextTurn,
+      guidedTerminal: resynced.terminal ?? s.guidedTerminal,
+      compositionState: resynced.composition_state ?? s.compositionState,
+    };
+  });
+  // The cancelled turn may have created blobs (step-1 upload path) or
+  // minted interpretation reviews before the cancel landed.
+  useBlobStore.getState().loadBlobs(sessionId);
+  void refreshInterpretationEventsForSession(sessionId);
+}
+
 function mergeCompositionProposals(
   existing: CompositionProposal[],
   incoming: CompositionProposal[],
@@ -2145,6 +2198,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           error: composeAbortMessage(signal),
           guidedChatPending: false,
         });
+        // The turn ran (and was cancelled) server-side; pull its durable
+        // partial results into view (see resyncAfterAbortedGuidedTurn).
+        await resyncAfterAbortedGuidedTurn(
+          requestedSessionId,
+          progressPollGeneration,
+        );
         return;
       }
       // HTTP-layer failure (network, 4xx/5xx).  Distinct from the

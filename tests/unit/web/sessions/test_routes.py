@@ -3396,6 +3396,100 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 500
 
+    def test_client_disconnect_cancels_guided_chat_turn(self, tmp_path) -> None:
+        """A client disconnect mid-guided-chat must cancel the server turn.
+
+        Guided sibling of test_client_disconnect_cancels_compose_turn
+        (elspeth-b2d9e4d084): without the watcher, an aborted guided chat
+        (Stop button / SPA compose timeout / closed tab) left the step
+        solver running to completion as a zombie — burning LLM budget,
+        holding the per-session compose lock, and appending chat turns the
+        client never sees. The route's cancelled-path bookkeeping (shielded
+        cancelled progress publish + unwind audit drain) already existed;
+        the watcher supplies the missing trigger, and the 499 conversion
+        keeps the unwind quiet instead of an ASGI crash log per Stop click.
+        """
+        app, _service = _make_app(tmp_path)
+        catalog = MagicMock(spec=CatalogService)
+        catalog.list_sources.return_value = []
+        app.state.catalog_service = catalog
+        client = TestClient(app)
+        resp = client.post("/api/sessions", json={"title": "Guided chat"})
+        session_id = resp.json()["id"]
+        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
+        assert guided_resp.status_code == 200
+
+        async def drive() -> tuple[list[dict[str, Any]], bool]:
+            solver_started = asyncio.Event()
+            solver_cancelled = {"flag": False}
+
+            async def hanging_solver(*args: Any, **kwargs: Any) -> Any:
+                del args, kwargs
+                solver_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    solver_cancelled["flag"] = True
+                    raise
+                raise AssertionError("unreachable — the solver never completes")
+
+            request_messages = [
+                {
+                    "type": "http.request",
+                    "body": json.dumps({"message": "help me", "step_index": "step_1_source"}).encode(),
+                    "more_body": False,
+                }
+            ]
+            sent: list[dict[str, Any]] = []
+
+            async def receive() -> dict[str, Any]:
+                if request_messages:
+                    return request_messages.pop(0)
+                # Second receive() is the disconnect watcher: report the
+                # client gone once the solver is running.
+                await solver_started.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict[str, Any]) -> None:
+                sent.append(message)
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": f"/api/sessions/{session_id}/guided/chat",
+                "raw_path": f"/api/sessions/{session_id}/guided/chat".encode(),
+                "query_string": b"",
+                "root_path": "",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+            }
+            with patch(
+                # The fresh step-1 session takes the step-1 source-chat
+                # resolver (awaited inline in the route task), not the
+                # generic advisory solver.
+                "elspeth.web.sessions.routes.composer.guided.resolve_step_1_source_chat_with_auto_drop",
+                new=hanging_solver,
+            ):
+                # Pre-fix behaviour is an unbounded hang (nothing observes
+                # the disconnect); the wait_for turns that into a bounded
+                # failure.
+                await asyncio.wait_for(app(scope, receive, send), timeout=5.0)
+            return sent, solver_cancelled["flag"]
+
+        loop = asyncio.new_event_loop()
+        try:
+            sent, solver_cancelled = loop.run_until_complete(drive())
+        finally:
+            loop.close()
+
+        assert solver_cancelled, "guided chat solver must be cancelled when the client disconnects"
+        status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+        assert status == 499, f"disconnect-cancel must unwind as a quiet 499, got {status}"
+
     def test_guided_chat_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
         """Step-1 chat source commit failures must not return ToolResult reprs."""
         from elspeth.contracts.blobs import BlobRecord

@@ -49,6 +49,10 @@ from elspeth.web.composer.tools._common import ToolResult
 _ToolOutcomeResponse = ToolResult | Mapping[str, Any] | None
 
 
+class _ToolBatchCancellationRequested(Exception):
+    """Internal sentinel: cancellation landed before any tool dispatched."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ToolOutcome:
     """Result of one tool call within a compose turn.

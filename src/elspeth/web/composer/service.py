@@ -19,7 +19,7 @@ import json
 import re
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
@@ -60,6 +60,7 @@ from elspeth.web.composer._compose_loop_carriers import (
     _DispatchOutcome,
     _PersistOutcome,
     _TerminateOutcome,
+    _ToolBatchCancellationRequested,
     _ToolOutcome,
 )
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
@@ -155,6 +156,45 @@ from elspeth.web.sessions.models import sessions_table
 from elspeth.web.validation import _redact_sensitive_content
 
 slog = structlog.get_logger()
+
+
+async def _await_tool_turn_with_deferred_cancellation[T](
+    awaitable: Awaitable[T],
+    *,
+    cancellation_requested: asyncio.Event,
+) -> tuple[T, asyncio.CancelledError | None]:
+    """Finish one dispatch+persist critical section before cancelling.
+
+    The child task is shielded because synchronous tool and persistence
+    workers cannot be stopped once submitted. Cancellation is remembered and
+    exposed to ``run_tool_batch`` through ``cancellation_requested`` so it
+    completes only the in-flight tool, publishes that completed prefix, and
+    starts no further tool calls.
+    """
+    task = asyncio.ensure_future(awaitable)
+    deferred: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), deferred
+        except _ToolBatchCancellationRequested:
+            if deferred is None:
+                raise
+            raise deferred from None
+        except asyncio.CancelledError as exc:
+            # A cancellation raised *by* the child remains a real child
+            # outcome. ``shield`` only protects it from cancellation of this
+            # awaiting task; it does not launder child cancellation.
+            if task.cancelled():
+                raise
+            cancellation_requested.set()
+            if deferred is None:
+                deferred = exc
+            if task.done():
+                try:
+                    return task.result(), deferred
+                except _ToolBatchCancellationRequested:
+                    raise deferred from None
+
 
 _blocking_result_from_tool_invocations = _no_tool_policy.blocking_result_from_tool_invocations
 _compose_empty_state_message = _no_tool_policy.compose_empty_state_message
@@ -2302,6 +2342,7 @@ class ComposerServiceImpl:
         progress: ComposerProgressSink | None,
         session_scope: str,
         advisor_calls_used: int,
+        cancellation_requested: asyncio.Event,
     ) -> tuple[_DispatchOutcome, int]:
         """Phase P3 of the compose loop — delegates to :func:`tool_batch.run_tool_batch`."""
         from elspeth.web.composer.tool_batch import (
@@ -2336,6 +2377,7 @@ class ComposerServiceImpl:
             turn_sessions_service=turn_sessions_service,
             turn_session_uuid=turn_session_uuid,
             turn_preferences=turn_preferences,
+            cancellation_requested=cancellation_requested,
         )
         acc = BatchAccumulator(
             state=state,
@@ -3304,65 +3346,86 @@ class ComposerServiceImpl:
                 advisor_checkpoint_passes_used += terminate.advisor_passes_delta
                 continue
 
-            dispatch, advisor_calls_used = await self._dispatch_tool_batch(
-                call_model=call_model,
-                state=state,
-                last_validation=last_validation,
-                last_runtime_preflight=last_runtime_preflight,
-                llm_messages=llm_messages,
-                recorder=recorder,
-                anti_anchor=anti_anchor,
-                discovery_cache=discovery_cache,
-                runtime_preflight_cache=runtime_preflight_cache,
-                session_id=session_id,
-                user_id=user_id,
-                user_message_id=user_message_id,
-                user_message_content=message,
-                current_state_id=current_state_id,
-                actor=actor,
-                initial_version=initial_version,
-                deadline=deadline,
-                progress=progress,
-                session_scope=session_scope,
-                advisor_calls_used=advisor_calls_used,
+            cancellation_requested = asyncio.Event()
+
+            async def _dispatch_and_persist_tool_turn(
+                _call_model: _CallModelOutcome = call_model,
+                _state: CompositionState = state,
+                _last_validation: ValidationSummary | None = last_validation,
+                _last_runtime_preflight: ValidationResult | None = last_runtime_preflight,
+                _current_state_id: str | None = current_state_id,
+                _advisor_calls_used: int = advisor_calls_used,
+                _cancellation_requested: asyncio.Event = cancellation_requested,
+                _persisted_tool_call_turn: bool = persisted_tool_call_turn,
+                _persisted_assistant_message_id: str | None = persisted_assistant_message_id,
+            ) -> tuple[_DispatchOutcome, _PersistOutcome, int]:
+                dispatch_result, updated_advisor_calls_used = await self._dispatch_tool_batch(
+                    call_model=_call_model,
+                    state=_state,
+                    last_validation=_last_validation,
+                    last_runtime_preflight=_last_runtime_preflight,
+                    llm_messages=llm_messages,
+                    recorder=recorder,
+                    anti_anchor=anti_anchor,
+                    discovery_cache=discovery_cache,
+                    runtime_preflight_cache=runtime_preflight_cache,
+                    session_id=session_id,
+                    user_id=user_id,
+                    user_message_id=user_message_id,
+                    user_message_content=message,
+                    current_state_id=_current_state_id,
+                    actor=actor,
+                    initial_version=initial_version,
+                    deadline=deadline,
+                    progress=progress,
+                    session_scope=session_scope,
+                    advisor_calls_used=_advisor_calls_used,
+                    cancellation_requested=_cancellation_requested,
+                )
+                # Preserve the existing test/debug seam before P4: callers
+                # inspecting an audit-persist failure must still see the P3
+                # outcomes that led to it.
+                self._phase3_last_tool_outcomes = dispatch_result.tool_outcomes
+
+                # Do not start a new advisory call after cancellation. If an
+                # advisory call was already running when cancellation landed,
+                # the enclosing shield lets it finish and P4 still publishes
+                # the completed audit prefix.
+                if not _cancellation_requested.is_set():
+                    await self._maybe_run_early_checkpoint(
+                        state=dispatch_result.state,
+                        prev_state=_state,
+                        session_id=session_id,
+                        llm_messages=llm_messages,
+                        recorder=recorder,
+                        progress=progress,
+                    )
+                persist_result = await self._persist_turn_audit(
+                    tool_outcomes=dispatch_result.tool_outcomes,
+                    decoded_args_by_call_id=dispatch_result.decoded_args_by_call_id,
+                    assistant_message=dispatch_result.assistant_message,
+                    raw_assistant_content=dispatch_result.raw_assistant_content,
+                    assistant_tool_calls=dispatch_result.assistant_tool_calls,
+                    plugin_crash=dispatch_result.plugin_crash,
+                    session_id=session_id,
+                    current_state_id=_current_state_id,
+                    persisted_tool_call_turn=_persisted_tool_call_turn,
+                    persisted_assistant_message_id=_persisted_assistant_message_id,
+                )
+                return dispatch_result, persist_result, updated_advisor_calls_used
+
+            (dispatch, persist, advisor_calls_used), deferred_cancel = await _await_tool_turn_with_deferred_cancellation(
+                _dispatch_and_persist_tool_turn(),
+                cancellation_requested=cancellation_requested,
             )
             # State the driver still owns across iterations updates from
             # the dispatch carrier; persist + classify consume the rest
             # of the dispatch fields directly.
-            prev_state = state
             state = dispatch.state
             last_validation = dispatch.last_validation
             last_runtime_preflight = dispatch.last_runtime_preflight
             if dispatch.mutation_success_observed:
                 mutation_success_seen = True
-            self._phase3_last_tool_outcomes = dispatch.tool_outcomes
-            # EARLY advisory pass (advisory, never blocks): fires on the
-            # empty->non-empty pipeline TRANSITION, which is structurally
-            # <= once per session. Placed here — after the state-owning
-            # block, before P4 persist — so the very turn that creates the
-            # pipeline always reaches the hook, even if the persist/
-            # plugin-crash branch below raises. Does NOT consume the END
-            # gate budget; the return value is intentionally discarded.
-            await self._maybe_run_early_checkpoint(
-                state=state,
-                prev_state=prev_state,
-                session_id=session_id,
-                llm_messages=llm_messages,
-                recorder=recorder,
-                progress=progress,
-            )
-            persist = await self._persist_turn_audit(
-                tool_outcomes=dispatch.tool_outcomes,
-                decoded_args_by_call_id=dispatch.decoded_args_by_call_id,
-                assistant_message=dispatch.assistant_message,
-                raw_assistant_content=dispatch.raw_assistant_content,
-                assistant_tool_calls=dispatch.assistant_tool_calls,
-                plugin_crash=dispatch.plugin_crash,
-                session_id=session_id,
-                current_state_id=current_state_id,
-                persisted_tool_call_turn=persisted_tool_call_turn,
-                persisted_assistant_message_id=persisted_assistant_message_id,
-            )
             current_state_id = persist.current_state_id
             persisted_assistant_message_id = persist.persisted_assistant_message_id
             persisted_tool_call_turn = persist.persisted_tool_call_turn
@@ -3390,6 +3453,14 @@ class ComposerServiceImpl:
                 if dispatch.plugin_crash_cause is None:
                     raise dispatch.plugin_crash
                 raise dispatch.plugin_crash from dispatch.plugin_crash_cause
+
+            if deferred_cancel is not None:
+                # P3's in-flight tool and P4's atomic audit publication are
+                # now complete. Preserve any LLM-call audit carried by this
+                # compose request, then resume the original cancellation at
+                # the first safe checkpoint before P5 or another model turn.
+                attach_llm_calls(deferred_cancel, recorder)
+                raise deferred_cancel
 
             classify = await self._classify_and_budget_turn(
                 dispatch=dispatch,

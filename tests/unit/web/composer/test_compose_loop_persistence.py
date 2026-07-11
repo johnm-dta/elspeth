@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -15,6 +18,8 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_tool_call_response
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.state import ValidationSummary
+from elspeth.web.composer.tools._common import ToolResult
 from elspeth.web.sessions.models import chat_messages_table
 from elspeth.web.sessions.protocol import ComposerSessionPreferencesRecord, CompositionStateData
 from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
@@ -432,6 +437,125 @@ async def test_step2_dispatches_one_persist_compose_turn_async_per_turn(
     )
 
     assert persist_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_sync_tool_waits_for_result_audit_persist(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    result_session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled awaiter must not split a sync side effect from P4 persist."""
+
+    service = composer_service_with_real_sessions
+    sessions_service = service._sessions_service  # type: ignore[attr-defined]
+    _patch_auto_commit_preferences(monkeypatch, sessions_service)
+
+    loop = asyncio.get_running_loop()
+    worker_started = asyncio.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    worker_invocations = 0
+
+    def _blocking_tool(*args: Any, **_kwargs: Any) -> ToolResult:
+        nonlocal worker_invocations
+        worker_invocations += 1
+        state = cast(Any, args[2])
+        loop.call_soon_threadsafe(worker_started.set)
+        if not release_worker.wait(timeout=5.0):
+            raise TimeoutError("test worker was never released")
+        worker_finished.set()
+        return ToolResult(
+            success=True,
+            updated_state=replace(state, version=state.version + 1),
+            validation=ValidationSummary(
+                is_valid=True,
+                errors=(),
+                warnings=(),
+                suggestions=(),
+                semantic_contracts=(),
+            ),
+            affected_nodes=(),
+        )
+
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _blocking_tool)
+
+    llm_calls = 0
+
+    async def _llm(_messages: Any, _tools: Any) -> Any:
+        nonlocal llm_calls
+        llm_calls += 1
+        if llm_calls == 1:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    id="call_cancel_during_worker",
+                                    function=SimpleNamespace(
+                                        name="set_metadata",
+                                        arguments=json.dumps({"patch": {"name": "Committed before cancel"}}),
+                                    ),
+                                ),
+                                SimpleNamespace(
+                                    id="call_must_not_start_after_cancel",
+                                    function=SimpleNamespace(
+                                        name="set_metadata",
+                                        arguments=json.dumps({"patch": {"name": "Must not run"}}),
+                                    ),
+                                ),
+                            ],
+                        )
+                    )
+                ]
+            )
+        return _text_response("must not be reached after cancellation")
+
+    compose_task = asyncio.create_task(
+        _run_one_turn(
+            service,
+            llm=_llm,
+            session_id=result_session_id,
+        )
+    )
+    await asyncio.wait_for(worker_started.wait(), timeout=2.0)
+    compose_task.cancel()
+    await asyncio.sleep(0)
+
+    try:
+        assert not compose_task.done(), "cancellation escaped while the synchronous tool still owned an in-flight side effect"
+    finally:
+        release_worker.set()
+        await asyncio.to_thread(worker_finished.wait, 5.0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(compose_task, timeout=5.0)
+
+    assert worker_invocations == 1, "deferred cancellation must not start another tool"
+    assert llm_calls == 1, "deferred cancellation must stop before another model turn"
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        persisted_rows = list(
+            conn.execute(
+                select(
+                    chat_messages_table.c.role,
+                    chat_messages_table.c.tool_calls,
+                    chat_messages_table.c.tool_call_id,
+                    chat_messages_table.c.content,
+                )
+                .where(chat_messages_table.c.session_id == result_session_id)
+                .where(chat_messages_table.c.role.in_(("assistant", "tool")))
+                .order_by(chat_messages_table.c.sequence_no)
+            ).mappings()
+        )
+
+    assert [row["role"] for row in persisted_rows] == ["assistant", "tool"]
+    assert len(persisted_rows[0]["tool_calls"]) == 1
+    assert persisted_rows[0]["tool_calls"][0]["id"] == "call_cancel_during_worker"
+    assert persisted_rows[1]["tool_call_id"] == "call_cancel_during_worker"
+    assert json.loads(persisted_rows[1]["content"])["success"] is True
+    assert await sessions_service.get_current_state(UUID(result_session_id)) is not None
 
 
 @pytest.mark.asyncio

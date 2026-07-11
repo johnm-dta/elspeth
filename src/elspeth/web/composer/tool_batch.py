@@ -27,6 +27,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.composer._compose_loop_carriers import (
     _CallModelOutcome,
     _DispatchOutcome,
+    _ToolBatchCancellationRequested,
     _ToolOutcome,
 )
 from elspeth.web.composer._required_paths_validator import (
@@ -135,6 +136,7 @@ class ToolBatchContext:
     turn_sessions_service: SessionServiceProtocol | None
     turn_session_uuid: UUID | None
     turn_preferences: ComposerSessionPreferencesRecord | None
+    cancellation_requested: asyncio.Event
 
 
 @dataclass(slots=True)
@@ -256,6 +258,16 @@ async def run_tool_batch(
     mutation_success_observed = False
 
     for tool_call in assistant_message.tool_calls:
+        if ctx.cancellation_requested.is_set():
+            # The enclosing compose-loop critical section has observed a
+            # cancellation. If no tool started, abort without publishing a
+            # fabricated empty assistant turn. Otherwise return the completed
+            # prefix so P4 can atomically publish its results before the
+            # original cancellation resumes. Never start another tool after
+            # the client has gone away.
+            if not tool_outcomes:
+                raise _ToolBatchCancellationRequested
+            break
         tool_name = tool_call.function.name
         pre_version = state.version
 

@@ -455,7 +455,7 @@ node without the queue.
 
 Users often describe the effect, not the utility plugin. Plan utility transforms
 explicitly when the requested workflow needs row shaping, field preservation,
-renaming, filtering, cleanup, type conversion, or schema-compatible field names.
+renaming, cleanup, type conversion, or schema-compatible field names.
 These nodes are part of the requested workflow even when the user does not name
 them.
 
@@ -464,6 +464,27 @@ For row shaping and cleanup, plan `field_mapper`, load its schema before
 is not obvious. Do not skip utility transforms just because the user did not name
 them; if the output contract requires a shaped row, the utility node is the node
 that implements that decision.
+
+### Row Filtering Is a Gate, Not a Transform
+
+"Keep only rows where …", "drop rows with …", "only process rows that …" is a
+**gate node**, never a transform. Build it as `node_type: "gate"` with a
+`condition` expression and `routes` mapping each outcome to a downstream
+connection or sink — e.g. condition `row['quantity'] > 3`, routes
+`{"true": "main", "false": "discard"}` (route `false` to a named sink instead
+when the user wants the rejected rows kept). Use `get_expression_grammar` for
+the condition syntax, and remember gate condition fields must be typed —
+insert a schema-approved `type_coerce` before the gate when the source column
+is a string.
+
+Transforms do not filter rows. `value_transform` is **assignment-only**: it
+computes field values, every row passes through, and an expression that
+evaluates to False does NOT drop or error-route the row — proposing it as a
+filter ships every row to the sink plus a leaked helper column, while telling
+the user the pipeline filters. Never claim filter semantics for it. The only
+transform that genuinely blocks rows is `keyword_filter`, which error-routes
+rows whose string fields match configured regex patterns — pattern blocking,
+not general conditional filtering.
 
 ### Plugin Contract Stability
 

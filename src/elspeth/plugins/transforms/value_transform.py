@@ -138,9 +138,14 @@ class ValueTransform(BaseTransform):
     name = "value_transform"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6ae41926c7e56283"
+    source_file_hash: str | None = "sha256:53f11fc53dbcb9c5"
     config_model = ValueTransformConfig
     passes_through_input = True
+    usage_when_not_to_use = (
+        "Row filtering or routing — value_transform never drops rows; every row passes "
+        "through with its computed fields. Use a gate node for conditional row filtering "
+        "(or keyword_filter for regex pattern blocking)."
+    )
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -282,10 +287,16 @@ class ValueTransform(BaseTransform):
             return PluginAssistance(
                 plugin_name="value_transform",
                 issue_code=None,
-                summary="Apply per-field expressions (map / filter / aggregate operations) using a restricted expression grammar. Stateless and pure.",
+                summary=(
+                    "Compute new or overwritten field values with per-row expressions using a "
+                    "restricted expression grammar. Assignment-only: every row passes through — "
+                    "it cannot drop, keep, or route rows. Stateless and pure."
+                ),
                 composer_hints=(
                     "Call get_expression_grammar to see the allowed operations — only stdlib-safe expressions are permitted.",
                     "Use this for field-level transformations (uppercase, regex extract, arithmetic). For type changes use type_coerce.",
+                    "Rows always pass through: an expression that evaluates to False just stores False — it does not drop or "
+                    "error-route the row. Conditional row filtering is a gate node, not this transform.",
                     "Expressions are sandboxed — file I/O, imports, and external calls are rejected at parse time.",
                 ),
             )

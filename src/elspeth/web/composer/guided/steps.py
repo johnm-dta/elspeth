@@ -42,6 +42,7 @@ from elspeth.web.composer.tools import (
     _execute_set_output,
     _execute_set_pipeline,
     _execute_set_source,
+    _failure_result,
     _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
 )
@@ -406,6 +407,85 @@ def handle_step_2_sink(
     )
 
 
+_ROW_PRESERVING_ASSIGNMENT_PLUGINS: frozenset[str] = frozenset({"value_transform", "passthrough", "truncate"})
+"""Transforms that emit every input row: assignment/pass-through only.
+
+A rationale claiming these plugins filter, keep, drop, or route rows is a
+false capability claim (2026-07-10 web eval, elspeth-c1d78dac70: the solver
+proposed ``value_transform`` writing a ``_keep`` boolean and told the user
+False rows would error-route out — all rows reached the sink plus a leaked
+helper column). ``type_coerce`` and ``keyword_filter`` are deliberately
+absent: both genuinely error-route rows (failed conversions / matched
+patterns), so a routing claim in their rationale can be true.
+"""
+
+_ROW_FILTER_CLAIM_PHRASES: tuple[str, ...] = (
+    "keep only",
+    "filter",
+    "error-rout",
+    "error rout",
+    "route out",
+    "routes out",
+    "routed out",
+)
+"""Substrings that assert row filtering regardless of surrounding context."""
+
+_ROW_FILTER_VERB_STEMS: tuple[str, ...] = ("drop", "remov", "discard", "exclud", "skip", "reject", "block")
+"""Verb stems that only read as row filtering when they sit near "row"."""
+
+_ROW_VERB_WINDOW_CHARS: int = 24
+"""How far (chars) before a "row" occurrence a verb stem counts as adjacent.
+
+Wide enough for "drops every row" / "excluding the rows", narrow enough that
+"Remove the currency symbol from the price field of each row" (a field edit)
+stays clean.
+"""
+
+
+def _row_filter_claim_marker(rationale: str) -> str | None:
+    """Return the matched row-filtering claim marker in *rationale*, or None.
+
+    Pure substring scan (no regex) so this module adds no imports: the
+    tier-model allowlist binds a signed entry in this file to its module-level
+    ast_path, and a new import statement would shift every top-level index.
+    """
+    text = rationale.lower()
+    for phrase in _ROW_FILTER_CLAIM_PHRASES:
+        if phrase in text:
+            return phrase
+    # Ambiguous verbs legitimately describe FIELD edits ("remove the currency
+    # symbol"); they only assert row filtering next to "row"/"rows". Scan the
+    # window preceding each "row" occurrence for a verb stem.
+    pos = text.find("row")
+    while pos != -1:
+        window = text[max(0, pos - _ROW_VERB_WINDOW_CHARS) : pos]
+        for stem in _ROW_FILTER_VERB_STEMS:
+            if stem in window:
+                return f"{stem} … row"
+        pos = text.find("row", pos + 1)
+    return None
+
+
+def _row_filter_claim_error(step_index: int, plugin: str, marker: str) -> str:
+    """Rejection text for a false row-filter claim on an assignment-only step.
+
+    Travels verbatim into ``validation.errors`` (via ``_failure_result``), so
+    the accept-failure repair loop feeds exactly this coaching back to the
+    solver as ``repair_context``.
+    """
+    return (
+        f"Step {step_index + 1} ('{plugin}'): the rationale claims row filtering ('{marker}'), "
+        f"but {plugin} is assignment-only — every row passes through, and an expression that "
+        "evaluates to False does not drop or error-route the row; it just stores False and "
+        "leaks the helper column into the output. Conditional row filtering is a gate node, "
+        "and guided chains cannot include gates. Re-propose without emulating a filter: keep "
+        "the honestly-buildable steps, and state plainly in `why` that the conditional row "
+        "filter is not included and must be added after the guided build completes (the "
+        "composer chat can add a gate). Only keyword_filter genuinely blocks rows, and only "
+        "by regex match on string fields."
+    )
+
+
 def handle_step_3_chain_accept(
     *,
     state: CompositionState,
@@ -460,6 +540,25 @@ def handle_step_3_chain_accept(
     if not state.outputs:
         raise InvariantError("step 3 reached without committed outputs; dispatcher bug")
     source_name, source = next(iter(state.sources.items()))
+
+    # Reject false row-filter claims BEFORE committing: an assignment-only
+    # transform ships every row, so a chain sold to the user as a filter
+    # silently doesn't filter. The failure rides the normal accept-failure
+    # path — the route reads validation.errors and re-solves with this text
+    # as repair_context. ``str(step["rationale"])`` mirrors the emitter
+    # (emitters.py build_step_3_propose_chain_turn), which has already
+    # direct-accessed these keys to render the proposal the user accepted.
+    for lint_idx, lint_step in enumerate(proposal.steps):
+        lint_plugin = str(lint_step["plugin"])
+        if lint_plugin not in _ROW_PRESERVING_ASSIGNMENT_PLUGINS:
+            continue
+        marker = _row_filter_claim_marker(str(lint_step["rationale"]))
+        if marker is not None:
+            return StepHandlerResult(
+                state=state,
+                session=session,
+                tool_result=_failure_result(state, _row_filter_claim_error(lint_idx, lint_plugin, marker)),
+            )
 
     n = len(proposal.steps)
     node_args: list[dict[str, Any]] = []

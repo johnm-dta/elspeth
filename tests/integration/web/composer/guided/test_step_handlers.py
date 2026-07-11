@@ -434,6 +434,137 @@ class TestStep3Handler:
         assert http["abuse_contact"] == "noreply@example.com"
         assert http["scraping_reason"] == "demo"
 
+    def test_row_filter_claim_on_value_transform_rejected(self) -> None:
+        """The 2026-07-10 web-eval defect (elspeth-c1d78dac70): the solver
+        proposed `value_transform` writing a `_keep` boolean and claimed rows
+        where the expression is False would error-route out. value_transform is
+        assignment-only — every row passes through — so the accept must reject
+        the false row-filter claim and coach toward the honest alternatives."""
+        from elspeth.web.composer.guided.protocol import GuidedStep
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
+
+        catalog = create_catalog_service()
+        step_1 = handle_step_1_source(
+            state=_empty_state(),
+            session=GuidedSession.initial(),
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "inventory.csv", "schema": {"mode": "observed", "guaranteed_fields": ["quantity"]}},
+                observed_columns=("quantity",),
+                sample_rows=({"quantity": "5"},),
+            ),
+        )
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "filtered.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=(),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "value_transform",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "_keep", "expression": "row['quantity'] > 3"}],
+                    },
+                    "rationale": "Adds a _keep flag; rows where the expression is False will error-route out, keeping only rows with quantity > 3.",
+                },
+            ),
+            why="keep only rows where quantity is greater than 3",
+        )
+
+        result = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_2.session,
+            catalog=catalog,
+            proposal=proposal,
+        )
+
+        assert result.tool_result.success is False
+        # Failure leaves state and session untouched — no partial commit.
+        assert result.state is step_2.state
+        assert result.session.step is not GuidedStep.STEP_4_WIRE
+        # The rejection names the plugin and the honest construct so the
+        # repair loop (repair_context) can coach the model.
+        messages = " ".join(e.message for e in result.tool_result.validation.errors)
+        assert "value_transform" in messages
+        assert "gate" in messages
+
+    def test_value_transform_compute_rationale_accepted(self) -> None:
+        """A genuine assignment rationale must NOT trip the row-filter-claim
+        lint — value_transform used for what it actually does stays accepted."""
+        from elspeth.web.composer.guided.protocol import GuidedStep
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
+
+        catalog = create_catalog_service()
+        step_1 = handle_step_1_source(
+            state=_empty_state(),
+            session=GuidedSession.initial(),
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "inventory.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+        )
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "priced.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=(),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "value_transform",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        # Benign row-adjacent verb ("Remove … from … each row")
+                        # describes a FIELD edit, not row filtering — must pass.
+                        "operations": [{"target": "price_doubled", "expression": "row['price'] * 2"}],
+                    },
+                    "rationale": "Remove the currency ambiguity by computing a numeric price_doubled field for each row.",
+                },
+            ),
+            why="compute the doubled price per row",
+        )
+
+        result = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_2.session,
+            catalog=catalog,
+            proposal=proposal,
+        )
+
+        assert result.tool_result.success is True, f"set_pipeline failed: {getattr(result.tool_result, 'data', result.tool_result)}"
+        assert result.session.step is GuidedStep.STEP_4_WIRE
+        assert result.state.nodes[0].plugin == "value_transform"
+
     def test_empty_proposal_is_valid_passthrough_to_wire(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.state_machine import ChainProposal

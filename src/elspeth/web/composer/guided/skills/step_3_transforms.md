@@ -138,6 +138,18 @@ it receives. Only a `field_mapper` actually drops fields. Set:
 Naming an output "cleaned" or "final" does not clean it — only a real
 `field_mapper` immediately before the output does.
 
+### Filtering rows — a gate, which this chain cannot express
+
+Conditional row filtering ("keep only rows where …") is a **gate node**, not
+a transform, and guided chains cannot include one. Transforms are
+row-preserving: `value_transform` only assigns — an expression evaluating to
+False does NOT drop or error-route the row; it just stores False. **Never
+emulate a filter with it** (e.g. a `_keep` boolean): every row still reaches
+the output plus the leaked helper column, and the accept rejects the false
+claim. Build the rest of the chain honestly; state plainly in `why` that the
+row filter must be added as a gate after the guided build (composer chat can
+add one). The sole row-blocker is `keyword_filter` — regex on strings only.
+
 ### Sample-value eyeballing
 
 When you wire a column into a value-shape-sensitive field (`web_scrape.url_field`,

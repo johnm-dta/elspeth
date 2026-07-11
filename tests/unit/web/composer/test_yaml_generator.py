@@ -18,6 +18,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_public_pipeline_dict, generate_public_yaml, generate_yaml
+from elspeth.web.composer.yaml_importer import composition_state_from_runtime_yaml
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 
 
@@ -856,3 +857,161 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
         # Empty state should produce an empty YAML doc (no source, no sinks)
         assert parsed is None or parsed == {}
+
+
+def _queue_node(*, description: str | None = None) -> NodeSpec:
+    """Canonical structural queue NodeSpec (elspeth-a5b86149d4)."""
+    return NodeSpec(
+        id="inbound",
+        node_type="queue",
+        plugin=None,
+        input="inbound",
+        on_success=None,
+        on_error=None,
+        options={} if description is None else {"description": description},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _make_queue_pipeline(*, description: str | None = None) -> CompositionState:
+    """Two sources fan into one queue, which feeds a single passthrough sink chain."""
+    return CompositionState(
+        source=None,
+        sources={
+            "orders": SourceSpec(
+                plugin="csv",
+                on_success="inbound",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            "refunds": SourceSpec(
+                plugin="csv",
+                on_success="inbound",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+        },
+        nodes=(
+            _queue_node(description=description),
+            NodeSpec(
+                id="normalize",
+                node_type="transform",
+                plugin="passthrough",
+                input="inbound",
+                on_success="combined",
+                on_error="discard",
+                options={"schema": {"mode": "observed"}},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(OutputSpec(name="combined", plugin="json", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+class TestGenerateQueueYaml:
+    def test_queue_without_description_generates_empty_mapping(self) -> None:
+        state = _make_queue_pipeline()
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert parsed["queues"] == {"inbound": {}}
+        assert parsed["queues"]["inbound"] == {}
+
+    def test_queue_description_round_trips(self) -> None:
+        state = _make_queue_pipeline(description="Orders and refunds interleave here")
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert parsed["queues"] == {"inbound": {"description": "Orders and refunds interleave here"}}
+
+    def test_queue_appears_only_under_top_level_queues_never_transforms(self) -> None:
+        state = _make_queue_pipeline()
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert "inbound" in parsed["queues"]
+        transform_names = {t["name"] for t in parsed.get("transforms", [])}
+        assert "inbound" not in transform_names
+        # The queue is not smuggled into any executable node list.
+        for section in ("transforms", "gates", "aggregations", "coalesce"):
+            entries = parsed.get(section, [])
+            assert all(entry.get("name") != "inbound" for entry in entries)
+
+    def test_generate_pipeline_dict_places_queues_after_sources_before_transforms(self) -> None:
+        state = _make_queue_pipeline()
+        keys = list(generate_pipeline_dict(state))
+
+        assert keys.index("sources") < keys.index("queues") < keys.index("transforms")
+
+    def test_queue_free_snapshot_is_unchanged(self) -> None:
+        """A queue-free pipeline emits no top-level ``queues`` key."""
+        state = _make_linear_pipeline()
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert "queues" not in parsed
+
+    def test_generate_pipeline_dict_rejects_malformed_internal_queue(self) -> None:
+        """The generator defends the canonical queue shape (single source of
+        truth: queue_node_contract_error) rather than emitting a broken queue."""
+        state = _make_queue_pipeline()
+        broken_queue = replace(state.nodes[0], plugin="passthrough")
+        state = state.with_node(broken_queue)
+
+        with pytest.raises(ValueError, match="does not accept field"):
+            generate_pipeline_dict(state)
+
+    def test_import_generate_import_preserves_queue_state(self) -> None:
+        """Export -> re-import is the queue contract's round-trip guarantee."""
+        original = composition_state_from_runtime_yaml(
+            """
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+  refunds:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+queues:
+  inbound:
+    description: interleave point
+transforms:
+- name: normalize
+  plugin: passthrough
+  input: inbound
+  on_success: combined
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+sinks:
+  combined:
+    plugin: json
+    options:
+      path: outputs/combined.jsonl
+    on_write_failure: discard
+"""
+        )
+        reimported = composition_state_from_runtime_yaml(generate_yaml(original))
+
+        original_queue = next(n for n in original.nodes if n.node_type == "queue")
+        reimported_queue = next(n for n in reimported.nodes if n.node_type == "queue")
+        assert reimported_queue.id == original_queue.id == "inbound"
+        assert dict(reimported_queue.options) == {"description": "interleave point"}
+        assert dict(reimported_queue.options) == dict(original_queue.options)
+        assert [source.on_success for source in reimported.sources.values()] == ["inbound", "inbound"]

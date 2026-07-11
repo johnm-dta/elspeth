@@ -32,7 +32,7 @@ from typing import Any
 import yaml
 
 from elspeth.contracts.trust_boundary import trust_boundary
-from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState
+from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
 
@@ -131,6 +131,27 @@ def _generate_pipeline_dict(state: CompositionState, *, omit_blob_bound_source_p
         doc["sources"] = {
             name: _source_entry(source, omit_blob_bound_source_paths=omit_blob_bound_source_paths) for name, source in sources.items()
         }
+
+    # Queues — structural pass-through fan-in points (elspeth-a5b86149d4).
+    # Emitted after sources and before executable node lists so the YAML reads
+    # source -> queues -> transforms -> ... Queue nodes are in COMPOSER_NODE_TYPES
+    # but belong to none of the executable node lists below, so without this
+    # block a queue node would be silently dropped from the export. Defend the
+    # canonical shape here via the single source of truth rather than trusting
+    # internal state blindly.
+    queues = [node for node in state.nodes if node.node_type == "queue"]
+    if queues:
+        queues_doc: dict[str, Any] = {}
+        for queue in queues:
+            contract_error = queue_node_contract_error(queue)
+            if contract_error is not None:
+                raise ValueError(contract_error)
+            queue_entry: dict[str, Any] = {}
+            description = queue.options.get("description")
+            if isinstance(description, str):
+                queue_entry["description"] = description
+            queues_doc[queue.id] = queue_entry
+        doc["queues"] = queues_doc
 
     # Transforms — filter nodes by type, access always-present fields directly.
     transforms = [n for n in state_dict["nodes"] if n["node_type"] == "transform"]

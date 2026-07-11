@@ -6322,6 +6322,125 @@ sinks:
         parsed = yaml.safe_load(exported_yaml)
         assert parsed["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
 
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_imports_and_persists_queue(self, tmp_path) -> None:
+        """A pasted runtime queue section survives import and is persisted as a
+        canonical structural queue node (elspeth-a5b86149d4)."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Queue import", "local")
+        yaml_text = """
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+  refunds:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+queues:
+  inbound:
+    description: Orders and refunds interleave here
+transforms:
+- name: normalize
+  plugin: passthrough
+  input: inbound
+  on_success: main
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 200, resp.text
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        queue_nodes = [node for node in record.nodes if node["node_type"] == "queue"]
+        assert len(queue_nodes) == 1
+        assert queue_nodes[0]["id"] == "inbound"
+        assert queue_nodes[0]["options"] == {"description": "Orders and refunds interleave here"}
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_malformed_queue_is_rejected_atomically(self, tmp_path) -> None:
+        """Malformed queue YAML is a 400 that leaves the prior persisted state and
+        version untouched — the import boundary is all-or-nothing."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Queue atomicity", "local")
+        valid_yaml = """
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+  refunds:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+queues:
+  inbound: {}
+transforms:
+- name: normalize
+  plugin: passthrough
+  input: inbound
+  on_success: main
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+        malformed_yaml = valid_yaml.replace("  inbound: {}", "  inbound:\n    priority: 5")
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            ok = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": valid_yaml})
+        assert ok.status_code == 200, ok.text
+        before = await service.get_current_state(session.id)
+        assert before is not None
+        version_before = before.version
+        nodes_before = list(before.nodes)
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            bad = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": malformed_yaml})
+
+        assert bad.status_code == 400
+        assert "priority" in bad.json()["detail"]
+        after = await service.get_current_state(session.id)
+        assert after is not None
+        assert after.version == version_before
+        assert list(after.nodes) == nodes_before
+
 
 class TestRunAlreadyActiveError:
     """Tests for seam contract D: RunAlreadyActiveError → 409 with error_type.

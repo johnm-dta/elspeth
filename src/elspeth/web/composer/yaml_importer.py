@@ -36,7 +36,7 @@ _UNSUPPORTED_COALESCE_FIELDS = frozenset(
 # Recognised top-level pipeline sections. A parsed document that is a
 # mapping but shares none of these keys is not a pipeline export at all
 # (see the guard in composition_state_from_runtime_yaml).
-_PIPELINE_SECTION_KEYS = frozenset({"source", "sources", "transforms", "gates", "aggregations", "coalesce", "sinks"})
+_PIPELINE_SECTION_KEYS = frozenset({"source", "sources", "transforms", "gates", "aggregations", "coalesce", "queues", "sinks"})
 
 
 class RuntimeYamlImportError(ValueError):
@@ -301,6 +301,66 @@ def _outputs_from_runtime_sinks(sinks: Any) -> tuple[OutputSpec, ...]:
 
 @trust_boundary(
     tier=3,
+    source="web-authored pipeline YAML queues mapping (untrusted import payload)",
+    source_param="section",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "raises RuntimeYamlImportError on non-mapping queues, non-string queue names, non-mapping "
+        "entries, unknown fields, and non-string descriptions; None yields an empty list"
+    ),
+    test_ref="tests/unit/web/composer/test_yaml_importer.py::test_queues_from_runtime_mapping_rejects_non_mapping_section",
+    test_fingerprint="383050875a3cf5ec556350735ecea390f4eb154ff6c03758f82cdd41978f7282",
+)
+def _queues_from_runtime_mapping(section: object) -> list[NodeSpec]:
+    """Parse a runtime ``queues`` mapping into canonical structural queue NodeSpecs.
+
+    Each entry ``<name>: {}`` or ``<name>: {description: <str>}`` becomes the
+    canonical queue shape (id == input == name, plugin=None, on_success=None,
+    description-only options) that ``queue_node_contract_error`` validates
+    (elspeth-a5b86149d4). Unknown fields and non-string descriptions are rejected
+    with a path-specific error rather than silently dropped.
+    """
+    if section is None:
+        return []
+    queues = _require_mapping(section, "queues")
+    result: list[NodeSpec] = []
+    for raw_name, raw_entry in queues.items():
+        if not isinstance(raw_name, str) or not raw_name:
+            raise RuntimeYamlImportError("queues keys must be non-empty strings")
+        path = f"queues.{raw_name}"
+        entry = _require_mapping(raw_entry, path)
+        unknown = sorted(set(entry) - {"description"})
+        if unknown:
+            raise RuntimeYamlImportError(f"{path} contains unknown field(s): {unknown}")
+        description = entry.get("description")
+        if description is not None and not isinstance(description, str):
+            raise RuntimeYamlImportError(f"{path}.description must be a string")
+        options = {} if description is None else {"description": description}
+        result.append(
+            NodeSpec(
+                id=raw_name,
+                node_type="queue",
+                plugin=None,
+                input=raw_name,
+                on_success=None,
+                on_error=None,
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                trigger=None,
+                output_mode=None,
+                expected_output_count=None,
+            )
+        )
+    return result
+
+
+@trust_boundary(
+    tier=3,
     source="operator-supplied runtime pipeline YAML import request",
     source_param="pipeline_yaml",
     suppresses=("R1", "R5"),
@@ -352,6 +412,10 @@ def composition_state_from_runtime_yaml(pipeline_yaml: str, *, version: int = 1)
         *_nodes_from_runtime_list(doc.get("gates"), "gates", "gate"),
         *_nodes_from_runtime_list(doc.get("aggregations"), "aggregations", "aggregation"),
         *_nodes_from_runtime_list(doc.get("coalesce"), "coalesce", "coalesce"),
+        # Queues carry no plugin, so the review-stamp map below is a pure no-op
+        # for them; they must nonetheless be present in ``nodes`` BEFORE that map
+        # so an imported queue survives as a first-class node (elspeth-a5b86149d4).
+        *_queues_from_runtime_mapping(doc.get("queues")),
     ]
     # Imported states must honour the same stage-then-surface review contract
     # as every composer tool mutation (elspeth-ae5160c3cb): an LLM node whose

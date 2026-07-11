@@ -742,6 +742,123 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().compositionState?.version).toBe(3);
     });
 
+    it("keeps waiting past any wall-clock budget while the cancelled turn is still unwinding", async () => {
+      // Synchronous tools are cancel-safe by running to completion —
+      // tool_batch.py never wraps them in asyncio.wait_for — so the
+      // shielded window has NO upper bound. A wall-clock budget on the
+      // settle wait just reintroduces the reconciliation race past its
+      // edge: the wait must end on semantic conditions only.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        // Mutable registry: still unwinding until the test flips it.
+        const registry = { phase: "using_tools" };
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockImplementation(() => Promise.resolve({ phase: registry.phase }));
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+          {
+            id: "user-1",
+            session_id: "session-1",
+            role: "user",
+            content: "hello",
+            tool_calls: null,
+            created_at: "2026-07-11T00:00:00Z",
+          },
+        ]);
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+
+        // A long synchronous tool: 25 (fake) seconds pass with the server
+        // still unwinding. The resync must NOT have fired.
+        await vi.advanceTimersByTimeAsync(25_000);
+        expect(stateMock).not.toHaveBeenCalled();
+
+        // The server finally settles; the resync now proceeds.
+        registry.phase = "cancelled";
+        await vi.advanceTimersByTimeAsync(1_000);
+        await sendPromise;
+        expect(stateMock).toHaveBeenCalled();
+        expect(useSessionStore.getState().compositionState?.version).toBe(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abandons the settle wait when the user switches sessions", async () => {
+      // The unbounded wait needs semantic exits: navigating away makes the
+      // resync moot, so the loop must end rather than poll a session the
+      // user has left (and must not fetch state for it either).
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockResolvedValue({ phase: "using_tools" });
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({ activeSessionId: "session-1" });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        useSessionStore.setState({ activeSessionId: "session-2" });
+        await vi.advanceTimersByTimeAsync(25_000);
+        await sendPromise;
+
+        expect(stateMock).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps the failed-row contract on a non-abort failure (no resync)", async () => {
       const apiMod = await import("@/api/client");
       (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({

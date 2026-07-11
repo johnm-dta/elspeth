@@ -186,12 +186,13 @@ async function refreshInterpretationEventsForSession(
   await useInterpretationEventsStore.getState().refreshAll(sessionId);
 }
 
-// Settle-wait pacing for resyncAfterAbortedComposeTurn. The budget bounds a
-// worst-case shielded tool (validation-running tools are seconds-scale, not
-// minutes); on exhaustion the resync proceeds best-effort — identical to
-// not having waited at all, never worse.
+// Settle-wait pacing for resyncAfterAbortedComposeTurn. Deliberately NO
+// wall-clock budget: synchronous tools are cancel-safe by running to
+// completion (tool_batch.py — never wrapped in asyncio.wait_for), so the
+// shielded window is unbounded by design and any time budget here would
+// reintroduce the reconciliation race past its edge. The wait is bounded
+// SEMANTICALLY instead — see waitForCancelledComposeToSettle.
 const ABORT_RESYNC_SETTLE_POLL_MS = 500;
-const ABORT_RESYNC_SETTLE_BUDGET_MS = 20_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -211,6 +212,16 @@ function sleep(ms: number): Promise<void> {
  * cancelled turn is visible to the resync GETs. Resyncing without this
  * wait deterministically misses commits whenever the abort lands mid-tool.
  *
+ * The wait ends on SEMANTIC conditions only, matching the server's own
+ * unboundedness (a wall-clock budget would silently reopen the race for
+ * any tool that outruns it):
+ * - the server settles (terminal or idle progress) — the normal exit;
+ * - the user navigated to a different session — the resync is moot;
+ * - a newer compose turn started in this session — its completion handler
+ *   owns the state sync now and this resync would be redundant;
+ * - the progress endpoint fails — progress is advisory, degrade to an
+ *   immediate best-effort resync.
+ *
  * Known benign edge: if the abort fires before this turn engaged compose
  * (e.g. still queued on the compose lock), the registry may hold the
  * PREVIOUS turn's terminal snapshot and the wait returns immediately —
@@ -219,8 +230,11 @@ function sleep(ms: number): Promise<void> {
 async function waitForCancelledComposeToSettle(
   sessionId: string,
 ): Promise<void> {
-  const deadline = Date.now() + ABORT_RESYNC_SETTLE_BUDGET_MS;
   for (;;) {
+    const current = useSessionStore.getState();
+    if (current.activeSessionId !== sessionId || current.isComposing) {
+      return;
+    }
     let phase: ComposerProgressPhase;
     try {
       phase = (await api.fetchComposerProgress(sessionId)).phase;
@@ -229,9 +243,6 @@ async function waitForCancelledComposeToSettle(
       return;
     }
     if (phase === "idle" || TERMINAL_COMPOSER_PROGRESS_PHASES.has(phase)) {
-      return;
-    }
-    if (Date.now() >= deadline) {
       return;
     }
     await sleep(ABORT_RESYNC_SETTLE_POLL_MS);
@@ -260,6 +271,13 @@ async function waitForCancelledComposeToSettle(
  */
 async function resyncAfterAbortedComposeTurn(sessionId: string): Promise<void> {
   await waitForCancelledComposeToSettle(sessionId);
+  const settled = useSessionStore.getState();
+  if (settled.activeSessionId !== sessionId || settled.isComposing) {
+    // The wait exited because the resync became moot (the user navigated
+    // away) or because a newer turn owns the state sync now — abandon
+    // instead of fetching results only to discard them.
+    return;
+  }
   // Reuse the inflight reconciler: it drops the optimistic local-* row only
   // when its canonical counterpart was actually persisted, so a request
   // that never reached the route keeps its failed row + retry affordance.

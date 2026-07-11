@@ -230,17 +230,25 @@ function sleep(ms: number): Promise<void> {
  * any tool that outruns it):
  * - quiescence: zero in-flight compose requests — the normal exit;
  * - the user navigated to a different session — the resync is moot;
- * - a newer compose turn started in this session — its completion handler
- *   owns the state sync now and this resync would be redundant;
+ * - a newer compose turn claimed the progress poller (`ownerGeneration`
+ *   went stale) — its completion handler owns the state sync now. The
+ *   generation is the mode-AGNOSTIC supersession signal: every compose
+ *   entry point (sendMessage, retryMessage, chatGuided) claims the poller
+ *   via startComposerProgressPolling, whereas store flags cannot see a
+ *   guided turn (chatGuided sets guidedChatPending, not isComposing);
  * - the progress endpoint fails or predates the count field — progress is
  *   advisory, degrade to an immediate best-effort resync.
  */
 async function waitForCancelledComposeToSettle(
   sessionId: string,
+  ownerGeneration: number,
 ): Promise<void> {
   for (;;) {
     const current = useSessionStore.getState();
-    if (current.activeSessionId !== sessionId || current.isComposing) {
+    if (
+      current.activeSessionId !== sessionId ||
+      composerProgressPollGeneration !== ownerGeneration
+    ) {
       return;
     }
     let inflightRequests: number;
@@ -278,10 +286,20 @@ async function waitForCancelledComposeToSettle(
  * Best-effort: the abort copy is already on screen, so a refetch failure
  * keeps the stale snapshot rather than stacking a second error on top.
  */
-async function resyncAfterAbortedComposeTurn(sessionId: string): Promise<void> {
-  await waitForCancelledComposeToSettle(sessionId);
-  const settled = useSessionStore.getState();
-  if (settled.activeSessionId !== sessionId || settled.isComposing) {
+async function resyncAfterAbortedComposeTurn(
+  sessionId: string,
+  ownerGeneration: number,
+): Promise<void> {
+  // ownerGeneration is the aborted turn's progress-poller claim (returned
+  // by its startComposerProgressPolling). It fences every stage of the
+  // resync: a newer compose turn in ANY mode — freeform or guided — claims
+  // the poller and thereby invalidates this resync, so a snapshot fetched
+  // here can never overwrite state a newer turn has since produced.
+  const superseded = () =>
+    useSessionStore.getState().activeSessionId !== sessionId ||
+    composerProgressPollGeneration !== ownerGeneration;
+  await waitForCancelledComposeToSettle(sessionId, ownerGeneration);
+  if (superseded()) {
     // The wait exited because the resync became moot (the user navigated
     // away) or because a newer turn owns the state sync now — abandon
     // instead of fetching results only to discard them.
@@ -301,7 +319,9 @@ async function resyncAfterAbortedComposeTurn(sessionId: string): Promise<void> {
   } catch {
     return;
   }
-  if (useSessionStore.getState().activeSessionId !== sessionId) {
+  if (superseded()) {
+    // A newer turn started (and possibly finished) while the GETs were in
+    // flight — this snapshot is stale against its results. Drop it.
     return;
   }
   useSessionStore.setState((s) => {
@@ -1202,7 +1222,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (isComposeAbort(err)) {
         // The turn ran (and was cancelled) server-side; pull its durable
         // partial results into view (see resyncAfterAbortedComposeTurn).
-        await resyncAfterAbortedComposeTurn(activeSessionId);
+        await resyncAfterAbortedComposeTurn(
+          activeSessionId,
+          progressPollGeneration,
+        );
       }
     } finally {
       get().stopInflightMessagesPolling(activeSessionId, inflightPollGeneration);
@@ -1634,7 +1657,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         // The recompose turn ran (and was cancelled) server-side; pull its
         // durable partial results into view (see
         // resyncAfterAbortedComposeTurn).
-        await resyncAfterAbortedComposeTurn(activeSessionId);
+        await resyncAfterAbortedComposeTurn(
+          activeSessionId,
+          progressPollGeneration,
+        );
       }
     } finally {
       get().stopInflightMessagesPolling(activeSessionId, inflightPollGeneration);

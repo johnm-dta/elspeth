@@ -941,6 +941,142 @@ describe("sessionStore", () => {
       }
     });
 
+    it("abandons the settle wait when a newer compose turn claims the poller", async () => {
+      // Guided chat sets guidedChatPending (not isComposing) and its route
+      // is not the freeform POST — a store-flag check cannot see it. Every
+      // compose entry point (sendMessage/retryMessage/chatGuided) claims
+      // the module-global progress poller via startComposerProgressPolling,
+      // so the poller generation is the mode-agnostic supersession signal:
+      // once a newer turn owns it, the aborted turn's resync must abandon
+      // without fetching at all.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        const registry = { phase: "using_tools", inflight_requests: 1 };
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockImplementation(() =>
+          Promise.resolve({
+            phase: registry.phase,
+            inflight_requests: registry.inflight_requests,
+          }),
+        );
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+        await vi.advanceTimersByTimeAsync(1_000); // waiter parked
+
+        // A guided chat turn starts in the same session: it claims the
+        // progress poller exactly as chatGuided does.
+        useSessionStore.getState().startComposerProgressPolling("session-1");
+        // The registry then quiesces (the guided turn finished; guided
+        // requests are also counted server-side, but even a zero count
+        // must not revive the superseded resync).
+        registry.phase = "complete";
+        registry.inflight_requests = 0;
+        await vi.advanceTimersByTimeAsync(2_000);
+        await sendPromise;
+
+        expect(stateMock).not.toHaveBeenCalled();
+        expect(useSessionStore.getState().compositionState?.version).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not apply a resync snapshot fetched before a newer turn finished", async () => {
+      // The race the fence must close at the APPLY side: the waiter
+      // settles, the resync's GETs go out, a newer turn starts AND
+      // completes while they are in flight, and the older snapshot then
+      // arrives. Applying it would overwrite the newer turn's state.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        // Quiescent from the start: the waiter settles immediately and
+        // the resync proceeds straight to its GETs.
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockResolvedValue({ phase: "cancelled", inflight_requests: 0 });
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        // Gate the state fetch so the test controls when it resolves.
+        let releaseStateFetch: (state: CompositionState) => void = () => {};
+        const gatedState = new Promise<CompositionState>((resolve) => {
+          releaseStateFetch = resolve;
+        });
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockReturnValue(gatedState);
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+        await vi.advanceTimersByTimeAsync(500); // resync GETs in flight
+
+        // A newer turn claims the poller and finishes, leaving newer
+        // frontend state (version 5).
+        useSessionStore.getState().startComposerProgressPolling("session-1");
+        useSessionStore.setState({ compositionState: makeCompositionState(5) });
+
+        // The stale snapshot (version 3) finally arrives.
+        releaseStateFetch(makeCompositionState(3));
+        await vi.advanceTimersByTimeAsync(500);
+        await sendPromise;
+
+        expect(useSessionStore.getState().compositionState?.version).toBe(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("does not tear down a newer turn's pollers when the aborted turn settles", async () => {
       // Turn A aborts and its settle wait parks. The user then sends turn B
       // in the same session: B starts the module-global progress/message

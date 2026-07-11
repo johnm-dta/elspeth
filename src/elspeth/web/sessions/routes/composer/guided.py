@@ -82,6 +82,7 @@ from .._helpers import (
     _state_response,
     _store_guided_audit_payload,
     _summarize_guided_response,
+    _track_compose_inflight,
     _validate_control_signal,
     _validate_step_indices,
     _verify_session_ownership,
@@ -2059,6 +2060,10 @@ async def post_guided_chat(
     body: GuidedChatRequest,
     request: Request,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    # Guided chat is compose activity: count it in the session's in-flight
+    # tally so the SPA's post-abort settlement signal (elspeth-06a23adfcc)
+    # cannot observe quiescence while a guided turn is mutating state.
+    _inflight_tally: None = Depends(_track_compose_inflight),
 ) -> GuidedChatResponse:
     """Submit a free-text chat message scoped to the user's current wizard step.
 

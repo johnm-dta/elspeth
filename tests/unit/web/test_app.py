@@ -240,6 +240,33 @@ class TestHealthEndpoint:
         assert response.json() == {"status": "ok"}
 
 
+class TestSystemStatusEndpoint:
+    """Tests for GET /api/system/status."""
+
+    def test_reports_configured_composer_timeout(self, tmp_path) -> None:
+        """The SPA derives its compose abort ceiling from this field.
+
+        The client-side compose cap must sit ABOVE the backend wall clock
+        (composer_timeout_seconds) so the backend's structured 422 always
+        beats the client abort. The wall clock is deployment-configurable
+        with no fixed maximum (only transport-ceiling headroom), so a
+        hard-coded frontend constant cannot satisfy the invariant — the
+        SPA reads the configured value here at boot and adds its own
+        grace margin.
+        """
+        app = create_app(
+            _settings(
+                tmp_path,
+                composer_timeout_seconds=300.0,
+                composer_transport_idle_ceiling_seconds=400.0,
+            )
+        )
+        client = TestClient(app)
+        response = client.get("/api/system/status")
+        assert response.status_code == 200
+        assert response.json()["composer_timeout_seconds"] == 300.0
+
+
 class TestMetricsEndpoint:
     """Tests for GET /metrics (Prometheus scrape endpoint)."""
 

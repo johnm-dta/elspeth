@@ -872,6 +872,14 @@ export interface SystemStatus {
   composer_provider: string | null;
   composer_reason: string | null;
   composer_missing_keys: string[];
+  /**
+   * The backend's configured compose wall clock
+   * (ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS). The SPA derives its compose
+   * abort ceiling from this (+ client grace) at boot — see
+   * applyServerComposerTimeout. Optional only for fixture tolerance; the
+   * server always sends it.
+   */
+  composer_timeout_seconds?: number;
 }
 
 // ── Blob Manager ────────────────────────────────────────────────────────────

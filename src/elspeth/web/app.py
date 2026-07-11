@@ -1169,6 +1169,12 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             "composer_provider": composer.provider,
             "composer_reason": composer.reason,
             "composer_missing_keys": list(composer.missing_keys),
+            # The SPA derives its compose abort ceiling from this at boot:
+            # client cap = wall clock + client grace, keeping the backend's
+            # structured 422 ahead of the client abort for ANY configured
+            # wall clock (there is no fixed maximum — only transport-ceiling
+            # headroom), not just the checked-in deployment default.
+            "composer_timeout_seconds": settings.composer_timeout_seconds,
         }
 
     # --- Prometheus metrics scrape endpoint ---

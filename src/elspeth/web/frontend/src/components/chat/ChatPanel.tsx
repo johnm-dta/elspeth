@@ -53,8 +53,8 @@ import { acknowledgementCardTitle } from "./AcknowledgementCard";
 import { humaniseStepLabel } from "./interpretationStepLabel";
 import {
   COMPOSE_TIMEOUT_ABORT_REASON,
-  COMPOSE_TIMEOUT_MS,
   COMPOSE_USER_CANCEL_ABORT_REASON,
+  getComposeTimeoutMs,
 } from "@/config/composer";
 import type { WireBlockerLink } from "./guided/WireStageTurn";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
@@ -691,7 +691,9 @@ export function ChatPanel({
       guidedChatControllerRef.current = controller;
       const timer = setTimeout(
         () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-        COMPOSE_TIMEOUT_MS,
+        // Read at call time: the ceiling is derived from the backend's
+        // configured wall clock once /api/system/status lands at boot.
+        getComposeTimeoutMs(),
       );
       try {
         await chatGuided(content, controller.signal);

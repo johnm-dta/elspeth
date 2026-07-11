@@ -3,8 +3,8 @@ import { useCallback, useRef } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import {
   COMPOSE_TIMEOUT_ABORT_REASON,
-  COMPOSE_TIMEOUT_MS,
   COMPOSE_USER_CANCEL_ABORT_REASON,
+  getComposeTimeoutMs,
 } from "@/config/composer";
 
 /**
@@ -32,7 +32,9 @@ export function useComposer() {
       activeControllerRef.current = controller;
       const timer = setTimeout(
         () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-        COMPOSE_TIMEOUT_MS,
+        // Read at call time: the ceiling is derived from the backend's
+        // configured wall clock once /api/system/status lands at boot.
+        getComposeTimeoutMs(),
       );
       try {
         await runner(controller.signal);

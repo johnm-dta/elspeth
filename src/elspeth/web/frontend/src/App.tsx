@@ -49,6 +49,7 @@ import {
   OPEN_CATALOG_EVENT,
 } from "./lib/composer-events";
 import type { SystemStatus } from "./types/index";
+import { applyServerComposerTimeout } from "./config/composer";
 
 // Health check interval in milliseconds (30 seconds)
 const HEALTH_CHECK_INTERVAL = 30_000;
@@ -211,6 +212,12 @@ function App() {
     try {
       const status = await api.fetchSystemStatus();
       setSystemStatus(status);
+      // Derive the compose abort ceiling from the deployment's configured
+      // wall clock — a hard-coded client cap only satisfies the
+      // client-outlives-server invariant for the checked-in defaults.
+      if (status.composer_timeout_seconds !== undefined) {
+        applyServerComposerTimeout(status.composer_timeout_seconds);
+      }
       setBackendAvailable(true);
       setLastHealthCheckAt(null);
     } catch (err) {

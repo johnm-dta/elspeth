@@ -5505,6 +5505,75 @@ class TestPassThroughComposerParity:
         assert sink_contract.consumer_requires == ("body",)
         assert sink_contract.satisfied is True
 
+    def test_batch_replicate_propagates_upstream_guarantees_to_downstream_consumer(self) -> None:
+        """Replicated rows retain the fields guaranteed by their source."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="replicate_in",
+                plugin="csv",
+                options={
+                    "schema": {
+                        "mode": "observed",
+                        "guaranteed_fields": ["color_name", "hex"],
+                    }
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="replicate",
+                node_type="aggregation",
+                plugin="batch_replicate",
+                input="replicate_in",
+                on_success="score_in",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "include_copy_index": True,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                trigger={"count": 10},
+                output_mode="transform",
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "score_variants",
+                "score_in",
+                "main",
+                plugin="passthrough",
+                options={
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": ["color_name", "hex"],
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="csv",
+                options={"path": "outputs/main.csv", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "replicate"))
+        state = state.with_edge(self._make_edge("e2", "replicate", "score_variants"))
+        state = state.with_edge(self._make_edge("e3", "score_variants", "main"))
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+        consumer_contract = next(ec for ec in result.edge_contracts if ec.to_id == "score_variants")
+        assert set(consumer_contract.producer_guarantees) == {"color_name", "hex", "copy_index"}
+        assert consumer_contract.consumer_requires == ("color_name", "hex")
+        assert consumer_contract.satisfied is True
+
     def test_preview_inherits_upstream_guarantees_through_fork_gate_into_pass_through(self) -> None:
         """Pass-through preview must follow fork branches back to their producer."""
         state = self._empty_state()

@@ -2817,6 +2817,75 @@ class TestMessageRoutes:
         assert follow_up.status_code == 200
         assert follow_up.json()["message"]["content"] == "Still alive"
 
+    def test_external_cancel_racing_disconnect_keeps_unwinding(self) -> None:
+        """An external cancel racing a client disconnect must keep unwinding.
+
+        ``triggered`` only proves a disconnect happened — not that the caught
+        CancelledError belongs to the watcher alone. When server shutdown or
+        an operator cancel races ``http.disconnect``, the route task carries
+        TWO cancellation requests; consuming one and marking the exception as
+        disconnect-initiated would let the route convert it into a handled
+        499 and swallow the external cancellation. The watcher may consume
+        only its own request: with an external cancel still pending, the
+        exception must stay unmarked so the route keeps unwinding as
+        genuinely cancelled (mirroring the else-branch's ``cancelling()``
+        re-check for the completion race).
+        """
+        from starlette.requests import Request
+
+        from elspeth.web.sessions.routes._helpers import (
+            _cancel_on_client_disconnect,
+            _is_client_disconnect_cancel,
+        )
+
+        async def drive() -> tuple[bool, bool]:
+            started = asyncio.Event()
+            allow_disconnect = asyncio.Event()
+
+            async def receive() -> dict[str, Any]:
+                await allow_disconnect.wait()
+                return {"type": "http.disconnect"}
+
+            request = Request({"type": "http"}, receive)
+            captured: dict[str, bool] = {}
+
+            async def guarded() -> None:
+                try:
+                    async with _cancel_on_client_disconnect(request):
+                        started.set()
+                        await asyncio.Event().wait()
+                except asyncio.CancelledError as exc:
+                    captured["marked"] = _is_client_disconnect_cancel(exc)
+                    raise
+                raise AssertionError("unreachable — the guarded block never completes")
+
+            task = asyncio.get_running_loop().create_task(guarded())
+            await started.wait()
+            allow_disconnect.set()
+            # Let the watcher observe the disconnect and file its cancel...
+            while task.cancelling() == 0:
+                await asyncio.sleep(0)
+            # ...then land the external cancel (server shutdown / operator)
+            # before the parked task has processed the watcher's.
+            task.cancel()
+            assert task.cancelling() == 2
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return captured["marked"], task.cancelled()
+
+        loop = asyncio.new_event_loop()
+        try:
+            marked, cancelled = loop.run_until_complete(drive())
+        finally:
+            loop.close()
+
+        assert marked is False, (
+            "the CancelledError must NOT be marked disconnect-initiated while "
+            "an external cancellation request is still pending — the mark lets "
+            "the route swallow a server-shutdown/operator cancel as a quiet 499"
+        )
+        assert cancelled is True, "the task must finish as genuinely cancelled"
+
     def test_get_messages(self, tmp_path) -> None:
         mock_composer = _make_composer_mock()
 

@@ -1593,13 +1593,19 @@ async def _cancel_on_client_disconnect(request: Request) -> AsyncIterator[None]:
     try:
         yield
     except asyncio.CancelledError as exc:
-        if triggered:
-            # Our own cancel: restore the task's cancellation count and
-            # mark the exception so the route's cancelled-path can
-            # discriminate disconnect-initiated cancellation from a real
-            # external cancel (server shutdown), which must keep
-            # unwinding.
-            task.uncancel()
+        # Consume ONLY the watcher's own cancellation request.
+        # ``triggered`` proves a disconnect happened, not that the
+        # delivered CancelledError belongs to the watcher alone: an
+        # external cancel (server shutdown, operator) can race the
+        # disconnect, leaving two requests on the task. Mark the
+        # exception as disconnect-initiated — licensing the route to
+        # convert it into a quiet 499 — only when no other request
+        # remains after ours is uncancelled (short-circuit keeps the
+        # uncancel from running for a purely external cancel); otherwise
+        # leave it unmarked so the route's cancelled-path re-raises and
+        # the task keeps unwinding as genuinely cancelled (the mirror of
+        # the else-branch's ``cancelling()`` re-check below).
+        if triggered and task.uncancel() == 0:
             setattr(exc, _CLIENT_DISCONNECT_CANCEL_MARKER, True)
         raise
     else:

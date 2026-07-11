@@ -999,6 +999,79 @@ class TestStage1Validation:
 
         assert result.is_valid, result.errors
 
+    def test_multiple_fork_gates_do_not_collide_on_fork_route_keyword(self) -> None:
+        """Two gates routing to the reserved 'fork' keyword are not duplicate producers.
+
+        Regression test for elspeth-b6940369a7: route target 'fork' is the
+        fork-mode keyword, not a connection, so any number of gates may use it.
+        Before the fix the web validator reported "Duplicate producer for
+        connection 'fork'" and rejected multi-fork topologies the engine builds.
+
+        Topology mirrors an engine-valid build (verified via
+        from_plugin_instances): a boolean router gate splits into two fork
+        gates whose branches terminate directly at sinks — no coalesce, so the
+        only thing under test is the two gates both routing to 'fork'.
+        """
+        state = self._empty_state()
+        state = state.with_source(self._make_source(on_success="router_in"))
+        state = state.with_node(
+            NodeSpec(
+                id="router",
+                node_type="gate",
+                plugin=None,
+                input="router_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['x'] > 0",
+                routes={"true": "fa_in", "false": "fb_in"},
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="gate_a",
+                node_type="gate",
+                plugin=None,
+                input="fa_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("sink_a1", "sink_a2"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="gate_b",
+                node_type="gate",
+                plugin=None,
+                input="fb_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("sink_b1", "sink_b2"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        for sink_name in ("sink_a1", "sink_a2", "sink_b1", "sink_b2"):
+            state = state.with_output(self._make_output(sink_name))
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+
     def test_gate_route_to_discard_is_valid_without_output_named_discard(self) -> None:
         """Gate routes may target virtual 'discard' without declaring a sink."""
         state = self._empty_state()

@@ -94,6 +94,22 @@ class TestProducerResolverBuild:
         for branch in ("a", "b"):
             assert resolver.find_producer_for(branch) is not None
 
+    def test_fork_route_target_is_not_a_connection_producer(self):
+        """Route target 'fork' is the reserved fork-mode keyword, not a connection.
+
+        Two gates routing to 'fork' must not contend as duplicate producers
+        (elspeth-b6940369a7); the DAG builder resolves 'fork' to
+        RouteDestination.fork() and never registers it as a connection.
+        """
+        nodes = (
+            _node("g1", plugin="gate1", node_type="gate", input="src", routes={"true": "fork"}, fork_to=("a1", "a2")),
+            _node("g2", plugin="gate2", node_type="gate", input="mid", routes={"true": "fork"}, fork_to=("b1", "b2")),
+        )
+        resolver = ProducerResolver.build(source=None, nodes=nodes, sink_names=frozenset())
+
+        assert "fork" not in resolver.duplicate_connections
+        assert resolver.find_producer_for("fork") is None
+
     def test_coalesce_without_on_success_publishes_under_own_id(self):
         nodes = (_node("c", plugin=None, node_type="coalesce", input="branches"),)
         resolver = ProducerResolver.build(source=None, nodes=nodes, sink_names=frozenset())

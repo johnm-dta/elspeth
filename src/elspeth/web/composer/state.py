@@ -58,6 +58,7 @@ COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gat
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
 _DISCARD_ROUTE_TARGET = "discard"
+_FORK_ROUTE_TARGET = "fork"
 
 
 def validate_composer_source_name(source_name: str) -> None:
@@ -1134,6 +1135,12 @@ def _check_schema_contracts(
         if node.routes is not None:
             for route_label, target in node.routes.items():
                 if target == _DISCARD_ROUTE_TARGET:
+                    continue
+                if target == _FORK_ROUTE_TARGET:
+                    # Reserved fork-mode keyword, not a connection. The
+                    # resolver applies the same carve-out; description
+                    # tracking must mirror it (see same-node carve-out
+                    # below).
                     continue
                 if target in sink_names:
                     _record_direct_sink(target, node.id, node.plugin, node.options)

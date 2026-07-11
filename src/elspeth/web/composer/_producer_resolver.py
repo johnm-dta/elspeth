@@ -132,6 +132,11 @@ class ProducerResolver:
             register(node.on_error, entry)
             if node.routes is not None:
                 for target in node.routes.values():
+                    if target == "fork":
+                        # Reserved fork-mode keyword: the DAG builder resolves it
+                        # to RouteDestination.fork(), never a connection, so any
+                        # number of fork gates may use it without contending.
+                        continue
                     register(target, entry)
             if node.fork_to is not None:
                 for target in node.fork_to:

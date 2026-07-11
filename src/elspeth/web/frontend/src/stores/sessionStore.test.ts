@@ -675,6 +675,73 @@ describe("sessionStore", () => {
       });
     });
 
+    it("waits for the cancelled turn's terminal progress before resyncing", async () => {
+      // The disconnect watcher cancels the route task, but the compose
+      // loop's dispatch+persist critical section is shielded (deferred
+      // cancellation, a7ac0f06f): the in-flight tool finishes and P4
+      // publishes AFTER the client's fetch has already rejected. Resyncing
+      // immediately reads the pre-publish snapshot and the late commits
+      // stay invisible until reload. The terminal 'cancelled' progress
+      // snapshot is published strictly after those persists, so the resync
+      // must wait for it.
+      const apiMod = await import("@/api/client");
+      const controller = new AbortController();
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+      const progressMock = apiMod.fetchComposerProgress as ReturnType<
+        typeof vi.fn
+      >;
+      progressMock
+        // sendMessage's initial progress poll.
+        .mockResolvedValueOnce({ phase: "using_tools" })
+        // First settle check: the cancelled turn is still unwinding
+        // (shielded tool + P4 publish in flight).
+        .mockResolvedValueOnce({ phase: "using_tools" })
+        // Second settle check onward: the unwind has published terminal.
+        .mockResolvedValue({ phase: "cancelled" });
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "user-1",
+          session_id: "session-1",
+          role: "user",
+          content: "hello",
+          tool_calls: null,
+          created_at: "2026-07-11T00:00:00Z",
+        },
+      ]);
+      const stateMock = apiMod.fetchCompositionState as ReturnType<
+        typeof vi.fn
+      >;
+      stateMock.mockResolvedValue(makeCompositionState(3));
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(1),
+      });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_user_cancel");
+      await sendPromise;
+
+      // The resync's state GET must run only after the settle wait
+      // observed the terminal snapshot (progress call #3).
+      const progressOrder = progressMock.mock.invocationCallOrder;
+      const stateOrder = stateMock.mock.invocationCallOrder[0];
+      expect(progressOrder.length).toBeGreaterThanOrEqual(3);
+      expect(stateOrder).toBeGreaterThan(progressOrder[2]);
+      expect(useSessionStore.getState().compositionState?.version).toBe(3);
+    });
+
     it("keeps the failed-row contract on a non-abort failure (no resync)", async () => {
       const apiMod = await import("@/api/client");
       (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({

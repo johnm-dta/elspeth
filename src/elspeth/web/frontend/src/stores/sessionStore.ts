@@ -186,6 +186,58 @@ async function refreshInterpretationEventsForSession(
   await useInterpretationEventsStore.getState().refreshAll(sessionId);
 }
 
+// Settle-wait pacing for resyncAfterAbortedComposeTurn. The budget bounds a
+// worst-case shielded tool (validation-running tools are seconds-scale, not
+// minutes); on exhaustion the resync proceeds best-effort — identical to
+// not having waited at all, never worse.
+const ABORT_RESYNC_SETTLE_POLL_MS = 500;
+const ABORT_RESYNC_SETTLE_BUDGET_MS = 20_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Block until the server side of a cancelled compose turn has settled.
+ *
+ * The client's abort rejects the fetch immediately, but the server is
+ * still working: the compose loop's dispatch+persist critical section is
+ * shielded (deferred cancellation — see _await_tool_turn_with_deferred_
+ * cancellation in composer/service.py), so the in-flight tool finishes and
+ * P4 publishes its results BEFORE the CancelledError resumes, and the
+ * route's cancelled unwind publishes the terminal 'cancelled' progress
+ * snapshot strictly AFTER those persists. Terminal (or idle) progress is
+ * therefore the happens-after signal that every durable write of the
+ * cancelled turn is visible to the resync GETs. Resyncing without this
+ * wait deterministically misses commits whenever the abort lands mid-tool.
+ *
+ * Known benign edge: if the abort fires before this turn engaged compose
+ * (e.g. still queued on the compose lock), the registry may hold the
+ * PREVIOUS turn's terminal snapshot and the wait returns immediately —
+ * an early resync equal to the unwaited behaviour, never worse.
+ */
+async function waitForCancelledComposeToSettle(
+  sessionId: string,
+): Promise<void> {
+  const deadline = Date.now() + ABORT_RESYNC_SETTLE_BUDGET_MS;
+  for (;;) {
+    let phase: ComposerProgressPhase;
+    try {
+      phase = (await api.fetchComposerProgress(sessionId)).phase;
+    } catch {
+      // Progress is advisory — settle best-effort and resync now.
+      return;
+    }
+    if (phase === "idle" || TERMINAL_COMPOSER_PROGRESS_PHASES.has(phase)) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      return;
+    }
+    await sleep(ABORT_RESYNC_SETTLE_POLL_MS);
+  }
+}
+
 /**
  * INVARIANT (elspeth-06a23adfcc): every freeform compose entry point that
  * can be aborted client-side (sendMessage, retryMessage) MUST call this from
@@ -194,16 +246,20 @@ async function refreshInterpretationEventsForSession(
  * session until the disconnect watcher cancels it, and every step it
  * completed before the cancel (canonical user row, assistant rows,
  * composition-state advances, proposals, interpretation reviews, blobs) is
- * already committed by per-operation transactions. The route's cancelled
- * unwind persists only LLM-call telemetry, so a single resync here observes
- * everything renderable. Without it the transcript/side rail keep the
- * pre-send snapshot until a manual reload (stale "No pipeline yet" at v1
- * while the server head is v3 with pending review cards).
+ * committed by per-operation transactions, with the shielded in-flight
+ * tool's P4 publish landing shortly AFTER the client's fetch has rejected
+ * (see waitForCancelledComposeToSettle). The route's cancelled unwind then
+ * persists only LLM-call telemetry, so waiting for terminal progress and
+ * resyncing once observes everything renderable. Without this the
+ * transcript/side rail keep the pre-send snapshot until a manual reload
+ * (stale "No pipeline yet" at v1 while the server head is v3 with pending
+ * review cards).
  *
  * Best-effort: the abort copy is already on screen, so a refetch failure
  * keeps the stale snapshot rather than stacking a second error on top.
  */
 async function resyncAfterAbortedComposeTurn(sessionId: string): Promise<void> {
+  await waitForCancelledComposeToSettle(sessionId);
   // Reuse the inflight reconciler: it drops the optimistic local-* row only
   // when its canonical counterpart was actually persisted, so a request
   // that never reached the route keeps its failed row + retry affordance.

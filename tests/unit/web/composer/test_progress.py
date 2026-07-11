@@ -262,6 +262,34 @@ class TestComposerProgressRegistry:
         registry.end_request("session-1")
 
     @pytest.mark.asyncio
+    async def test_list_active_snapshots_carry_live_inflight_count(self) -> None:
+        """The operator /_active view reports the LIVE count, not publish-time zero.
+
+        Stored snapshots are created by publish() where inflight_requests
+        defaults to 0; serving them raw from list_active() would show an
+        actively composing session with a zero count, contradicting the
+        live-count contract the per-session GET provides.
+        """
+        registry = ComposerProgressRegistry()
+        await registry.publish(
+            session_id="session-1",
+            request_id="message-1",
+            user_id="user-1",
+            event=ComposerProgressEvent(
+                phase="using_tools",
+                headline="I'm applying the requested pipeline changes.",
+                evidence=("A tool call is running.",),
+            ),
+        )
+        registry.begin_request("session-1")
+        try:
+            active = await registry.list_active(user_id="user-1")
+            assert len(active) == 1
+            assert active[0].inflight_requests == 1
+        finally:
+            registry.end_request("session-1")
+
+    @pytest.mark.asyncio
     async def test_clear_removes_session_snapshot(self) -> None:
         registry = ComposerProgressRegistry()
         await registry.publish(

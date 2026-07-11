@@ -139,11 +139,21 @@ class ComposerProgressRegistry:
         live quiescence state alongside the last narrative phase.
         """
         with self._lock:
-            inflight = self._inflight.get(session_id, 0)
             snapshot = self._snapshots.get(session_id) or _idle_snapshot(session_id)
-            if snapshot.inflight_requests == inflight:
-                return snapshot
-            return snapshot.model_copy(update={"inflight_requests": inflight})
+            return self._with_live_inflight(session_id, snapshot)
+
+    def _with_live_inflight(self, session_id: str, snapshot: ComposerProgressSnapshot) -> ComposerProgressSnapshot:
+        """Overlay the live in-flight count onto a stored snapshot.
+
+        Stored snapshots carry the field's default (0) from publish();
+        every read surface must overlay the CURRENT count or it reports
+        an actively composing session as quiescent. Caller must hold
+        ``self._lock``.
+        """
+        inflight = self._inflight.get(session_id, 0)
+        if snapshot.inflight_requests == inflight:
+            return snapshot
+        return snapshot.model_copy(update={"inflight_requests": inflight})
 
     async def list_active(self, *, user_id: str) -> tuple[ComposerProgressSnapshot, ...]:
         """Return non-terminal snapshots for one user's sessions.
@@ -167,7 +177,7 @@ class ComposerProgressRegistry:
         """
         with self._lock:
             owned = (
-                snap
+                self._with_live_inflight(sid, snap)
                 for sid, snap in self._snapshots.items()
                 if self._user_index[sid] == user_id and snap.phase in NON_TERMINAL_PROGRESS_PHASES
             )

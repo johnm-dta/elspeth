@@ -47,6 +47,23 @@
   gap: var(--space-xs);
 }
 
+/* Compose-timeout bootstrap notice for the side-rail Apply: soft, transient
+   "connecting" status shown while the backend wall clock is still landing.
+   Muted register — mirrors .chat-input-bootstrapping on the main Send. */
+.side-rail-suggestion-connecting {
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* Stuck state: backend reachable but reported no usable compose timeout, so
+   Apply can never ungate. Error register (not the muted "connecting" one). */
+.side-rail-suggestion-unavailable {
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
 .side-rail-suggestion-item {
   display: flex;
   align-items: flex-start;

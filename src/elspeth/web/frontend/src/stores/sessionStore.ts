@@ -25,6 +25,7 @@ import * as api from "@/api/client";
 import {
   COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
+  resetComposeTimeout,
 } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
@@ -616,6 +617,16 @@ interface SessionState {
    */
   composeTimeoutReady: boolean;
   setComposeTimeoutReady: (ready: boolean) => void;
+  /**
+   * TRUE when the backend is reachable (GET /api/system/status returned) but
+   * did NOT supply a usable composer_timeout_seconds, so composeTimeoutReady
+   * can never latch. Distinguishes "still booting" (both false) from "up but
+   * misconfigured" (this true) so the Send affordances can show a distinct
+   * diagnostic instead of a perpetual "Connecting…". Reset to false whenever a
+   * valid ceiling lands or the backend goes unreachable.
+   */
+  composerTimeoutUnavailable: boolean;
+  setComposerTimeoutUnavailable: (unavailable: boolean) => void;
   stateVersions: CompositionStateVersion[];
   error: string | null;
   /**
@@ -782,6 +793,7 @@ const initialState = {
   composerProgress: null as ComposerProgressSnapshot | null,
   isComposing: false,
   composeTimeoutReady: false,
+  composerTimeoutUnavailable: false,
   stateVersions: [] as CompositionStateVersion[],
   isLoadingVersions: false,
   error: null as string | null,
@@ -800,6 +812,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setComposeTimeoutReady(ready) {
     set({ composeTimeoutReady: ready });
+  },
+
+  setComposerTimeoutUnavailable(unavailable) {
+    set({ composerTimeoutUnavailable: unavailable });
   },
 
   async loadSessions() {
@@ -2382,6 +2398,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset() {
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    // Reset the module compose-timeout predicate in lockstep with the store
+    // gate: initialState sets composeTimeoutReady=false, and the module's
+    // composeTimeoutApplied must go false too or the two would disagree after
+    // logout (the store gate would report un-ready while isComposeTimeoutReady()
+    // still returned true). App.checkHealth re-latches both on re-auth.
+    resetComposeTimeout();
     // Fresh array (not initialState.sessions) so loadSessions' reference
     // guard can't mistake a post-reset store for the pre-reset one it
     // captured before a still-in-flight fetch (logout/login ABA).

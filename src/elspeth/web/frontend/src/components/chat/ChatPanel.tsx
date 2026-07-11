@@ -52,6 +52,8 @@ import {
 import { acknowledgementCardTitle } from "./AcknowledgementCard";
 import { humaniseStepLabel } from "./interpretationStepLabel";
 import {
+  COMPOSE_CONNECTING_MESSAGE,
+  COMPOSE_UNAVAILABLE_MESSAGE,
   COMPOSE_USER_CANCEL_ABORT_REASON,
   runComposeWithTimeout,
 } from "@/config/composer";
@@ -614,6 +616,12 @@ export function ChatPanel({
   // Bootstrap-race gate (single source of truth): guided sends read the same
   // readiness the shared runComposeWithTimeout enforces for freeform.
   const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  // Stuck state (backend up but reported no compose timeout): drives the
+  // Explain button's disabled reason so it matches the main Send instead of
+  // saying "Connecting…" forever.
+  const composerTimeoutUnavailable = useSessionStore(
+    (s) => s.composerTimeoutUnavailable,
+  );
   const guidedSelfHealNotice = useSessionStore((s) => s.guidedSelfHealNotice);
   // Whether the CURRENT chat has any work — gates the mode-switch confirmation
   // (ModeSwitchButton). Freeform work = messages or a non-empty composition;
@@ -1766,7 +1774,24 @@ export function ChatPanel({
                 type="button"
                 className="btn btn-compact guided-explain-btn"
                 onClick={() => void sendGuidedChat(GUIDED_EXPLAIN_MESSAGE)}
-                disabled={guidedChatPending || guidedResponsePending}
+                // Bootstrap race: Explain routes sendGuidedChat ->
+                // runComposeWithTimeout, which no-ops until the backend wall
+                // clock lands. A guided decision restores from server state on
+                // reload before App.checkHealth latches readiness, so gate the
+                // button (dead-button doctrine) rather than leave a silent
+                // no-op — same as the primary Send.
+                disabled={
+                  guidedChatPending || guidedResponsePending || !composeTimeoutReady
+                }
+                title={
+                  !guidedChatPending &&
+                  !guidedResponsePending &&
+                  !composeTimeoutReady
+                    ? composerTimeoutUnavailable
+                      ? COMPOSE_UNAVAILABLE_MESSAGE
+                      : COMPOSE_CONNECTING_MESSAGE
+                    : undefined
+                }
               >
                 Explain this step
               </button>
@@ -1881,7 +1906,14 @@ export function ChatPanel({
             <GuidedChatHistory
               chatHistory={guidedSession.chat_history}
               onRetrySyntheticFailure={handleRetrySyntheticFailure}
-              retryDisabled={guidedChatPending || guidedResponsePending}
+              // !composeTimeoutReady: the synthetic-failure turn restores from
+              // server-authoritative chat_history on reload, so its Retry can
+              // render before readiness latches. Retry routes sendGuidedChat ->
+              // runComposeWithTimeout, which no-ops when not ready; disable it
+              // so it is not a silent dead button (same gate as Explain).
+              retryDisabled={
+                guidedChatPending || guidedResponsePending || !composeTimeoutReady
+              }
             />
           );
           // Persistent-mount contract (AcknowledgementStack.tsx): the stack

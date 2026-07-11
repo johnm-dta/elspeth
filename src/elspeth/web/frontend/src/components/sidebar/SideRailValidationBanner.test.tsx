@@ -347,6 +347,53 @@ describe("SideRailValidationBanner", () => {
       expect(sendMessage).not.toHaveBeenCalled();
     });
 
+    it("surfaces a visible, announced connecting reason while the compose timeout is not ready (a11y)", () => {
+      // The disabled reason must be perceivable to assistive tech, not conveyed
+      // by the button's title attribute alone (which SRs do not reliably read).
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        sendMessage: vi.fn(),
+        isComposing: false,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+      const reason = screen.getByText(/connecting to the composer/i);
+      expect(reason).toHaveAttribute("role", "status");
+    });
+
+    it("removes the connecting reason once the compose timeout is ready", () => {
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        sendMessage: vi.fn(),
+        isComposing: false,
+        composeTimeoutReady: true,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+      expect(screen.queryByText(/connecting to the composer/i)).toBeNull();
+    });
+
+    it("shows the stuck 'unavailable' reason (assertive) instead of 'Connecting…' when the backend reported no compose timeout", () => {
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        sendMessage: vi.fn(),
+        isComposing: false,
+        composeTimeoutReady: false,
+        composerTimeoutUnavailable: true,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+      const reason = screen.getByText(/server did not report a compose timeout/i);
+      expect(reason).toHaveAttribute("role", "alert");
+      expect(screen.queryByText(/connecting to the composer/i)).toBeNull();
+    });
+
     it("collapses by default when more than 2 suggestions are present, expands on header click", async () => {
       const user = userEvent.setup();
       const manySuggestions = [

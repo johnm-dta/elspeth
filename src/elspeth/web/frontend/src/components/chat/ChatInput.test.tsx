@@ -619,4 +619,17 @@ describe("ChatInput — compose timeout readiness gate (bootstrap race)", () => 
     await user.keyboard("{Enter}");
     expect(onSend).toHaveBeenCalledWith("build a pipeline");
   });
+
+  it("shows a distinct unavailable alert (not 'Connecting…') when the backend reports no compose timeout", () => {
+    // Backend up but no usable timeout: readiness never latches, so surface a
+    // stuck-state diagnostic instead of a perpetual soft "Connecting…".
+    useSessionStore.setState({ composerTimeoutUnavailable: true });
+    renderInput(vi.fn());
+
+    expect(
+      screen.getByText(/server did not report a compose timeout/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/connecting to the composer/i)).toBeNull();
+    expect(screen.getByLabelText(/send message/i)).toBeDisabled();
+  });
 });

@@ -49,7 +49,10 @@ import {
   OPEN_CATALOG_EVENT,
 } from "./lib/composer-events";
 import type { SystemStatus } from "./types/index";
-import { applyServerComposerTimeout } from "./config/composer";
+import {
+  applyServerComposerTimeout,
+  isComposeTimeoutReady,
+} from "./config/composer";
 
 // Health check interval in milliseconds (30 seconds)
 const HEALTH_CHECK_INTERVAL = 30_000;
@@ -226,7 +229,35 @@ function App() {
         status.composer_timeout_seconds !== undefined &&
         applyServerComposerTimeout(status.composer_timeout_seconds)
       ) {
-        useSessionStore.getState().setComposeTimeoutReady(true);
+        // Mirror the module readiness predicate (set atomically with the
+        // ceiling inside applyServerComposerTimeout) into the reactive store,
+        // so the store gate can never claim readiness the ceiling has not.
+        useSessionStore
+          .getState()
+          .setComposeTimeoutReady(isComposeTimeoutReady());
+        useSessionStore.getState().setComposerTimeoutUnavailable(false);
+      } else if (!isComposeTimeoutReady()) {
+        // Backend reachable but no usable composer_timeout_seconds AND no good
+        // ceiling was ever latched — genuinely stuck. The gate must stay closed
+        // (a send would schedule an abort from the stale default ceiling), so
+        // latch a distinct diagnostic: the Send affordance stops saying
+        // "Connecting…" and the misconfiguration is visible. Log once on the
+        // false→true transition, not every poll.
+        //
+        // The `!isComposeTimeoutReady()` guard is load-bearing: a partial or
+        // absent response that arrives AFTER a good ceiling was latched is a
+        // transient (the known ceiling stands, readiness holds), so we must not
+        // flag unavailable or spam a false "no usable timeout" error on a
+        // genuinely healthy composer.
+        const sessionState = useSessionStore.getState();
+        if (!sessionState.composerTimeoutUnavailable) {
+          console.error(
+            "[health-check] system status reported no usable " +
+              "composer_timeout_seconds:",
+            status.composer_timeout_seconds,
+          );
+        }
+        sessionState.setComposerTimeoutUnavailable(true);
       }
       setBackendAvailable(true);
       setLastHealthCheckAt(null);
@@ -238,6 +269,10 @@ function App() {
       console.error("[health-check] fetchSystemStatus failed:", err);
       setSystemStatus(null);
       setBackendAvailable(false);
+      // Backend unreachable: the "Backend unavailable" banner is the signal
+      // now, not the composer-specific diagnostic. Clear it so a later
+      // recovery does not surface a stale "composer unavailable".
+      useSessionStore.getState().setComposerTimeoutUnavailable(false);
       setLastHealthCheckAt(new Date().toLocaleTimeString());
     } finally {
       setHealthChecking(false);
@@ -363,6 +398,21 @@ function App() {
       }
     };
   }, [checkHealth]);
+
+  // Re-establish the compose-timeout gate on RE-authentication. App stays
+  // mounted across auth changes (AuthGuard gates only its children), so the
+  // mount effect above does not re-run on login; meanwhile logout's store reset
+  // dropped composeTimeoutReady to false (and reset the module ceiling in
+  // lockstep). Without this, a fresh login would sit behind a disabled Send
+  // until the next 30s poll re-latched the backend ceiling. Fire only on the
+  // false→true transition so the initial mount does not double-fetch.
+  const wasAuthenticatedRef = useRef(isAuthenticated);
+  useEffect(() => {
+    if (isAuthenticated && !wasAuthenticatedRef.current) {
+      void checkHealth();
+    }
+    wasAuthenticatedRef.current = isAuthenticated;
+  }, [isAuthenticated, checkHealth]);
 
   // Phase 6B Task 8 short-circuit: if the URL hash is `#/shared/{token}`,
   // render the read-only inspect view inside AuthGuard. The token is a

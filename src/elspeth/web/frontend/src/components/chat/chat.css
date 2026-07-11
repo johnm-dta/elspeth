@@ -422,6 +422,16 @@
   font-size: var(--font-size-xs);
 }
 
+/* Compose-timeout stuck state: backend reachable but it reported no usable
+   compose wall clock, so Send can never ungate. Error register (not the muted
+   "connecting" one) — this is a misconfiguration to notice, not a transient. */
+.chat-input-composer-unavailable {
+  padding: var(--space-1-5) var(--space-2-5);
+  margin-bottom: var(--space-sm);
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
 .chat-input-row {
   display: flex;
   gap: var(--space-sm);

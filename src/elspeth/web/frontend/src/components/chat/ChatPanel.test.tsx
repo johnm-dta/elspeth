@@ -2079,6 +2079,52 @@ describe("ChatPanel mode discriminator", () => {
     ).toBe(true);
   });
 
+  it("Explain is disabled until the compose timeout is ready (bootstrap race)", () => {
+    // A guided decision restores from server state on reload; if the Explain
+    // button renders before App.checkHealth latches readiness, a click would
+    // route sendGuidedChat -> runComposeWithTimeout(ready=false) and silently
+    // no-op — a dead button. Gate it, same as the primary Send. Override the
+    // mode-discriminator beforeEach post-boot seed to reproduce the boot window.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      composeTimeoutReady: false,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      (screen.getByRole("button", { name: "Explain this step" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("Explain's disabled reason switches to the unavailable diagnostic in the stuck state", () => {
+    // Backend up but no compose timeout: the Explain title must match the main
+    // Send ("Composer unavailable…"), not say "Connecting…" forever.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      composeTimeoutReady: false,
+      composerTimeoutUnavailable: true,
+    });
+
+    render(<ChatPanel />);
+
+    const btn = screen.getByRole("button", { name: "Explain this step" });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute(
+      "title",
+      "Composer unavailable — the server did not report a compose timeout.",
+    );
+  });
+
   it("no Explain without a current decision (nothing on screen to explain)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -2232,6 +2278,25 @@ describe("ChatPanel mode discriminator", () => {
         guidedSession: guidedSessionWithSyntheticFailure(),
         guidedNextTurn: singleSelectTurn(),
         guidedChatPending: true,
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    });
+
+    it("Retry is disabled until the compose timeout is ready (bootstrap race)", () => {
+      // The synthetic-failure turn lives in server-authoritative chat_history,
+      // so it restores on reload and its Retry can render before readiness
+      // latches. A click would route sendGuidedChat ->
+      // runComposeWithTimeout(ready=false) and silently no-op; gate it.
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: guidedSessionWithSyntheticFailure(),
+        guidedNextTurn: singleSelectTurn(),
+        composeTimeoutReady: false,
       });
 
       render(<ChatPanel />);

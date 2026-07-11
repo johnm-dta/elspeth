@@ -6,7 +6,7 @@ import {
   COMPOSE_CLIENT_GRACE_MS,
   getComposeTimeoutMs,
   applyServerComposerTimeout,
-  resetComposeTimeoutForTests,
+  resetComposeTimeout,
   COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
@@ -18,7 +18,7 @@ describe("compose timeout ceiling", () => {
   afterEach(() => {
     // The ceiling is module-level state; the readiness gate lives in the
     // store. Restore both so tests stay independent.
-    resetComposeTimeoutForTests();
+    resetComposeTimeout();
     resetStore(useSessionStore);
     vi.useRealTimers();
   });

@@ -4,6 +4,10 @@ import { useComposer } from "@/hooks/useComposer";
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import {
+  COMPOSE_CONNECTING_MESSAGE,
+  COMPOSE_UNAVAILABLE_MESSAGE,
+} from "@/config/composer";
 import type { CompositionState, ValidationEntryDTO } from "@/types/index";
 import {
   sortedSourceEntries,
@@ -23,7 +27,15 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
   // (bootstrap race). The underlying runComposeWithTimeout also no-ops when
   // not ready; disabling the button keeps it from reading as a dead click.
   const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  const composerTimeoutUnavailable = useSessionStore(
+    (s) => s.composerTimeoutUnavailable,
+  );
   const applyDisabled = isComposing || !composeTimeoutReady;
+  // Reason shown while Apply is held closed by the compose gate (not while
+  // composing): the stuck "unavailable" state, else the transient boot window.
+  const composeGateReason = composerTimeoutUnavailable
+    ? COMPOSE_UNAVAILABLE_MESSAGE
+    : COMPOSE_CONNECTING_MESSAGE;
   const [expanded, setExpanded] = useState(suggestions.length <= 2);
 
   function handleApply(suggestion: ValidationEntryDTO): void {
@@ -54,6 +66,22 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
           {expanded ? "▴" : "▾"}
         </span>
       </div>
+      {expanded && !isComposing && !composeTimeoutReady && (
+        // Visible + announced reason the Apply buttons below are disabled. The
+        // per-button title alone is not reliably read by screen readers. Matches
+        // the main ChatInput affordance: polite role="status" for the transient
+        // boot window, assertive role="alert" for the stuck "unavailable" state.
+        <div
+          role={composerTimeoutUnavailable ? "alert" : "status"}
+          className={
+            composerTimeoutUnavailable
+              ? "side-rail-suggestion-unavailable"
+              : "side-rail-suggestion-connecting"
+          }
+        >
+          {composeGateReason}
+        </div>
+      )}
       {expanded && (
         <ul className="side-rail-suggestion-list">
           {suggestions.map((s, i) => (
@@ -66,7 +94,7 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
                 disabled={applyDisabled}
                 title={
                   !isComposing && !composeTimeoutReady
-                    ? "Connecting to the composer…"
+                    ? composeGateReason
                     : undefined
                 }
                 onClick={() => handleApply(s)}

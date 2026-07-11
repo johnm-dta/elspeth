@@ -21,7 +21,7 @@ import type {
 import {
   COMPOSE_CLIENT_GRACE_MS,
   getComposeTimeoutMs,
-  resetComposeTimeoutForTests,
+  resetComposeTimeout,
 } from "@/config/composer";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
@@ -514,7 +514,7 @@ describe("App compose timeout readiness (bootstrap race)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(useSessionStore);
-    resetComposeTimeoutForTests();
+    resetComposeTimeout();
     useExecutionStore.getState().reset();
     useAuthStore.setState({
       token: "test-token",
@@ -551,6 +551,7 @@ describe("App compose timeout readiness (bootstrap race)", () => {
       expect(useSessionStore.getState().composeTimeoutReady).toBe(true),
     );
     expect(getComposeTimeoutMs()).toBe(300_000 + COMPOSE_CLIENT_GRACE_MS);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
   });
 
   it("leaves the composer unready when system status fails, so no send starts against the unsafe default", async () => {
@@ -561,6 +562,153 @@ describe("App compose timeout readiness (bootstrap race)", () => {
 
     await screen.findByText(/Backend unavailable/i);
     expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    // Backend down → the banner owns the signal; the composer-specific
+    // diagnostic must not latch.
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("flags the composer unavailable when the backend is up but reports no compose timeout", async () => {
+    // Backend reachable (health 200) but composer_timeout_seconds omitted: the
+    // gate stays closed (no send against the stale default) AND a distinct
+    // stuck-state diagnostic latches so the Send stops reading as "connecting".
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("a partial poll AFTER a good ceiling keeps ready and does not re-flag or re-log (else-guard)", async () => {
+    // The else-guard (!isComposeTimeoutReady()) across two polls: once a real
+    // ceiling latches, a later partial/absent response is a transient — it must
+    // not un-ready, flag unavailable, or spam a false "no usable timeout" error.
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus")
+      .mockResolvedValueOnce({
+        composer_available: true,
+        composer_model: "gpt-4o",
+        composer_provider: "openai",
+        composer_reason: null,
+        composer_missing_keys: [],
+        composer_timeout_seconds: 300,
+      } satisfies SystemStatus)
+      .mockResolvedValue({
+        composer_available: true,
+        composer_model: "gpt-4o",
+        composer_provider: "openai",
+        composer_reason: null,
+        composer_missing_keys: [],
+      } satisfies SystemStatus);
+
+    render(<App />);
+
+    // First poll (mount) latches ready off the 300s ceiling.
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(true),
+    );
+
+    // Second poll (30s interval) returns a partial response with no timeout.
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+    const falseAlarms = errorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("no usable"),
+    );
+    expect(falseAlarms).toHaveLength(0);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+
+  const GOOD_STATUS = {
+    composer_available: true,
+    composer_model: "gpt-4o",
+    composer_provider: "openai",
+    composer_reason: null,
+    composer_missing_keys: [],
+    composer_timeout_seconds: 300,
+  } satisfies SystemStatus;
+  const PARTIAL_STATUS = {
+    composer_available: true,
+    composer_model: "gpt-4o",
+    composer_provider: "openai",
+    composer_reason: null,
+    composer_missing_keys: [],
+  } satisfies SystemStatus;
+
+  it("recovers from unavailable to ready when a later poll supplies a valid timeout", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus")
+      .mockResolvedValueOnce(PARTIAL_STATUS)
+      .mockResolvedValue(GOOD_STATUS);
+
+    render(<App />);
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+
+  it("logs the missing-timeout diagnostic once across repeated partial polls, not every poll", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue(PARTIAL_STATUS);
+
+    render(<App />);
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+    // A second poll while still stuck must NOT re-log (false→true guard).
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const noUsable = errorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("no usable"),
+    );
+    expect(noUsable).toHaveLength(1);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+
+  it("clears the unavailable diagnostic when the backend later goes unreachable (banner owns it)", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus")
+      .mockResolvedValueOnce(PARTIAL_STATUS)
+      .mockRejectedValue(new Error("down"));
+
+    render(<App />);
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+
+    // Backend goes down on the next poll → catch resets the composer diagnostic.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+
+    vi.useRealTimers();
     errorSpy.mockRestore();
   });
 });

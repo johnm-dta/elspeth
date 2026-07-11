@@ -12,6 +12,10 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
+import {
+  COMPOSE_CONNECTING_MESSAGE,
+  COMPOSE_UNAVAILABLE_MESSAGE,
+} from "@/config/composer";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -109,6 +113,13 @@ export function ChatInput({
   // a silently inert Send reads as a bug). Both freeform and guided render
   // this input, so this one gate covers both paths.
   const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  // Set when the backend is reachable but reported no usable compose timeout,
+  // so readiness can never latch. Distinguishes "up but misconfigured" (show a
+  // distinct, alerting diagnostic) from the transient boot window (show the
+  // soft "Connecting…").
+  const composerTimeoutUnavailable = useSessionStore(
+    (s) => s.composerTimeoutUnavailable,
+  );
   const awaitingComposeTimeout = !composeTimeoutReady;
   // Phase 5a Task 1 — empty-state placeholder primes the user to type data
   // directly into chat (URL / a few rows / a short brief).  Reads two
@@ -279,16 +290,34 @@ export function ChatInput({
           {uploadStatus}
         </div>
       )}
-      {/* Bootstrap gate reason. role=status (polite): a soft, transient
-          startup condition, not an error. Shown only while NOT composing so it
-          never collides with the Stop affordance. Explains why Send is
-          disabled during the (usually sub-second) window before
-          GET /api/system/status supplies the backend compose wall clock. */}
-      {awaitingComposeTimeout && !disabled && (
-        <div role="status" className="chat-input-bootstrapping">
-          Connecting to the composer…
-        </div>
-      )}
+      {/* Bootstrap gate reason. Two states share this slot (both keep Send
+          disabled, both hidden while composing so neither collides with Stop):
+          - transient boot window: role=status (polite) soft "Connecting…"
+            during the (usually sub-second) wait for GET /api/system/status.
+          - backend up but no usable compose timeout: role=alert, a distinct
+            stuck-state diagnostic so it never reads as a perpetual connect. */}
+      {awaitingComposeTimeout &&
+        !disabled &&
+        (composerTimeoutUnavailable ? (
+          // Distinct `key` per branch: force React to unmount the polite status
+          // and mount a fresh assertive alert on the Connecting→Unavailable
+          // flip, rather than mutate role in place (which SRs may not re-announce).
+          <div
+            key="unavailable"
+            role="alert"
+            className="chat-input-composer-unavailable"
+          >
+            {COMPOSE_UNAVAILABLE_MESSAGE}
+          </div>
+        ) : (
+          <div
+            key="connecting"
+            role="status"
+            className="chat-input-bootstrapping"
+          >
+            {COMPOSE_CONNECTING_MESSAGE}
+          </div>
+        ))}
       <div className="chat-input-row" role="group" aria-label="Message composition">
         <textarea
           ref={inputRef}

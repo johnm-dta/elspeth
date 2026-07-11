@@ -2,6 +2,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
+import {
+  applyServerComposerTimeout,
+  isComposeTimeoutReady,
+} from "@/config/composer";
 import type {
   ChatMessage,
   ComposerPreferences,
@@ -223,6 +227,29 @@ describe("sessionStore", () => {
       useSessionStore.getState().setComposeTimeoutReady(true);
       expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
       useSessionStore.getState().setComposeTimeoutReady(false);
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    });
+
+    it("composerTimeoutUnavailable starts false and is toggled by its setter", () => {
+      // Distinguishes "up but misconfigured" from the transient boot window;
+      // must default false so a healthy boot never shows the stuck diagnostic.
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+      useSessionStore.getState().setComposerTimeoutUnavailable(true);
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true);
+      useSessionStore.getState().setComposerTimeoutUnavailable(false);
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+    });
+
+    it("reset() clears the module compose-timeout readiness in lockstep (logout invariant)", () => {
+      // On logout the store resets composeTimeoutReady=false; the module
+      // predicate must reset in lockstep, or the two disagree (store un-ready,
+      // module still ready) until the next health poll re-mirrors.
+      applyServerComposerTimeout(300);
+      expect(isComposeTimeoutReady()).toBe(true);
+
+      useSessionStore.getState().reset();
+
+      expect(isComposeTimeoutReady()).toBe(false);
       expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
     });
   });

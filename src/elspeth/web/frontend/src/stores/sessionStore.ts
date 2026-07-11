@@ -171,6 +171,9 @@ function formatLlmAuthError(apiErr: ApiError): string {
  * Idempotent (the store keys by session_id and reconciles resolved events
  * across surfaces), so it is safe to call on any compose completion. A new
  * compose entry point that omits this call reintroduces the freeform deadlock.
+ * Client-side aborts reach it through resyncAfterAbortedComposeTurn — a
+ * cancelled turn can mint review cards before the cancel lands, and those
+ * must surface too (elspeth-06a23adfcc).
  *
  * Returns the underlying refresh promise. The freeform callers fire it and
  * forget (each `void`s the result); guided `respondGuided` (P3.6/D12) must
@@ -181,6 +184,69 @@ async function refreshInterpretationEventsForSession(
   sessionId: string,
 ): Promise<void> {
   await useInterpretationEventsStore.getState().refreshAll(sessionId);
+}
+
+/**
+ * INVARIANT (elspeth-06a23adfcc): every freeform compose entry point that
+ * can be aborted client-side (sendMessage, retryMessage) MUST call this from
+ * its abort branch. A client-side abort (Stop button / COMPOSE_TIMEOUT_MS
+ * guard) only rejects the local fetch — the server turn keeps mutating the
+ * session until the disconnect watcher cancels it, and every step it
+ * completed before the cancel (canonical user row, assistant rows,
+ * composition-state advances, proposals, interpretation reviews, blobs) is
+ * already committed by per-operation transactions. The route's cancelled
+ * unwind persists only LLM-call telemetry, so a single resync here observes
+ * everything renderable. Without it the transcript/side rail keep the
+ * pre-send snapshot until a manual reload (stale "No pipeline yet" at v1
+ * while the server head is v3 with pending review cards).
+ *
+ * Best-effort: the abort copy is already on screen, so a refetch failure
+ * keeps the stale snapshot rather than stacking a second error on top.
+ */
+async function resyncAfterAbortedComposeTurn(sessionId: string): Promise<void> {
+  // Reuse the inflight reconciler: it drops the optimistic local-* row only
+  // when its canonical counterpart was actually persisted, so a request
+  // that never reached the route keeps its failed row + retry affordance.
+  await useSessionStore.getState().loadInflightMessages(sessionId);
+  let state: CompositionState | null | undefined;
+  let proposals: CompositionProposal[] | null | undefined;
+  try {
+    [state, proposals] = await Promise.all([
+      api.fetchCompositionState(sessionId),
+      api.fetchCompositionProposals(sessionId),
+    ]);
+  } catch {
+    return;
+  }
+  if (useSessionStore.getState().activeSessionId !== sessionId) {
+    return;
+  }
+  useSessionStore.setState((s) => {
+    const previousVersion = s.compositionState?.version ?? null;
+    const newVersion = state?.version ?? null;
+    const versionChanged =
+      newVersion !== null && newVersion !== previousVersion;
+    // R4-H3 mirror of the success branches: a new state version invalidates
+    // any validation verdict rendered against the old one.
+    if (versionChanged) {
+      getExecutionStore().clearValidation();
+    }
+    const newState = state ?? s.compositionState;
+    const nodeStillExists =
+      !s.selectedNodeId ||
+      newState?.nodes.some((n) => n.id === s.selectedNodeId);
+    return {
+      compositionState: newState,
+      compositionProposals: proposals ?? s.compositionProposals,
+      ...(nodeStillExists ? {} : { selectedNodeId: null }),
+    };
+  });
+  // Same fire-and-forget refreshes as the success branches: the cancelled
+  // turn may have created blobs, auto-titled the session, and minted
+  // interpretation reviews before the cancel landed.
+  useBlobStore.getState().loadBlobs(sessionId);
+  void useSessionStore.getState().loadSessions();
+  void refreshInterpretationEventsForSession(sessionId);
 }
 
 function mergeCompositionProposals(
@@ -1041,6 +1107,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
         ...recoveryPatch,
       }));
+      if (isComposeAbort(err)) {
+        // The turn ran (and was cancelled) server-side; pull its durable
+        // partial results into view (see resyncAfterAbortedComposeTurn).
+        await resyncAfterAbortedComposeTurn(activeSessionId);
+      }
     } finally {
       get().stopInflightMessagesPolling(activeSessionId);
       get().stopComposerProgressPolling(activeSessionId);
@@ -1447,6 +1518,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
         ...recoveryPatch,
       }));
+      if (isComposeAbort(err)) {
+        // The recompose turn ran (and was cancelled) server-side; pull its
+        // durable partial results into view (see
+        // resyncAfterAbortedComposeTurn).
+        await resyncAfterAbortedComposeTurn(activeSessionId);
+      }
     } finally {
       get().stopInflightMessagesPolling(activeSessionId);
       get().stopComposerProgressPolling(activeSessionId);

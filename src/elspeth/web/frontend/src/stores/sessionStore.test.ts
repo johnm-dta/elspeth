@@ -596,6 +596,104 @@ describe("sessionStore", () => {
       expect(state.error).not.toContain("Failed to send message");
     });
 
+    it("resyncs durable server state after a compose abort (elspeth-06a23adfcc)", async () => {
+      // A client-side abort (Stop button / COMPOSE_TIMEOUT_MS guard) only
+      // rejects the local fetch — the turn ran server-side until the
+      // disconnect watcher cancelled it, and every step it completed before
+      // the cancel (canonical user row, assistant rows, state advances,
+      // proposals, interpretation reviews) is already committed. The store
+      // must refetch those surfaces or the transcript/side rail keep the
+      // pre-send snapshot until a manual reload.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      const controller = new AbortController();
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+      const canonicalUser: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:00Z",
+      };
+      const partialAssistant: ChatMessage = {
+        id: "asst-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "Built the pipeline; interpretation review cards are ready.",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:01Z",
+      };
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        canonicalUser,
+        partialAssistant,
+      ]);
+      (
+        apiMod.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(makeCompositionState(3, ["analyze"]));
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([makeCompositionProposal({ id: "proposal-abort" })]);
+      (
+        apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([makePendingInterpretationEvent("evt-abort")]);
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(1),
+      });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_user_cancel");
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.error).toContain("Composition stopped");
+      // Side rail reflects the durable head, not the pre-send snapshot.
+      expect(state.compositionState?.version).toBe(3);
+      expect(state.compositionProposals).toEqual([
+        expect.objectContaining({ id: "proposal-abort" }),
+      ]);
+      // Version moved 1 -> 3, so stale validation must be dropped (R4-H3).
+      expect(clearValidationMock).toHaveBeenCalled();
+      // Transcript shows the canonical rows; the optimistic local-* user
+      // row is dropped because its canonical counterpart was persisted.
+      expect(state.messages.map((m) => m.id)).toEqual(["user-1", "asst-1"]);
+      // The turn's pending interpretation reviews surface without a reload.
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-abort"]).toBeDefined();
+      });
+    });
+
+    it("keeps the failed-row contract on a non-abort failure (no resync)", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+        status: 422,
+        error_type: "convergence",
+        detail: "ignored",
+      });
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().sendMessage("hello");
+
+      const state = useSessionStore.getState();
+      // Non-abort failures keep the pre-existing contract: failed optimistic
+      // row + retry affordance, no composition-state refetch (recovery-class
+      // errors are mediated by the recovery panel, not a silent resync).
+      expect(apiMod.fetchCompositionState).not.toHaveBeenCalled();
+      expect(state.messages[0].local_status).toBe("failed");
+    });
+
     it("includes provider detail when an LLM unavailable response exposes it", async () => {
       const { sendMessage: mockSendMessage } = await import("@/api/client");
       (mockSendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
@@ -1722,6 +1820,64 @@ describe("sessionStore", () => {
       expect(state.error).not.toContain("Failed to send message");
       expect(state.messages[0].local_status).toBe("failed");
       expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("resyncs durable server state after an aborted retry (elspeth-06a23adfcc)", async () => {
+      const apiMod = await import("@/api/client");
+      const controller = new AbortController();
+      (apiMod.recompose as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:00Z",
+      };
+      const partialAssistant: ChatMessage = {
+        id: "asst-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "Partial recompose output.",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:01Z",
+      };
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        userMessage,
+        partialAssistant,
+      ]);
+      (
+        apiMod.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(makeCompositionState(2));
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+        compositionState: makeCompositionState(1),
+      });
+      const retryPromise = useSessionStore
+        .getState()
+        .retryMessage("user-1", controller.signal);
+      controller.abort("compose_user_cancel");
+      await retryPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.error).toContain("Composition stopped");
+      expect(state.compositionState?.version).toBe(2);
+      expect(state.messages.map((m) => m.id)).toEqual(["user-1", "asst-1"]);
+      // The canonical refetch clears the transient failed flag — the user
+      // message was always durable; only the recompose turn was cancelled.
+      expect(state.messages[0].local_status).toBeUndefined();
     });
   });
 

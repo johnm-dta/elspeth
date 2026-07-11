@@ -1,0 +1,99 @@
+{
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_IMPLEMENT",
+  "summary": "Plan 04 is executable after repair: AWS startup now validates settings, logical targets, runtime-directory shape, connectivity, and both schemas before auth or service mutation; errors are redacted, retry and engine lifecycles are bounded, and DDL-free behavior has a zero-skip PostgreSQL proof.",
+  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-04-validate-only-startup.md",
+  "reviewed_at": "2026-07-11T05:34:30Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "aa323093853550cac8744c85ab735936294c87ec",
+    "baseline": "Current create_app, LocalAuthProvider, FilesystemPayloadStore, LandscapeDB, repaired Plans 01-03, AWS ECS readiness spec, and Plans 05/10/11/12 handoffs."
+  },
+  "blocking_issues": [],
+  "warnings": [],
+  "resolved_findings": [
+    {
+      "id": "B04-1",
+      "status": "RESOLVED",
+      "resolution": "Plan 04 now consumes require_distinct_postgres_targets after valid Plan 01 URLs and before every directory, auth, engine, or probe action."
+    },
+    {
+      "id": "B04-2",
+      "status": "RESOLVED",
+      "resolution": "AWS schema validation moved ahead of eager LocalAuthProvider construction, with an auth.db-absence regression test on failure."
+    },
+    {
+      "id": "B04-3",
+      "status": "RESOLVED",
+      "resolution": "The startup gate covers data, explicit payload, and blob directories; payload symlink and unsafe-mode rules match FilesystemPayloadStore before auth mutation."
+    },
+    {
+      "id": "B04-4",
+      "status": "RESOLVED",
+      "resolution": "Startup uses raw URLs, Plan 02 pool kwargs, session-first connection-bound probes, Landscape finally-disposal, and BaseException-safe session disposal."
+    },
+    {
+      "id": "B04-5",
+      "status": "RESOLVED",
+      "resolution": "Retry scheduling reserves the connection timeout, clips sleeps, rechecks the deadline after sleep, and translates terminal database/schema failures to static unchained errors."
+    },
+    {
+      "id": "B04-6",
+      "status": "RESOLVED",
+      "resolution": "Path derivation, stat, and resolution failures are translated at the boundary without leaking configured paths."
+    },
+    {
+      "id": "B04-7",
+      "status": "RESOLVED",
+      "resolution": "The Docker proof moved to tests/testcontainer, uses DDL-denied runtime roles plus catalog fingerprints, and Docker absence or skips are BLOCKED."
+    },
+    {
+      "id": "B04-8",
+      "status": "RESOLVED",
+      "resolution": "Focused, subsystem, Ruff, format, strict mypy, diff-check, and Wardline handoff gates are explicit."
+    },
+    {
+      "id": "W04-1",
+      "status": "RESOLVED",
+      "resolution": "Plans 03 and 05 now reject payload paths startup would reject, and all directory prose consistently assigns provisioning to the operator rather than --init-schema."
+    },
+    {
+      "id": "W04-2",
+      "status": "RESOLVED",
+      "resolution": "Plan 12 now owns the exact three-file PostgreSQL command and requires zero skips."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "architecture": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "quality_security": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "systems": {
+      "status": "APPROVED",
+      "blocking": 0
+    }
+  },
+  "verification": [
+    "git diff --check on Plan 04 and its Plan 03/05/12/overview handoffs",
+    "current create_app and LocalAuthProvider ordering verified",
+    "current FilesystemPayloadStore symlink and permission contract verified",
+    "current Plan 02 target, probe, pool, and exception contracts reconciled",
+    "PostgreSQL 16 DDL-denied runtime-role behavior independently verified by the reality reviewer",
+    "four-lens post-repair review reached GO with no remaining blockers"
+  ],
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-11T05:20:00Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial review found missing target separation, post-auth validation, incomplete mount gating, unsafe lifecycle/redaction behavior, stale Docker ownership, and absent final gates."
+    }
+  ]
+}

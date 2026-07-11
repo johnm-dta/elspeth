@@ -913,6 +913,21 @@ def _requirements(options: Mapping[str, Any]) -> tuple[InterpretationRequirement
     return tuple(requirements)
 
 
+def parse_interpretation_requirements(options: Mapping[str, Any]) -> tuple[InterpretationRequirement, ...] | None:
+    """Public validated accessor for ``options.interpretation_requirements``.
+
+    Returns ``None`` when the key is absent or null; otherwise every row is
+    coerced through the same per-field validation this module applies before
+    enumerating review sites (``KeyError`` / ``TypeError`` / ``ValueError``
+    on any malformed row). External writers that need to read requirement
+    rows they did not stage (e.g. the YAML import route surfacing pending
+    review events, elspeth-ae5160c3cb) MUST come through here rather than
+    hand-walking the raw list, so a row that this module would reject at the
+    run gate can never be silently half-read upstream.
+    """
+    return _requirements(options)
+
+
 def _coerce_requirement(value: Mapping[str, Any]) -> InterpretationRequirement:
     requirement_id = value["id"]
     user_term = value["user_term"]

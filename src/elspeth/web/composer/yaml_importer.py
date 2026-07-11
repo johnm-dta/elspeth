@@ -8,6 +8,7 @@ execute; editor-only UI edges are intentionally left empty.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, cast
 
 import yaml
@@ -21,6 +22,7 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
+from elspeth.web.composer.tools import _options_with_default_llm_reviews
 
 MAX_RUNTIME_YAML_IMPORT_CHARS = 262_144
 _UNSUPPORTED_COALESCE_FIELDS = frozenset(
@@ -350,6 +352,20 @@ def composition_state_from_runtime_yaml(pipeline_yaml: str, *, version: int = 1)
         *_nodes_from_runtime_list(doc.get("gates"), "gates", "gate"),
         *_nodes_from_runtime_list(doc.get("aggregations"), "aggregations", "aggregation"),
         *_nodes_from_runtime_list(doc.get("coalesce"), "coalesce", "coalesce"),
+    ]
+    # Imported states must honour the same stage-then-surface review contract
+    # as every composer tool mutation (elspeth-ae5160c3cb): an LLM node whose
+    # prompt_template/model carries no pending requirement is fail-closed at
+    # the run gate (the requirement-None enumerator branch) while the
+    # interpretation-event writer boundary refuses to surface a resolvable
+    # card — an unrecoverable block. The auto-stagers are idempotent and
+    # LLM-scoped no-ops elsewhere, so applying them to every node is safe;
+    # hand-written requirement rows whose draft no longer matches the field
+    # value are replaced with fresh pending ones (same semantics as the tool
+    # path).
+    nodes = [
+        replace(node, options=dict(_options_with_default_llm_reviews(node_id=node.id, plugin=node.plugin, options=node.options)))
+        for node in nodes
     ]
 
     metadata = PipelineMetadata()

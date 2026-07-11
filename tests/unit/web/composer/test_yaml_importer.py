@@ -417,3 +417,67 @@ def test_composition_state_from_runtime_yaml_reimports_generate_public_yaml_outp
     assert set(reimported.sources) == {"source"}
     assert [n.id for n in reimported.nodes] == ["normalize", "split", "batch"]
     assert {o.name for o in reimported.outputs} == {"audit", "rejected"}
+
+
+def test_composition_state_from_runtime_yaml_stages_llm_review_requirements() -> None:
+    """Imported LLM nodes carry the same default pending review requirements
+    every composer mutation path stages (elspeth-ae5160c3cb). Without them the
+    run gate blocks fail-closed (requirement-None enumerator branch) while the
+    interpretation-event writer boundary refuses to surface a resolvable card,
+    leaving the imported pipeline permanently blocked."""
+    state = composition_state_from_runtime_yaml(
+        """
+sources:
+  source:
+    plugin: csv
+    on_success: score
+    options:
+      schema:
+        mode: observed
+transforms:
+- name: score
+  plugin: llm
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    model: anthropic/claude-haiku-4.5
+    prompt_template: 'Score this: {{ row.value }}'
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+    )
+    node = next(n for n in state.nodes if n.plugin == "llm")
+    requirements = {r["kind"]: r for r in node.options["interpretation_requirements"]}
+    assert set(requirements) == {"llm_prompt_template", "llm_model_choice"}
+    pt = requirements["llm_prompt_template"]
+    assert pt["status"] == "pending"
+    assert pt["draft"] == "Score this: {{ row.value }}"
+    assert pt["user_term"] == "llm_prompt_template:score"
+    mc = requirements["llm_model_choice"]
+    assert mc["status"] == "pending"
+    assert mc["draft"] == "anthropic/claude-haiku-4.5"
+    assert mc["user_term"] == "llm_model_choice:score"
+
+
+def test_composition_state_from_runtime_yaml_does_not_stage_reviews_on_non_llm_nodes() -> None:
+    """The auto-stagers are LLM-scoped no-ops: a non-llm transform imports
+    with its options untouched."""
+    state = composition_state_from_runtime_yaml(
+        """
+transforms:
+- name: normalize
+  plugin: field_normalizer
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    field: category
+"""
+    )
+    node = next(n for n in state.nodes if n.id == "normalize")
+    assert node.options == {"field": "category"}

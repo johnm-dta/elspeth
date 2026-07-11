@@ -25,6 +25,7 @@ from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolStatus,
 )
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.enums import CreationModality, TerminalOutcome, TerminalPath
@@ -5090,6 +5091,161 @@ sinks:
         assert record.sources["source"]["plugin"] == "csv"
         assert record.sources["source"]["options"]["path"] == str(blob_path)
         assert record.outputs[0]["name"] == "main"
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_surfaces_llm_review_events(self, tmp_path) -> None:
+        """Importing YAML with an llm node must surface resolvable pending
+        interpretation EVENTS, not just fail-closed requirements
+        (elspeth-ae5160c3cb). Without the events the run gate blocks while no
+        review card renders and nothing can resolve the block."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: score
+    options:
+      schema:
+        mode: observed
+transforms:
+- name: score
+  plugin: llm
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    model: anthropic/claude-haiku-4.5
+    prompt_template: 'Score this: {{ row.value }}'
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 200, resp.text
+        record = await service.get_current_state(session.id)
+        assert record is not None
+
+        events = await service.list_interpretation_events(session.id, status="pending")
+        by_kind = {event.kind: event for event in events}
+        assert set(by_kind) == {InterpretationKind.LLM_PROMPT_TEMPLATE, InterpretationKind.LLM_MODEL_CHOICE}
+        pt = by_kind[InterpretationKind.LLM_PROMPT_TEMPLATE]
+        assert pt.affected_node_id == "score"
+        assert pt.llm_draft == "Score this: {{ row.value }}"
+        assert pt.user_term == "llm_prompt_template:score"
+        assert str(pt.composition_state_id) == str(record.id)
+        assert pt.tool_call_id is not None and pt.tool_call_id.startswith("backend_auto_surface:")
+        assert pt.model_identifier == "yaml_import"
+        assert pt.model_version == "yaml_import"
+        assert pt.provider == "yaml_import"
+        assert pt.composer_skill_hash == "yaml_import"
+        mc = by_kind[InterpretationKind.LLM_MODEL_CHOICE]
+        assert mc.affected_node_id == "score"
+        assert mc.llm_draft == "anthropic/claude-haiku-4.5"
+        assert mc.user_term == "llm_model_choice:score"
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_malformed_interpretation_requirements(self, tmp_path) -> None:
+        """Hand-written interpretation_requirements rows the schema would
+        refuse are rejected 400 before persistence (elspeth-ae5160c3cb)."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+transforms:
+- name: score
+  plugin: llm
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    model: anthropic/claude-haiku-4.5
+    prompt_template: 'Score this: {{ row.value }}'
+    interpretation_requirements:
+    - kind: not_a_kind
+      user_term: x
+      status: pending
+"""
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+        assert resp.status_code == 400
+        assert "score" in resp.json()["detail"]
+        assert await service.get_current_state(session.id) is None
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_reviews_are_resolvable_and_unblock_execution(self, tmp_path) -> None:
+        """The defect in elspeth-ae5160c3cb was an UNRESOLVABLE block: the run
+        gate held while nothing existed to resolve. Lock in the full loop —
+        import, accept both surfaced cards, requirements patch to resolved,
+        no pending events remain, and the interpretation run gate clears."""
+        from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
+        from elspeth.web.sessions.routes._helpers import _state_from_record
+
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: score
+    options:
+      schema:
+        mode: observed
+transforms:
+- name: score
+  plugin: llm
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    model: anthropic/claude-haiku-4.5
+    prompt_template: 'Score this: {{ row.value }}'
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+        assert resp.status_code == 200, resp.text
+
+        events = await service.list_interpretation_events(session.id, status="pending")
+        assert len(events) == 2
+        for event in events:
+            resolve_resp = client.post(
+                f"/api/sessions/{session.id}/interpretations/{event.id}/resolve",
+                json={"choice": "accepted_as_drafted"},
+            )
+            assert resolve_resp.status_code == 200, resolve_resp.text
+
+        assert await service.list_interpretation_events(session.id, status="pending") == []
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        node = next(n for n in record.nodes if n["id"] == "score")
+        statuses = {r["kind"]: r["status"] for r in node["options"]["interpretation_requirements"]}
+        assert statuses == {"llm_prompt_template": "resolved", "llm_model_choice": "resolved"}
+
+        gate_result = materialize_state_for_execution(_state_from_record(record))
+        assert not isinstance(gate_result, InterpretationReviewPending)
 
     @pytest.mark.asyncio
     async def test_post_state_yaml_allows_wired_secret_ref_marker(self, tmp_path) -> None:

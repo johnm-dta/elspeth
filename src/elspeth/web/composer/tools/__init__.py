@@ -49,6 +49,11 @@ from elspeth.web.composer.tools._common import (
     _compute_validation_delta,
     _credential_wiring_contract_failure,
     _failure_result,
+    # Cross-package consumer: composer.yaml_importer applies the default
+    # LLM review auto-stagers to imported runtime YAML so imported states
+    # honour the same stage-then-surface contract as tool mutations
+    # (elspeth-ae5160c3cb).
+    _options_with_default_llm_reviews,
     _prevalidate_plugin_options,
     diff_states,
     validate_composer_file_sink_collision_policy,
@@ -166,6 +171,7 @@ __all__ = [
     "_failure_result",
     "_handle_request_interpretation_review",
     "_inject_prior_validation",
+    "_options_with_default_llm_reviews",
     "_persist_prepared_blob_create",
     "_prepare_blob_create",
     "_prevalidate_plugin_options",

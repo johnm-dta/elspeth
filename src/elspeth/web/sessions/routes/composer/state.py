@@ -5,6 +5,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.secrets import collect_credential_field_violations
 from elspeth.web.blobs.protocol import BlobNotFoundError
@@ -15,6 +16,7 @@ from elspeth.web.composer.yaml_importer import (
     RuntimeYamlImportError,
     composition_state_from_runtime_yaml,
 )
+from elspeth.web.interpretation_state import parse_interpretation_requirements
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
 
@@ -493,6 +495,7 @@ async def import_state_yaml(
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
         )
+        _reject_malformed_interpretation_requirements(imported_state)
 
         service: SessionServiceProtocol = request.app.state.session_service
         state_data, _validation = await _state_data_from_composer_state(
@@ -511,7 +514,117 @@ async def import_state_yaml(
             state_data,
             provenance="session_seed",
         )
+        await _surface_imported_interpretation_review_events(
+            service,
+            session_id=session.id,
+            state=imported_state,
+            composition_state_id=UUID(str(state_record.id)),
+        )
         return _state_response(state_record)
+
+
+# Provenance sentinel for interpretation events surfaced by the YAML import
+# path: no composer LLM context exists at this surface — the draft came from
+# the imported document — so all four audit provenance columns carry this
+# value instead of a model identity (the D2 "most audit-honest value
+# available" doctrine from ComposerServiceImpl._auto_surface_prompt_template_reviews).
+_YAML_IMPORT_SURFACE_PROVENANCE = "yaml_import"
+
+
+def _reject_malformed_interpretation_requirements(state: CompositionState) -> None:
+    """Reject hand-written ``interpretation_requirements`` rows that this
+    module's own schema would refuse, BEFORE persistence (elspeth-ae5160c3cb).
+
+    Legitimate exports never carry requirement rows (``strip_authoring_options``
+    removes them at export) and the importer's auto-stagers only emit
+    well-formed rows, so any malformed row here was hand-written into the
+    pasted document. Rejecting outright is the same
+    stricter-than-the-tool-path posture as ``_reject_fabricated_secret_literals``
+    for this paste-facing entry point — and it guarantees the post-persist
+    surfacing pass below can parse every row without a post-persist failure
+    path. Audit hygiene: name the node, never echo row content.
+    """
+    for node in state.nodes:
+        try:
+            parse_interpretation_requirements(node.options)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Node '{node.id}' carries a malformed interpretation_requirements entry. "
+                    "Remove the hand-written interpretation_requirements block and re-import; "
+                    "the importer stages review requirements itself."
+                ),
+            ) from exc
+
+
+async def _surface_imported_interpretation_review_events(
+    service: SessionServiceProtocol,
+    *,
+    session_id: UUID,
+    state: CompositionState,
+    composition_state_id: UUID,
+) -> None:
+    """Surface a resolvable pending interpretation EVENT for every pending
+    requirement carried by the just-imported state (elspeth-ae5160c3cb).
+
+    Imported YAML never passes through the compose loop, so neither the
+    freeform finalization surfacer nor the guided B1 surfacer runs. Without
+    this pass the staged requirements block the run fail-closed (the
+    interpretation-state enumerators) while no review card exists and the
+    resolve path has nothing to target — an unrecoverable block.
+
+    Every row parses cleanly here by construction:
+    ``_reject_malformed_interpretation_requirements`` already 400-rejected
+    malformed rows pre-persist, so a parse failure at this seam is a
+    first-party bug and crashes honestly rather than being caught.
+
+    Mirrors the guided B1 W1 backstop: ``create_pending_interpretation_event``
+    raises a ValueError subclass on any writer-boundary mismatch (e.g. a
+    hand-written requirement row that fails its per-kind precondition), and
+    this runs after ``save_composition_state`` at a persist seam — so a
+    mismatched site is SKIPPED and stays fail-closed at the run-time gate
+    (advisory polarity) rather than 500ing the import after the state
+    already persisted. The requirements staged by the importer's own
+    auto-stagers always satisfy the boundary; only hand-crafted rows can
+    trip it.
+    """
+    for node in state.nodes:
+        requirements = parse_interpretation_requirements(node.options)
+        if requirements is None:
+            continue
+        for requirement in requirements:
+            if requirement["status"] != "pending":
+                continue
+            draft = requirement["draft"]
+            if type(draft) is not str or not draft:
+                continue
+            # kind/user_term are validated non-empty members by the parse above.
+            kind = InterpretationKind(requirement["kind"])
+            user_term = requirement["user_term"]
+            try:
+                await service.create_pending_interpretation_event(
+                    session_id=session_id,
+                    composition_state_id=composition_state_id,
+                    affected_node_id=node.id,
+                    tool_call_id=f"backend_auto_surface:{uuid4()}",
+                    user_term=user_term,
+                    kind=kind,
+                    llm_draft=draft,
+                    model_identifier=_YAML_IMPORT_SURFACE_PROVENANCE,
+                    model_version=_YAML_IMPORT_SURFACE_PROVENANCE,
+                    provider=_YAML_IMPORT_SURFACE_PROVENANCE,
+                    composer_skill_hash=_YAML_IMPORT_SURFACE_PROVENANCE,
+                )
+            except ValueError:
+                # W1 backstop, same shape and rationale as the guided B1
+                # surfacer (composer/service.py): the per-kind writer boundary
+                # is NECESSARY but not always SUFFICIENT to replicate here, a
+                # raise at this post-persist seam would 500 an import whose
+                # state already saved, and a skipped advisory surface stays
+                # fail-closed at the run-time gate. Deliberately not slog'd —
+                # a skipped advisory surface is not a telemetry/audit event.
+                continue
 
 
 @router.post(

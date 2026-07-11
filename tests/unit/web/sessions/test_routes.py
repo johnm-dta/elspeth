@@ -5248,6 +5248,63 @@ sinks:
         assert not isinstance(gate_result, InterpretationReviewPending)
 
     @pytest.mark.asyncio
+    async def test_post_state_yaml_reimport_does_not_duplicate_pending_reviews(self, tmp_path) -> None:
+        """Re-importing the same YAML must not surface twin pending events
+        (elspeth-1fcaec9b63). The resolve path demands exactly one pending
+        requirement per (node, kind, user_term), so a duplicate event is
+        permanently unresolvable once its twin resolves: the card 422s with
+        interpretation_placeholder_unavailable in a loop reload never clears."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: score
+    options:
+      schema:
+        mode: observed
+transforms:
+- name: score
+  plugin: llm
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    model: anthropic/claude-haiku-4.5
+    prompt_template: 'Score this: {{ row.value }}'
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            for _ in range(2):
+                resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+                assert resp.status_code == 200, resp.text
+
+        events = await service.list_interpretation_events(session.id, status="pending")
+        kinds = sorted(event.kind.value for event in events)
+        assert kinds == ["llm_model_choice", "llm_prompt_template"], kinds
+
+        for event in events:
+            resolve_resp = client.post(
+                f"/api/sessions/{session.id}/interpretations/{event.id}/resolve",
+                json={"choice": "accepted_as_drafted"},
+            )
+            assert resolve_resp.status_code == 200, resolve_resp.text
+
+        assert await service.list_interpretation_events(session.id, status="pending") == []
+
+    @pytest.mark.asyncio
     async def test_post_state_yaml_allows_wired_secret_ref_marker(self, tmp_path) -> None:
         """Hardening (T-1) no-false-positive lock-in: a legitimately wired
         {secret_ref: NAME} marker in a credential field -- the form export

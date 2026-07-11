@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -2949,3 +2950,48 @@ async def test_resolve_llm_model_choice_amended_patches_options_model(service) -
     # Drift guard must follow the amended model, not the drafted one.
     node_spec = next(n for n in state_from_record(new_state).nodes if n.id == "rate_node")
     _validate_model_choice_review(node_spec, chosen)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_create_pending_is_idempotent_for_identical_resurface(service) -> None:
+    """An identical re-surface returns the existing pending event, never a twin.
+
+    The resolve path's exactly-one-pending-requirement gate makes duplicate
+    pending events for the same (node, kind, user_term, draft) permanently
+    unresolvable: the first resolve stamps the requirement, and the twin then
+    422s with interpretation_placeholder_unavailable forever
+    (elspeth-1fcaec9b63 — reachable by importing the same YAML twice). The
+    writer boundary must enforce the invariant for every kind, not just
+    pipeline_decision.
+    """
+    session_id = uuid4()
+    model = "anthropic/claude-haiku-4.5"
+    state = await _seed_state_with_llm_node(service, session_id=session_id, node=_model_choice_review_node(model=model))
+    create_kwargs: dict[str, Any] = {
+        "session_id": session_id,
+        "composition_state_id": state.id,
+        "affected_node_id": "rate_node",
+        "user_term": "llm_model_choice:rate_node",
+        "kind": InterpretationKind.LLM_MODEL_CHOICE,
+        "llm_draft": model,
+        "model_identifier": "anthropic/claude-opus-4-7",
+        "model_version": "2026-05-01",
+        "provider": "anthropic",
+        "composer_skill_hash": "a" * 64,
+    }
+    first = await service.create_pending_interpretation_event(tool_call_id="call_mc_first", **create_kwargs)
+    second = await service.create_pending_interpretation_event(tool_call_id="call_mc_refire", **create_kwargs)
+
+    assert second.id == first.id
+    pending = await service.list_interpretation_events(session_id, status="pending")
+    assert [e.id for e in pending] == [first.id]
+
+    resolved, _new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=first.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+    assert resolved.choice is InterpretationChoice.ACCEPTED_AS_DRAFTED
+    assert await service.list_interpretation_events(session_id, status="pending") == []

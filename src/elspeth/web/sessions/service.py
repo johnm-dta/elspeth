@@ -3176,21 +3176,30 @@ class SessionServiceImpl:
                     row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
                     return _interpretation_event_record_from_row(row)
 
-                if kind is InterpretationKind.PIPELINE_DECISION:
-                    existing_pending_row = conn.execute(
-                        select(interpretation_events_table)
-                        .where(interpretation_events_table.c.session_id == sid)
-                        .where(interpretation_events_table.c.affected_node_id == affected_node_id)
-                        .where(interpretation_events_table.c.kind == kind_value)
-                        .where(interpretation_events_table.c.user_term == user_term)
-                        .where(interpretation_events_table.c.llm_draft == llm_draft)
-                        .where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
-                        .where(interpretation_events_table.c.interpretation_source == InterpretationSource.USER_APPROVED.value)
-                        .order_by(interpretation_events_table.c.created_at, interpretation_events_table.c.id)
-                        .limit(1)
-                    ).one_or_none()
-                    if existing_pending_row is not None:
-                        return _interpretation_event_record_from_row(existing_pending_row)
+                # Idempotent re-surface, every kind: an identical pending event
+                # (same node/kind/user_term/draft) is returned, never twinned.
+                # The resolve path demands exactly ONE pending requirement per
+                # (node, kind, user_term), so twin pending events are
+                # structurally unresolvable — the first resolve stamps the
+                # requirement and the twin 422s placeholder_unavailable forever
+                # (elspeth-1fcaec9b63, reachable by importing the same YAML
+                # twice). Surfacer read-side dedup cannot enforce this: it
+                # crosses transactions, while this SELECT runs under the
+                # session advisory lock.
+                existing_pending_row = conn.execute(
+                    select(interpretation_events_table)
+                    .where(interpretation_events_table.c.session_id == sid)
+                    .where(interpretation_events_table.c.affected_node_id == affected_node_id)
+                    .where(interpretation_events_table.c.kind == kind_value)
+                    .where(interpretation_events_table.c.user_term == user_term)
+                    .where(interpretation_events_table.c.llm_draft == llm_draft)
+                    .where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
+                    .where(interpretation_events_table.c.interpretation_source == InterpretationSource.USER_APPROVED.value)
+                    .order_by(interpretation_events_table.c.created_at, interpretation_events_table.c.id)
+                    .limit(1)
+                ).one_or_none()
+                if existing_pending_row is not None:
+                    return _interpretation_event_record_from_row(existing_pending_row)
 
                 conn.execute(
                     insert(interpretation_events_table).values(

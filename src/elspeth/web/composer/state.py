@@ -49,16 +49,20 @@ from elspeth.core.config import (
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 from elspeth.web.composer.guided.state_machine import GuidedSession
 
-NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
+NodeType = Literal["transform", "gate", "aggregation", "coalesce", "queue"]
 EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"]
 CoalesceBranches = tuple[str, ...] | Mapping[str, str]
 
-COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gate", "transform"))
+COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gate", "queue", "transform"))
 
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
 _DISCARD_ROUTE_TARGET = "discard"
 _FORK_ROUTE_TARGET = "fork"
+# A queue's entire runtime surface is QueueSettings, whose only field is an
+# optional operator-facing description (elspeth-a5b86149d4). Nothing else may
+# ride in a queue node's options.
+_QUEUE_OPTION_KEYS: frozenset[str] = frozenset({"description"})
 
 
 def validate_composer_source_name(source_name: str) -> None:
@@ -250,6 +254,48 @@ def _serialize_branches(branches: CoalesceBranches) -> list[str] | dict[str, str
     if isinstance(branches, Mapping):
         return dict(deep_thaw(branches))
     return list(branches)
+
+
+def queue_node_contract_error(node: NodeSpec) -> str | None:
+    """Return the intrinsic (topology-free) contract violation for a queue node.
+
+    A queue is a structural pass-through fan-in point (elspeth-a5b86149d4). Its
+    canonical shape is ``id == input``, no plugin/routing/coalesce/aggregation
+    fields, implicit output under its own id (``on_success is None``), and at
+    most a string ``description`` option. This helper is the SINGLE source of
+    truth for that shape so state validation, the mutation tools, and YAML
+    generation all reject the same malformed queues identically. It performs no
+    state/topology lookup — producer/consumer/namespace checks live in
+    ``validate()``. Returns None for a non-queue node or a canonical queue.
+    """
+    if node.node_type != "queue":
+        return None
+    if node.input != node.id:
+        return f"Queue '{node.id}' input must equal its id."
+    forbidden = {
+        "plugin": node.plugin,
+        "on_success": node.on_success,
+        "on_error": node.on_error,
+        "condition": node.condition,
+        "routes": node.routes,
+        "fork_to": node.fork_to,
+        "branches": node.branches,
+        "policy": node.policy,
+        "merge": node.merge,
+        "trigger": node.trigger,
+        "output_mode": node.output_mode,
+        "expected_output_count": node.expected_output_count,
+    }
+    present = sorted(name for name, value in forbidden.items() if value is not None)
+    if present:
+        return f"Queue '{node.id}' does not accept field(s): {present}."
+    unknown = sorted(set(node.options) - _QUEUE_OPTION_KEYS)
+    if unknown:
+        return f"Queue '{node.id}' contains unknown option(s): {unknown}."
+    description = node.options.get("description")
+    if description is not None and not isinstance(description, str):
+        return f"Queue '{node.id}' options.description must be a string."
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1185,8 +1231,13 @@ def _check_schema_contracts(
             )
         )
 
+    # Coalesce reads its branches (not its input); a queue reads its fan-in
+    # predecessors but republishes under the same id, so counting it as a
+    # consumer of its own connection would make the legal queue-then-consumer
+    # pattern read as a duplicate consumer (elspeth-a5b86149d4). Both are
+    # excluded from ordinary consumer accounting.
     consumer_claims: list[tuple[str, str, str]] = [
-        (node.input, node.id, f"node '{node.id}'") for node in nodes if node.node_type != "coalesce"
+        (node.input, node.id, f"node '{node.id}'") for node in nodes if node.node_type not in ("coalesce", "queue")
     ]
     consumer_counts = Counter(connection_name for connection_name, _node_id, _desc in consumer_claims)
     duplicate_consumers = sorted(name for name, count in consumer_counts.items() if count > 1)
@@ -1250,6 +1301,20 @@ def _check_schema_contracts(
                     _warn(
                         f"node:{producer_node.id}",
                         f"Contract check skipped because connection '{connection_name}' is produced by coalesce node '{producer_node.id}'; runtime validator will check this edge.",
+                        "medium",
+                    )
+                )
+                return None
+            if producer_node.node_type == "queue":
+                # A queue publishes an observed/unknown schema and never merges
+                # its predecessors' guarantees (elspeth-a5b86149d4). Stop here
+                # rather than picking one predecessor, so a downstream consumer's
+                # required-field check abstains at the queue boundary instead of
+                # comparing against a single arbitrary upstream.
+                warnings.append(
+                    _warn(
+                        f"node:{producer_node.id}",
+                        f"Contract check skipped because connection '{connection_name}' is produced by queue node '{producer_node.id}' with observed schema.",
                         "medium",
                     )
                 )
@@ -1508,6 +1573,14 @@ def _check_schema_contracts(
         producer_node = node_by_id[producer.producer_id]
         if producer_node.node_type == "gate":
             return _connection_propagation_vote(producer_node.input)
+
+        if producer_node.node_type == "queue":
+            # Observed/unknown schema: a queue never propagates or unions its
+            # predecessors' pass-through guarantees, so a downstream consumer's
+            # required_input_fields must not be resolved against one of them
+            # (elspeth-a5b86149d4). Abstaining here keeps explicit required
+            # fields on a valid consumer from being falsely rejected.
+            return False, frozenset()
 
         if producer_node.node_type == "coalesce":
             if not producer_node.branches:
@@ -2448,6 +2521,14 @@ class CompositionState:
                             "high",
                         )
                     )
+            elif node.node_type == "queue":
+                # Intrinsic (topology-free) queue shape: id == input, no
+                # plugin/routing, description-only options (elspeth-a5b86149d4).
+                # Producer/consumer/namespace checks run in the queue-structure
+                # block after connection completeness.
+                queue_error = queue_node_contract_error(node)
+                if queue_error is not None:
+                    errors.append(_err(f"node:{node.id}", queue_error, "high"))
 
         errors.extend(_validate_runtime_route_destinations(self.sources, self.nodes, self.outputs))
 
@@ -2474,6 +2555,55 @@ class CompositionState:
                         f"node:{node.id}",
                         f"Node '{node.id}' input '{node.input}' is not reachable from any runtime connection "
                         "(source.on_success, node.on_success/on_error, routes, or fork_to).",
+                        "high",
+                    )
+                )
+
+        # Structural queue topology (elspeth-a5b86149d4). At-least-one-producer
+        # is covered by the input-reachability check above (a queue's input is
+        # its id, which its producers publish to); more-than-one ordinary
+        # consumer is covered by the duplicate-consumer check. Here we require
+        # exactly one downstream consumer (reject zero) and a name disjoint from
+        # the source keys and the reserved source producer namespace, mirroring
+        # the runtime's global source/queue name uniqueness. Sink-name disjoint-
+        # ness rides the existing connection/sink overlap check via the queue's
+        # consumer claim.
+        sink_output_names = {output.name for output in self.outputs}
+        for node in self.nodes:
+            if node.node_type != "queue":
+                continue
+            ordinary_consumers = [n.id for n in self.nodes if n.node_type != "queue" and n.input == node.id]
+            if not ordinary_consumers:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Queue '{node.id}' has no downstream consumer; a queue must feed exactly one ordinary node.",
+                        "high",
+                    )
+                )
+            if node.id in self.sources:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Queue '{node.id}' collides with a source of the same name; source and queue names must be globally unique.",
+                        "high",
+                    )
+                )
+            if node.id == "source" or node.id.startswith("source:"):
+                # Mirrors _producer_resolver.is_source_producer_id — a queue may
+                # not shadow the reserved source producer namespace.
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Queue '{node.id}' uses the reserved source producer namespace ('source' / 'source:<name>').",
+                        "high",
+                    )
+                )
+            if node.id in sink_output_names:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Queue '{node.id}' collides with a sink of the same name; connection and sink names must be disjoint.",
                         "high",
                     )
                 )

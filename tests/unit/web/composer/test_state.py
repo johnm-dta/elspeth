@@ -19,6 +19,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
     ValidationEntry,
     ValidationSummary,
+    queue_node_contract_error,
 )
 
 
@@ -5743,3 +5744,188 @@ class TestCompositionStateValidateEmitsSemanticContracts:
         # Other validation may pass or fail; what we assert is that
         # the semantic contract is SATISFIED.
         assert any(c.outcome.value == "satisfied" for c in result.semantic_contracts)
+
+
+class TestCompositionStateQueue:
+    """Structural queue fan-in exposure (elspeth-a5b86149d4).
+
+    A declared queue node legalises many-producer -> one-consumer interleave
+    (mirroring the runtime `queues:` contract) without relaxing the ordinary
+    single-producer / single-consumer rule anywhere else. Its canonical shape
+    is id == input, plugin/routing absent, implicit output under its id, and
+    description-only options.
+    """
+
+    def _queue(self, queue_id: str = "inbound", *, description: str | None = None, **overrides: Any) -> NodeSpec:
+        defaults: dict[str, Any] = {
+            "id": queue_id,
+            "node_type": "queue",
+            "plugin": None,
+            "input": queue_id,
+            "on_success": None,
+            "on_error": None,
+            "options": {} if description is None else {"description": description},
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+        defaults.update(overrides)
+        return NodeSpec(**defaults)
+
+    def _source(self, on_success: str = "inbound") -> SourceSpec:
+        return SourceSpec(
+            plugin="csv",
+            on_success=on_success,
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+
+    def _transform(self, node_id: str = "normalize", *, input: str = "inbound", on_success: str = "combined") -> NodeSpec:
+        return NodeSpec(
+            id=node_id,
+            node_type="transform",
+            plugin="passthrough",
+            input=input,
+            on_success=on_success,
+            on_error="discard",
+            options={"schema": {"mode": "observed"}},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+
+    def _sink(self, name: str = "combined") -> OutputSpec:
+        return OutputSpec(name=name, plugin="json", options={"schema": {"mode": "observed"}}, on_write_failure="discard")
+
+    def _state(self, *, sources: dict[str, SourceSpec], nodes: tuple[NodeSpec, ...], outputs: tuple[OutputSpec, ...]) -> CompositionState:
+        return CompositionState(
+            source=None,
+            sources=sources,
+            nodes=nodes,
+            edges=(),
+            outputs=outputs,
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def _valid_state(self, **queue_overrides: Any) -> CompositionState:
+        return self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._queue(**queue_overrides), self._transform()),
+            outputs=(self._sink(),),
+        )
+
+    # --- Happy path + serialization ---
+
+    def test_valid_two_source_queue_pipeline(self) -> None:
+        result = self._valid_state().validate()
+        assert result.is_valid, result.errors
+
+    def test_queue_survives_serialization_round_trip(self) -> None:
+        state = self._valid_state(description="Orders and refunds interleave here")
+        restored = CompositionState.from_dict(state.to_dict())
+        assert restored == state
+        queue = next(n for n in restored.nodes if n.node_type == "queue")
+        assert queue.id == "inbound" and queue.input == "inbound"
+        assert queue.options == {"description": "Orders and refunds interleave here"}
+
+    # --- Intrinsic contract (pure helper parity) ---
+
+    def test_canonical_queue_has_no_intrinsic_error(self) -> None:
+        assert queue_node_contract_error(self._queue()) is None
+        assert queue_node_contract_error(self._queue(description="hi")) is None
+
+    def test_queue_input_must_equal_id(self) -> None:
+        assert "input must equal its id" in (queue_node_contract_error(self._queue(input="other")) or "")
+        result = self._valid_state(input="other").validate()
+        assert not result.is_valid
+
+    def test_queue_rejects_non_canonical_fields(self) -> None:
+        for field, value in (
+            ("plugin", "csv"),
+            ("on_success", "x"),
+            ("on_error", "x"),
+            ("condition", "True"),
+            ("routes", {"a": "b"}),
+            ("fork_to", ("a",)),
+            ("policy", "require_all"),
+            ("merge", "nested"),
+            ("trigger", {"kind": "count"}),
+            ("output_mode", "passthrough"),
+            ("expected_output_count", 2),
+        ):
+            error = queue_node_contract_error(self._queue(**{field: value}))
+            assert error is not None and field in error, f"{field} not rejected: {error}"
+
+    def test_queue_rejects_unknown_option_and_non_string_description(self) -> None:
+        assert "unknown option" in (queue_node_contract_error(self._queue(options={"buffer": 10})) or "")
+        assert "description must be a string" in (queue_node_contract_error(self._queue(options={"description": 5})) or "")
+
+    # --- Structural topology ---
+
+    def test_queue_requires_at_least_one_producer(self) -> None:
+        # No source targets the queue's id -> unreachable / no producer.
+        state = self._state(
+            sources={"orders": self._source(on_success="elsewhere")},
+            nodes=(self._queue(), self._transform(input="inbound", on_success="combined")),
+            outputs=(self._sink(),),
+        )
+        assert not state.validate().is_valid
+
+    def test_queue_requires_a_downstream_consumer(self) -> None:
+        # Producers exist but nothing consumes the queue's output.
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._queue(),),
+            outputs=(self._sink(),),
+        )
+        result = state.validate()
+        assert not result.is_valid
+        assert any("downstream consumer" in e.message for e in result.errors)
+
+    def test_two_ordinary_consumers_of_a_queue_are_a_duplicate_consumer(self) -> None:
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(
+                self._queue(),
+                self._transform("c1", input="inbound", on_success="combined"),
+                self._transform("c2", input="inbound", on_success="combined2"),
+            ),
+            outputs=(self._sink(), self._sink("combined2")),
+        )
+        result = state.validate()
+        assert not result.is_valid
+        assert any("Duplicate consumer" in e.message for e in result.errors)
+
+    def test_queue_id_may_not_collide_with_a_sink(self) -> None:
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._queue(), self._transform(input="inbound", on_success="combined")),
+            outputs=(self._sink(), self._sink("inbound")),
+        )
+        assert not state.validate().is_valid
+
+    def test_queue_id_may_not_collide_with_a_source_key(self) -> None:
+        state = self._state(
+            sources={"inbound": self._source(on_success="elsewhere"), "orders": self._source()},
+            nodes=(self._queue(), self._transform(input="inbound", on_success="combined")),
+            outputs=(self._sink(),),
+        )
+        result = state.validate()
+        assert not result.is_valid
+
+    def test_undeclared_fan_in_without_a_queue_still_reports_duplicate_producer(self) -> None:
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._transform(input="inbound", on_success="combined"),),
+            outputs=(self._sink(),),
+        )
+        result = state.validate()
+        assert not result.is_valid
+        assert any("Duplicate producer" in e.message for e in result.errors)

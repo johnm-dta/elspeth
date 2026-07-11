@@ -154,3 +154,19 @@ def test_container_fields_are_deeply_frozen() -> None:
     # The dataclass itself must be immutable (frozen=True prevents assignment).
     with pytest.raises(AttributeError):
         policy.handles_no_sensitive_data = True  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Queue exposure must not narrow the generic persisted transport model
+# (elspeth-a5b86149d4). ``_PipelineNodeModel.node_type`` stays a plain ``str``
+# so set_pipeline keeps Tier-3 LLM-recoverable feedback for unknown enum
+# values; the closed vocabulary lives on the composer state / review DTOs.
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_node_transport_model_node_type_stays_open_str() -> None:
+    from elspeth.web.composer.redaction import _PipelineNodeModel
+
+    assert _PipelineNodeModel.model_fields["node_type"].annotation is str
+    model = _PipelineNodeModel.model_validate({"id": "inbound", "node_type": "queue", "input": "inbound", "options": {"description": "x"}})
+    assert model.node_type == "queue"

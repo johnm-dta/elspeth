@@ -644,3 +644,75 @@ class TestPromotePatchOutputOptionsArgErrorRouting:
         assert "/private/out.json" not in redacted["patch"]
         # sink_name is non-sensitive — passes through verbatim
         assert redacted.get("sink_name") == "out1"
+
+
+# ---------------------------------------------------------------------------
+# Queue fan-in through patch_node_options (elspeth-a5b86149d4 /
+# elspeth-6421ffa028). patch_node_options is the third canonical mutation
+# boundary: it must accept a description edit and reject any patch that would
+# break the intrinsic queue contract, leaving state atomically unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _state_with_queue_node(options: dict[str, Any] | None = None) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="inbound",
+                node_type="queue",
+                plugin=None,
+                input="inbound",
+                on_success=None,
+                on_error=None,
+                options=options if options is not None else {"description": "orig"},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+class TestPatchNodeOptionsQueue:
+    def test_patch_accepts_description(self) -> None:
+        state = _state_with_queue_node({"description": "orig"})
+        result = _execute_patch_node_options(
+            {"node_id": "inbound", "patch": {"description": "orders and refunds interleave here"}},
+            state,
+            _ctx(),
+        )
+        assert result.success is True
+        queue = next(n for n in result.updated_state.nodes if n.id == "inbound")
+        assert dict(queue.options) == {"description": "orders and refunds interleave here"}
+
+    def test_patch_rejects_unknown_key_atomically(self) -> None:
+        state = _state_with_queue_node({"description": "orig"})
+        result = _execute_patch_node_options(
+            {"node_id": "inbound", "patch": {"priority": "high"}},
+            state,
+            _ctx(),
+        )
+        assert result.success is False
+        assert result.updated_state.version == state.version
+        queue = next(n for n in result.updated_state.nodes if n.id == "inbound")
+        assert dict(queue.options) == {"description": "orig"}
+
+    def test_patch_rejects_non_string_description_atomically(self) -> None:
+        state = _state_with_queue_node({"description": "orig"})
+        result = _execute_patch_node_options(
+            {"node_id": "inbound", "patch": {"description": 123}},
+            state,
+            _ctx(),
+        )
+        assert result.success is False
+        assert result.updated_state.version == state.version
+        queue = next(n for n in result.updated_state.nodes if n.id == "inbound")
+        assert dict(queue.options) == {"description": "orig"}

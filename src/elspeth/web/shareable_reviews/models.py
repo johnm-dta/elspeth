@@ -123,7 +123,7 @@ class NodeSpecResponse(_StrictResponse):
     """
 
     id: str
-    node_type: Literal["transform", "gate", "aggregation", "coalesce"]
+    node_type: Literal["transform", "gate", "aggregation", "coalesce", "queue"]
     plugin: str | None
     input: str
     on_success: str | None

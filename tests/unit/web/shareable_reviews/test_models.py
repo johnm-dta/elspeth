@@ -19,6 +19,7 @@ from elspeth.web.audit_readiness.models import AuditReadinessSnapshot, Readiness
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.shareable_reviews.models import (
     MarkReadyForReviewResponse,
+    NodeSpecResponse,
     ShareableLinkResponse,
     SharedInspectResponse,
 )
@@ -284,3 +285,46 @@ def test_shared_inspect_response_rejects_wrong_pipeline_metadata_field_type() ->
             created_at=datetime.now(UTC),
             expires_at=datetime.now(UTC),
         )
+
+
+def _canonical_queue_node_wire() -> dict[str, object]:
+    """The wire shape a canonical structural queue serialises to."""
+    return {
+        "id": "inbound",
+        "node_type": "queue",
+        "plugin": None,
+        "input": "inbound",
+        "on_success": None,
+        "on_error": None,
+        "options": {"description": "Orders and refunds interleave here"},
+    }
+
+
+def test_node_spec_response_accepts_queue() -> None:
+    """The shareable-review node-type vocabulary is a true discriminated set
+    that must accept the ``queue`` structural node (elspeth-a5b86149d4)."""
+    node = NodeSpecResponse.model_validate(_canonical_queue_node_wire())
+    assert node.node_type == "queue"
+    assert node.input == "inbound"
+    assert node.plugin is None
+    assert dict(node.options) == {"description": "Orders and refunds interleave here"}
+
+
+def test_shared_inspect_response_accepts_queue_node_in_snapshot() -> None:
+    """A composition_snapshot carrying a queue node round-trips through the
+    strict SharedInspectResponse mirror without a storage migration."""
+    snapshot = _make_audit_readiness_snapshot()
+    composition = _make_composition_snapshot()
+    composition["nodes"] = [_canonical_queue_node_wire()]
+    response = SharedInspectResponse(
+        session_id=str(uuid4()),
+        state_id=str(uuid4()),
+        pipeline_metadata={"name": "Demo", "description": ""},
+        composition_snapshot=composition,
+        yaml="version: 1\n",
+        audit_readiness=snapshot,
+        created_by_user_id="user-1",
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC),
+    )
+    assert response.composition_snapshot.nodes[0].node_type == "queue"

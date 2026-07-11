@@ -681,3 +681,62 @@ async def test_mcp_preview_runtime_preflight_joins_shared_session_inflight() -> 
     assert first is expected
     assert second is expected
     assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Queue fan-in over the composer MCP surface (elspeth-a5b86149d4 /
+# elspeth-6421ffa028). tools/list must advertise queue in the closed
+# upsert_node node_type enum, and the generic call_tool dispatch must
+# persist and retrieve a queue node with no storage migration.
+# ---------------------------------------------------------------------------
+
+_QUEUE_UPSERT_ARGS: dict[str, object] = {
+    "id": "inbound",
+    "node_type": "queue",
+    "plugin": None,
+    "input": "inbound",
+    "on_success": None,
+    "on_error": None,
+    "options": {"description": "Orders and refunds interleave here"},
+}
+
+
+class TestQueueExposure:
+    @pytest.fixture()
+    def scratch_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "scratch"
+        d.mkdir()
+        return d
+
+    def test_tools_list_advertises_queue_node_type(self) -> None:
+        upsert = next(t for t in _build_tool_defs() if t["name"] == "upsert_node")
+        enum = upsert["parameters"]["properties"]["node_type"]["enum"]
+        assert "queue" in enum
+
+    def test_call_tool_persists_and_retrieves_queue_node(self, scratch_dir: Path) -> None:
+        result = _dispatch_tool(
+            "upsert_node",
+            dict(_QUEUE_UPSERT_ARGS),
+            _empty_state(),
+            _mock_catalog(),
+            scratch_dir,
+        )
+        assert result["success"] is True, result.get("error")
+        nodes = result["state"]["nodes"]
+        queue = next(n for n in nodes if n["id"] == "inbound")
+        assert queue["node_type"] == "queue"
+        assert queue["input"] == "inbound"
+        assert queue["plugin"] is None
+        assert queue["options"] == {"description": "Orders and refunds interleave here"}
+
+    def test_call_tool_rejects_malformed_queue_atomically(self, scratch_dir: Path) -> None:
+        state = _empty_state()
+        result = _dispatch_tool(
+            "upsert_node",
+            {**_QUEUE_UPSERT_ARGS, "input": "elsewhere"},
+            state,
+            _mock_catalog(),
+            scratch_dir,
+        )
+        assert result["success"] is False
+        assert result["state"] == state.to_dict()

@@ -44,6 +44,7 @@ from elspeth.web.composer.state import (
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
     _validate_gate_route_parity,
+    queue_node_contract_error,
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
@@ -604,35 +605,42 @@ def _execute_set_pipeline(
         fork_to = tuple(n.fork_to) if n.fork_to is not None else None
         branches = dict(n.branches) if isinstance(n.branches, Mapping) else tuple(n.branches) if n.branches is not None else None
         nt = n.node_type
-        node_specs.append(
-            NodeSpec(
-                id=n.id,
-                node_type=cast(NodeType, nt),
+        node_spec = NodeSpec(
+            id=n.id,
+            node_type=cast(NodeType, nt),
+            plugin=n.plugin,
+            input=n.input,
+            on_success=n.on_success,
+            on_error=n.on_error or ("discard" if nt in ("transform", "aggregation") else None),
+            options=_options_with_default_llm_reviews(
+                node_id=n.id,
                 plugin=n.plugin,
-                input=n.input,
-                on_success=n.on_success,
-                on_error=n.on_error or ("discard" if nt in ("transform", "aggregation") else None),
-                options=_options_with_default_llm_reviews(
-                    node_id=n.id,
-                    plugin=n.plugin,
-                    options=n.options,
-                ),
-                condition=n.condition,
-                routes=n.routes,
-                fork_to=fork_to,
-                branches=branches,
-                policy=n.policy,
-                merge=n.merge,
-                # ``n.trigger`` is a typed :class:`_NodeTriggerModel` (or None) per F3 —
-                # convert to a plain dict at the NodeSpec boundary because
-                # :class:`NodeSpec.trigger` is typed ``Mapping[str, Any] | None`` and
-                # is deep-frozen by ``freeze_fields("trigger")``; the freeze contract
-                # requires a Mapping, not a Pydantic model instance.
-                trigger=n.trigger.model_dump() if n.trigger is not None else None,
-                output_mode=n.output_mode,
-                expected_output_count=n.expected_output_count,
-            )
+                options=n.options,
+            ),
+            condition=n.condition,
+            routes=n.routes,
+            fork_to=fork_to,
+            branches=branches,
+            policy=n.policy,
+            merge=n.merge,
+            # ``n.trigger`` is a typed :class:`_NodeTriggerModel` (or None) per F3 —
+            # convert to a plain dict at the NodeSpec boundary because
+            # :class:`NodeSpec.trigger` is typed ``Mapping[str, Any] | None`` and
+            # is deep-frozen by ``freeze_fields("trigger")``; the freeze contract
+            # requires a Mapping, not a Pydantic model instance.
+            trigger=n.trigger.model_dump() if n.trigger is not None else None,
+            output_mode=n.output_mode,
+            expected_output_count=n.expected_output_count,
         )
+        # Validate every queue's intrinsic shape via the single shared guard
+        # BEFORE the new state is assembled/assigned below, so a malformed
+        # queue rolls the whole atomic replacement back with the prior state
+        # unchanged. Pipeline completeness stays validation telemetry, not a
+        # mutation rejection — an orphan queue is accepted here.
+        queue_contract_error = queue_node_contract_error(node_spec)
+        if queue_contract_error is not None:
+            return _failure_result(state, queue_contract_error)
+        node_specs.append(node_spec)
 
     edge_specs = []
     for e in validated.edges:
@@ -1010,7 +1018,13 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                     },
                     "required": ["id", "node_type", "input"],
                 },
-                "description": "Array of node specs: [{id, input, plugin?, node_type, options?, on_success?, on_error?, condition?, routes?, fork_to?, branches?, policy?, merge?, trigger?, output_mode?, expected_output_count?}]",
+                "description": (
+                    "Array of node specs: [{id, input, plugin?, node_type, options?, on_success?, on_error?, condition?, "
+                    "routes?, fork_to?, branches?, policy?, merge?, trigger?, output_mode?, expected_output_count?}]. "
+                    "A queue node is a structural fan-in point: node_type='queue', id == input to the shared connection "
+                    "name, plugin and every routing field omitted, options accepts only an optional description. "
+                    "Multiple producers may publish that connection name precisely because the queue is declared."
+                ),
             },
             "edges": {
                 "type": "array",

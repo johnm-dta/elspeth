@@ -24,6 +24,7 @@ from elspeth.web.composer.state import (
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
     _validate_gate_route_parity,
+    queue_node_contract_error,
 )
 from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
@@ -145,7 +146,7 @@ _UPSERT_NODE_DECLARATION_JSON_SCHEMA: dict[str, Any] = {
         "id": {"type": "string", "description": "Unique node identifier."},
         "node_type": {
             "type": "string",
-            "enum": ["transform", "gate", "aggregation", "coalesce"],
+            "enum": ["transform", "gate", "aggregation", "coalesce", "queue"],
         },
         "plugin": {
             "type": ["string", "null"],
@@ -277,7 +278,12 @@ _UPSERT_NODE_DECLARATION = ToolDeclaration(
         "Fields are node_type-dependent: "
         "transform/aggregation use plugin+options; "
         "gate uses condition+routes (or fork_to); "
-        "coalesce uses branches+policy+merge. "
+        "coalesce uses branches+policy+merge; "
+        "queue is a structural fan-in point — set id == input to the shared "
+        "connection name, omit plugin and every routing field (on_success/"
+        "on_error/routes/fork_to), and options accepts only an optional "
+        "description. Multiple producers may publish that name precisely "
+        "because the queue is declared. "
         "Omit fields that don't apply to your node_type."
     ),
     json_schema=_UPSERT_NODE_DECLARATION_JSON_SCHEMA,
@@ -408,6 +414,58 @@ _SET_METADATA_DECLARATION = ToolDeclaration(
 )
 
 
+def _execute_upsert_queue_node(
+    validated: _UpsertNodeArgumentsModel,
+    state: CompositionState,
+) -> ToolResult:
+    """Insert/update a canonical structural queue node.
+
+    Construct the NodeSpec from the validated arguments verbatim, run ONLY the
+    intrinsic ``queue_node_contract_error`` guard, and mutate (``with_node``)
+    only after that check passes. A malformed queue (id != input, any
+    forbidden field, unknown/typed option) returns an ordinary
+    ``_failure_result`` and leaves the exact prior state/version unchanged —
+    ``with_node`` is never reached, so the mutation is atomic. A canonical
+    queue succeeds and persists even when the resulting pipeline is
+    incomplete (missing producers/downstream); completeness is validation
+    telemetry surfaced on the returned ``ToolResult.validation``, not a
+    mutation rejection.
+    """
+    fork_to: tuple[str, ...] | None = tuple(validated.fork_to) if validated.fork_to is not None else None
+    branches: CoalesceBranches | None = None
+    if validated.branches is not None:
+        branches = dict(validated.branches) if isinstance(validated.branches, Mapping) else tuple(validated.branches)
+    node = NodeSpec(
+        id=validated.id,
+        node_type="queue",
+        plugin=validated.plugin,
+        input=validated.input,
+        on_success=validated.on_success,
+        on_error=validated.on_error,
+        options=dict(validated.options),
+        condition=validated.condition,
+        routes=validated.routes,
+        fork_to=fork_to,
+        branches=branches,
+        policy=validated.policy,
+        merge=validated.merge,
+        trigger=validated.trigger,
+        output_mode=validated.output_mode,
+        expected_output_count=validated.expected_output_count,
+    )
+    contract_error = queue_node_contract_error(node)
+    if contract_error is not None:
+        return _failure_result(state, contract_error)
+
+    new_state = state.with_node(node)
+    affected = {validated.id}
+    for edge in new_state.edges:
+        if edge.from_node == validated.id or edge.to_node == validated.id:
+            affected.add(edge.from_node)
+            affected.add(edge.to_node)
+    return _mutation_result(new_state, tuple(sorted(affected)))
+
+
 def _execute_upsert_node(
     args: dict[str, Any],
     state: CompositionState,
@@ -417,6 +475,15 @@ def _execute_upsert_node(
     validated = cast(_UpsertNodeArgumentsModel, _validate_mutation_arguments(_UpsertNodeArgumentsModel, args, "upsert_node arguments"))
     node_id = validated.id
     node_type = validated.node_type
+    if node_type == "queue":
+        # A queue is a structural pass-through fan-in point with no plugin,
+        # no routing, and no plugin options — so the plugin/credential/review
+        # gates below do not apply. The ONLY intrinsic constraint is
+        # queue_node_contract_error (state.py), the single source of truth
+        # shared with state validation and YAML generation. Pipeline
+        # completeness (producers/downstream) stays validation telemetry, so an
+        # orphan queue inserted during incremental authoring still persists.
+        return _execute_upsert_queue_node(validated, state)
     plugin = validated.plugin
     node_options = validated.options
     runtime_owned_error = _runtime_owned_llm_option_error(
@@ -814,6 +881,14 @@ def _execute_patch_node_options(
             return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 
     new_node = replace(current, options=new_options)
+    # Third canonical mutation boundary: a patch that would break a queue's
+    # intrinsic contract (unknown option, non-string description) is rejected
+    # by the single shared guard before with_node, leaving state atomically
+    # unchanged. Returns None for every non-queue node, so this is a no-op for
+    # transform/gate/aggregation/coalesce patches.
+    queue_contract_error = queue_node_contract_error(new_node)
+    if queue_contract_error is not None:
+        return _failure_result(state, queue_contract_error)
     new_state = state.with_node(new_node)
     review_contract_error = composition_review_contract_error(new_state)
     if review_contract_error is not None:

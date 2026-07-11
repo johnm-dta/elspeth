@@ -13101,3 +13101,111 @@ class TestToolContextSecretServiceTyping:
 
         ctx = ToolContext(catalog=MagicMock(spec=CatalogService))
         assert ctx.secret_service is None
+
+
+# ---------------------------------------------------------------------------
+# Queue fan-in exposure through the mutation tools (elspeth-a5b86149d4 /
+# elspeth-6421ffa028). The canonical structural queue NodeSpec is
+# id == input, node_type="queue", plugin=None, on_success/on_error None,
+# description-only options, every other field None. The single intrinsic
+# guard is state.queue_node_contract_error; upsert_node must accept a
+# canonical queue and reject every intrinsic malformation atomically.
+# ---------------------------------------------------------------------------
+
+_QUEUE_UPSERT_ARGS: dict[str, Any] = {
+    "id": "inbound",
+    "node_type": "queue",
+    "plugin": None,
+    "input": "inbound",
+    "on_success": None,
+    "on_error": None,
+    "options": {"description": "Orders and refunds interleave here"},
+}
+
+
+def _upsert_node_definition() -> Mapping[str, Any]:
+    definition = next(d for d in get_tool_definitions() if d["name"] == "upsert_node")
+    assert isinstance(definition, Mapping)
+    return definition
+
+
+class TestUpsertNodeQueue:
+    def test_closed_node_type_enum_includes_queue(self) -> None:
+        """The upsert_node declaration's closed node_type enum advertises queue."""
+        enum = _upsert_node_definition()["parameters"]["properties"]["node_type"]["enum"]
+        assert "queue" in enum
+        # The four pre-existing node types remain advertised.
+        for existing in ("transform", "gate", "aggregation", "coalesce"):
+            assert existing in enum
+
+    def test_declaration_documents_queue_contract(self) -> None:
+        """The tool description states the id == input / plugin-omitted / description-only contract."""
+        description = _upsert_node_definition()["description"]
+        assert "queue" in description.lower()
+        assert "id == input" in description
+
+    def test_upsert_canonical_queue_succeeds_and_persists(self) -> None:
+        result = execute_tool("upsert_node", dict(_QUEUE_UPSERT_ARGS), _empty_state(), _mock_catalog())
+        assert result.success is True
+        assert result.updated_state.version == 2
+        queue = next(n for n in result.updated_state.nodes if n.id == "inbound")
+        assert queue.node_type == "queue"
+        assert queue.input == "inbound"
+        assert queue.plugin is None
+        assert queue.on_success is None
+        assert queue.on_error is None
+        assert dict(queue.options) == {"description": "Orders and refunds interleave here"}
+        for field_name in (
+            "condition",
+            "routes",
+            "fork_to",
+            "branches",
+            "policy",
+            "merge",
+            "trigger",
+            "output_mode",
+            "expected_output_count",
+        ):
+            assert getattr(queue, field_name) is None
+
+    def test_orphan_queue_persists_even_though_validation_reports_incomplete(self) -> None:
+        """Incremental authoring: an orphan canonical queue is a mutation SUCCESS.
+
+        Pipeline completeness (missing producers / downstream) is validation
+        telemetry, not a mutation rejection.
+        """
+        result = execute_tool("upsert_node", dict(_QUEUE_UPSERT_ARGS), _empty_state(), _mock_catalog())
+        assert result.success is True
+        assert any(n.id == "inbound" for n in result.updated_state.nodes)
+        # The queue has no producer and no downstream consumer yet, so the
+        # validation summary is not valid — but the mutation still landed.
+        assert result.validation.is_valid is False
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"input": "elsewhere"},
+            {"plugin": "passthrough"},
+            {"on_success": "downstream"},
+            {"on_error": "errors"},
+            {"condition": "row['x'] > 0"},
+            {"routes": {"true": "a", "false": "b"}},
+            {"fork_to": ["a", "b"]},
+            {"branches": ["a", "b"]},
+            {"policy": "all"},
+            {"merge": "first"},
+            {"trigger": {"count": 5}},
+            {"output_mode": "passthrough"},
+            {"expected_output_count": 3},
+            {"options": {"description": "ok", "priority": "high"}},
+            {"options": {"description": 123}},
+        ],
+    )
+    def test_intrinsically_malformed_queue_is_rejected_atomically(self, override: dict[str, Any]) -> None:
+        state = _empty_state()
+        args = {**_QUEUE_UPSERT_ARGS, **override}
+        result = execute_tool("upsert_node", args, state, _mock_catalog())
+        assert result.success is False
+        # Atomic: the exact prior state/version is untouched, no partial node.
+        assert result.updated_state.version == state.version
+        assert all(n.id != "inbound" for n in result.updated_state.nodes)

@@ -1405,3 +1405,85 @@ class TestSetPipelineInlineBlobTsvDelimiter:
         assert result.success is True, result.to_dict()
         source = result.updated_state.sources["source"]
         assert source.options.get("delimiter") is None
+
+
+# ---------------------------------------------------------------------------
+# Queue fan-in through set_pipeline (elspeth-a5b86149d4 / elspeth-6421ffa028).
+# set_pipeline validates every queue's intrinsic shape (queue_node_contract_error)
+# before assigning the newly built state; pipeline completeness stays validation
+# telemetry. The generic persisted transport model _PipelineNodeModel.node_type
+# is intentionally a plain ``str`` and must NOT be narrowed to accept queue.
+# ---------------------------------------------------------------------------
+
+_QUEUE_NODE_ENTRY: dict[str, Any] = {
+    "id": "inbound",
+    "node_type": "queue",
+    "input": "inbound",
+    "options": {"description": "Orders and refunds interleave here"},
+}
+
+
+def _valid_args_with_queue(queue_override: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A set_pipeline payload whose ONLY variable is the queue node.
+
+    The source passes real ``_prevalidate_source`` (csv + path + schema) so a
+    dispatch failure is attributable to the queue, not the source.
+    """
+    queue = dict(_QUEUE_NODE_ENTRY)
+    if queue_override is not None:
+        queue = {**queue, **queue_override}
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "inbound",
+            "options": {"path": "in.csv", "schema": {"mode": "observed"}},
+        },
+        "nodes": [queue],
+        "edges": [],
+        "outputs": [],
+    }
+
+
+class TestSetPipelineQueue:
+    def test_pipeline_node_transport_accepts_queue_without_narrowing(self) -> None:
+        """The reduced transport model accepts a queue entry; node_type stays ``str``."""
+        from elspeth.web.composer.redaction import _PipelineNodeModel
+
+        assert _PipelineNodeModel.model_fields["node_type"].annotation is str
+        model = _PipelineNodeModel.model_validate(_QUEUE_NODE_ENTRY)
+        assert model.node_type == "queue"
+
+    def test_set_pipeline_arguments_model_accepts_queue_entry(self) -> None:
+        args = _minimal_valid_args()
+        args["nodes"] = [dict(_QUEUE_NODE_ENTRY)]
+        validated = SetPipelineArgumentsModel.model_validate(args)
+        assert validated.nodes[0].node_type == "queue"
+
+    def test_set_pipeline_accepts_canonical_queue(self) -> None:
+        result = _execute_set_pipeline(_valid_args_with_queue(), _empty_state(), ToolContext(catalog=_mock_catalog()))
+        assert result.success is True, result.to_dict()
+        queue = next(n for n in result.updated_state.nodes if n.id == "inbound")
+        assert queue.node_type == "queue"
+        assert queue.input == "inbound"
+        assert queue.plugin is None
+        assert queue.on_success is None
+        assert queue.on_error is None
+        assert dict(queue.options) == {"description": "Orders and refunds interleave here"}
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"input": "elsewhere"},
+            {"plugin": "passthrough"},
+            {"on_success": "downstream"},
+            {"options": {"description": "ok", "priority": "high"}},
+            {"options": {"description": 123}},
+        ],
+    )
+    def test_set_pipeline_rejects_malformed_queue_atomically(self, override: dict[str, Any]) -> None:
+        state = _empty_state()
+        result = _execute_set_pipeline(_valid_args_with_queue(override), state, ToolContext(catalog=_mock_catalog()))
+        assert result.success is False
+        # Atomic: the exact prior state/version is untouched.
+        assert result.updated_state.version == state.version
+        assert result.updated_state.nodes == state.nodes

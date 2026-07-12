@@ -87,6 +87,7 @@ export type PersistedTutorialStage = "guided" | "run" | "audit" | "graduation";
 export interface UserComposerPreferencesPayload {
   default_mode: ComposerMode;
   banner_dismissed_at: string | null;
+  freeform_intro_dismissed_at: string | null;
   tutorial_completed_at: string | null;
   // In-progress tutorial resume state; all four null when no tutorial is
   // in progress. run_id/source_data_hash are recorded once the tutorial
@@ -106,6 +107,7 @@ export interface UserComposerPreferencesPayload {
 export interface UpdateUserComposerPreferencesPayload {
   default_mode?: ComposerMode;
   banner_dismissed_at?: string | null;
+  freeform_intro_dismissed_at?: string | null;
   tutorial_completed_at?: string | null;
   // Absent = unchanged; explicit null = clear. Setting (or clearing)
   // tutorial_completed_at also clears any resume field not supplied in

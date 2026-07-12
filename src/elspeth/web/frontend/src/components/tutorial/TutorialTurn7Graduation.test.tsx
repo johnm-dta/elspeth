@@ -53,6 +53,7 @@ describe("TutorialTurn7Graduation", () => {
           usePreferencesStore.getState().defaultMode ??
           "guided",
         banner_dismissed_at: null,
+        freeform_intro_dismissed_at: null,
         tutorial_completed_at:
           body.tutorial_completed_at === undefined
             ? null

@@ -41,6 +41,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: "2026-07-12T05:00:00Z",
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -54,9 +55,40 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.defaultMode).toBe("freeform");
     expect(state.bannerDismissedAt).toBeNull();
+    expect(state.freeformIntroDismissedAt).toBe("2026-07-12T05:00:00Z");
     expect(state.tutorialCompletedAt).toBeNull();
     expect(selectTutorialCompleted(state)).toBe(false);
     expect(state.loaded).toBe(true);
+  });
+
+  it("dismisses the freeform introduction only after the server confirms", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      freeformIntroDismissedAt: null,
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      freeform_intro_dismissed_at: "2026-07-12T05:00:00Z",
+      tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-12T05:00:00Z",
+    });
+
+    const pending = usePreferencesStore.getState().dismissFreeformIntro();
+    expect(usePreferencesStore.getState().writing).toBe(true);
+    expect(usePreferencesStore.getState().freeformIntroDismissedAt).toBeNull();
+    await pending;
+
+    expect(mockUpdate).toHaveBeenCalledWith({
+      freeform_intro_dismissed_at: expect.any(String),
+    });
+    expect(usePreferencesStore.getState().freeformIntroDismissedAt).toBe(
+      "2026-07-12T05:00:00Z",
+    );
   });
 
   it("selectTutorialCompleted derives true when tutorialCompletedAt is set", () => {
@@ -73,6 +105,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -117,6 +150,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -144,6 +178,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-05-19T12:30:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -175,6 +210,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-05-19T12:30:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -229,6 +265,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-07-09T00:00:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -281,6 +318,7 @@ describe("preferencesStore", () => {
     let resolveFirst!: (payload: {
       default_mode: "guided";
       banner_dismissed_at: null;
+      freeform_intro_dismissed_at: null;
       tutorial_completed_at: string;
       tutorial_stage: null;
       tutorial_session_id: null;
@@ -304,6 +342,7 @@ describe("preferencesStore", () => {
     resolveFirst({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-07-09T00:00:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -327,6 +366,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-07-09T00:00:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -354,6 +394,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -385,6 +426,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: stamp,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -444,6 +486,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValue({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -472,6 +515,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -639,6 +683,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -661,6 +706,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -706,6 +752,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -725,6 +772,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: stamp,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -809,6 +857,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockFetch.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: "run",
       tutorial_session_id: "sess-1",
@@ -831,6 +880,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: "guided",
       tutorial_session_id: "sess-2",
@@ -865,6 +915,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: "run",
       tutorial_session_id: "sess-3",
@@ -895,6 +946,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-07-02T00:00:00Z",
       // Completion-clears-progress: the backend terminated the resume state.
       tutorial_stage: null,

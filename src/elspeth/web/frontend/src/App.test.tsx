@@ -168,6 +168,7 @@ vi.mock("./api/client", () => ({
   fetchUserComposerPreferences: vi.fn().mockResolvedValue({
     default_mode: "guided",
     banner_dismissed_at: null,
+    freeform_intro_dismissed_at: null,
     tutorial_completed_at: "2026-05-19T00:00:00Z",
     tutorial_stage: null,
     tutorial_session_id: null,
@@ -980,6 +981,7 @@ describe("App preferences bootstrap (Phase 1B)", () => {
     vi.spyOn(api, "updateUserComposerPreferences").mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,

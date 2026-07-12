@@ -47,6 +47,8 @@ import type {
 // (`v1`) so a future schema change can add a `v2` key without colliding
 // with stale tabs that pre-date the upgrade.
 const BANNER_DISMISSED_STORAGE_KEY = "elspeth_prefs_banner_dismissed_v1";
+const FREEFORM_INTRO_DISMISSED_STORAGE_KEY =
+  "elspeth_prefs_freeform_intro_dismissed_v1";
 
 /**
  * In-progress tutorial resume state (elspeth-918f4434b3), server-persisted
@@ -65,6 +67,7 @@ export interface TutorialProgress {
 interface PreferencesState {
   defaultMode: ComposerMode | null;
   bannerDismissedAt: string | null;
+  freeformIntroDismissedAt: string | null;
   tutorialCompletedAt: string | null;
   tutorialCompleted: boolean;
   tutorialStage: PersistedTutorialStage | null;
@@ -97,6 +100,7 @@ interface PreferencesState {
   publishTutorialGraduation: (completedAt: string | null) => void;
   resetTutorial: () => Promise<void>;
   dismissDefaultChangedBanner: () => Promise<void>;
+  dismissFreeformIntro: () => Promise<void>;
   clearError: () => void;
   reset: () => void;
 }
@@ -108,6 +112,7 @@ function tutorialCompletedFrom(value: string | null): boolean {
 const INITIAL_STATE = {
   defaultMode: null as ComposerMode | null,
   bannerDismissedAt: null as string | null,
+  freeformIntroDismissedAt: null as string | null,
   tutorialCompletedAt: null as string | null,
   tutorialCompleted: false,
   tutorialStage: null as PersistedTutorialStage | null,
@@ -144,6 +149,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       set({
         defaultMode: payload.default_mode,
         bannerDismissedAt: payload.banner_dismissed_at,
+        freeformIntroDismissedAt: payload.freeform_intro_dismissed_at,
         tutorialCompletedAt: payload.tutorial_completed_at,
         tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
         tutorialStage: payload.tutorial_stage,
@@ -502,6 +508,46 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     }
   },
 
+  dismissFreeformIntro: async () => {
+    if (get().writing) {
+      throw new Error(
+        "preferencesStore: dismissFreeformIntro called while a write was in flight",
+      );
+    }
+    const stamp = new Date().toISOString();
+    set({ writing: true, writeError: null });
+    try {
+      const payload = await updateUserComposerPreferences({
+        freeform_intro_dismissed_at: stamp,
+      });
+      const resolved = payload.freeform_intro_dismissed_at;
+      set({
+        freeformIntroDismissedAt: resolved,
+        writing: false,
+      });
+      if (typeof window !== "undefined" && resolved !== null) {
+        try {
+          window.localStorage.setItem(
+            FREEFORM_INTRO_DISMISSED_STORAGE_KEY,
+            resolved,
+          );
+        } catch {
+          // The account-level server value remains authoritative; peer tabs
+          // catch up on their next preference bootstrap.
+        }
+      }
+    } catch (err) {
+      set({
+        writing: false,
+        writeError:
+          err instanceof Error
+            ? `Couldn't hide the freeform introduction: ${err.message}`
+            : "Couldn't hide the freeform introduction.",
+      });
+      throw err;
+    }
+  },
+
   clearError: () => set({ writeError: null }),
 
   reset: () => set(INITIAL_STATE),
@@ -519,8 +565,14 @@ export function initCrossTabSync(): void {
   crossTabSyncInitialised = true;
 
   window.addEventListener("storage", (event: StorageEvent) => {
-    if (event.key !== BANNER_DISMISSED_STORAGE_KEY) return;
     if (event.newValue === null) return;
+    if (event.key === FREEFORM_INTRO_DISMISSED_STORAGE_KEY) {
+      usePreferencesStore.setState({
+        freeformIntroDismissedAt: event.newValue,
+      });
+      return;
+    }
+    if (event.key !== BANNER_DISMISSED_STORAGE_KEY) return;
     // Update local state to match the broadcast value WITHOUT making
     // another PATCH (the originating tab already wrote it). If the
     // current store already has a non-null dismissed_at, prefer the

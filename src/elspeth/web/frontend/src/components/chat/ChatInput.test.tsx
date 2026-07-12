@@ -324,7 +324,7 @@ describe("ChatInput mobile density CSS", () => {
 
   // chat.css has FOUR separate `@media (max-width: 760px)` blocks (inline
   // run-results, this composer-density block, inline-source-fallback, and
-  // template-cards-grid). A plain indexOf lands on whichever comes first in
+  // responsive CSS blocks). A plain indexOf lands on whichever comes first in
   // the file — not necessarily the composer-density block these tests mean
   // to pin — and then over-reads to the next top-level comment, which
   // happens to swallow the intended block too, so the assertions passed by

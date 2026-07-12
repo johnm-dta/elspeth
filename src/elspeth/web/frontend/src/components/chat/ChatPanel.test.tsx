@@ -128,21 +128,6 @@ vi.mock("./ChatInput", () => ({
   ),
 }));
 
-vi.mock("./TemplateCards", () => ({
-  TemplateCards: ({
-    onSelectTemplate: _onSelectTemplate,
-  }: {
-    onSelectTemplate: (
-      seedPrompt: string,
-      recommendedStartingPoint: "dynamic_source_from_chat" | "csv_upload" | "api_source",
-    ) => void;
-  }) => (
-    <div data-testid="template-cards">
-      Template cards
-    </div>
-  ),
-}));
-
 vi.mock("@/components/blobs/BlobManager", () => ({
   BlobManager: () => <div data-testid="blob-manager" />,
 }));
@@ -250,7 +235,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Revise the request and send it again.")).toBeInTheDocument();
   });
 
-  it("keeps starter examples collapsed in an empty freeform session without sending a template prompt", () => {
+  it("shows the quiet introduction in an empty freeform session", () => {
     const sendMessage = vi.fn();
     const session: Session = {
       id: "session-templates",
@@ -272,14 +257,15 @@ describe("ChatPanel", () => {
       sessions: [session],
       messages: [],
     });
+    usePreferencesStore.setState({
+      loaded: true,
+      freeformIntroDismissedAt: null,
+    });
 
-    const { container } = render(<ChatPanel />);
+    render(<ChatPanel />);
 
-    expect(screen.getByTestId("template-cards")).toBeInTheDocument();
-    const disclosure = container.querySelector("details.starter-examples-disclosure");
-    expect(disclosure).not.toBeNull();
-    expect(disclosure).not.toHaveAttribute("open");
-    expect(screen.getByText("Starter examples")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Build a pipeline" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Don’t show this again" })).toBeVisible();
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(sendMessage).not.toHaveBeenCalled();
   });

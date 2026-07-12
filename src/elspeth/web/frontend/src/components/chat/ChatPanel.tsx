@@ -25,7 +25,7 @@ import { groupIntoTurns, turnRepresentativeMessage, type ChatTurn } from "./turn
 import { ComposingIndicator } from "./ComposingIndicator";
 import { ModelChip } from "./ModelChip";
 import { ChatInput } from "./ChatInput";
-import { TemplateCards } from "./TemplateCards";
+import { FreeformIntroduction } from "./FreeformIntroduction";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { InlineRunResults } from "@/components/execution/InlineRunResults";
 import { CompletionSummary } from "./guided/CompletionSummary";
@@ -74,11 +74,6 @@ import {
   type ChatTurn as GuidedChatTurn,
   type GuidedStep,
 } from "@/types/guided";
-import type { ExampleUseCase, RecommendedStartingPoint } from "./templates_data";
-
-function assertNever(value: never): never {
-  throw new Error(`Unhandled template starting point: ${value}`);
-}
 
 function isTerminalComposerPhase(
   phase: string | null | undefined,
@@ -1440,37 +1435,6 @@ export function ChatPanel({
     [sendMessage],
   );
 
-  const handleSelectTemplate = useCallback(
-    (
-      seedPrompt: string,
-      recommendedStartingPoint: ExampleUseCase["recommended_starting_point"],
-    ) => {
-      const applyStartingPoint = (startingPoint: RecommendedStartingPoint) => {
-        switch (startingPoint) {
-          case "dynamic_source_from_chat":
-            setInputText("");
-            sendMessage(seedPrompt);
-            return;
-          case "csv_upload":
-            setInputText(seedPrompt);
-            setShowBlobManager(true);
-            inputRef.current?.focus();
-            return;
-          case "api_source":
-            setInputText(seedPrompt);
-            onOpenSecrets?.();
-            inputRef.current?.focus();
-            return;
-          default:
-            assertNever(startingPoint);
-        }
-      };
-
-      applyStartingPoint(recommendedStartingPoint);
-    },
-    [onOpenSecrets, sendMessage],
-  );
-
   // No active session: show prompt to select or create one
   if (!activeSessionId) {
     return (
@@ -2162,10 +2126,7 @@ export function ChatPanel({
         tabIndex={0}
       >
         {messages.length === 0 ? (
-          <details className="starter-examples-disclosure">
-            <summary>Starter examples</summary>
-            <TemplateCards onSelectTemplate={handleSelectTemplate} />
-          </details>
+          <FreeformIntroduction />
         ) : (
           // Render one bubble per *turn*, not one per audit row. The compose
           // loop persists every LLM round-trip as its own assistant row

@@ -6,8 +6,8 @@
    .message-sources-created*, .inline-source-created-turn*,
    .message-group-separator, .tool-call-*, .pending-proposals-banner*,
    .inline-source-fallback-prompt*, .pending-overlay-pill, .spec-pending-proposal,
-   .yaml-pending-summary, .runs-pending-proposal, .composing-*, .template-cards*,
-   .template-card*, .chat-model-chip*, .proposal-diff*.
+   .yaml-pending-summary, .runs-pending-proposal, .composing-*,
+   .freeform-introduction, .chat-model-chip*, .proposal-diff*.
    Tenants (execution-named but chat-mounted — they render inside the chat
    panel via inline run results):
      .inline-run-results*, .run-outputs-panel*, .run-output-artifact*. */
@@ -1745,177 +1745,30 @@
 
 
 /* ---------------------------------------------------------------------------
-   TemplateCards (onboarding empty state)
+   Freeform introduction (dismissible account-level empty state)
    --------------------------------------------------------------------------- */
-.starter-examples-disclosure {
-  width: min(100%, 1120px);
-  margin: var(--space-md) auto;
-  padding: 0 var(--space-lg);
-}
-
-.starter-examples-disclosure > summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--size-control-compact);
-  padding: var(--space-xs) var(--space-sm);
+.freeform-introduction {
+  width: min(calc(100% - 2 * var(--space-lg)), 40rem);
+  margin: var(--space-xl) auto;
+  padding: var(--space-lg);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-}
-
-.starter-examples-disclosure > summary:hover,
-.starter-examples-disclosure > summary:focus-visible {
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-  background-color: var(--color-surface-elevated);
-}
-
-.starter-examples-disclosure[open] > summary {
-  margin-bottom: var(--space-sm);
-}
-
-.template-cards-container {
-  padding: var(--space-xl) var(--space-2xl);
-  width: min(100%, 1120px);
-  max-width: 1120px;
-  margin: 0 auto;
-}
-
-.template-cards-heading {
-  text-align: center;
-  margin-bottom: var(--space-xl);
-}
-
-.template-cards-title {
-  margin: 0 0 var(--space-sm);
-  font-size: var(--font-size-xl);
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.template-cards-subtitle {
-  margin: 0;
-  font-size: var(--font-size-base);
-  color: var(--color-text-muted);
-}
-
-.template-cards-grid {
-  display: grid;
-  /* 4 x 3 desktop field of domain exemplars. */
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-md);
-}
-
-.template-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: var(--space-1-5);
-  aspect-ratio: 1 / 1;
-  min-width: 0;
-  padding: var(--space-md);
-  overflow: hidden;
-  /* Exemplar tiles keep faded chrome so the grid reads as reference
-     context; the explicit "Use this example" button inside each card is
-     the interactive affordance (elspeth-b948756c5a). min-height stays
-     auto so the action button can push a card past the square when the
-     content needs the room. */
-  background-color: color-mix(
-    in srgb,
-    var(--color-surface-elevated) 72%,
-    var(--color-bg)
-  );
-  border: 1px solid
-    color-mix(in srgb, var(--color-border) 68%, transparent);
   border-radius: var(--radius-lg);
-  text-align: left;
+  background-color: var(--color-surface-elevated);
+  text-align: center;
 }
 
-.template-card-action {
-  margin-top: var(--space-xs);
-  align-self: flex-start;
-}
-
-.template-card-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1-5);
-}
-
-.template-card-icon {
-  font-size: var(--font-size-lg);
-  opacity: 0.76;
-}
-
-.template-card-title {
-  font-size: var(--font-size-sm);
-  font-weight: 600;
+.freeform-introduction h2 {
+  margin: 0 0 var(--space-sm);
   color: var(--color-text);
-  line-height: 1.15;
-  opacity: 0.9;
-}
-
-.template-card-description {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: var(--font-size-xs);
-  /* No opacity dimming here (dark-contrast carry-over, ux-review-2026-07-02):
-     --color-text-muted itself passes AA, but the previous 0.82 dim
-     composited it below 4.5:1 against the card's color-mix background in
-     BOTH themes (~4.2:1 dark / ~4.3:1 light vs the #173942 dark card mix).
-     The card keeps its faded chrome via the background/border mix above;
-     text stays at full token strength. Pinned by TemplateCards.test.tsx. */
-  color: var(--color-text-muted);
-  line-height: 1.3;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.template-card-sda {
-  margin-top: auto;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--space-xs);
-  font-size: var(--font-size-xs);
-  /* Same contrast discipline as .template-card-description above: the old
-     0.76 dim dropped this micro-text to ~3.9:1 on the dark card mix.
-     Muted/secondary tokens at full strength pass AA on the card surface. */
-  color: var(--color-text-muted);
-  line-height: 1.2;
-}
-
-.template-card-sda div {
-  min-width: 0;
-}
-
-.template-card-sda dt {
+  font-size: var(--font-size-lg);
   font-weight: 600;
+}
+
+.freeform-introduction p {
+  margin: 0 auto var(--space-md);
   color: var(--color-text-secondary);
-}
-
-.template-card-sda dd {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-@media (max-width: 760px) {
-  .template-cards-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 520px) {
-  .template-cards-grid {
-    grid-template-columns: 1fr;
-  }
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
 }
 
 /* ── Acknowledgement stack (pinned top-of-chat LLM decisions) ─────────────

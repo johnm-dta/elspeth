@@ -51,7 +51,7 @@ const AUDITED_COMPONENTS = [
   "CompletionBar",
   "PluginCard",
   "FilterChipStrip",
-  "TemplateCards",
+  "FreeformIntroduction",
   "ShortcutsHelp",
   "WireStageTurn",
   "SchemaFormTurn",
@@ -125,7 +125,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "SchemaFormTurn",
   "SideRail",
   "ShortcutsHelp",
-  "TemplateCards",
+  "FreeformIntroduction",
   "TutorialGuidedShell",
   "TutorialTurn1Welcome",
   "TutorialTurn4Run",
@@ -276,7 +276,7 @@ import { InlineSourceFallbackPrompt } from "@/components/chat/InlineSourceFallba
 import { CompletionBar } from "@/components/composer/CompletionBar";
 import { PluginCard } from "@/components/catalog/PluginCard";
 import { FilterChipStrip, type CatalogFilters } from "@/components/catalog/FilterChipStrip";
-import { TemplateCards } from "@/components/chat/TemplateCards";
+import { FreeformIntroduction } from "@/components/chat/FreeformIntroduction";
 import { ShortcutsHelp } from "@/components/common/ShortcutsHelp";
 import { WireStageTurn } from "@/components/chat/guided/WireStageTurn";
 import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
@@ -851,11 +851,14 @@ describe("FilterChipStrip", () => {
   });
 });
 
-describe("TemplateCards", () => {
+describe("FreeformIntroduction", () => {
   it("has no axe violations", async () => {
-    const { container } = render(
-      <TemplateCards onSelectTemplate={() => {}} />,
-    );
+    usePreferencesStore.setState({
+      loaded: true,
+      freeformIntroDismissedAt: null,
+      writing: false,
+    });
+    const { container } = render(<FreeformIntroduction />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

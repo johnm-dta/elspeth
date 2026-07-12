@@ -37,8 +37,24 @@ function branchConnectionLabels(
 }
 
 export function reconstructWireEdges(data: WireStageData): WireEdge[] {
+  // Two-phase, queue-aware reconstruction. A declared queue accepts many
+  // producers publishing one connection name and feeds exactly one ordinary
+  // downstream consumer. We must draw every producer -> queue edge plus the
+  // single queue -> consumer edge — never a dishonest producer -> consumer
+  // bypass, and never a queue self-loop.
+  const queueIds = new Set(
+    data.topology.nodes
+      .filter((node) => node.node_type === "queue")
+      .map((node) => node.id),
+  );
+
+  // Ordinary consumers keyed by the connection label they read. Queue nodes are
+  // kept OUT of this map: the queue's `input === id` must not claim its own
+  // connection name, so the ordinary downstream consumer of that name wins and
+  // the queue's output routes to it.
   const consumerByLabel = new Map<string, string>();
   for (const node of data.topology.nodes) {
+    if (node.node_type === "queue") continue;
     if (node.node_type === "coalesce") {
       for (const label of branchConnectionLabels(node.branches)) {
         consumerByLabel.set(label, node.id);
@@ -59,10 +75,21 @@ export function reconstructWireEdges(data: WireStageData): WireEdge[] {
   );
 
   const edges: WireEdge[] = [];
-  const pushEdge = (from: string, label: string | null) => {
+  const pushEdge = (
+    from: string,
+    label: string | null,
+    opts?: { fromQueue?: boolean },
+  ) => {
     if (label === null) return;
-    const to = consumerByLabel.get(label);
+    // An ordinary producer targeting a declared queue connection routes to the
+    // queue node itself (the queue is the sole canonical producer of its id).
+    // The queue's own output (fromQueue) routes to the ordinary downstream
+    // consumer of that same id.
+    const fromQueue = opts?.fromQueue ?? false;
+    const to =
+      !fromQueue && queueIds.has(label) ? label : consumerByLabel.get(label);
     if (to === undefined) return;
+    if (to === from) return; // no self-loop (a queue's implicit output is its id)
     const contract = contractByPair.get(pairKey(from, to));
     edges.push({
       from,
@@ -73,11 +100,23 @@ export function reconstructWireEdges(data: WireStageData): WireEdge[] {
     });
   };
 
-  for (const source of Object.values(data.topology.sources)) {
+  // Sort source iteration by id so the reconstructed edge set is invariant to
+  // source insertion order, while preserving overall source -> node -> output
+  // flow ordering for the readable wiring list.
+  const sources = Object.values(data.topology.sources).sort((a, b) =>
+    a.id.localeCompare(b.id),
+  );
+  for (const source of sources) {
     pushEdge(source.id, source.on_success);
     pushEdge(source.id, source.on_validation_failure);
   }
   for (const node of data.topology.nodes) {
+    if (node.node_type === "queue") {
+      // The queue's implicit output uses its own id; route it to the ordinary
+      // downstream consumer of that id (pushEdge rejects the self-loop).
+      pushEdge(node.id, node.id, { fromQueue: true });
+      continue;
+    }
     pushEdge(node.id, node.on_success);
     pushEdge(node.id, node.on_error);
     for (const label of Object.values(node.routes ?? {})) {
@@ -137,6 +176,13 @@ export function buildEntityNames(data: WireStageData): Map<string, string> {
     );
   }
   for (const node of data.topology.nodes) {
+    if (node.node_type === "queue") {
+      // Plain-language queue label keyed by the declared connection name (a
+      // user-meaningful queue name, e.g. "inbound queue step") — never a
+      // merge/coalesce label (a queue is uncorrelated interleave, not a join).
+      names.set(node.id, `${node.id} queue step`);
+      continue;
+    }
     names.set(node.id, `${stepLabelForPlugin(node.plugin ?? node.node_type)} step`);
   }
   for (const output of data.topology.outputs) {

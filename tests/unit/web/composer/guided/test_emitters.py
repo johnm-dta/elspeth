@@ -16,7 +16,13 @@ from elspeth.web.composer.guided.emitters import (
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType, validate_payload
 from elspeth.web.composer.guided.state_machine import SourceResolved
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
-from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.state import (
+    CompositionState,
+    NodeSpec,
+    OutputSpec,
+    PipelineMetadata,
+    SourceSpec,
+)
 from elspeth.web.sessions.routes._helpers import _guided_step_index
 
 
@@ -45,6 +51,66 @@ def _empty_state() -> CompositionState:
         edges=(),
         outputs=(),
         metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _queue_state() -> CompositionState:
+    """Two sources fan into a declared queue that feeds one ordinary consumer."""
+
+    def _src() -> SourceSpec:
+        return SourceSpec(
+            plugin="csv",
+            on_success="inbound",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+
+    return CompositionState(
+        source=None,
+        sources={"orders": _src(), "refunds": _src()},
+        nodes=(
+            NodeSpec(
+                id="inbound",
+                node_type="queue",
+                plugin=None,
+                input="inbound",
+                on_success=None,
+                on_error=None,
+                options={"description": "Orders and refunds interleave here"},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="normalize",
+                node_type="transform",
+                plugin="passthrough",
+                input="inbound",
+                on_success="combined",
+                on_error="discard",
+                options={"schema": {"mode": "observed"}},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="combined",
+                plugin="json",
+                options={"schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(name="Queue fan-in", description=""),
         version=1,
     )
 
@@ -164,6 +230,21 @@ class TestStep4WireEmitter:
         assert payload["edge_contracts"] == []
         assert payload["semantic_contracts"] == []
         assert payload["warnings"] == []
+
+    def test_emits_queue_node_generically_without_a_queue_branch(self) -> None:
+        # A declared queue fan-in flows through the generic emitter unchanged:
+        # the canonical queue row appears in the topology and the payload
+        # validates, with no queue-specific emitter mutation
+        # (elspeth-a5b86149d4 / elspeth-6421ffa028).
+        turn = build_step_4_wire_turn(_queue_state())
+
+        assert turn["type"] == TurnType.CONFIRM_WIRING.value
+        assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
+        queue = next(node for node in turn["payload"]["topology"]["nodes"] if node["node_type"] == "queue")
+        assert queue["id"] == "inbound"
+        assert queue["input"] == "inbound"
+        assert queue["plugin"] is None
+        assert queue["on_success"] is None
 
 
 class _SourceCatalog:

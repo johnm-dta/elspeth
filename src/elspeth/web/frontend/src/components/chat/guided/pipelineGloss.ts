@@ -72,6 +72,10 @@ function transformPhrase(node: NodeSpec): string {
   if (node.node_type === "gate") return "filter the rows";
   if (node.node_type === "aggregation") return "summarise the rows";
   if (node.node_type === "coalesce") return "merge the branches";
+  // A queue is uncorrelated fan-in: many producers publish one connection name
+  // and the queue interleaves those rows. NEVER merge/join/union language — it
+  // does not correlate or combine schemas (contrast with coalesce above).
+  if (node.node_type === "queue") return "interleave the incoming rows";
   const plugin = (node.plugin ?? "").toLowerCase();
   if (/llm|rate|score|classif|grade/.test(plugin)) return "rate each row";
   if (/scrape|fetch|http|web/.test(plugin)) return SCRAPE_PAGE_PHRASE;

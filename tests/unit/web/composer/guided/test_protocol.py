@@ -282,6 +282,34 @@ class TestPayloadValidation:
         }
         assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
 
+    def test_confirm_wiring_accepts_queue_node_type_generically(self) -> None:
+        # _WireNodeTopo.node_type is a generic str transport field, not the
+        # closed composition vocabulary, so a queue node validates without any
+        # queue-specific schema branch (elspeth-a5b86149d4 / elspeth-6421ffa028).
+        payload = {
+            "topology": {
+                "sources": {},
+                "nodes": [
+                    {
+                        "id": "inbound",
+                        "node_type": "queue",
+                        "plugin": None,
+                        "input": "inbound",
+                        "on_success": None,
+                        "on_error": None,
+                        "routes": None,
+                        "fork_to": None,
+                        "branches": None,
+                    }
+                ],
+                "outputs": [],
+            },
+            "edge_contracts": [],
+            "semantic_contracts": [],
+            "warnings": [],
+        }
+        assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
+
     def test_confirm_wiring_payload_missing_key_rejected(self) -> None:
         err = validate_payload(TurnType.CONFIRM_WIRING, {"topology": {}})
         assert err is not None

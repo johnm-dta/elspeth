@@ -274,6 +274,123 @@ describe("reconstructWireEdges", () => {
   });
 });
 
+// ── Structural queue fan-in (elspeth-a5b86149d4 / elspeth-6421ffa028) ─────────
+//
+// A declared queue node accepts many producers publishing one connection name
+// and feeds exactly one ordinary downstream consumer. The wire stage must
+// reconstruct every producer -> queue edge plus the single queue -> consumer
+// edge, in either source order, with no dishonest producer -> consumer bypass
+// and no queue self-loop.
+
+function queueData(reverseSources = false): WireStageData {
+  const orders = {
+    id: "source:orders",
+    plugin: "csv",
+    on_success: "inbound",
+    on_validation_failure: "discard",
+  };
+  const refunds = {
+    id: "source:refunds",
+    plugin: "csv",
+    on_success: "inbound",
+    on_validation_failure: "discard",
+  };
+  return {
+    topology: {
+      sources: reverseSources ? { refunds, orders } : { orders, refunds },
+      nodes: [
+        {
+          id: "inbound",
+          node_type: "queue",
+          plugin: null,
+          input: "inbound",
+          on_success: null,
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+        {
+          id: "normalize",
+          node_type: "transform",
+          plugin: "passthrough",
+          input: "inbound",
+          on_success: "combined",
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+      ],
+      outputs: [
+        {
+          id: "output:combined",
+          sink_name: "combined",
+          plugin: "json",
+          on_write_failure: "discard",
+        },
+      ],
+    },
+    edge_contracts: [],
+    semantic_contracts: [],
+    warnings: [],
+  };
+}
+
+describe("reconstructWireEdges — queue fan-in", () => {
+  it("draws every producer->queue edge plus one queue->consumer edge, no bypass or self-loop", () => {
+    const pairs = reconstructWireEdges(queueData()).map(
+      (edge) => `${edge.from}->${edge.to}`,
+    );
+
+    expect(pairs).toContain("source:orders->inbound");
+    expect(pairs).toContain("source:refunds->inbound");
+    expect(pairs).toContain("inbound->normalize");
+    expect(pairs).toContain("normalize->output:combined");
+    // No dishonest producer -> consumer bypass edge.
+    expect(pairs).not.toContain("source:orders->normalize");
+    expect(pairs).not.toContain("source:refunds->normalize");
+    // The queue draws exactly one edge to its downstream consumer.
+    expect(pairs.filter((pair) => pair.endsWith("->normalize"))).toEqual([
+      "inbound->normalize",
+    ]);
+    // No queue self-loop (the implicit output uses the queue's own id).
+    expect(pairs).not.toContain("inbound->inbound");
+  });
+
+  it("produces the same edge set when source insertion order is reversed", () => {
+    const forward = reconstructWireEdges(queueData(false))
+      .map((edge) => `${edge.from}->${edge.to}`)
+      .sort();
+    const reversed = reconstructWireEdges(queueData(true))
+      .map((edge) => `${edge.from}->${edge.to}`)
+      .sort();
+
+    expect(reversed).toEqual(forward);
+  });
+});
+
+describe("WireStageTurn — queue labels", () => {
+  it("names a queue node '<id> queue step', never merge/coalesce", () => {
+    const names = buildEntityNames(queueData());
+    expect(names.get("inbound")).toBe("inbound queue step");
+  });
+
+  it("renders the plain-language queue step label in the wiring rows", () => {
+    render(
+      <WireStageTurn
+        data={queueData()}
+        onConfirm={vi.fn()}
+        confirmDisabled={false}
+      />,
+    );
+    const list = document.querySelector(".wire-stage__edges");
+    expect(list?.textContent).toContain("inbound queue step");
+    // Uncorrelated interleave, never merge/coalesce language.
+    expect(list?.textContent).not.toMatch(/merge|coalesce/i);
+  });
+});
+
 describe("WireStageTurn", () => {
   it("renders prompt-shield advisory warning when present", () => {
     const data = canonicalData();

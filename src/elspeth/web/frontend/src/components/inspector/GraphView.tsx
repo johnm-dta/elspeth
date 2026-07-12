@@ -683,69 +683,140 @@ export function GraphView() {
     // 3. For direct sink references (on_success/on_error/routes pointing to sink names),
     //    create edges directly since sinks are in nodeIds
 
-    // Producer registry: connection_point_name → { nodeId, edgeType, label }
-    // This tracks all producers (source and nodes) and their output connection types
+    // Producer registry: connection_point_name → producers.
+    // ELSPETH allows MANY producers to publish one connection name ONLY when a
+    // declared queue node consumes it (structural fan-in, ADR-028). So this is a
+    // MULTIMAP, not one-producer-per-connection: overwriting would silently drop
+    // every producer but the last and misrender the intentional fan-in.
     type ProducerInfo = { nodeId: string; edgeType: "success" | "error"; label: string };
-    const connectionProducers: Record<string, ProducerInfo> = {};
+    const connectionProducers = new Map<string, ProducerInfo[]>();
+    function registerProducer(connection: string, producer: ProducerInfo): void {
+      const producers = connectionProducers.get(connection) ?? [];
+      producers.push(producer);
+      connectionProducers.set(connection, producers);
+    }
+
+    // Declared queue ids: a queue is the SOLE canonical producer of its own
+    // connection for ordinary downstream lookup, and every producer publishing
+    // that name draws an edge to the queue node.
+    const queueIds = new Set(
+      compositionState.nodes
+        .filter((node) => node.node_type === "queue")
+        .map((node) => node.id),
+    );
 
     // Each source produces on its on_success connection
     for (const [sourceName, source] of sortedSourceEntries(compositionState)) {
       if (source.on_success) {
-        connectionProducers[source.on_success] = {
+        registerProducer(source.on_success, {
           nodeId: sourceComponentId(sourceName),
           edgeType: "success",
           label: "success",
-        };
+        });
       }
     }
 
-    // Each node can produce on on_success, on_error, or routes
+    // Each node can produce on on_success, on_error, or routes. Queue nodes have
+    // none of these (their output is implicit under their own id), so they
+    // register nothing here.
     for (const node of compositionState.nodes) {
       if (node.on_success) {
-        connectionProducers[node.on_success] = {
+        registerProducer(node.on_success, {
           nodeId: node.id,
           edgeType: "success",
           label: "success",
-        };
+        });
       }
       if (node.on_error) {
-        connectionProducers[node.on_error] = {
+        registerProducer(node.on_error, {
           nodeId: node.id,
           edgeType: "error",
           label: "error",
-        };
+        });
       }
       if (node.routes) {
         for (const [routeLabel, targetConn] of Object.entries(node.routes)) {
-          connectionProducers[targetConn] = {
+          registerProducer(targetConn, {
             nodeId: node.id,
             edgeType: "success",
             label: routeLabel,
-          };
+          });
         }
       }
     }
 
-    // Infer edges by matching node.input to upstream connection producers
+    // Phase 1: draw every producer → queue edge. Deterministic (sorted by
+    // producer id) so source insertion order cannot change the output; a
+    // self-producer is skipped. This runs BEFORE the direct-edge blocks below so
+    // these ids own the producer→queue pairs and the dedup set suppresses the
+    // direct-block duplicates (a queue IS a node, so nodeIds.has(queueId) is true).
+    for (const queueId of queueIds) {
+      const producers = [...(connectionProducers.get(queueId) ?? [])].sort((a, b) =>
+        a.nodeId.localeCompare(b.nodeId),
+      );
+      for (const producer of producers) {
+        if (producer.nodeId === queueId) continue; // no queue self-loop
+        if (existingConnections.has(`${producer.nodeId}->${queueId}`)) continue;
+        const isError = producer.edgeType === "error";
+        rfEdges.push({
+          id: `inferred-queue-in-${producer.nodeId}-${queueId}`,
+          source: producer.nodeId,
+          target: queueId,
+          label: producer.label,
+          animated: isError,
+          style: {
+            stroke: isError ? EDGE_COLORS.error : EDGE_COLORS.normal,
+            strokeWidth: 1.5,
+          },
+          labelStyle: { fontSize: 10, fill: EDGE_LABEL_COLOR },
+        });
+        existingConnections.add(`${producer.nodeId}->${queueId}`);
+      }
+    }
+
+    // Phase 2: infer edges by matching node.input to its upstream producer.
     for (const node of compositionState.nodes) {
-      if (node.input) {
-        const producer = connectionProducers[node.input];
-        if (producer && !existingConnections.has(`${producer.nodeId}->${node.id}`)) {
-          const isError = producer.edgeType === "error";
+      if (!node.input) continue;
+
+      // A queue is the SOLE canonical producer of its own connection: synthesise
+      // the queue node as the producer (queue → consumer), never the upstream
+      // sources (which would be a dishonest producer → consumer bypass).
+      if (queueIds.has(node.input)) {
+        if (node.input === node.id) continue; // the queue's own implicit output
+        if (!existingConnections.has(`${node.input}->${node.id}`)) {
           rfEdges.push({
-            id: `inferred-conn-${producer.nodeId}-${node.id}`,
-            source: producer.nodeId,
+            id: `inferred-queue-out-${node.input}-${node.id}`,
+            source: node.input,
             target: node.id,
-            label: producer.label,
-            animated: isError,
-            style: {
-              stroke: isError ? EDGE_COLORS.error : EDGE_COLORS.normal,
-              strokeWidth: 1.5,
-            },
+            label: "success",
+            style: { stroke: EDGE_COLORS.normal, strokeWidth: 1.5 },
             labelStyle: { fontSize: 10, fill: EDGE_LABEL_COLOR },
           });
-          existingConnections.add(`${producer.nodeId}->${node.id}`);
+          existingConnections.add(`${node.input}->${node.id}`);
         }
+        continue;
+      }
+
+      const producers = [...(connectionProducers.get(node.input) ?? [])].sort((a, b) =>
+        a.nodeId.localeCompare(b.nodeId),
+      );
+      for (const producer of producers) {
+        if (producer.nodeId === node.id) continue;
+        if (existingConnections.has(`${producer.nodeId}->${node.id}`)) continue;
+        const isError = producer.edgeType === "error";
+        rfEdges.push({
+          id: `inferred-conn-${producer.nodeId}-${node.id}`,
+          source: producer.nodeId,
+          target: node.id,
+          label: producer.label,
+          animated: isError,
+          style: {
+            stroke: isError ? EDGE_COLORS.error : EDGE_COLORS.normal,
+            strokeWidth: 1.5,
+          },
+          labelStyle: { fontSize: 10, fill: EDGE_LABEL_COLOR },
+        });
+        existingConnections.add(`${producer.nodeId}->${node.id}`);
       }
     }
 

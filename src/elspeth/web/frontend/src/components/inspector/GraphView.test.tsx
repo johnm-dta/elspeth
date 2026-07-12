@@ -77,6 +77,10 @@ vi.mock("@xyflow/react", () => ({
       data-source-color={nodeColor?.({ id: "source" })}
       data-gate-color={nodeColor?.({ id: "quality_gate" })}
       data-sink-color={nodeColor?.({ id: "results" })}
+      // Queue-kind probe: a queue node with id "inbound" must colour via its
+      // own --color-badge-queue token (Task 6 minimap recognition). Harmless
+      // for compositions without such a node — it resolves to the fallback.
+      data-queue-color={nodeColor?.({ id: "inbound" })}
       data-unknown-color={nodeColor?.({ id: "unknown" })}
       data-stroke-color={nodeStrokeColor?.({ id: "source" })}
     />
@@ -639,6 +643,142 @@ describe("GraphView", () => {
       // Sink edges should be inferred
       expect(screen.getByTestId("edge-inferred-sink-processor-results")).toBeInTheDocument();
       expect(screen.getByTestId("edge-inferred-sink-processor-errors-error")).toBeInTheDocument();
+    });
+  });
+
+  // Honest structural queue fan-in (elspeth-a5b86149d4 / elspeth-6421ffa028).
+  // Many producers publish one connection name; a declared queue node consumes
+  // it and one ordinary node consumes the queue. The graph must draw every
+  // producer -> queue edge and exactly one queue -> consumer edge — never a
+  // dishonest producer -> consumer bypass, and never a queue self-loop.
+  describe("queue fan-in", () => {
+    function queueState(order: "orders-first" | "refunds-first" = "orders-first"): CompositionState {
+      const orders: [string, unknown] = [
+        "orders",
+        { plugin: "csv", options: {}, on_success: "inbound" },
+      ];
+      const refunds: [string, unknown] = [
+        "refunds",
+        { plugin: "csv", options: {}, on_success: "inbound" },
+      ];
+      const entries = order === "orders-first" ? [orders, refunds] : [refunds, orders];
+      return makeState({
+        sources: Object.fromEntries(entries) as never,
+        nodes: [
+          {
+            id: "inbound",
+            node_type: "queue",
+            plugin: null,
+            input: "inbound",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+          makeNode({
+            id: "normalize",
+            node_type: "transform",
+            plugin: "passthrough",
+            input: "inbound",
+            on_success: "combined",
+          }),
+        ],
+        outputs: [{ name: "combined", plugin: "json", options: {} }],
+      });
+    }
+
+    function renderedEdgeIds(): string[] {
+      return Array.from(document.querySelectorAll('[data-testid^="edge-"]'))
+        .map((el) => el.getAttribute("data-testid") ?? "")
+        .sort();
+    }
+
+    it("draws every producer->queue edge and one queue->consumer edge, no bypass, no self-loop", () => {
+      useSessionStore.setState({ compositionState: queueState() });
+      render(<GraphView />);
+      const ids = renderedEdgeIds();
+
+      // Both sources draw distinct edges to the queue node.
+      expect(ids).toContain("edge-inferred-queue-in-source:orders-inbound");
+      expect(ids).toContain("edge-inferred-queue-in-source:refunds-inbound");
+      // The queue draws exactly one edge to the downstream consumer of `inbound`.
+      expect(ids).toContain("edge-inferred-queue-out-inbound-normalize");
+      // NO dishonest producer -> consumer bypass edge (the current-code defect).
+      expect(ids.some((id) => id.includes("source:orders-normalize"))).toBe(false);
+      expect(ids.some((id) => id.includes("source:refunds-normalize"))).toBe(false);
+      // The only edge terminating at the consumer comes from the queue.
+      expect(ids.filter((id) => id.endsWith("-normalize"))).toEqual([
+        "edge-inferred-queue-out-inbound-normalize",
+      ]);
+      // No queue self-loop (the queue's implicit output uses its own id).
+      expect(ids.some((id) => id.includes("inbound-inbound"))).toBe(false);
+    });
+
+    it("produces the same edge set when source insertion order is reversed", () => {
+      useSessionStore.setState({ compositionState: queueState("orders-first") });
+      const { unmount } = render(<GraphView />);
+      const forward = renderedEdgeIds();
+      unmount();
+
+      useSessionStore.setState({ compositionState: queueState("refunds-first") });
+      render(<GraphView />);
+      const reversed = renderedEdgeIds();
+
+      expect(reversed).toEqual(forward);
+    });
+
+    it("exposes the queue node in the keyboard list and opens its config panel with the queue badge", async () => {
+      useSessionStore.setState({
+        selectedNodeId: null,
+        selectNode: (nodeId: string | null) =>
+          useSessionStore.setState({ selectedNodeId: nodeId } as never),
+        compositionState: queueState(),
+      } as never);
+      render(<GraphView />);
+
+      const list = screen.getByRole("list", { name: /pipeline components/i });
+      await userEvent.click(
+        within(list).getByRole("button", { name: /queue: inbound/i }),
+      );
+      const panel = screen.getByRole("complementary", {
+        name: /inbound configuration/i,
+      });
+      expect(panel).toHaveFocus();
+      expect(within(panel).getByText("queue")).toHaveClass(
+        "type-badge",
+        "type-badge-queue",
+      );
+    });
+
+    it("colours the queue node in the minimap by its queue token", () => {
+      document.documentElement.style.setProperty("--color-badge-queue", "#ff91c8");
+      const padding = Array.from({ length: 8 }, (_, i) =>
+        makeNode({ id: `pad${i}`, node_type: "transform", plugin: "p" }),
+      );
+      useSessionStore.setState({
+        compositionState: makeState({
+          sources: {
+            orders: { plugin: "csv", options: {}, on_success: "inbound" },
+          } as never,
+          nodes: [
+            {
+              id: "inbound",
+              node_type: "queue",
+              plugin: null,
+              input: "inbound",
+              on_success: null,
+              on_error: null,
+              options: {},
+            },
+            ...padding,
+          ],
+          outputs: [{ name: "combined", plugin: "json", options: {} }],
+        }),
+      });
+      render(<GraphView />);
+      expect(screen.getByTestId("minimap")).toHaveAttribute(
+        "data-queue-color",
+        "#ff91c8",
+      );
     });
   });
 

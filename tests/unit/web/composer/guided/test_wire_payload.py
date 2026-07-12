@@ -109,6 +109,71 @@ def _contract_state() -> CompositionState:
     )
 
 
+def _queue_state() -> CompositionState:
+    """Canonical two-source declared queue fan-in.
+
+    Two named sources publish the ``inbound`` connection; the declared queue
+    node ``inbound`` (id == input, plugin None, implicit output under its id)
+    consumes them and a single ordinary transform consumes the queue.
+    """
+
+    def _src() -> SourceSpec:
+        return SourceSpec(
+            plugin="csv",
+            on_success="inbound",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+
+    return CompositionState(
+        source=None,
+        sources={"orders": _src(), "refunds": _src()},
+        nodes=(
+            NodeSpec(
+                id="inbound",
+                node_type="queue",
+                plugin=None,
+                input="inbound",
+                on_success=None,
+                on_error=None,
+                options={"description": "Orders and refunds interleave here"},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="normalize",
+                node_type="transform",
+                plugin="passthrough",
+                input="inbound",
+                on_success="combined",
+                on_error="discard",
+                options={"schema": {"mode": "observed"}},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="combined",
+                plugin="json",
+                options={"schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(name="Queue fan-in", description=""),
+        version=1,
+    )
+
+
 class TestWireStageDataShape:
     def test_wire_stage_data_keys(self) -> None:
         payload: WireStageData = {
@@ -392,6 +457,46 @@ class TestBuildStep4WireTurn:
 
         assert "advisor_findings" not in payload
         assert "signoff_outcome" not in payload
+
+
+class TestQueueTransportPin:
+    """The wire transport DTO carries ``node_type`` as a generic ``str``. A queue
+    node must therefore flow through ``_build_wire_topology`` unchanged, with NO
+    queue-specific emitter branch, and the resulting payload must still validate.
+    """
+
+    def test_queue_node_flows_through_topology_unchanged(self) -> None:
+        topo = _build_wire_topology(_queue_state())
+
+        queue = next(node for node in topo["nodes"] if node["node_type"] == "queue")
+        assert queue == {
+            "id": "inbound",
+            "node_type": "queue",
+            "plugin": None,
+            "input": "inbound",
+            "on_success": None,
+            "on_error": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+        }
+
+    def test_both_sources_publish_the_queue_connection(self) -> None:
+        topo = _build_wire_topology(_queue_state())
+
+        assert topo["sources"]["orders"]["on_success"] == "inbound"
+        assert topo["sources"]["refunds"]["on_success"] == "inbound"
+        # The ordinary downstream consumer reads the queue's id, unchanged.
+        normalize = next(node for node in topo["nodes"] if node["id"] == "normalize")
+        assert normalize["input"] == "inbound"
+
+    def test_step_4_wire_turn_emits_and_validates_queue_topology(self) -> None:
+        turn = build_step_4_wire_turn(_queue_state())
+
+        assert turn["type"] == TurnType.CONFIRM_WIRING.value
+        assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
+        node_types = {node["node_type"] for node in turn["payload"]["topology"]["nodes"]}
+        assert "queue" in node_types
 
 
 class TestHonestGapRendering:

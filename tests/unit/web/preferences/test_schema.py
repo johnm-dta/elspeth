@@ -16,6 +16,7 @@ def test_user_preferences_table_columns() -> None:
         "user_id",
         "default_composer_mode",
         "banner_dismissed_at",
+        "freeform_intro_dismissed_at",
         "tutorial_completed_at",
         "tutorial_stage",
         "tutorial_session_id",
@@ -23,6 +24,11 @@ def test_user_preferences_table_columns() -> None:
         "tutorial_source_data_hash",
         "updated_at",
     }
+
+
+def test_freeform_intro_dismissed_at_is_nullable_timestamp() -> None:
+    table = metadata.tables["user_preferences"]
+    assert table.c.freeform_intro_dismissed_at.nullable
 
 
 def test_user_preferences_user_id_is_primary_key() -> None:

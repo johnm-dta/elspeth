@@ -66,6 +66,7 @@ class ComposerPreferences(BaseModel):
 
     default_mode: ComposerMode
     banner_dismissed_at: datetime | None
+    freeform_intro_dismissed_at: datetime | None
     tutorial_completed_at: datetime | None
     # In-progress tutorial resume state. All four are NULL when no tutorial
     # is in progress. ``tutorial_run_id`` / ``tutorial_source_data_hash``
@@ -122,6 +123,7 @@ class UpdateComposerPreferencesRequest(BaseModel):
 
     default_mode: ComposerMode | None = None
     banner_dismissed_at: datetime | None = None
+    freeform_intro_dismissed_at: datetime | None = None
     tutorial_completed_at: datetime | None = None
     tutorial_stage: TutorialStage | None = None
     tutorial_session_id: str | None = None

@@ -16,6 +16,7 @@ def test_composer_preferences_valid() -> None:
     payload = ComposerPreferences(
         default_mode="guided",
         banner_dismissed_at=None,
+        freeform_intro_dismissed_at=None,
         tutorial_completed_at=None,
         tutorial_stage=None,
         tutorial_session_id=None,
@@ -58,6 +59,16 @@ def test_update_request_accepts_only_banner_field() -> None:
     assert payload.banner_dismissed_at == stamp
 
 
+def test_update_request_accepts_freeform_intro_dismissal() -> None:
+    stamp = datetime(2026, 7, 12, 5, 0, tzinfo=UTC)
+    payload = UpdateComposerPreferencesRequest(
+        freeform_intro_dismissed_at=stamp,
+    )
+
+    assert payload.freeform_intro_dismissed_at == stamp
+    assert "freeform_intro_dismissed_at" in payload.model_fields_set
+
+
 def test_update_request_rejects_invalid_mode() -> None:
     with pytest.raises(ValidationError):
         UpdateComposerPreferencesRequest(default_mode="kiosk")  # type: ignore[arg-type]
@@ -76,6 +87,7 @@ def test_composer_preferences_accepts_tutorial_completed_at() -> None:
     payload = ComposerPreferences(
         default_mode="guided",
         banner_dismissed_at=None,
+        freeform_intro_dismissed_at=None,
         tutorial_completed_at=stamp,
         tutorial_stage=None,
         tutorial_session_id=None,

@@ -134,7 +134,10 @@ from sqlalchemy.types import JSON
 #        ``tutorial_source_data_hash``) so a reload mid-tutorial resumes at the
 #        persisted stage instead of restarting at Welcome (elspeth-918f4434b3).
 #        Pre-release delete-and-recreate policy; see runbook above.
-SESSION_SCHEMA_EPOCH = 26
+#   27 -> ``user_preferences`` gains ``freeform_intro_dismissed_at`` so the
+#        freeform empty-state introduction can be dismissed account-wide.
+#        Pre-release delete-and-recreate policy; see runbook above.
+SESSION_SCHEMA_EPOCH = 27
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -1500,6 +1503,8 @@ user_preferences_table = Table(
     ),
     # NULL = banner not yet dismissed; non-NULL = dismissed-at timestamp.
     Column("banner_dismissed_at", DateTime(timezone=True), nullable=True),
+    # NULL = freeform introduction visible; non-NULL = dismissed account-wide.
+    Column("freeform_intro_dismissed_at", DateTime(timezone=True), nullable=True),
     # NULL = tutorial not completed/reset; non-NULL = completed-at timestamp.
     Column("tutorial_completed_at", DateTime(timezone=True), nullable=True),
     # First-run tutorial resume state (elspeth-918f4434b3). NULL = no

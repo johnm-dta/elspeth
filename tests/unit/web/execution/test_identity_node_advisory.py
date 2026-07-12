@@ -276,6 +276,51 @@ def test_passthrough_downstream_of_gate_fork_is_not_flagged() -> None:
     )
 
 
+def test_passthrough_downstream_of_queue_is_not_flagged() -> None:
+    """A queue is a legitimate structural reason for a downstream passthrough.
+
+    The canonical upstream producer of the passthrough's input is the queue
+    (elspeth-a5b86149d4), not whichever source feeds the queue.  Because a
+    queue interleaves multiple producers with an observed/unknown schema, a
+    passthrough that consumes it is doing real structural work and must NOT be
+    flagged as dead weight.  The queue is fed by a real producer, so the
+    passthrough is not skipped for a dangling input.
+    """
+    source = SourceSpec(
+        plugin="csv",
+        on_success="inbound",
+        options={"path": "in.csv"},
+        on_validation_failure="discard",
+    )
+    queue = NodeSpec(
+        id="inbound",
+        node_type="queue",
+        plugin=None,
+        input="inbound",
+        on_success=None,
+        on_error=None,
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    passthrough = _make_passthrough_node(
+        node_id="forward_inbound",
+        input_field="inbound",
+        on_success="json_out",
+    )
+    state = _make_state_with(
+        nodes=(queue, passthrough),
+        outputs=(_make_observed_sink(),),
+        source=source,
+    )
+    findings = _find_identity_node_advisories(state)
+    assert findings == [], "Passthrough consuming a declared queue is legitimate structural fan-in and must not be flagged."
+
+
 def test_identity_passthrough_to_fixed_sink_is_flagged() -> None:
     """Sink schema mode is irrelevant — passthrough still adds no contract benefit."""
     fixed_sink = OutputSpec(

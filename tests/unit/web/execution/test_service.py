@@ -705,6 +705,78 @@ class TestExecutionFlow:
         assert status.accounting is None
 
 
+def _text_source(path: Path, on_success: str) -> Any:
+    """A row-per-line text source rooted at ``path`` publishing ``on_success``."""
+    from elspeth.web.composer.state import SourceSpec
+
+    return SourceSpec(
+        plugin="text",
+        on_success=on_success,
+        options={"path": str(path), "column": "body", "schema": {"mode": "observed"}},
+        on_validation_failure="discard",
+    )
+
+
+def _queue_node(queue_id: str = "inbound") -> Any:
+    """Canonical structural queue NodeSpec (id == input, plugin None)."""
+    from elspeth.web.composer.state import NodeSpec
+
+    return NodeSpec(
+        id=queue_id,
+        node_type="queue",
+        plugin=None,
+        input=queue_id,
+        on_success=None,
+        on_error=None,
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _fanout_llm_node(input_label: str, node_id: str = "classify") -> Any:
+    """LLM transform consuming ``input_label`` (one provider call per row)."""
+    from elspeth.web.composer.state import NodeSpec
+
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="llm",
+        input=input_label,
+        on_success="out",
+        on_error="errors",
+        options={
+            "provider": "openrouter",
+            "model": "openai/gpt-4o-mini",
+            "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _queue_fan_in_state(*, sources: dict[str, Any], extra_nodes: tuple[Any, ...] = ()) -> Any:
+    """CompositionState: ``sources`` fan into queue ``inbound`` feeding an LLM."""
+    from elspeth.web.composer.state import CompositionState, PipelineMetadata
+
+    return CompositionState(
+        sources=sources,
+        nodes=(*extra_nodes, _queue_node(), _fanout_llm_node("inbound")),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 class TestExecutionFanoutGuard:
     @pytest.mark.asyncio
     async def test_line_explode_to_llm_requires_ack_before_run_creation(
@@ -960,6 +1032,131 @@ class TestExecutionFanoutGuard:
         assert risk.estimated_provider_calls == 101
         assert risk.upstream_fanout == ("source:refunds:text:estimated_rows=101",)
         assert mock_session_service.create_run.await_count == 0
+
+    # ── Queue fan-in provider-cost guard (elspeth-6421ffa028) ───────────
+    # A declared queue fans multiple upstream sources into one LLM. The
+    # cost guard MUST traverse EVERY predecessor and combine cardinalities
+    # conservatively — never resolve to whichever source registered last.
+
+    def test_queue_fan_in_combines_known_source_cardinalities(self, tmp_path: Path) -> None:
+        """Two known source predecessors of a queue are summed, not last-writer-wins."""
+        from elspeth.web.execution.fanout_guard import evaluate_execution_fanout_guard
+
+        orders = tmp_path / "orders.txt"
+        refunds = tmp_path / "refunds.txt"
+        orders.write_text("\n".join(f"order-{i}" for i in range(60)) + "\n", encoding="utf-8")
+        refunds.write_text("\n".join(f"refund-{i}" for i in range(60)) + "\n", encoding="utf-8")
+        state = _queue_fan_in_state(
+            sources={
+                "orders": _text_source(orders, "inbound"),
+                "refunds": _text_source(refunds, "inbound"),
+            }
+        )
+
+        guard = evaluate_execution_fanout_guard(state, data_dir=tmp_path)
+
+        assert guard is not None, "60 + 60 = 120 > threshold must require a guard"
+        risk = guard.risks[0]
+        assert risk.node_id == "classify"
+        # Summed conservatively across both predecessors, not a single source's 60.
+        assert risk.estimated_provider_calls == 120
+        assert set(risk.upstream_fanout) == {
+            "source:orders:text:estimated_rows=60",
+            "source:refunds:text:estimated_rows=60",
+        }
+
+    def test_queue_fan_in_one_unknown_predecessor_guards_with_unknown_calls(self, tmp_path: Path) -> None:
+        """Any unknown-cardinality predecessor keeps the sum None and risk HIGH."""
+        from elspeth.web.composer.state import SourceSpec
+        from elspeth.web.execution.fanout_guard import evaluate_execution_fanout_guard
+
+        orders = tmp_path / "orders.txt"
+        orders.write_text("\n".join(f"order-{i}" for i in range(5)) + "\n", encoding="utf-8")
+        # A csv source with no path/limit has an unknowable cardinality.
+        unknown = SourceSpec(
+            plugin="csv",
+            on_success="inbound",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+        state = _queue_fan_in_state(sources={"orders": _text_source(orders, "inbound"), "refunds": unknown})
+
+        guard = evaluate_execution_fanout_guard(state, data_dir=tmp_path)
+
+        assert guard is not None, "an unknown predecessor must never silently return no guard"
+        risk = guard.risks[0]
+        assert risk.estimated_provider_calls is None
+        assert risk.risk_level == "high"
+        assert "source:refunds:csv:estimated_rows=unknown" in risk.upstream_fanout
+
+    def test_queue_fan_in_token_creating_predecessor_stays_visible(self, tmp_path: Path) -> None:
+        """A token-creating transform feeding the queue is not lost behind the queue."""
+        from elspeth.web.composer.state import NodeSpec
+        from elspeth.web.execution.fanout_guard import evaluate_execution_fanout_guard
+
+        orders = tmp_path / "orders.txt"
+        refunds = tmp_path / "refunds.txt"
+        orders.write_text("alpha\nbeta\n", encoding="utf-8")
+        refunds.write_text("gamma\ndelta\n", encoding="utf-8")
+        explode = NodeSpec(
+            id="explode_lines",
+            node_type="transform",
+            plugin="line_explode",
+            input="orders_rows",
+            on_success="inbound",
+            on_error="errors",
+            options={"source_field": "body", "schema": {"mode": "observed"}},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+        state = _queue_fan_in_state(
+            sources={
+                "orders": _text_source(orders, "orders_rows"),
+                "refunds": _text_source(refunds, "inbound"),
+            },
+            extra_nodes=(explode,),
+        )
+
+        guard = evaluate_execution_fanout_guard(state, data_dir=tmp_path)
+
+        assert guard is not None
+        risk = guard.risks[0]
+        # Token-creating fanout upstream of a queue is unbounded, not summable.
+        assert risk.estimated_provider_calls is None
+        assert any(marker.startswith("transform:explode_lines:line_explode") for marker in risk.upstream_fanout)
+
+    def test_queue_fan_in_guard_is_source_order_invariant(self, tmp_path: Path) -> None:
+        """Reversing predecessor order yields an identical guard decision."""
+        from elspeth.web.execution.fanout_guard import evaluate_execution_fanout_guard
+
+        orders = tmp_path / "orders.txt"
+        refunds = tmp_path / "refunds.txt"
+        orders.write_text("\n".join(f"order-{i}" for i in range(60)) + "\n", encoding="utf-8")
+        refunds.write_text("\n".join(f"refund-{i}" for i in range(60)) + "\n", encoding="utf-8")
+        forward = _queue_fan_in_state(
+            sources={
+                "orders": _text_source(orders, "inbound"),
+                "refunds": _text_source(refunds, "inbound"),
+            }
+        )
+        reverse = _queue_fan_in_state(
+            sources={
+                "refunds": _text_source(refunds, "inbound"),
+                "orders": _text_source(orders, "inbound"),
+            }
+        )
+
+        guard_forward = evaluate_execution_fanout_guard(forward, data_dir=tmp_path)
+        guard_reverse = evaluate_execution_fanout_guard(reverse, data_dir=tmp_path)
+
+        assert guard_forward is not None and guard_reverse is not None
+        assert guard_forward.risks[0].estimated_provider_calls == 120
+        assert guard_reverse.risks[0].estimated_provider_calls == 120
+        assert sorted(guard_forward.risks[0].upstream_fanout) == sorted(guard_reverse.risks[0].upstream_fanout)
 
 
 class TestWebRuntimeInfrastructure:
@@ -5590,7 +5787,15 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
             }
         ]
 
-        with patch.object(service, "_run_pipeline"):
+        # The mock csv source resolves to no real file, so its cardinality is
+        # statically unknown — which now (correctly) trips the conservative
+        # fanout guard (elspeth-6421ffa028). This test covers the interpretation
+        # placeholder gate, not fanout, so isolate it from the guard here; the
+        # unknown-cardinality guard behavior is covered by TestExecutionFanoutGuard.
+        with (
+            patch.object(service, "_run_pipeline"),
+            patch("elspeth.web.execution.service.evaluate_execution_fanout_guard", return_value=None),
+        ):
             run_id = await service.execute(session_id=uuid4())
 
         assert isinstance(run_id, UUID)

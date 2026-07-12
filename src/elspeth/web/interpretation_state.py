@@ -281,17 +281,17 @@ def prompt_shield_recommendation_warning_pairs(
     ``warnings`` list and they are excluded from the blocking contract.
     """
 
-    producer_by_output_stream = _producer_by_output_stream(state.nodes)
+    graph = _output_stream_graph(state.nodes)
     warnings: list[tuple[str, str]] = []
     for node in state.nodes:
         if node.plugin != "llm":
             continue
-        if _llm_has_authorized_shield_upstream(node, producer_by_output_stream):
+        if _llm_has_authorized_shield_upstream(node, graph):
             continue  # State A — already shielded, silent
         if _llm_has_shield_recommendation(node):
             continue  # review already staged on this node
         draft = PROMPT_SHIELD_AVAILABLE_DRAFT if shield_available is True else PROMPT_SHIELD_WARNING_DRAFT
-        consumes_untrusted = _llm_consumes_untrusted_remote_content(node, producer_by_output_stream)
+        consumes_untrusted = _llm_consumes_untrusted_remote_content(node, graph)
         lead = (
             f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape upstream "
             "without an authorized prompt-injection shield between them. "
@@ -302,80 +302,137 @@ def prompt_shield_recommendation_warning_pairs(
     return tuple(warnings)
 
 
-def _producer_by_output_stream(nodes: Sequence[NodeSpec]) -> dict[str, NodeSpec]:
-    producers: dict[str, NodeSpec] = {}
+@dataclass(frozen=True, slots=True)
+class _OutputStreamGraph:
+    """Queue-aware producer graph for the prompt-injection-shield walkers.
+
+    ``producers_by_stream`` maps each output-stream name to the producers that
+    publish it (each declared queue is installed as the sole canonical producer
+    of its own stream). ``queue_predecessors`` maps a queue id to the distinct
+    producers that fan into it. Both are keyed on ``NodeSpec.id`` order so the
+    analysis is insertion-order invariant.
+    """
+
+    producers_by_stream: Mapping[str, tuple[NodeSpec, ...]]
+    queue_predecessors: Mapping[str, tuple[NodeSpec, ...]]
+
+
+def _output_stream_graph(nodes: Sequence[NodeSpec]) -> _OutputStreamGraph:
+    queue_ids = {node.id for node in nodes if node.node_type == "queue"}
+    ordinary: dict[str, dict[str, NodeSpec]] = {}
+    queue_predecessors: dict[str, dict[str, NodeSpec]] = {queue_id: {} for queue_id in queue_ids}
+
+    def register(stream: str | None, producer: NodeSpec) -> None:
+        if stream is None or stream == "" or stream in _NON_PRODUCED_ROUTE_TARGETS:
+            return
+        # A declared queue accepts many producers under its id: fan them into
+        # its predecessor set rather than overwriting a single-producer entry.
+        if stream in queue_ids and producer.id != stream:
+            queue_predecessors[stream].setdefault(producer.id, producer)
+            return
+        ordinary.setdefault(stream, {}).setdefault(producer.id, producer)
+
     for node in nodes:
-        _register_output_stream_producer(producers, stream=node.on_success, producer=node)
-        _register_output_stream_producer(producers, stream=node.on_error, producer=node)
+        register(node.on_success, node)
+        register(node.on_error, node)
         if node.routes is not None:
             for route_target in node.routes.values():
-                _register_output_stream_producer(producers, stream=route_target, producer=node)
+                register(route_target, node)
         if node.fork_to is not None:
             for fork_target in node.fork_to:
-                _register_output_stream_producer(producers, stream=fork_target, producer=node)
-    return producers
+                register(fork_target, node)
 
+    # Install each declared queue as the sole canonical producer of its stream.
+    for node in nodes:
+        if node.node_type == "queue":
+            ordinary[node.id] = {node.id: node}
 
-def _register_output_stream_producer(
-    producers: dict[str, NodeSpec],
-    *,
-    stream: str | None,
-    producer: NodeSpec,
-) -> None:
-    if stream is None or stream == "" or stream in _NON_PRODUCED_ROUTE_TARGETS:
-        return
-    producers[stream] = producer
+    return _OutputStreamGraph(
+        producers_by_stream={stream: tuple(entries[key] for key in sorted(entries)) for stream, entries in ordinary.items()},
+        queue_predecessors={queue_id: tuple(entries[key] for key in sorted(entries)) for queue_id, entries in queue_predecessors.items()},
+    )
 
 
 def _llm_consumes_untrusted_remote_content(
     node: NodeSpec,
-    producer_by_output_stream: Mapping[str, NodeSpec],
+    graph: _OutputStreamGraph,
 ) -> bool:
-    """Walk upstream from ``node``; return True iff untrusted producer reached without a shield."""
+    """Return True iff ANY predecessor path reaches an untrusted producer without a shield.
 
-    if node.plugin != "llm":
-        return False
-    stream = node.input
-    visited: set[str] = set()
-    while stream and stream not in visited:
-        visited.add(stream)
-        if stream not in producer_by_output_stream:
-            return False
-        producer = producer_by_output_stream[stream]
-        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
-            return False
-        if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
-            return True
-        stream = producer.input
-    return False
-
-
-def _llm_has_authorized_shield_upstream(
-    node: NodeSpec,
-    producer_by_output_stream: Mapping[str, NodeSpec],
-) -> bool:
-    """Walk upstream from ``node``; return True iff an authorized prompt-injection
-    shield is reachable on the input chain.
-
-    This is the always-on **State A** detector: it is judged on its own, NOT
-    coupled to first reaching an untrusted producer (the deliberate decoupling
-    from :func:`_llm_consumes_untrusted_remote_content`). A shielded LLM stays
-    silent regardless of what produces its input.
+    The asymmetry is deliberate and security-critical: a single tainted
+    predecessor of a queue fan-in taints the downstream LLM. A missing producer
+    ends that path without reaching an untrusted producer.
     """
 
     if node.plugin != "llm":
         return False
-    stream = node.input
-    visited: set[str] = set()
-    while stream and stream not in visited:
-        visited.add(stream)
-        if stream not in producer_by_output_stream:
-            return False
-        producer = producer_by_output_stream[stream]
-        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
-            return True
-        stream = producer.input
-    return False
+    return _stream_reaches_untrusted(node.input, graph, frozenset())
+
+
+def _stream_reaches_untrusted(stream: str | None, graph: _OutputStreamGraph, visited: frozenset[str]) -> bool:
+    if not isinstance(stream, str) or not stream:
+        return False
+    producers = graph.producers_by_stream.get(stream)
+    if not producers:
+        return False
+    return any(_producer_reaches_untrusted(producer, graph, visited) for producer in producers)
+
+
+def _producer_reaches_untrusted(producer: NodeSpec, graph: _OutputStreamGraph, visited: frozenset[str]) -> bool:
+    if producer.id in visited:
+        return False
+    # Path-LOCAL visited (passed by value), keyed on stable node id: a diamond
+    # that reconverges on a shared upstream must not truncate a sibling path.
+    visited = visited | {producer.id}
+    if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+        return False
+    if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+        return True
+    if producer.node_type == "queue":
+        return any(
+            _producer_reaches_untrusted(predecessor, graph, visited) for predecessor in graph.queue_predecessors.get(producer.id, ())
+        )
+    return _stream_reaches_untrusted(producer.input, graph, visited)
+
+
+def _llm_has_authorized_shield_upstream(
+    node: NodeSpec,
+    graph: _OutputStreamGraph,
+) -> bool:
+    """Return True iff ALL reachable predecessor paths prove an authorized shield.
+
+    This is the always-on **State A** detector: it is judged on its own, NOT
+    coupled to first reaching an untrusted producer. A shield is only credited
+    when EVERY predecessor path proves one — an unshielded or unknown/missing
+    predecessor path is fail-safe (NOT proven safe), so the advisory still fires.
+    """
+
+    if node.plugin != "llm":
+        return False
+    return _stream_proves_shield(node.input, graph, frozenset())
+
+
+def _stream_proves_shield(stream: str | None, graph: _OutputStreamGraph, visited: frozenset[str]) -> bool:
+    if not isinstance(stream, str) or not stream:
+        return False  # chain ended without a shield → not proven
+    producers = graph.producers_by_stream.get(stream)
+    if not producers:
+        return False  # missing producer → unknown → fail-safe
+    return all(_producer_proves_shield(producer, graph, visited) for producer in producers)
+
+
+def _producer_proves_shield(producer: NodeSpec, graph: _OutputStreamGraph, visited: frozenset[str]) -> bool:
+    if producer.id in visited:
+        return False  # cycle without a shield → not proven
+    visited = visited | {producer.id}
+    if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+        return True
+    if producer.node_type == "queue":
+        predecessors = graph.queue_predecessors.get(producer.id, ())
+        if not predecessors:
+            return False  # queue with no known predecessor → unknown → fail-safe
+        return all(_producer_proves_shield(predecessor, graph, visited) for predecessor in predecessors)
+    return _stream_proves_shield(producer.input, graph, visited)
 
 
 def prompt_shield_state_for_node(
@@ -400,8 +457,8 @@ def prompt_shield_state_for_node(
 
     if node.plugin != "llm":
         return "A"
-    producer_by_output_stream = _producer_by_output_stream(all_nodes)
-    if _llm_has_authorized_shield_upstream(node, producer_by_output_stream):
+    graph = _output_stream_graph(all_nodes)
+    if _llm_has_authorized_shield_upstream(node, graph):
         return "A"
     return "B" if shield_available else "C"
 
@@ -1142,9 +1199,11 @@ def _prompt_shield_artifact_hash(node: NodeSpec, all_nodes: Sequence[NodeSpec]) 
     The hash binds to exactly that adjudication:
 
     - this LLM's node id (the review attaches to a specific node)
-    - the upstream chain from this LLM's input back to either an authorized
-      shield, an untrusted producer, or the end of the chain — captured as
-      ``(producer_id, producer_plugin)`` pairs in stream order.
+    - EVERY upstream path from this LLM's input back to either an authorized
+      shield, an untrusted producer, or the end of the chain — each captured as
+      a tuple of ``(producer_id, producer_plugin)`` pairs. A declared queue
+      fans into every predecessor path, so changing either predecessor changes
+      the hash. The paths are sorted, so predecessor insertion order does not.
 
     Fields like ``model``, ``temperature``, ``prompt_template``, ``api_key``
     and ``schema`` are intentionally NOT in scope: they don't change whether
@@ -1152,28 +1211,47 @@ def _prompt_shield_artifact_hash(node: NodeSpec, all_nodes: Sequence[NodeSpec]) 
     review intact.
     """
 
-    producer_by_output_stream = _producer_by_output_stream(all_nodes)
-    chain: list[tuple[str, str | None]] = []
-    stream = node.input
-    visited: set[str] = set()
-    while isinstance(stream, str) and stream and stream not in visited:
-        visited.add(stream)
-        if stream not in producer_by_output_stream:
-            break
-        producer = producer_by_output_stream[stream]
-        chain.append((producer.id, producer.plugin))
-        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
-            break
-        if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
-            break
-        stream = producer.input
+    graph = _output_stream_graph(all_nodes)
+    paths = _prompt_shield_upstream_paths(node.input, graph, frozenset())
+    sorted_paths = sorted(paths, key=lambda path: tuple((pid, plugin or "") for pid, plugin in path))
     return stable_hash(
         {
             "review_kind": "prompt_shield_recommendation",
             "llm_node_id": node.id,
-            "upstream_chain": chain,
+            "upstream_paths": [list(path) for path in sorted_paths],
         }
     )
+
+
+_ShieldPath = tuple[tuple[str, str | None], ...]
+
+
+def _prompt_shield_upstream_paths(stream: str | None, graph: _OutputStreamGraph, visited: frozenset[str]) -> list[_ShieldPath]:
+    """Enumerate every upstream producer path from ``stream`` toward a shield/untrusted/end."""
+    if not isinstance(stream, str) or not stream:
+        return [()]
+    producers = graph.producers_by_stream.get(stream)
+    if not producers:
+        return [()]
+    paths: list[_ShieldPath] = []
+    for producer in producers:
+        paths.extend(_prompt_shield_producer_paths(producer, graph, visited))
+    return paths
+
+
+def _prompt_shield_producer_paths(producer: NodeSpec, graph: _OutputStreamGraph, visited: frozenset[str]) -> list[_ShieldPath]:
+    head: tuple[str, str | None] = (producer.id, producer.plugin)
+    if producer.id in visited:
+        return [(head,)]  # cycle — stop, still record this producer
+    visited = visited | {producer.id}
+    if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS or producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+        return [(head,)]  # adjudication boundary reached
+    if producer.node_type == "queue":
+        predecessors = graph.queue_predecessors.get(producer.id, ())
+        if not predecessors:
+            return [(head,)]
+        return [(head, *sub) for predecessor in predecessors for sub in _prompt_shield_producer_paths(predecessor, graph, visited)]
+    return [(head, *sub) for sub in _prompt_shield_upstream_paths(producer.input, graph, visited)]
 
 
 def _raw_html_cleanup_artifact_hash(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> str:

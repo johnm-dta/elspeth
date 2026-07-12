@@ -584,6 +584,12 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         if upstream.fork_to:
             for fork_target in upstream.fork_to:
                 _record(fork_target, upstream.id)
+    # Canonicalize declared queues: a queue interleaves many producers under
+    # its own id, so the queue itself — not whichever source registered first —
+    # is the canonical producer of that connection (elspeth-a5b86149d4).
+    for node in state.nodes:
+        if node.node_type == "queue":
+            producer_by_target[node.id] = node.id
 
     for node in state.nodes:
         # Rule 1: identity passthrough plugin (literal name).
@@ -602,11 +608,13 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         if node.input not in producer_by_target:
             continue
         upstream_id = producer_by_target[node.input]
-        # Rule 6: upstream is not a gate (per skill lines 1517-1518 —
-        # per-fork-branch passthrough is the documented legitimate pattern).
-        # ``upstream_id == "source"`` is not in nodes_by_id; the source is
-        # never a gate, so falling through is correct.
-        if upstream_id in nodes_by_id and nodes_by_id[upstream_id].node_type == "gate":
+        # Rule 6: upstream is not a gate or a queue. A gate-fork's per-branch
+        # passthrough is the documented legitimate pattern (skill lines
+        # 1517-1518); a queue interleaves fan-in with an observed/unknown schema,
+        # so a downstream passthrough is doing real structural work, not dead
+        # weight (elspeth-a5b86149d4). ``upstream_id == "source"`` is not in
+        # nodes_by_id; the source is neither, so falling through is correct.
+        if upstream_id in nodes_by_id and nodes_by_id[upstream_id].node_type in ("gate", "queue"):
             continue
         # Rule 5: passthrough has no schema.fields anchor (Concept-5 exemption
         # per skill lines 758-768).  ``options`` values are Tier-3 (LLM- or

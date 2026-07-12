@@ -549,7 +549,7 @@ def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() 
 
 def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
     # The gate topology routes web_scrape output into the LLM via gate routes,
-    # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
+    # exercising the _output_stream_graph producer walk (routes/fork_to). The
     # Prompt-shield recommendation is advisory, not blocking:
     # an unshielded LLM-over-scrape surfaces a warning and still composes.
     state = _state_with_web_scrape_gate_to_llm()
@@ -572,6 +572,240 @@ def test_gate_routed_web_scrape_through_prompt_shield_emits_no_warning() -> None
     warning_pairs = prompt_shield_recommendation_warning_pairs(state)
 
     assert warning_pairs == ()
+
+
+# ── Queue fan-in prompt-shield asymmetry (elspeth-a5b86149d4) ────────────
+# A declared queue fans multiple upstream producers into one LLM. The
+# prompt-injection shield analysis MUST stay conservative across every
+# predecessor path — never resolve to whichever producer registered last.
+#   consumes_untrusted  = ANY predecessor path reaches untrusted-without-shield
+#   has_authorized_shield = ALL predecessor paths prove a shield
+#   a missing/unknown predecessor path is fail-safe (NOT proven safe)
+
+
+def _queue(queue_id: str = "inbound") -> NodeSpec:
+    return NodeSpec(
+        id=queue_id,
+        node_type="queue",
+        plugin=None,
+        input=queue_id,
+        on_success=None,
+        on_error=None,
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _web_scrape(node_id: str, *, input_stream: str, on_success: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="web_scrape",
+        input=input_stream,
+        on_success=on_success,
+        on_error="stop",
+        options={"url_field": "url", "content_field": "content"},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _shield(node_id: str, *, input_stream: str, on_success: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="azure_prompt_shield",
+        input=input_stream,
+        on_success=on_success,
+        on_error="stop",
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _passthrough(node_id: str, *, input_stream: str, on_success: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="value_transform",
+        input=input_stream,
+        on_success=on_success,
+        on_error="stop",
+        options={"operations": [{"target": "x", "expression": "1"}]},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _llm(node_id: str = "classify", *, input_stream: str = "inbound") -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="llm",
+        input=input_stream,
+        on_success="out",
+        on_error="stop",
+        options={"prompt_template": "Classify {{ row.content }}."},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _state(nodes: tuple[NodeSpec, ...]) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=nodes,
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def test_queue_fan_in_untrusted_on_any_predecessor_marks_downstream_untrusted() -> None:
+    """One untrusted predecessor among many taints the downstream LLM (ANY-path rule)."""
+    # Order: the benign transform registers LAST, so the pre-fix single-producer
+    # map would resolve `inbound` to it and MISS the untrusted web_scrape path.
+    state = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _passthrough("benign_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs
+    message = next(msg for component, msg in warning_pairs if component == "node:classify")
+    assert "consumes externally-fetched content from a web_scrape upstream" in message
+
+
+def test_queue_fan_in_shield_authorized_only_when_all_predecessors_shielded() -> None:
+    """A shield on one predecessor is not enough: an unshielded path still warns (ALL-path rule)."""
+    # Order: shield_a registers LAST, so the pre-fix single-producer map would
+    # resolve `inbound` to the shield and silence the warning (the inversion).
+    partially_shielded = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="scraped_a"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _shield("shield_a", input_stream="scraped_a", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(partially_shielded)
+
+    assert warning_pairs, "an unshielded predecessor path must still surface the shield advisory"
+    message = next(msg for component, msg in warning_pairs if component == "node:classify")
+    assert "consumes externally-fetched content from a web_scrape upstream" in message
+
+    # When EVERY predecessor path is shielded, State A is silent.
+    fully_shielded = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="scraped_a"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="scraped_b"),
+            _shield("shield_a", input_stream="scraped_a", on_success="inbound"),
+            _shield("shield_b", input_stream="scraped_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    assert prompt_shield_recommendation_warning_pairs(fully_shielded) == ()
+
+
+def test_queue_fan_in_one_unknown_predecessor_emits_conservative_warning() -> None:
+    """An unprovable (missing-upstream) predecessor is fail-safe, so the advisory still fires."""
+    # shield_a registers LAST → pre-fix map silences; post-fix ALL-path proof
+    # fails because the mystery predecessor's upstream is unknown.
+    state = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="scraped_a"),
+            _passthrough("mystery_b", input_stream="ghost_stream", on_success="inbound"),
+            _shield("shield_a", input_stream="scraped_a", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs, "an unknown predecessor path must not be treated as proven-shielded"
+    assert any(component == "node:classify" for component, _msg in warning_pairs)
+
+
+def test_queue_fan_in_artifact_hash_covers_all_sorted_predecessor_paths() -> None:
+    """The prompt-shield artifact hash binds every predecessor path, order-invariant."""
+    baseline = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+    reversed_order = _state(
+        (
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    def _hash(state: CompositionState) -> str:
+        llm = next(node for node in state.nodes if node.plugin == "llm")
+        return pipeline_decision_artifact_hash(llm, state.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+
+    baseline_hash = _hash(baseline)
+
+    # Insertion order of the two predecessors does not change the hash.
+    assert baseline_hash == _hash(reversed_order)
+
+    # Changing EITHER predecessor changes the hash.
+    changed_a = _state(
+        (
+            _web_scrape("scrape_a_renamed", input_stream="rows_a", on_success="inbound"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+    changed_b = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _passthrough("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+    assert _hash(changed_a) != baseline_hash
+    assert _hash(changed_b) != baseline_hash
 
 
 def _state_with_plain_llm_only() -> CompositionState:

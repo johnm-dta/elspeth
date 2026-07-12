@@ -13209,3 +13209,103 @@ class TestUpsertNodeQueue:
         # Atomic: the exact prior state/version is untouched, no partial node.
         assert result.updated_state.version == state.version
         assert all(n.id != "inbound" for n in result.updated_state.nodes)
+
+
+class TestQueueBoundaryFieldEvidenceAbstains:
+    """A queue exposes observed/unknown schema — field/numeric evidence must
+    abstain at that boundary and MUST NOT synthesise a union of the
+    predecessors' schemas (elspeth-a5b86149d4)."""
+
+    @staticmethod
+    def _typed_amount_source(on_success: str) -> SourceSpec:
+        # A fixed-schema source that DOES declare `amount: int` — a merged
+        # union across two of these WOULD prove the value_field numeric.
+        return SourceSpec(
+            plugin="csv",
+            on_success=on_success,
+            options={"path": "/data/x.csv", "schema": {"mode": "fixed", "fields": ["amount: int"]}},
+            on_validation_failure="discard",
+        )
+
+    @staticmethod
+    def _distribution_profile(input_stream: str) -> NodeSpec:
+        return NodeSpec(
+            id="profile_amounts",
+            node_type="aggregation",
+            plugin="batch_distribution_profile",
+            input=input_stream,
+            on_success="main",
+            on_error="discard",
+            options={"schema": {"mode": "observed"}, "value_field": "amount"},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+
+    @staticmethod
+    def _main_sink() -> OutputSpec:
+        return OutputSpec(
+            name="main",
+            plugin="json",
+            options={"path": "/data/outputs/main.jsonl", "format": "jsonl", "schema": {"mode": "observed"}},
+            on_write_failure="discard",
+        )
+
+    def _queue_node(self) -> NodeSpec:
+        return NodeSpec(
+            id="inbound",
+            node_type="queue",
+            plugin=None,
+            input="inbound",
+            on_success=None,
+            on_error=None,
+            options={},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+
+    def test_direct_typed_source_proves_numeric_value_field(self) -> None:
+        """Control: a direct typed source proves `amount` is numeric — no abstention warning."""
+        state = CompositionState(
+            sources={"orders": self._typed_amount_source("straight")},
+            nodes=(self._distribution_profile("straight"),),
+            edges=(),
+            outputs=(self._main_sink(),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        result = state.validate()
+        assert not any("does not declare the field type" in entry.message for entry in result.warnings), (
+            "a direct typed producer must PROVE the value_field, not abstain"
+        )
+
+    def test_queue_boundary_abstains_and_does_not_union_predecessor_schemas(self) -> None:
+        """Two typed sources through a queue: the numeric proof abstains, not unions."""
+        state = CompositionState(
+            sources={
+                "orders": self._typed_amount_source("inbound"),
+                "refunds": self._typed_amount_source("inbound"),
+            },
+            nodes=(self._queue_node(), self._distribution_profile("inbound")),
+            edges=(),
+            outputs=(self._main_sink(),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        result = state.validate()
+        # Both predecessors declare `amount: int`; a union WOULD have proven
+        # numeric. The queue's observed boundary must abstain instead, so the
+        # numeric-only advisory still fires against the observed schema.
+        assert any(
+            entry.component == "node:profile_amounts"
+            and "batch_distribution_profile.value_field.numeric" in entry.message
+            and "does not declare the field type" in entry.message
+            for entry in result.warnings
+        )

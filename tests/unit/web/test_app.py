@@ -975,6 +975,20 @@ class TestSettingsFromEnv:
         settings = _settings_from_env()
         assert settings.host == "127.0.0.1"
 
+    def test_reads_aws_ecs_deployment_fields_as_explicitly_set(self, tmp_path, monkeypatch) -> None:
+        data_dir = tmp_path / "data"
+        payload_store_path = tmp_path / "payloads"
+        monkeypatch.setenv("ELSPETH_WEB__DEPLOYMENT_TARGET", "aws-ecs")
+        monkeypatch.setenv("ELSPETH_WEB__DATA_DIR", str(data_dir))
+        monkeypatch.setenv("ELSPETH_WEB__PAYLOAD_STORE_PATH", str(payload_store_path))
+
+        settings = _settings_from_env()
+
+        assert settings.deployment_target == "aws-ecs"
+        assert settings.data_dir == data_dir.resolve()
+        assert settings.payload_store_path == payload_store_path.resolve()
+        assert {"deployment_target", "data_dir", "payload_store_path"} <= settings.model_fields_set
+
     def test_json_integer_parsed(self, monkeypatch) -> None:
         monkeypatch.setenv("ELSPETH_WEB__PORT", "9090")
         settings = _settings_from_env()

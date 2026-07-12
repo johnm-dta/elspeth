@@ -263,6 +263,42 @@ class TestWebSettingsValidation:
             )
 
 
+class TestDeploymentTarget:
+    def test_defaults_to_default(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.deployment_target == "default"
+
+    def test_accepts_aws_ecs(self) -> None:
+        settings = WebSettings(
+            deployment_target="aws-ecs",
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.deployment_target == "aws-ecs"
+
+    def test_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError, match="'default' or 'aws-ecs'"):
+            WebSettings(
+                deployment_target="azure-aca",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+            )
+
+
 class TestWebSettingsDerivedAccessors:
     """Tests for get_landscape_url() and get_payload_store_path()."""
 

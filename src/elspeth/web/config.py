@@ -37,6 +37,18 @@ def _allow_insecure_test_keys(host: str) -> bool:
     return host in _LOCAL_HOSTS and ("pytest" in sys.modules or os.environ.get("ELSPETH_ENV") == "test")
 
 
+def is_default_secret_key_placeholder(secret_key: str) -> bool:
+    return secret_key == "change-me-in-production"
+
+
+def is_undersized_secret_key(secret_key: str) -> bool:
+    return len(secret_key.encode("utf-8")) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES
+
+
+def is_uniform_byte_key(key_bytes: bytes) -> bool:
+    return len(set(key_bytes)) == 1
+
+
 def _is_loopback_or_private_origin(value: str) -> bool:
     parsed = urlparse(value)
     hostname = parsed.hostname
@@ -81,6 +93,9 @@ class WebSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8451, ge=1, le=65535)
     auth_provider: AuthProviderType = "local"
+    # ``default`` preserves current behavior; ``aws-ecs`` is strictly validated by
+    # web/deployment_contract.py::validate_aws_ecs_settings.
+    deployment_target: Literal["default", "aws-ecs"] = "default"
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
@@ -604,13 +619,12 @@ class WebSettings(BaseModel):
         """Reject default or undersized JWT HMAC keys outside explicit test contexts."""
         if _allow_insecure_test_keys(self.host):
             return self
-        if self.secret_key == "change-me-in-production":
+        if is_default_secret_key_placeholder(self.secret_key):
             raise ValueError(
                 "secret_key must be set to a secure value outside explicit test contexts. "
                 "Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
             )
-        secret_key_bytes = self.secret_key.encode("utf-8")
-        if len(secret_key_bytes) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES:
+        if is_undersized_secret_key(self.secret_key):
             raise ValueError(
                 f"secret_key must be at least {_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES} bytes outside explicit test contexts. "
                 "Generate a high-entropy key for ELSPETH_WEB__SECRET_KEY."
@@ -635,7 +649,7 @@ class WebSettings(BaseModel):
         if _allow_insecure_test_keys(self.host):
             return self
         raw_key = self.shareable_link_signing_key.get_secret_value()
-        if len(set(raw_key)) == 1:
+        if is_uniform_byte_key(raw_key):
             raise ValueError(
                 "shareable_link_signing_key is a known-weak placeholder "
                 "(uniform-byte pattern detected); generate a real key with "

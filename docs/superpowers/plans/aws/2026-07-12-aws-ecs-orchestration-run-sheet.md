@@ -104,8 +104,8 @@ successful Plan 12 closeout may issue AWS runtime GO.
    weaken audit ordering, replace audit evidence with telemetry, or retain raw
    provider/user content in operational evidence.
 10. **No security bypasses:** no waiver, baseline, allowlist broadening,
-    threshold reduction, skipped mandatory lane, or partial Wardline scan may
-    turn a failing gate green.
+    threshold reduction, skipped mandatory lane, or partial, inert, or
+    unanchored Wardline scan may turn a failing gate green.
 11. **Operator-held authority stays operator-held:** agents diagnose signed
     trust metadata but never receive signing keys or self-sign repairs.
 12. **Current-scope defects stay in scope:** do not hide an implementation gap
@@ -134,6 +134,50 @@ successful Plan 12 closeout may issue AWS runtime GO.
     or repeatedly failing work to `xhigh`. If the surface cannot set effort,
     state it in the dispatch and use the highest supported setting without
     blocking solely on that limitation.
+16. **Authoritative Wardline invocation override:** every plan-local Wardline
+    command is invocation-shape overridden by the following standard command,
+    while preserving the owning plan's gate timing, finding severity, repair,
+    and acceptance semantics:
+
+    ```bash
+    test "$(wardline --version)" = "wardline, version 1.3.1"
+    wardline scan . \
+      --trust-pack config.wardline.elspeth_pack \
+      --allow-custom-packs \
+      --fail-on ERROR \
+      --fail-on-unanalyzed \
+      --format agent-summary \
+      --output /tmp/aws-wardline-agent-summary.json
+    jq -e '
+      .schema == "wardline-agent-summary-1" and
+      .gate.verdict == "PASSED" and
+      .gate.tripped == false and
+      .gate.exit_class == 0 and
+      .summary.active_defects == 0 and
+      .summary.unanalyzed == 0 and
+      .resolution.inert == false and
+      .resolution.recognized_boundaries > 0 and
+      all(.engine_facts[]?;
+        .rule_id != "WLN-ENGINE-FUNCTION-SKIPPED" and
+        .rule_id != "WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT")
+    ' /tmp/aws-wardline-agent-summary.json >/dev/null
+    ```
+
+    This is an orchestration/tooling invocation override, not a security
+    waiver. The baseline must first integrate the pack through
+    `config/wardline/elspeth_pack.py` and `weft.toml`. Pre-baseline slices may
+    gather diagnostic evidence, but they cannot close on an inert scan. The
+    exact 1.3.1 preflight stops loader/schema drift for re-review; the jq
+    assertion is the complete-analysis contract beyond the CLI unanalyzed
+    sub-gate. The `/tmp` summary is diagnostic only; durable evidence stores
+    only sanitized pass/fail counts. Plan-specific output, format, or emission
+    options may be appended only when they preserve these standard flags and
+    this assertion.
+17. **Baseline signing freeze:** from the final signed-entry diagnosis through
+    operator repair, post-repair diagnosis, baseline gates, baseline commit,
+    and baseline close, freeze all program-worktree code/config mutation.
+    Preserve queued sibling work, commits, and checkpoints intact, but pause
+    their integration and further mutation until the baseline closes.
 
 ## 3. Coordinator bootstrap
 
@@ -204,6 +248,24 @@ successful Plan 12 closeout may issue AWS runtime GO.
 
   Expected: 20 milestone steps. Temporary tracker snapshots are diagnostic only
   and must not be committed or treated as durable acceptance evidence.
+
+  Before Baseline dispatch, reconcile the live structured tracker contract for
+  `elspeth-8166b310e7` and `elspeth-c0103e6c88`; prose comments are not a
+  substitute. Baseline structured targets/verification must include
+  `state.py`, the exact direct boundary-test node, `config/wardline/elspeth_pack.py`,
+  `weft.toml`, `config/wardline/verify_elspeth_pack_contract.py`, the signed
+  metadata directory as operator-owned scope, the Section 2 authoritative
+  command, and its version/non-inert/complete-analysis jq acceptance. 08A
+  structured targets/verification must remove `state.py`, the direct boundary
+  test, fingerprint repair, pack/config files, and baseline signing work. Use
+  the tracker-supported structured update surface, refresh both issues with
+  `filigree show ... --json`, and stop dispatch until the live fields match
+  this split exactly. This run-sheet edit does not itself mutate the tracker.
+  The exact signed-YAML repair set does not exist yet and must not be invented:
+  immediately after the final signed-entry diagnosis and before operator
+  repair, update Baseline's structured target files to replace the directory
+  placeholder with only the exact receipt-listed YAML paths, refresh the issue,
+  and require a byte-for-byte match to the diagnosis receipt before proceeding.
 
   If the milestone is still `planning`, atomically start its lifecycle under
   coordinator ownership before dispatching children; otherwise require an
@@ -460,9 +522,13 @@ release, and close instructions as stated in rule 13.
   The verification-baseline close is historical evidence, not a permanent
   waiver. Before each baseline-dependent dispatch, and after any
   trust-boundary-sensitive change, run the current trust-tier,
-  trust-boundary, and full Wardline gates from the clean program worktree.
-  Signed binding drift returns to the named operator. Wardline exit 1 requires
-  a boundary repair; exit 2 is a tool failure.
+  trust-boundary, and full Wardline gates from the clean program worktree,
+  using the Section 2 standard pack command. Signed binding drift returns to
+  the named operator. Wardline requires both exit 0 and non-inert anchored
+  coverage. A missing or untrusted pack, zero recognized or anchored
+  boundaries, unanalyzed source units/files, either prohibited formal
+  incomplete-analysis fact, missing current engine metrics, an active ERROR+
+  defect, exit 1, or exit 2 blocks dispatch.
 
 - [ ] **Step 3: Atomically start or validate exact-owner resume**
 
@@ -552,7 +618,9 @@ release, and close instructions as stated in rule 13.
   property, frontend, Docker, PostgreSQL, live, static, typing, trust,
   Wardline, coverage, manifest, packaging, and affected-area checks in
   proportion to the change. Hold only the complete unfiltered repository suite
-  until Plan 12 final washup.
+  until Plan 12 final washup. Every Wardline check uses the Section 2 standard
+  pack command and requires exit 0 plus non-inert anchored coverage; the
+  invocation override does not weaken the owning plan's gate semantics.
 
   Refresh claim liveness after each completed plan task and at least hourly
   during long checks. After each task, add a sanitized
@@ -607,7 +675,7 @@ integrated result.
   test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
   test -z "$(git status --porcelain)"
   PROGRAM_TIP="$(git rev-parse HEAD)"
-  test "$PROGRAM_TIP" = "$IMPLEMENTATION_SHA"
+  git merge-base --is-ancestor "$IMPLEMENTATION_SHA" "$PROGRAM_TIP"
   filigree show "$ISSUE_ID" --json | jq -e \
     --arg worker "$WORKER_ID" \
     '.status_category == "wip" and .assignee == $worker' >/dev/null
@@ -622,6 +690,21 @@ integrated result.
   elspeth.aws-ecs-integrated-verification.v1, program_tip, and a non-empty
   checks array using the bounded Section 5 schema. The envelope is valid only
   when program_tip equals PROGRAM_TIP; pre-change evidence cannot satisfy it.
+
+  Baseline is an evidence dependency for closure, not a new hard-DAG
+  implementation prerequisite. Plan 01 and Plan 02 may be claimed,
+  implemented, tested, and committed in parallel with Baseline. However, no
+  non-Baseline slice, including Plan 01 or Plan 02, may enter Step 3 until the
+  Baseline close commit is in current program ancestry and a fresh Section 2
+  standard Wardline command plus jq assertion passes on that exact program
+  tip. This closure rule does not add or imply a tracker dependency edge.
+
+  `IMPLEMENTATION_SHA` normally equals `PROGRAM_TIP`. An ancestor-only match is
+  permitted solely because the shared program lineage may have admitted later
+  coordinator-reviewed commits while this issue waited for Baseline evidence
+  or resumed after evidence invalidation. Step 2 is therefore mandatory on the
+  complete current tip: it binds the closure to the integrated tree, and Step
+  3 records that exact `PROGRAM_TIP` rather than the older implementation SHA.
 
 - [ ] **Step 3: Comment and close truthfully on program-branch evidence**
 
@@ -700,8 +783,11 @@ Exit conditions:
 - Plan 02 owns and regenerates the initial PostgreSQL `uv.lock` change.
 - Signed-tier diagnosis is clean or operator-repaired; no agent signs.
 - Trust-boundary tests/scope/tier pass.
-- `wardline scan . --fail-on ERROR` exits 0; exit 1 requires boundary repair,
-  exit 2 is a tool failure and blocks the stage.
+- The exact Section 2 standard Wardline command and its immediately following
+  jq assertion pass on the integrated Stage-1 tip. A missing or untrusted
+  pack, zero recognized boundaries, `INERT`, unanalyzed source units/files,
+  either prohibited formal incomplete-analysis fact, missing metrics, an
+  active ERROR+ defect, exit 1, or exit 2 blocks the stage.
 
 ### Stage 2: Parallel early consumers
 
@@ -883,7 +969,10 @@ Plan 12. Use feat/aws-ecs-program or a candidate-derived immutable exact-SHA
 temporary ref for hosted CI; never push or update release/0.7.1 early. Any
 code, documentation, lockfile, generated-file, or candidate-SHA change
 invalidates all candidate evidence and restarts Task 1. Evidence from
-different SHAs may never be combined.
+different SHAs may never be combined. The Wardline washup uses the Section 2
+standard pack command and requires exit 0 plus non-inert anchored coverage;
+missing or stale metrics, formal incomplete-analysis facts, and active ERROR+
+defects invalidate that evidence.
 
 After Tasks 1–8 pass and cleanup is complete, but before Task 9 issues GO:
 
@@ -938,7 +1027,11 @@ At every stage barrier:
       executed with zero skips; intentionally deferred task-role/live proof is
       still explicitly owned by Plan 10 or Plan 12.
 - [ ] Signed-tier diagnosis and operator repairs are complete where required.
-- [ ] `wardline scan . --fail-on ERROR` exited 0 for external-input changes.
+- [ ] The exact Section 2 standard Wardline command and its immediately
+      following jq assertion passed on the stage-exit tip. A missing or
+      untrusted pack, zero recognized boundaries, `INERT`, unanalyzed source
+      units/files, either prohibited formal incomplete-analysis fact, missing
+      metrics, or an active ERROR+ defect blocks stage exit.
 - [ ] `uv lock --check` passes; the current lock owner is correct.
 - [ ] `git diff --check` passes, the program worktree is clean, and the paused
   release branch still equals `RELEASE_START_SHA`.
@@ -993,6 +1086,25 @@ its descendants. Release the claim only for an explicit owner handoff. Do not
 close as partial, convert an in-scope defect to an observation, or weaken a
 gate.
 
+### Baseline-reopen Wardline evidence overlay
+
+Reopening Baseline freezes dispatch and pauses every Wardline-evidence-dependent
+closure, without adding tracker DAG edges. It invalidates all prior Wardline
+handoffs, including Plan 01, Plan 02, and their hard-DAG descendants even when
+they are not Baseline descendants in the Section 4 graph. Preserve every
+implementation commit and checkpoint; pause work in progress rather than
+discarding it. Reopen affected closed issues in reverse topological order,
+including Plan 01/02 and their hard descendants, while treating this paragraph
+as an evidence-invalidation overlay rather than a dependency rewrite.
+
+Repair and reclose Baseline first. Then exact-owner resume each paused or
+reopened issue, integrate its preserved implementation on the current program
+lineage, rerun its complete focused handoff, and run the exact Section 2
+standard Wardline command plus jq assertion at that affected issue's exact tip.
+Reclose affected issues in topological order with fresh anchors. No prior
+Wardline result survives a Baseline reopen, and no affected closure resumes
+until Baseline is reclosed and the fresh exact-tip standard scan passes.
+
 ### After a program-branch commit or close
 
 Freeze all dispatch and stop active descendant workers first. From the exact
@@ -1037,12 +1149,19 @@ while queue:
 assert len(topological) == len(by_id), "live milestone DAG contains a cycle"
 
 descendants: set[str] = set()
-pending = list(children[owner])
-while pending:
-    issue_id = pending.pop()
-    if issue_id not in descendants:
-        descendants.add(issue_id)
-        pending.extend(children[issue_id])
+baseline_id = "elspeth-8166b310e7"
+if owner == baseline_id:
+    # Baseline owns the Wardline evidence substrate. Its reopen invalidates
+    # every prior slice handoff, including independent roots Plan 01/02 and
+    # their descendants, without changing the tracker DAG.
+    descendants = set(by_id) - {owner}
+else:
+    pending = list(children[owner])
+    while pending:
+        issue_id = pending.pop()
+        if issue_id not in descendants:
+            descendants.add(issue_id)
+            pending.extend(children[issue_id])
 reverse_topological = [issue_id for issue_id in reversed(topological) if issue_id in descendants]
 phase_by_issue = {
     step["issue_id"]: phase["phase"]["issue_id"]
@@ -1135,7 +1254,10 @@ Stop and surface the exact owner/remedy when any of these occurs:
 - required operator, credential, Docker, AWS, Terraform, browser, or evidence
   facility unavailable;
 - required test skipped, deselected, xfailed, or not collected;
-- Wardline exit 1 without a boundary fix, or exit 2;
+- Wardline pack missing or untrusted; `INERT`; zero recognized or anchored
+  boundaries; unanalyzed source units/files; a prohibited formal
+  incomplete-analysis fact; missing current engine metrics; an active ERROR+
+  defect; exit 1; or exit 2;
 - signed metadata drift without operator-authorized repair;
 - lockfile or generated-golden ownership collision;
 - potential secret, raw provider response, prompt/content, URL, ARN, account,

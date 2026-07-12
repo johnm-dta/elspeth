@@ -1,131 +1,122 @@
 {
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_GATE_BASELINE",
-  "summary": "Plan 08 is implementation-ready after its explicit gate-baseline prerequisite: 08A now owns the trust-declared endpoint predicate, the unconditional validation/execution backstop, source and sink YAML/seed evidence, and every composer mutation surface; 08B is only guided-source prompt parity after Plan 06. Live signed-tier drift and a Wardline analysis-budget failure are tracked separately and block 08A rather than being hidden in prose.",
+  "summary": "Plan 08 is implementation-ready under the repaired verification-baseline contract. Baseline now owns the pre-existing state.py trust evidence, the conservative Wardline 1.3.1 pack bridge and focused external verifier, exact non-inert complete-analysis acceptance, and the operator-only signed-YAML repair receipt. 08A owns only the S3 web endpoint gate. The run sheet permits Plan 01/02 implementation before Baseline but binds every closure to a fresh exact-tip handoff, and a Baseline reopen invalidates every prior Wardline-dependent handoff without changing the hard DAG.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-08-s3-endpoint-gate.md",
-  "reviewed_at": "2026-07-11T17:59:45Z",
+  "reviewed_at": "2026-07-12T21:00:36Z",
   "review_basis": {
-    "branch": "release/0.7.1",
-    "head": "aa71969808ee72690cd144f0de34fe26ff7511d9",
-    "baseline": "Fresh Loomweave index plus live validation, execution, composer mutation, YAML/seed persistence, guided prompt, signed tier-model, Wardline, Plans 00/06/07, and Filigree dependency surfaces."
+    "branch": "feat/aws-ecs-program",
+    "head": "76cd2ddee1b7a0cabcad8506a8490adb8c2b9a90",
+    "baseline": "Live Wardline 1.3.1 CLI, pack loader, agent-summary schema, formal incomplete-analysis IDs, signed-diagnosis JSON schema, CI pytest collection, Filigree structured fields, shared-tip close protocol, and Baseline reopen lifecycle were checked against the program worktree."
   },
   "blocking_issues": [],
   "warnings": [
     {
       "id": "R08-1",
       "status": "DEPENDENCY",
-      "detail": "08A is not executable now. Filigree elspeth-c0103e6c88 is blocked by P1 gate-baseline task elspeth-8166b310e7; 08B remains blocked by Plan 06 and 08A."
+      "detail": "08A remains blocked by P1 Baseline elspeth-8166b310e7. Baseline dispatch is blocked until the live structured tracker fields are reconciled to this reviewed ownership split."
     },
     {
       "id": "R08-2",
       "status": "OPERATOR_ACTION",
-      "detail": "Plan-08 edits stale existing signed tier-model scopes. Agents diagnose only; an operator reviews and runs the signing path, then agents rerun diagnosis and the shape-only verification gate."
+      "detail": "The final protected diagnosis receipt may name existing signed YAML rows requiring repair. Agents never sign; the coordinator records the exact receipt paths and an operator reviews and repairs only that set under the signing freeze."
     },
     {
       "id": "R08-3",
-      "status": "TOOLING_BLOCKER",
-      "detail": "Wardline 1.3.1 currently emits active WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT at work 367820/367776. A full authoritative scan must complete before the gate-baseline task closes; narrowing, baselining, or waiving is forbidden."
+      "status": "PINNED_TOOL_CONTRACT",
+      "detail": "The authoritative Wardline gate is pinned to 1.3.1 and requires the Elspeth pack, non-inert recognized coverage, zero unanalyzed source units, zero active ERROR+ defects, and absence of Wardline's formal incomplete-analysis facts. Version/schema drift requires re-review."
     },
     {
       "id": "R08-4",
       "status": "ACCEPTED",
-      "detail": "YAML import and E2E seed may persist endpoint-invalid state for repair, but mark it invalid. The unconditional execution preflight is the final backstop for imported, reverted, forked, and legacy state."
+      "detail": "Conservative Wardline resolution facts outside the formal incomplete-analysis set remain visible and counted but do not imply a false clean result; the pack deliberately seeds raw input to raw output because the decorator also covers non-raising predicates."
     }
   ],
   "resolved_findings": [
     {
       "id": "B08-1",
       "status": "RESOLVED",
-      "resolution": "The new predicate carries an explicit Tier-3 trust boundary, static non-interpolating error prose, null semantics, and focused helper coverage."
+      "resolution": "Baseline and 08A file ownership is disjoint: state trust evidence, pack/config/verifier, and signed metadata belong to Baseline; S3 web policy code belongs to 08A."
     },
     {
       "id": "B08-2",
       "status": "RESOLVED",
-      "resolution": "The false six-site inventory was replaced by all nine direct constructors, both patch paths, secret/blob wiring, delegations, imports/seeds, and copy/legacy behavior."
+      "resolution": "All agent-owned baseline mutations and focused checks precede final signed diagnosis; the signing freeze then permits only exact operator YAML repair, one receipt-bound tracker update, read-only gates, staging, commit, and closure."
     },
     {
       "id": "B08-3",
       "status": "RESOLVED",
-      "resolution": "Central validation tests cover source and sink, omission/null, static redaction, check order/count, exact error attribution, and no settings/plugin/network work."
+      "resolution": "The Wardline gate uses agent-summary plus an exact jq assertion for version, gate result, active defects, unanalyzed units, non-inertness, recognized boundaries, and formal incomplete-analysis facts."
     },
     {
       "id": "B08-4",
       "status": "RESOLVED",
-      "resolution": "A real execution-service endpoint-invalid state proves rejection before create_run and closes the revert/fork/legacy backstop."
+      "resolution": "The pack contract is checked by a dedicated script executed with Wardline's shebang-derived interpreter, outside ordinary pytest collection where Wardline is not a project dependency."
     },
     {
       "id": "B08-5",
       "status": "RESOLVED",
-      "resolution": "YAML import and E2E seed each cover source and sink using response-visible is_valid and validation_errors rather than nonexistent persisted check diagnostics."
+      "resolution": "Final diagnosis is captured in a mode-0600 JSON receipt; safe unique YAML paths are derived mechanically, reconciled into Filigree, staged as an exact array, and compared against the complete expected staged set."
     },
     {
       "id": "B08-6",
       "status": "RESOLVED",
-      "resolution": "Immediate composer rejection now includes set/patch source and output, all set_pipeline branches, recipe delegation, raw/resolved blob source, secret-ref wiring, and inline-blob wiring."
+      "resolution": "The shared-tip close protocol accepts an implementation ancestor only with a complete fresh handoff on the current exact tip, which makes pre-Baseline Plan 01/02 implementations closable after Baseline without weakening evidence."
     },
     {
       "id": "B08-7",
       "status": "RESOLVED",
-      "resolution": "The guided prompt change has a focused behavior assertion and is isolated in 08B after the source registration exists."
+      "resolution": "Baseline reopen has an executable special case that invalidates all other milestone-step Wardline handoffs, preserves WIP commits/checkpoints, and reopens closed consumers in reverse topological order."
     },
     {
       "id": "B08-8",
       "status": "RESOLVED",
-      "resolution": "Plans 06 and 07 own explicit source/sink assertions that endpoint_url is not an allowed secret-ref field, plus positive CLI load-and-instantiation tests."
-    },
-    {
-      "id": "B08-9",
-      "status": "RESOLVED",
-      "resolution": "The existing YAML-path trust-evidence failure is repaired directly in the route surface already touched by 08A and included in the tracker target files."
-    },
-    {
-      "id": "B08-10",
-      "status": "RESOLVED",
-      "resolution": "Signed allowlist drift and Wardline degraded analysis are first-class operator/tooling work in elspeth-8166b310e7, which now blocks 08A in Filigree."
-    },
-    {
-      "id": "B08-11",
-      "status": "RESOLVED",
-      "resolution": "Plans 00, 06, and 07 and both Plan-08 tracker slices now describe the same gate-baseline -> 08A -> registration -> 08B dependency semantics."
+      "resolution": "The endpoint policy, central validation/execution backstop, YAML/seed persistence behavior, composer mutation inventory, prompt parity, redaction, and CLI separation from the original approved review remain unchanged."
     }
   ],
   "reviewer_summaries": {
-    "architecture_and_reality": {
-      "status": "APPROVED_AFTER_REPAIRS",
+    "executable_reality": {
+      "status": "PASS",
       "blocking": 0
     },
-    "security_and_crossplan": {
-      "status": "APPROVED_AFTER_REPAIRS",
+    "architecture_and_ownership": {
+      "status": "PASS",
       "blocking": 0
     },
     "tests_static_and_gates": {
-      "status": "APPROVED_AFTER_REPAIRS",
+      "status": "PASS",
       "blocking": 0
     },
-    "reality_check": {
-      "status": "APPROVED_AFTER_REPAIRS",
+    "lifecycle_and_reopen": {
+      "status": "PASS",
       "blocking": 0
     }
   },
   "verification": [
-    "Loomweave index refreshed at aa71969808ee72690cd144f0de34fe26ff7511d9 before source inspection",
-    "all direct source/output constructors and option-only mutation paths reconciled against live code",
-    "execution, persistence, revert/fork, guided, CLI, and cross-plan chokepoints reconciled",
-    "Filigree 08A/08B metadata and dependency edges updated without claiming or transitioning implementation work",
-    "gate-baseline task reparented under Wave 1; live Filigree plan now counts 16 steps and renders it beside blocked 08A",
-    "read-only signed-entry diagnosis executed and existing drift surfaced rather than bypassed",
-    "trust-boundary gate baseline executed and its existing YAML-route evidence defect assigned to 08A",
-    "Wardline full scan and explain loop executed; active engine budget defect tracked as a blocker",
-    "review JSON parsed with jq",
-    "git diff --check",
-    "three independent specialist reviews rerun after repair"
+    "live Wardline 1.3.1 version, CLI flags, lowercase grammar loader, pack API, FunctionTaint fields, agent-summary fields, and formal incomplete-analysis IDs checked",
+    "authoritative jq assertion executed successfully against a current non-inert 56-boundary agent-summary",
+    "signed-diagnosis JSON receipt command executed: exit 1 matched requires_action true, safe derivation produced exactly config/cicd/enforce_tier_model/web.yaml, and both receipt files were mode 0600",
+    "ordinary CI pytest collection confirmed to omit Wardline as a dependency, motivating the dedicated external-tool verifier outside tests",
+    "shared-tip ancestor close and executable Baseline reopen special case reviewed",
+    "Plan 08 and orchestration run-sheet diff passed git diff --check",
+    "four independent review lenses returned PASS after repair"
   ],
   "review_history": [
     {
       "reviewed_at": "2026-07-11T17:30:00Z",
       "verdict": "CHANGES_REQUESTED",
-      "summary": "Initial review found a missing trust declaration, false authoring-path inventory, incomplete blob/secret/import/seed coverage, an unimplementable persisted-diagnostics assertion, weak import-boundary evidence, untested guided prose, absent static/Wardline closeout, stale tracker targets, and hidden signed-gate/tooling prerequisites."
+      "summary": "Initial review found incomplete endpoint-path coverage and hidden signed/Wardline prerequisites."
+    },
+    {
+      "reviewed_at": "2026-07-11T17:59:45Z",
+      "verdict": "APPROVED",
+      "summary": "The endpoint implementation split was approved, with Baseline still described by a stale Wardline budget failure and state evidence assigned to 08A."
+    },
+    {
+      "reviewed_at": "2026-07-12T21:00:36Z",
+      "verdict": "APPROVED",
+      "summary": "Live execution exposed a Baseline/08A ownership cycle and an inert bare Wardline scan; the repaired contract now provides executable ownership, evidence, freeze, close, and reopen semantics."
     }
   ],
-  "plan_sha256": "4f13f03a4dacc89bb497c24d1d1dbff162e668b4d02faf5e62fe61aeefad0094"
+  "plan_sha256": "7d9ef25964cd321c3000bcc3ed746cb70b44f921a1490c27b5c5dc8d10640239"
 }

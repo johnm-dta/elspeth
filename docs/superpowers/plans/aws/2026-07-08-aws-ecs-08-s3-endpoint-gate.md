@@ -10,7 +10,7 @@
 
 | Slice | Filigree | Executable now? | Scope | Blocking edges |
 |---|---|---:|---|---|
-| Gate baseline | `elspeth-8166b310e7` | **Yes** | Operator/tooling repair: signed tier bindings and complete Wardline analysis | none |
+| Gate baseline | `elspeth-8166b310e7` | **Yes** | Signed-tier repair + pre-existing `state.py` trust-boundary evidence repair + authoritative non-inert Wardline analysis | none |
 | 08A | `elspeth-c0103e6c88` | **No** | Tasks 1-3: predicate, load-bearing validation gate, every composer mutation backstop | gate baseline `elspeth-8166b310e7` |
 | 08B | `elspeth-a342f333a4` | **No** | Task 4 only: guided-source prompt parity | Plan 06 `elspeth-7fe6aa531f` and 08A |
 
@@ -46,11 +46,20 @@ CLI/batch separation is structural: no core/CLI module imports the web policy. P
 
 ### Task 0: Restore and prove the verification baseline
 
-**Owner:** Filigree `elspeth-8166b310e7`; operator/tooling work, not Plan-08 application code.
+**Owner:** Filigree `elspeth-8166b310e7`; verification-baseline work, not AWS S3 feature implementation. The agent owns the evidence and Wardline bridge changes below; the operator alone owns signed metadata repair.
 
-The live review found two real baseline failures. Read-only signed-entry diagnosis reports existing binding drift, and Wardline 1.3.1 currently emits active `WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT` because Pydantic discovery exceeds its work budget (`367820/367776`). Neither may be hidden by an allowlist, baseline, waiver, or narrowed scan.
+**Baseline-owned files:**
 
-- [ ] Run read-only diagnosis before touching Plan-08 source:
+- Modify: `src/elspeth/web/sessions/routes/composer/state.py`
+- Modify: `tests/unit/web/sessions/routes/composer/test_state_boundaries.py`
+- Create: `config/wardline/elspeth_pack.py`
+- Modify: `weft.toml`
+- Create: `config/wardline/verify_elspeth_pack_contract.py`
+- Modify after operator signing: individually diagnosed `config/cicd/enforce_tier_model/*.yaml` files, bounded to the operator-reviewed final repair set
+
+The live review found three real baseline failures: signed binding drift; `_reject_disallowed_source_paths` fails the direct-test/fingerprint contract; and the current Wardline analysis is non-authoritative. An earlier review recorded `WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT` when Pydantic discovery exceeded its work budget (`367820/367776`); current live analysis no longer reports that capacity defect, but it must prove both adequate engine capacity and non-inert coverage through Elspeth's trust-boundary pack. None of these failures may be hidden by an allowlist, baseline, waiver, narrowed scan, or inert successful exit.
+
+- [ ] Run the initial read-only signed-entry diagnosis before changing any baseline-owned file. Record the result for comparison, but do not ask the operator to repair rows yet:
 
   ```bash
   ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing \
@@ -60,7 +69,108 @@ The live review found two real baseline failures. Read-only signed-entry diagnos
       --format text
   ```
 
-- [ ] If diagnosis contains anything except `OK`/`OK_SHAPE_ONLY`, stop for the operator. The agent must not run `justify`, `sign-judge-signatures`, `rotate`, or any other signing/write path. The operator first reviews a dry run, then repairs only the diagnosed existing rows using operator-held credentials, for example:
+- [ ] Repair the pre-existing trust-boundary evidence on `_reject_disallowed_source_paths`. Add `tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_disallowed_source_paths_raises_400_on_escaped_path`; its own body must call the helper directly under `pytest.raises(HTTPException)` with an escaped path and assert the raised exception's `status_code == 400`. Retarget the decorator's `test_ref` to that exact node.
+- [ ] Finalize the test body with the decorator's fingerprint omitted, run the trust-boundary rule once, and copy only the emitted canonical fingerprint into `test_fingerprint`. Then rerun both the focused test and the complete trust-boundary gate to green; never guess, precompute, or copy an unrelated fingerprint:
+
+  ```bash
+  uv run pytest tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_disallowed_source_paths_raises_400_on_escaped_path -q
+  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier --root src/elspeth
+  ```
+
+- [ ] Add Elspeth's Wardline pack bridge in `config/wardline/elspeth_pack.py` and declare `packs = ["config.wardline.elspeth_pack"]` under `[wardline]` in `weft.toml`. The runtime loader extends the default grammar itself, so the pack must not call `default_grammar()` or include built-ins. Use the required imports and exact contract shape:
+
+  ```python
+  from collections.abc import Mapping
+
+  from wardline.core.taints import TaintState
+  from wardline.scanner.grammar import BoundaryType, TrustGrammar
+  from wardline.scanner.taint.provider import FunctionTaint
+
+
+  def _seed_elspeth_trust_boundary(_levels: Mapping[str, TaintState]) -> FunctionTaint:
+      return FunctionTaint(TaintState.EXTERNAL_RAW, TaintState.EXTERNAL_RAW)
+
+
+  ELSPETH_TRUST_BOUNDARY = BoundaryType(
+      canonical_name="trust_boundary",
+      module_prefix="elspeth.contracts.trust_boundary",
+      group=1,
+      level_args=(),
+      seed=_seed_elspeth_trust_boundary,
+      builtin=False,
+  )
+
+  grammar = TrustGrammar(boundary_types=(ELSPETH_TRUST_BOUNDARY,), rules=())
+  ```
+
+  The conservative seed is deliberate. Elspeth's decorator covers both raising validators and `non_raising=True` predicates, so mapping every decorated result to `ASSURED` would create known false positives and over-trust return values. `elspeth-lints` owns decorator-contract honesty; Wardline conservatively anchors the external-origin flow.
+- [ ] Add `config/wardline/verify_elspeth_pack_contract.py` as a focused external-tool contract verifier, not a pytest module. Ordinary project CI intentionally does not install Wardline, so this verifier must stay outside `tests/` and the default pytest collection. The verifier imports the pack with Wardline's own pinned interpreter and asserts that lowercase `grammar` is a `TrustGrammar` with exactly one boundary and no rules; assert exact canonical name, module prefix, `group == 1`, `level_args == ()`, `builtin is False`, and `FunctionTaint` seed states `body_taint is TaintState.EXTERNAL_RAW` and `return_taint is TaintState.EXTERNAL_RAW`. Resolve the installed `wardline` executable, derive its interpreter from the executable's shebang, reject a missing or non-executable interpreter, and never hardcode a user-specific tool path. Run the verifier directly and require exit 0:
+
+  ```bash
+  WARDLINE_BIN="$(command -v wardline)"
+  WARDLINE_PYTHON="$(sed -n '1s/^#!//p' "$WARDLINE_BIN")"
+  test -n "$WARDLINE_PYTHON" && test -x "$WARDLINE_PYTHON"
+  "$WARDLINE_PYTHON" config/wardline/verify_elspeth_pack_contract.py
+  ```
+
+- [ ] Require the exact installed Wardline 1.3.1 loader/schema contract, then run the authoritative full-root gate and immediately validate the same agent-summary output:
+
+  ```bash
+  test "$(wardline --version)" = "wardline, version 1.3.1"
+  wardline scan . \
+    --trust-pack config.wardline.elspeth_pack \
+    --allow-custom-packs \
+    --fail-on ERROR \
+    --fail-on-unanalyzed \
+    --format agent-summary \
+    --output /tmp/aws-wardline-agent-summary.json
+  jq -e '
+    .schema == "wardline-agent-summary-1" and
+    .gate.verdict == "PASSED" and
+    .gate.tripped == false and
+    .gate.exit_class == 0 and
+    .summary.active_defects == 0 and
+    .summary.unanalyzed == 0 and
+    .resolution.inert == false and
+    .resolution.recognized_boundaries > 0 and
+    all(.engine_facts[]?;
+      .rule_id != "WLN-ENGINE-FUNCTION-SKIPPED" and
+      .rule_id != "WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT")
+  ' /tmp/aws-wardline-agent-summary.json >/dev/null
+  ```
+
+  The exact version check stops loader/schema drift for re-review. Exit 0 is necessary but not sufficient; the jq assertion is the Wardline 1.3.1 complete-analysis contract beyond the CLI's unanalyzed sub-gate. `INERT`, zero recognized boundaries, unanalyzed source units/files, either named member of Wardline 1.3.1's formal `INCOMPLETE_ANALYSIS_RULE_IDS` set, missing metrics, an untrusted or missing pack, or an active ERROR+ defect blocks the baseline. Conservative resolution facts outside that formal set, including flow-insensitive fallback, remain visible and are recorded by count but do not imply a false clean result. Exit 1 requires explanation and repair; exit 2 also blocks. A subdirectory or `--affected` scan is advisory only. Do not add a baseline, waiver, allowlist, or scope narrowing. The `/tmp` summary is diagnostic only; durable evidence records only sanitized pass/fail counts, never raw findings or paths.
+- [ ] Only after all agent-owned state/pack/weft/test work and the focused trust, pack-contract, version, and authoritative Wardline checks above are complete, run the final read-only signed-entry diagnosis into a mode-`0600` JSON receipt and derive the exact unique YAML repair paths from that receipt. Exit 0 means no repair paths; exit 1 is permitted only when the validated receipt says `requires_action == true`. Reject every unsafe/non-basename `source_file` before prefixing it with the allowlist directory:
+
+  ```bash
+  umask 077
+  SIGNED_RECEIPT=/tmp/aws-final-signed-diagnosis.json
+  SIGNED_PATHS=/tmp/aws-final-signed-yaml-paths.txt
+  set +e
+  ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing \
+    uv run elspeth-lints diagnose-judge-signatures \
+      --root src/elspeth \
+      --allowlist-dir config/cicd/enforce_tier_model \
+      --format json >"$SIGNED_RECEIPT"
+  SIGNED_STATUS=$?
+  set -e
+  test "$SIGNED_STATUS" -eq 0 -o "$SIGNED_STATUS" -eq 1
+  jq -e '
+    (.entries | type == "array") and
+    (.requires_action | type == "boolean") and
+    all(.entries[]; (.requires_action | type == "boolean")) and
+    all(.entries[] | select(.requires_action); .source_file | test("^[A-Za-z0-9_.-]+[.]yaml$")) and
+    (($status == 0 and .requires_action == false) or
+     ($status == 1 and .requires_action == true))
+  ' --argjson status "$SIGNED_STATUS" "$SIGNED_RECEIPT" >/dev/null
+  jq -r '.entries[] | select(.requires_action) | .source_file' "$SIGNED_RECEIPT" \
+    | LC_ALL=C sort -u \
+    | sed 's#^#config/cicd/enforce_tier_model/#' >"$SIGNED_PATHS"
+  chmod 600 "$SIGNED_RECEIPT" "$SIGNED_PATHS"
+  ```
+
+  This receipt is the operator's repair set. At this point the signing freeze begins: through operator repair, post-repair diagnosis, baseline gates, staging, baseline commit, and baseline close, no agent or sibling lane may edit code or configuration. The only permitted config mutation is the operator's exact reviewed signed-YAML repair; all other permitted actions are read-only verification, the one coordinator-owned Filigree structured-field update that records the receipt-listed YAML paths, staging/commit, and closure. The tracker update does not alter the signed source tree and must finish before operator repair. Preserve queued sibling work, commits, and checkpoints intact but paused.
+- [ ] If the final diagnosis contains anything except `OK`/`OK_SHAPE_ONLY`, stop for the operator. The agent must not run `justify`, `sign-judge-signatures`, `rotate`, or any other signing/write path. The operator first reviews a dry run, then repairs only the final diagnosed existing rows using operator-held credentials, for example:
 
   ```bash
   uv run elspeth-lints sign-judge-signatures \
@@ -73,15 +183,36 @@ The live review found two real baseline failures. Read-only signed-entry diagnos
   ```
 
   Follow the diagnostic classification: remove genuinely stale `NO_MATCHING_FINDING` rows; use the emitted re-justify path for scope/AST binding drift; never hand-edit judge metadata. Do not commit `*.bak-*` files.
-- [ ] Re-run diagnosis after the operator pass and require only `OK`/`OK_SHAPE_ONLY`, then run the key-free verification posture used for agents/forks:
+- [ ] After the operator pass, make no further code/config edits. Re-run diagnosis and require only `OK`/`OK_SHAPE_ONLY`; run the shape-only tier-model gate, focused state test, complete trust-boundary gate, focused pack-contract verifier, exact Wardline version preflight, authoritative scan, and exact jq assertion above on the unchanged tree. Any failure exits the freeze for rework and requires a new final diagnosis before signing resumes.
+- [ ] Stage and commit one coherent baseline change. Stage the five fixed source/test/pack/config paths exactly, then stage each operator-reviewed signed YAML output individually from the final diagnosis/receipt; never stage the allowlist directory or use a glob:
 
   ```bash
-  ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing \
-    uv run elspeth-lints check --rules trust_tier.tier_model --root src/elspeth
+  git add src/elspeth/web/sessions/routes/composer/state.py
+  git add tests/unit/web/sessions/routes/composer/test_state_boundaries.py
+  git add config/wardline/elspeth_pack.py
+  git add weft.toml
+  git add config/wardline/verify_elspeth_pack_contract.py
+  mapfile -t SIGNED_YAML_PATHS <"$SIGNED_PATHS"
+  if test "${#SIGNED_YAML_PATHS[@]}" -gt 0; then
+    git add -- "${SIGNED_YAML_PATHS[@]}"
+  fi
+  {
+    printf '%s\n' \
+      src/elspeth/web/sessions/routes/composer/state.py \
+      tests/unit/web/sessions/routes/composer/test_state_boundaries.py \
+      config/wardline/elspeth_pack.py \
+      weft.toml \
+      config/wardline/verify_elspeth_pack_contract.py
+    cat "$SIGNED_PATHS"
+  } | LC_ALL=C sort -u >/tmp/aws-baseline-expected-staged-paths.txt
+  git diff --cached --name-only | LC_ALL=C sort -u >/tmp/aws-baseline-actual-staged-paths.txt
+  cmp -s /tmp/aws-baseline-expected-staged-paths.txt /tmp/aws-baseline-actual-staged-paths.txt
+  if git diff --cached --name-only | rg '(^|/)[^/]*\.bak-'; then exit 1; fi
+  git commit -m "chore(security): restore authoritative verification baseline"
   ```
 
-- [ ] Run `wardline scan . --fail-on ERROR`. The present engine work-budget defect means the scan has not completed authoritatively. Escalate it to the Wardline/tooling owner, increase/fix the analyzer's legitimate capacity through its owned configuration/release path, and rerun the full project-root scan. A subdirectory/`--affected` scan is advisory and cannot close this prerequisite. Exit 1 requires explanation and repair; exit 2 also blocks.
-- [ ] Close `elspeth-8166b310e7` only when both gates pass. Then start 08A atomically. No source implementation begins against a known-unverifiable baseline.
+  Before committing, require the staged-name review to contain only those five fixed paths plus the exact individually approved YAML repair set; reject every `*.bak-*` or unrelated path.
+- [ ] Close `elspeth-8166b310e7` only when all baseline gates pass. Then start 08A atomically. No AWS S3 feature implementation begins against a known-unverifiable baseline.
 
 ---
 
@@ -142,7 +273,6 @@ The live review found two real baseline failures. Read-only signed-entry diagnos
 
 - Modify: `src/elspeth/web/execution/schemas.py`
 - Modify: `src/elspeth/web/execution/validation.py`
-- Modify: `src/elspeth/web/sessions/routes/composer/state.py` (repair the existing YAML-path boundary evidence while this route is in scope)
 - Modify: `tests/unit/web/execution/test_validation.py`
 - Modify: `tests/unit/web/execution/test_service.py`
 - Modify: `tests/unit/web/sessions/test_routes.py`
@@ -156,7 +286,6 @@ The live review found two real baseline failures. Read-only signed-entry diagnos
 - [ ] Add an execution-service regression using a real endpoint-invalid `CompositionState` (not a mocked invalid `ValidationResult`). Assert `PipelineValidationError`, no `create_run`, no plugin instantiation, and no provider/network call. This pins the final backstop used by revert/fork/legacy state.
 - [ ] Parameterize YAML-import route coverage for an invalid `aws_s3` source and invalid `aws_s3` sink. Use a structurally valid source-to-sink YAML document so authoring validation reaches runtime preflight. POST it, then assert the response and persisted record have `is_valid=False` and `validation_errors` contains the static `aws_s3`/`endpoint_url` policy message. `CompositionStateResponse` does not expose validation check names; exact check-name assertions belong in the direct validation tests.
 - [ ] Add the same source/sink parameterization for `POST /{session_id}/state/e2e-seed` with `e2e_state_seed_enabled=True`. Assert invalid persistence and unchanged static-message/redaction behavior.
-- [ ] Repair the pre-existing trust-boundary evidence on `_reject_disallowed_source_paths`: add a direct unit test that calls the helper and uses `pytest.raises(HTTPException)` for an escaped path, retarget the decorator's `test_ref` to that test, and set the exact linter-produced `test_fingerprint` only after the test body is final. The current HTTP-route test is real behavioral coverage but does not satisfy the trust-boundary rule's direct exception-evidence contract; leaving it unchanged makes the required gate fail before Plan-08 findings can be judged.
 - [ ] Run the red tests, implement the gate, and run the full owning files:
 
   ```bash
@@ -169,7 +298,7 @@ The live review found two real baseline failures. Read-only signed-entry diagnos
 - [ ] Stage only Task-2 files and commit:
 
   ```bash
-  git add src/elspeth/web/execution/schemas.py src/elspeth/web/execution/validation.py src/elspeth/web/sessions/routes/composer/state.py tests/unit/web/execution/test_validation.py tests/unit/web/execution/test_service.py tests/unit/web/sessions/test_routes.py
+  git add src/elspeth/web/execution/schemas.py src/elspeth/web/execution/validation.py tests/unit/web/execution/test_validation.py tests/unit/web/execution/test_service.py tests/unit/web/sessions/test_routes.py
   git commit -m "feat(web): enforce aws_s3 endpoint policy in validation"
   ```
 
@@ -216,10 +345,20 @@ The central validation check remains authoritative. These tool checks are defens
   ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing uv run elspeth-lints check --rules trust_tier.tier_model --root src/elspeth
   PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier --root src/elspeth
   git diff --check
-  wardline scan . --fail-on ERROR
+  test "$(wardline --version)" = "wardline, version 1.3.1"
+  wardline scan . --trust-pack config.wardline.elspeth_pack --allow-custom-packs --fail-on ERROR --fail-on-unanalyzed --format agent-summary --output /tmp/aws-wardline-agent-summary.json
+  jq -e '
+    .schema == "wardline-agent-summary-1" and
+    .gate.verdict == "PASSED" and .gate.tripped == false and .gate.exit_class == 0 and
+    .summary.active_defects == 0 and .summary.unanalyzed == 0 and
+    .resolution.inert == false and .resolution.recognized_boundaries > 0 and
+    all(.engine_facts[]?;
+      .rule_id != "WLN-ENGINE-FUNCTION-SKIPPED" and
+      .rule_id != "WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT")
+  ' /tmp/aws-wardline-agent-summary.json >/dev/null
   ```
 
-  Wardline exit 1 requires `wardline explain-taint <fingerprint> --chain`, a fix at the authoring/config boundary, and a rescan. Exit 2 blocks handoff. Do not baseline or waive a new finding. Exit zero supplements rather than replaces the explicit security regressions.
+  Wardline exit 1 requires `wardline explain-taint <fingerprint> --chain`, a fix at the authoring/config boundary, and a rescan. Exit 2 blocks handoff. Exit 0 remains subject to Task 0's non-inert rule: current engine metrics and recognized boundary count greater than zero are mandatory; `INERT`, unanalyzed source units/files, either formal incomplete-analysis engine fact, missing metrics, or an active ERROR+ defect blocks. Conservative resolution facts outside Wardline 1.3.1's formal incomplete-analysis set remain visible but do not imply incomplete analysis. Do not baseline, waive, allowlist, or narrow away a finding. The authoritative scan supplements rather than replaces the explicit security regressions.
 
   Task 3 edits scopes that already own signed tier-model entries (`_execute_set_source_from_blob` and `_execute_set_pipeline`), so signature drift is expected after the code change. The implementing agent reruns read-only diagnosis and stops. The operator follows the Task-0 repair workflow for only the diagnosed changed rows; the agent then reruns diagnosis plus the shape-only gate. The HMAC key stays operator-only and must never enter the agent environment.
 
@@ -259,8 +398,20 @@ The central validation check remains authoritative. These tool checks are defens
   uv run mypy src/ elspeth-lints/src/
   PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier --root src/elspeth
   git diff --check
-  wardline scan . --fail-on ERROR
+  test "$(wardline --version)" = "wardline, version 1.3.1"
+  wardline scan . --trust-pack config.wardline.elspeth_pack --allow-custom-packs --fail-on ERROR --fail-on-unanalyzed --format agent-summary --output /tmp/aws-wardline-agent-summary.json
+  jq -e '
+    .schema == "wardline-agent-summary-1" and
+    .gate.verdict == "PASSED" and .gate.tripped == false and .gate.exit_class == 0 and
+    .summary.active_defects == 0 and .summary.unanalyzed == 0 and
+    .resolution.inert == false and .resolution.recognized_boundaries > 0 and
+    all(.engine_facts[]?;
+      .rule_id != "WLN-ENGINE-FUNCTION-SKIPPED" and
+      .rule_id != "WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT")
+  ' /tmp/aws-wardline-agent-summary.json >/dev/null
   ```
+
+  Exit 0 remains subject to Task 0's non-inert rule: current engine metrics and recognized boundary count greater than zero are mandatory; `INERT`, unanalyzed source units/files, either formal incomplete-analysis engine fact, missing metrics, an untrusted or missing pack, or an active ERROR+ defect blocks 08B. Conservative resolution facts outside Wardline 1.3.1's formal incomplete-analysis set remain visible but do not imply incomplete analysis. Do not baseline, waive, allowlist, or narrow the scan.
 
 - [ ] Stage exactly, commit, and hand 08B to the integration coordinator:
 
@@ -277,6 +428,6 @@ The central validation check remains authoritative. These tool checks are defens
 
 - Plan 06 must keep `endpoint_url` canonical/top-level, reject aliases/nested client config/extras, assert it is absent from source `allowed_secret_ref_fields`, and prove a CLI source config survives both settings load and plugin instantiation.
 - Plan 07 must mirror that contract and non-secret assertion for the sink and prove CLI sink acceptance.
-- Plan 10 consumes both closed 08 slices; Plan 12 re-runs the full suite, trust/static/Wardline gates, and live S3 acceptance. No web test may skip/xfail the endpoint rejection.
+- Plan 10 consumes both closed 08 slices; Plan 12 re-runs the full suite, trust/static/authoritative non-inert Wardline gates, and live S3 acceptance. No web test may skip/xfail the endpoint rejection.
 
 **Accepted limitation:** Plan 08 deliberately rejects every non-null web value rather than attempting URL allowlisting. Operator-controlled endpoints remain a CLI/batch concern.

@@ -45,10 +45,10 @@ def test_blob_inline_resolutions_table_exists_with_expected_columns(engine) -> N
     }
 
 
-def test_blob_inline_resolutions_schema_epoch_is_26(engine) -> None:
-    assert SESSION_SCHEMA_EPOCH == 26
+def test_blob_inline_resolutions_schema_epoch_is_27(engine) -> None:
+    assert SESSION_SCHEMA_EPOCH == 27
     with engine.connect() as conn:
-        assert conn.execute(text("PRAGMA user_version")).scalar_one() == 26
+        assert conn.execute(text("PRAGMA user_version")).scalar_one() == 27
 
 
 def test_blob_inline_resolutions_blob_id_is_historical_without_live_blob_fk(engine) -> None:

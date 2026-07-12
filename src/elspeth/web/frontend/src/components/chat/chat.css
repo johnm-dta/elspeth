@@ -1748,13 +1748,13 @@
    Freeform introduction (dismissible account-level empty state)
    --------------------------------------------------------------------------- */
 .freeform-introduction {
-  width: min(calc(100% - 2 * var(--space-lg)), 40rem);
+  width: min(calc(100% - 2 * var(--space-lg)), 48rem);
   margin: var(--space-xl) auto;
   padding: var(--space-lg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   background-color: var(--color-surface-elevated);
-  text-align: center;
+  text-align: left;
 }
 
 .freeform-introduction h2 {
@@ -1762,13 +1762,62 @@
   color: var(--color-text);
   font-size: var(--font-size-lg);
   font-weight: 600;
+  text-align: center;
 }
 
 .freeform-introduction p {
-  margin: 0 auto var(--space-md);
+  margin: 0 0 var(--space-md);
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
   line-height: 1.55;
+}
+
+.freeform-introduction-section {
+  margin: var(--space-lg) 0;
+}
+
+.freeform-introduction-section h3 {
+  margin: 0 0 var(--space-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.freeform-introduction-definitions {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+}
+
+.freeform-introduction-definition {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) 1fr;
+  gap: var(--space-md);
+}
+
+.freeform-introduction-definition dt {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.freeform-introduction-definition dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+}
+
+.freeform-introduction > button {
+  display: block;
+  margin: 0 auto;
+}
+
+@media (max-width: 520px) {
+  .freeform-introduction-definition {
+    grid-template-columns: 1fr;
+    gap: var(--space-2xs);
+  }
 }
 
 /* ── Acknowledgement stack (pinned top-of-chat LLM decisions) ─────────────

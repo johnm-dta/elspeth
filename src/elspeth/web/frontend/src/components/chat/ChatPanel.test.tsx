@@ -264,7 +264,9 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel />);
 
-    expect(screen.getByRole("heading", { name: "Build a pipeline" })).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "How pipelines work" }),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "Don’t show this again" })).toBeVisible();
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(sendMessage).not.toHaveBeenCalled();

@@ -15,14 +15,40 @@ describe("FreeformIntroduction", () => {
     });
   });
 
-  it("briefly explains how to build an auditable pipeline", () => {
+  it("explains the building blocks and wiring of an auditable pipeline", () => {
     render(<FreeformIntroduction />);
 
     expect(
-      screen.getByRole("heading", { name: "Build a pipeline" }),
+      screen.getByRole("heading", { name: "How pipelines work", level: 2 }),
     ).toBeVisible();
     expect(
-      screen.getByText(/what ELSPETH should read.*how the data should change/is),
+      screen.getByRole("heading", {
+        name: "The three building blocks",
+        level: 3,
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Wiring the flow", level: 3 }),
+    ).toBeVisible();
+
+    for (const term of [
+      "Sources",
+      "Transforms",
+      "Sinks",
+      "Gate",
+      "Fork",
+      "Coalesce",
+      "Aggregate",
+      "Queue",
+      "Expand",
+    ]) {
+      expect(screen.getByText(term, { selector: "dt" })).toBeVisible();
+    }
+
+    expect(
+      screen.getByText(
+        /think of each record as a case moving through a controlled workplace/,
+      ),
     ).toBeVisible();
   });
 

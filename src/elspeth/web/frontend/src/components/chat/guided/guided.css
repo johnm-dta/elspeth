@@ -2000,6 +2000,22 @@
   border-radius: var(--radius-lg);
 }
 
+/* On a completed wide/short workspace, Run Results must remain visible at the
+   bottom instead of being squeezed below the 400px YAML preview. Let this card
+   yield vertical space while preserving enough room for its heading, actions,
+   and a useful scrollable YAML viewport. */
+.chat-panel--completed > .guided-completion {
+  min-height: 18rem;
+  overflow: hidden;
+}
+
+.chat-panel--completed
+  > .guided-completion
+  .guided-completion-yaml-container {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* Section heading -- "Pipeline ready" */
 .guided-completion-heading {
   margin: 0;

@@ -184,6 +184,19 @@
   overflow: auto;
 }
 
+/* The completed surface is a vertical evidence stack: Pipeline ready first,
+   then its run evidence. Keep the two cards visually adjacent while allowing
+   expanded results to consume the rest of the panel instead of leaving an
+   unstructured void below. The :not() preserves the collapse affordance's
+   content-height contract. */
+.chat-panel--completed > .inline-run-results:not(.inline-run-results--collapsed) {
+  flex: 1 1 auto;
+  min-height: 6rem;
+  max-height: none;
+  margin-top: var(--space-xs);
+  margin-bottom: 0;
+}
+
 .inline-run-results--collapsed {
   max-height: none;
   overflow: visible;

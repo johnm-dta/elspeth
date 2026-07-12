@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
@@ -22,6 +22,13 @@ describe("FreeformIntroduction", () => {
       screen.getByRole("heading", { name: "How pipelines work", level: 2 }),
     ).toBeVisible();
     expect(
+      screen.getByText(
+        "A pipeline is a controlled route for information. You choose what " +
+          "enters, what happens to it, and where the result goes. ELSPETH " +
+          "records each step so you can review how every output was produced.",
+      ),
+    ).toBeVisible();
+    expect(
       screen.getByRole("heading", {
         name: "The three building blocks",
         level: 3,
@@ -31,23 +38,78 @@ describe("FreeformIntroduction", () => {
       screen.getByRole("heading", { name: "Wiring the flow", level: 3 }),
     ).toBeVisible();
 
-    for (const term of [
-      "Sources",
-      "Transforms",
-      "Sinks",
-      "Gate",
-      "Fork",
-      "Coalesce",
-      "Aggregate",
-      "Queue",
-      "Expand",
-    ]) {
-      expect(screen.getByText(term, { selector: "dt" })).toBeVisible();
+    const definitions = [
+      [
+        "Sources",
+        "bring records into the pipeline from files, databases, APIs, or " +
+          "text. ELSPETH tracks each incoming record through the run.",
+      ],
+      [
+        "Transforms",
+        "examine or change records. They can clean fields, enrich content, " +
+          "apply an LLM, or prepare data for the next step.",
+      ],
+      [
+        "Sinks",
+        "receive records at the end of a route. They can write results to " +
+          "files, data stores, or other configured destinations; records " +
+          "requiring attention can follow a separate route.",
+      ],
+      [
+        "Gate",
+        "is a sorting desk. It sends each case along the appropriate route " +
+          "according to a stated condition.",
+      ],
+      [
+        "Fork",
+        "sends controlled copies of one case to several specialist teams. " +
+          "ELSPETH tracks each parallel path independently.",
+      ],
+      [
+        "Coalesce",
+        "waits for the required specialist responses, then combines their " +
+          "findings into one case that can continue.",
+      ],
+      [
+        "Aggregate",
+        "brings a group of cases together for batch work, such as producing " +
+          "totals, statistics, or a report.",
+      ],
+      [
+        "Queue",
+        "is a shared inbox. It accepts cases from several upstream teams and " +
+          "feeds one next step while keeping every case separate.",
+      ],
+      [
+        "Expand",
+        "opens a bundled case into several independently tracked cases.",
+      ],
+    ];
+
+    for (const [term, description] of definitions) {
+      const termElement = screen.getByText(term, { selector: "dt" });
+      const definitionRow = termElement.parentElement;
+
+      expect(termElement).toBeVisible();
+      expect(definitionRow).not.toBeNull();
+      expect(
+        within(definitionRow!).getByText(description, { selector: "dd" }),
+      ).toBeVisible();
     }
 
     expect(
       screen.getByText(
-        /think of each record as a case moving through a controlled workplace/,
+        "Wiring is the set of connections between these components. A simple " +
+          "pipeline runs from source to transforms to sink. For a more " +
+          "involved flow, think of each record as a case moving through a " +
+          "controlled workplace:",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Describe the outcome you need in ordinary language. ELSPETH will " +
+          "propose the components and their wiring; review the graph and " +
+          "details before you run it.",
       ),
     ).toBeVisible();
   });

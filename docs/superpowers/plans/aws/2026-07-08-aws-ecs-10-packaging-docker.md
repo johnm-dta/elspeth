@@ -14,6 +14,14 @@ from the runbooks index and Docker guide.
 
 **Tech Stack:** uv, Docker multi-stage build, Markdown, AWS CLI v2, jq, curl.
 
+**Program orchestration:** Execute this plan directly in the one shared
+`/home/john/elspeth/.worktrees/aws-ecs-program` worktree on
+`feat/aws-ecs-program`. The orchestration run sheet supersedes any generic
+per-plan worktree, branch, claim, merge, or close convention. Task 0 freezes
+the clean current program tip before any Plan 10 edit; the paused
+`release/0.7.1` branch is not the rollback baseline and remains unchanged until
+Plan 12 completes Tasks 1–8 and performs the final exact-SHA fast-forward.
+
 **Depends on:** every implementation slice in Plans 01–09, 11, 13–14, and 15A–15C,
 including both split slices of Plans 03 and 08. This broad dependency is
 intentional: Task 0 must bind a mechanically complete pre-Plan-10 rollback

@@ -5,6 +5,17 @@
 is the executable stage order. This index describes scope; the run sheet owns
 dispatch, integration, close, recovery, and Plan-10/12 checkpoint procedure.
 
+**Execution model:** run the entire program in the one ignored worktree
+`/home/john/elspeth/.worktrees/aws-ecs-program` on
+`feat/aws-ecs-program`, based on the recorded initial `release/0.7.1` tip. The
+main release checkout stays paused. Slices commit directly to the program
+branch and close truthfully at `feat/aws-ecs-program@<SHA>` after focused
+integrated evidence; the run sheet supersedes every plan-local worktree,
+branch, claim, merge, and close bootstrap. Plan 12 holds the complete
+unfiltered suite until final washup, proves Tasks 1–8 on one unchanged
+candidate, then fast-forwards that exact SHA into `release/0.7.1` before Task
+9 may issue GO.
+
 > **For agentic workers:** This is the index, not a plan. Execute the numbered
 > subplans with superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans. Plans 01–11, 13–14, and 15A–15C define scoped implementation
@@ -54,9 +65,10 @@ extras `postgres` and `aws`.
 The executable tracker graph is milestone `elspeth-6343920a47` (AWS ECS
 runtime readiness for `release/0.7.1`). The plan-repair work that created and
 verified this graph is tracked separately as `elspeth-e1e2e0f99f`; it is not
-an implementation step. Start implementation work through Filigree's atomic
-`work_start` / `work_start_next` surfaces. No implementation step is claimed
-by this planning repair.
+an implementation step. Start only the exact issue IDs in this index through
+Filigree's atomic `work_start` surface. Never use `work_start_next` or infer
+the next slice from ready-queue order. No implementation step is claimed by
+this planning repair.
 
 | Plan slice | Filigree step |
 |------------|---------------|
@@ -98,10 +110,12 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   keys on plugin name + option key, so the policy, pipeline-validation wiring,
   and composer mutation backstops are implementable and testable before the plugins exist). Plan 06
   starts only after both 02 and all of 08A are done; this is enforced by the
-  Filigree DAG, not left to merge prose. Merge 02 with its regenerated
-  `uv.lock`, then implement/rebase 06 on that tree, rerun `uv lock`, and commit
-  the freshly regenerated lockfile with 06; never text-merge `uv.lock`. Plans
-  01 may merge wherever its ordinary file-level conflicts permit.
+  Filigree DAG, not left to informal sequencing prose. Commit Plan 02 and its
+  regenerated `uv.lock` directly to the program branch. Plan 06 then consumes
+  that current integrated tip, reruns `uv lock`, and commits the freshly
+  regenerated lockfile directly; never text-merge `uv.lock`. Serialize Plan
+  01's direct commits around any overlapping file ownership and rerun affected
+  tests on the resulting program tip.
   This keeps 08's gate in the tree before any web-reachable `aws_s3`
   registration and gives the 02↔06 dependency additions one authoritative
   lockfile history. Plan 15A starts after the shared baseline and may run
@@ -113,8 +127,9 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   already-closed 08A); 08B Task 4 is guided-source prompt parity and starts only
   after 06 and 08A are closed. Plan 07 extends the `aws` extra with
   Jinja2 for sink key templates and regenerates `uv.lock` a final time; Plans
-  10/12 consume that 02 -> 06 -> 07 result. **Within-wave order:** merge 04
-  before 05 — both edit the same `app.py:293-294` lifespan orphan call, and
+  10/12 consume that 02 -> 06 -> 07 result. **Within-wave order:** commit and
+  verify 04 before starting 05's overlapping edits — both touch the same
+  `app.py:293-294` lifespan orphan call, and
   05's wrapper instructions assume 04's `create_tables` kwarg is already
   present at that site. Plan 09 waits for 06 because LiteLLM's real Bedrock
   transport requires the `aws` extra even though its unit tests mock the call.
@@ -138,23 +153,26 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   audit, readiness, cache, and CLI-separation boundaries; presentation-only
   filtering is never an exit condition.
 - **Wave 4 — owned closeout, never parallel with implementation:** 12 starts
-  only after every task and commit from 01–11, 13–14, and 15A–15C is present in one integrated
-  `release/0.7.1` tree. A failure in 12 reopens the owning implementation
-  surface; after repair, restart 12's gate sequence from the beginning.
+  only after every task and commit from 01–11, 13–14, and 15A–15C is present in
+  the one integrated `feat/aws-ecs-program` tree. A failure in 12 reopens the
+  owning implementation surface; after repair, restart 12's gate sequence
+  from the beginning. After Tasks 1–8 pass on one unchanged candidate, require
+  the paused release tip still equals its recorded start, fast-forward
+  `release/0.7.1` to that candidate, and only then execute Task 9 GO/closure.
 
 **Security ordering constraint:** the plan-08 gate must be in the tree
-before (never merely "in the same merge as") the first web-reachable
+before (never merely in the same combined commit batch as) the first web-reachable
 `aws_s3` registration from 06/07 — see the within-wave order above. The live
 tracker enforces completion of all 08A Tasks 1–3 before Plan 06 starts; Tasks
 1–2 are the mechanically load-bearing execution gate and Task 3 completes the
 immediate authoring-surface defenses.
-**Round 3 — this is now mechanically enforced, not a merge discipline:**
+**Round 3 — this is now mechanically enforced, not a manual sequencing discipline:**
 plan 06 Task 3 and plan 07 Task 1 each land a guard test in their
 registration commits (`test_registered_aws_s3_source_is_endpoint_url_gated`
 / `test_registered_aws_s3_sink_is_endpoint_url_gated`) that drives
 `validate_pipeline` and is deliberately red on any tree carrying an
-`aws_s3` registration without plan 08A's core gate — a tree that merges 06/07
-ahead of the gate cannot pass CI. A tree with 06/07 merged but not 08
+`aws_s3` registration without plan 08A's core gate — a tree that commits 06/07
+ahead of the gate cannot pass CI. A tree with 06/07 committed but not 08
 carries the exact web-authorable exfiltration/SSRF surface the design
 review rated Critical. Do not deploy the web app from such a tree. Likewise, do not call the tree aws-ecs-safe
 until plan 11 has landed: without it, pipeline runs, tutorial projections,
@@ -186,7 +204,8 @@ redirecting the task-local OTLP path.
    the unscoped full-suite run, the CI-aligned static, formatting, typing,
    contract, Wardline, and lean-image gates, the hosted `CI Success` umbrella,
    and a live Aurora/EFS/ECS/ALB deployment, persistence, observation, and
-   rollback rehearsal on the exact integrated `release/0.7.1` SHA. Scoped
+   rollback rehearsal on the exact integrated program-branch candidate SHA,
+   followed by one exact-SHA fast-forward into `release/0.7.1`. Scoped
    per-plan pytest runs remain useful during implementation, but they do not
    satisfy runtime acceptance.
 4. **`aws_s3` class naming — RESOLVED in the Plan-06 repair.** Plans 06 and
@@ -216,10 +235,11 @@ redirecting the task-local OTLP path.
    PARTIAL-aware needs `_validate_current_schema` to tolerate a partial
    table set.
 7. **uv.lock ownership — RESOLVED by dependency order** (02 -> 06 -> 07):
-   Plan 02 writes the `postgres` slice, Plan 06 rebases and regenerates for the
-   initial `aws` slice, and Plan 07 finally regenerates after adding Jinja2 to
-   the standalone source+sink `aws` extra. A text merge is forbidden. Plans
-   10 and 12 consume and frozen-check Plan 07's final integrated lock.
+   Plan 02 writes the `postgres` slice directly on the program branch. Plan 06
+   consumes that current tip and regenerates for the initial `aws` slice. Plan
+   07 consumes the resulting tip and regenerates after adding Jinja2 to the
+   standalone source+sink `aws` extra. A text merge is forbidden. Plans 10 and
+   12 consume and frozen-check Plan 07's final integrated lock.
 8. **Trusted publication for the lean `INSTALL_EXTRAS` Docker build** (plan 10
    Task 1 verifies by real local `docker build`/`docker run`, but
    `build-push.yaml` never exercises the `INSTALL_EXTRAS` build-arg path,

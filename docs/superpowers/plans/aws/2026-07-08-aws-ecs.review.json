@@ -1,13 +1,20 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 7 orchestration handoff",
+  "review": "AWS ECS runtime-readiness plan set — round 8 single-worktree autonomous handoff",
   "date": "2026-07-12",
-  "reviewed_at": "2026-07-12T08:52:19Z",
+  "reviewed_at": "2026-07-12T11:58:37Z",
   "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ release/0.7.1",
-  "process": "Approved designs and plan reviews followed by a live reference audit, exact Filigree DAG extraction, orchestration-risk critique, path relocation, dependency reconciliation, and self-review of the executable stage handoff.",
+  "process": "Independent xhigh re-review of the repaired autonomous prompt, run sheet, Plan 00, Plan 10, and Plan 12 using reality, architecture, quality/security, systems, documentation-testing, supply-chain, worktree, and verification lenses. The current diff, full resulting sources, all AWS plan-folder orchestration references, live Filigree DAG and critical path, workflow triggers, shell fences, links, JSON, whitespace, stale terms, and SHA256 bindings were checked.",
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO to execute the dependency DAG. Plans 15A, 15B, and 15C have no remaining plan-design blockers. Runtime GO still requires one unchanged 0.7.1 candidate to pass Plan 12, including epoch-23 schema handling, task-role Guardrails, CloudWatch/X-Ray telemetry, rollback, evidence, and teardown.",
+  "verdict_summary": "GO to execute the dependency DAG in one ignored feat/aws-ecs-program worktree. All slice mutations and tracker transitions are serialized, the full unfiltered suite is held until final washup, and runtime GO still requires one unchanged candidate to pass Plan 12 Tasks 1 through 8, cleanup, exact-SHA hosted CI, and the final no-merge-commit fast-forward into release/0.7.1.",
+  "source_sha256": {
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "cd8a63cf02cca9aa2d71e61448634d8e1e405e33e805420246f109510cca9940",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "cc0310767206c68db1700c47109bd221eb8930bcd03592b68aff4f61a53c6cba",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "94047e986bd687f2c7e5b3f5d508a647a7879f3ad31b9741b378c9320bfdaa44",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "3bb971d0db88f1575c362f970f37c80728ee064d58207e285c9d2726d32ba4f6",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "50d7afb72f7cbb5483879a8a94365968db818d163653d13e20fd0e56ba2f52e8"
+  },
   "reviewer_verdicts": {
     "reality": "APPROVED_AFTER_REPAIRS",
     "architecture": "APPROVED_AFTER_REPAIRS",
@@ -51,12 +58,15 @@
     "Plan 12 mechanically checks all 19 pre-closeout tracker steps: 18 application slices plus the verification-baseline task; the live milestone has 20 steps including closeout."
   ],
   "verification": [
-    "git diff --check",
-    "balanced Markdown code fences across Plans 15A/15B/15C and the universal design",
-    "JSON parse of all AWS ECS review artifacts",
-    "stale retired Plan-15 filename search",
-    "live Filigree full-plan, Plan15A/B/C, Plan12 metadata, and critical-path inspection",
-    "three independent final plan re-reviews returned GO"
+    "git diff --check passes for tracked changes and the untracked autonomous prompt",
+    "balanced Markdown fences across all five reviewed sources",
+    "all 56 Bash or shell fences pass bash -n",
+    "all current local links resolve, excluding three intentional Plan 10 forward-link examples created during implementation",
+    "all AWS ECS review artifacts parse as JSON",
+    "targeted stale orchestration-term searches found no executable per-slice worktree, branch, rebase, early release integration, or omitted-full-suite instruction in the five reviewed sources",
+    "live Filigree milestone has exactly 20 expected steps, exact direct dependencies, and the documented nine-node critical path",
+    "CI, CodeQL, and judge-gate workflows all accept Plan 12's immutable RC* exact-SHA push ref",
+    "every reviewed source SHA256 matches its refreshed sidecar or aggregate source_sha256 binding"
   ],
   "reviewed_files": [
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md",
@@ -78,6 +88,7 @@
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15b-universal-web-plugin-policy.md",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15c-bedrock-guardrail-shields.md",
     "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md",
     "docs/superpowers/specs/2026-07-08-aws-ecs-runtime-readiness-design.md",
     "docs/superpowers/specs/2026-07-12-universal-web-plugin-policy-design.md"
   ],
@@ -105,6 +116,12 @@
       "date": "2026-07-12",
       "verdict": "APPROVED_WITH_WARNINGS",
       "summary": "All AWS plan/review artifacts moved into the aws folder; path-bearing repository and tracker references were repaired; an orchestration run sheet now pins the live 20-step DAG, integration-before-close protocol, stage barriers, rollback baseline, and Plan 12 handoff."
+    },
+    {
+      "round": 8,
+      "date": "2026-07-12",
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "summary": "The single-worktree autonomous model was independently re-reviewed after repair. The release-ancestry stop condition, stale start-next/merge/rebase wording, full-suite timing, exact-SHA CI path, and review hash bindings now agree across the prompt, run sheet, Plan 00, Plan 10, and Plan 12."
     }
   ]
 }

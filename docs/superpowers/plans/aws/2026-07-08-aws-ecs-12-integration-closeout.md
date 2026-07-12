@@ -5,9 +5,10 @@
 > integration gate, not a parallel implementation slice. Steps use checkbox
 > (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce one exact-version `release/0.7.1` candidate, prove its local
-and hosted gates, then prove the design's live Aurora/EFS/ECS/ALB acceptance
-criteria before issuing runtime GO.
+**Goal:** Produce one exact-version candidate on `feat/aws-ecs-program`, prove
+its local and hosted gates plus the design's live Aurora/EFS/ECS/ALB acceptance
+criteria, then fast-forward that exact tested SHA into `release/0.7.1` before
+issuing runtime GO.
 
 **Architecture:** Plans 01–11, 13–14, and 15A–15C own implementation and scoped tests. This plan
 starts only after all of them have landed, installs the exact locked
@@ -25,7 +26,7 @@ particular, plan 02's `postgres` dependency and plan 06's `aws` dependency must
 already coexist in one regenerated `uv.lock`; plan 08's endpoint gate must
 precede the plan 06/07 web-reachable `aws_s3` registrations; plan 11's
 landscape-write guard must be present. Do not start this plan against a branch
-that merely has open or partially merged versions of those plans.
+that merely has open or partially integrated versions of those plans.
 
 **Owner:** one integration coordinator owns the sequence, durable control
 manifest, tracker claim, and final verdict. Infrastructure, database,
@@ -34,10 +35,20 @@ their approved surfaces; they do not issue the final go/no-go verdict. The
 coordinator confirms each named operator's authority and availability before
 Task 1 starts and records the matrix in the protected gate ledger.
 
+**Program branch contract:** Run Tasks 1–8 in the one shared
+`/home/john/elspeth/.worktrees/aws-ecs-program` worktree on
+`feat/aws-ecs-program`. The main checkout and `release/0.7.1` remain clean and
+paused at `RELEASE_START_SHA`. Use the program branch or a candidate-derived
+immutable exact-SHA temporary ref for hosted CI. After Tasks 1–8 pass on one
+unchanged candidate and cleanup completes, Task 9 fast-forwards the paused
+release branch to that exact SHA without a merge commit, verifies all slice
+anchors in release ancestry, and only then may issue GO and close Plan 12.
+
 ## Hard-stop rules
 
-- Run every command from the repository root with the integrated
-  `release/0.7.1` commit checked out.
+- Run Tasks 1–8 from the program worktree with `feat/aws-ecs-program` checked
+  out. Run only Task 9's final release-boundary commands from the paused main
+  checkout.
 - Execute every Task 1–7 command block in a Bash shell already configured with
   `set -Eeuo pipefail` and `umask 077` (`AWS_PAGER=""` for AWS work). Task 8 is
   the deliberate exception: it keeps `pipefail` but collects failures instead
@@ -58,7 +69,8 @@ Task 1 starts and records the matrix in the protected gate ledger.
   cleanup surface, aggregates failures, and returns NO-GO. Only after Task 8
   finishes may the owner repair and restart at Task 1. Results from different
   commits may never be combined into a go verdict.
-- Do not create a VCS release tag, promote the candidate image beyond the
+- Do not push or update `release/0.7.1` before Task 9's final fast-forward.
+  Do not create a VCS release tag, promote the candidate image beyond the
   acceptance environment, or call the AWS ECS program complete until Task 9
   returns GO. Task 7's candidate-specific ECR tag is evidence plumbing, not a
   release tag.
@@ -74,17 +86,20 @@ Task 1 starts and records the matrix in the protected gate ledger.
 - Modify if 0.7.1 entry is absent: `CHANGELOG.md`
 - Verify: `docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md`
 
-- [ ] Confirm the closeout is running on the release integration branch and
+- [ ] Confirm the closeout is running on the program integration branch and
   starts from a clean tree:
 
   ```bash
-  test "$(git branch --show-current)" = "release/0.7.1"
+  test "$(git branch --show-current)" = "feat/aws-ecs-program"
   test -z "$(git status --porcelain)"
   git diff --check
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  test -z "$(git -C /home/john/elspeth status --porcelain)"
   ```
 
   **Expected result:** all three commands exit 0. If plan work is still
-  uncommitted or the integration owner is on a plan-specific branch, stop.
+  uncommitted, the integration owner is on another branch, or the paused
+  release tip has drifted, stop.
 
 - [ ] Initialize the owner-approved protected evidence ledger outside the
   repository before the first gate. Its parent directory is mode 0700 on
@@ -96,7 +111,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
   ```bash
   export GATE_LEDGER="${GATE_LEDGER:?set approved durable mode-0600 ledger path}"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger init --file "$GATE_LEDGER" --branch release/0.7.1 --starting-sha "$(git rev-parse HEAD)"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger init --file "$GATE_LEDGER" --branch feat/aws-ecs-program --starting-sha "$(git rev-parse HEAD)"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record --file "$GATE_LEDGER" --check-id task1.clean-start --exit-status 0 --receipt-hash "$(printf '%s' clean-start | sha256sum | awk '{print $1}')"
   ```
 
@@ -110,13 +125,19 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
   ```bash
   export INTEGRATION_OWNER="${INTEGRATION_OWNER:?set the named integration coordinator}"
-  filigree plan elspeth-6343920a47 --json | uv run --frozen python -c 'import json,sys; p=json.load(sys.stdin); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4","elspeth-f5d5dddddf","elspeth-130dc48252","elspeth-0674a06468","elspeth-7d1f35e3d8"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; missing=required-done; assert not missing, f"implementation steps not done: {sorted(missing)}"; assert any(s["issue_id"] == "elspeth-05396fed38" for s in steps), "Plan 12 tracker step missing"'
+  filigree plan elspeth-6343920a47 --json --detail full > /tmp/aws-ecs-plan12-start.json
+  uv run --frozen python -c 'import json,sys; p=json.load(open("/tmp/aws-ecs-plan12-start.json")); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4","elspeth-f5d5dddddf","elspeth-130dc48252","elspeth-0674a06468","elspeth-7d1f35e3d8"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; missing=required-done; assert not missing, f"implementation steps not done: {sorted(missing)}"; assert any(s["issue_id"] == "elspeth-05396fed38" for s in steps), "Plan 12 tracker step missing"'
+  while read -r anchor; do
+      [[ "$anchor" =~ ^feat/aws-ecs-program@[0-9a-f]{40}$ ]]
+      CLOSE_SHA="${anchor##*@}"
+      git merge-base --is-ancestor "$CLOSE_SHA" HEAD
+  done < <(jq -r '.phases[].steps[] | select(.issue_id != "elspeth-05396fed38") | .close_commit' /tmp/aws-ecs-plan12-start.json)
   filigree show elspeth-7d1f35e3d8 --json | jq -e '(.blocked_by | sort) as $deps | ($deps | index("elspeth-0674a06468")) != null and ($deps | index("elspeth-7fe6aa531f")) != null' >/dev/null
   PLAN12_JSON="$(filigree show elspeth-05396fed38 --json)"
   PLAN12_STATUS="$(jq -r .status <<<"$PLAN12_JSON")"
   PLAN12_ASSIGNEE="$(jq -r '.assignee // ""' <<<"$PLAN12_JSON")"
   if test "$PLAN12_STATUS" = "pending" && test -z "$PLAN12_ASSIGNEE"; then
-      filigree start-work elspeth-05396fed38 --assignee "$INTEGRATION_OWNER" --actor "$INTEGRATION_OWNER"
+      filigree start-work elspeth-05396fed38 --assignee "$INTEGRATION_OWNER" --actor "$INTEGRATION_OWNER" --commit "feat/aws-ecs-program@$(git rev-parse HEAD)"
   else
       test "$PLAN12_STATUS" = "in_progress"
       test "$PLAN12_ASSIGNEE" = "$INTEGRATION_OWNER"
@@ -161,8 +182,8 @@ Task 1 starts and records the matrix in the protected gate ledger.
   or image-label fiction. If a failure later reopens implementation, amend or
   replace the candidate as appropriate and restart this plan from Task 1.
 
-- [ ] Verify that the lockfile represents the merged 02/06/07 dependency set;
-  do not regenerate it during closeout:
+- [ ] Verify that the lockfile represents the serially integrated 02/06/07
+  dependency set; do not regenerate it during closeout:
 
   ```bash
   uv lock --check
@@ -178,9 +199,10 @@ Task 1 starts and records the matrix in the protected gate ledger.
   used by the live CI test and static-analysis jobs. If either command reports
   lock drift, reopen the owning slice: Plan 02 for PostgreSQL, Plan 06 for the
   initial AWS packages, or Plan 07 for the final Jinja2-extended source+sink
-  AWS extra. Rebase in dependency order, run `uv lock`, commit the regenerated
-  file with that repair, and restart this plan. Never resolve `uv.lock` by
-  editing conflict markers or choosing one side.
+  AWS extra. Reopen the owner and affected descendants, repair and re-execute
+  them in dependency order on the current program tip, run `uv lock` under the
+  owning slice, commit the regenerated file, and restart this plan. Never
+  resolve `uv.lock` by editing conflict markers or choosing one side.
 
 - [ ] Capture the candidate commit for the final evidence record:
 
@@ -191,11 +213,14 @@ Task 1 starts and records the matrix in the protected gate ledger.
   **Expected result:** one 40-character commit SHA. Every later task must run
   against this SHA unless a failure causes a repair and full restart.
   Bind that SHA into the protected gate ledger; subsequent records reject any
-  different worktree HEAD.
+  different worktree HEAD. Any code, documentation, lockfile, or generated-file
+  change after this point invalidates every candidate receipt and restarts this
+  plan from Task 1; evidence from different SHAs may never be combined.
 
 **Definition of Done:**
 
-- [ ] `release/0.7.1` is clean.
+- [ ] `feat/aws-ecs-program` is clean and `release/0.7.1` still equals
+  `RELEASE_START_SHA`.
 - [ ] Project and installed distribution versions are exactly 0.7.1.
 - [ ] `CHANGELOG.md` has a dated 0.7.1 release entry covering this program's
   public behavior and operational constraints.
@@ -472,28 +497,35 @@ Task 1 starts and records the matrix in the protected gate ledger.
 - Reference: `.github/workflows/ci.yaml`
 - No file changes are expected.
 
-- [ ] Publish the exact candidate branch and open or reuse its unmerged release
-  PR to `main`. The PR is the review/merge surface, but it is **not** the
-  exact-SHA CI surface: GitHub Actions checks out the synthetic merge ref for a
-  `pull_request` event, so that run's `headSha` is not `CANDIDATE_SHA`.
+- [ ] Publish only the exact program-branch candidate for hosted review and CI.
+  Do not push or update `release/0.7.1`, and do not use it as the PR head.
 
-  ```bash
+  ~~~bash
   export CANDIDATE_SHA="$(git rev-parse HEAD)"
-  git push origin HEAD:release/0.7.1
-  PR_NUMBER="$(gh pr list --state open --base main --head release/0.7.1 --json number,headRefOid --jq 'map(select(.headRefOid == env.CANDIDATE_SHA)) | first | .number // empty')"
+  export PROGRAM_BRANCH="feat/aws-ecs-program"
+  test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  REMOTE_PROGRAM_SHA="$(git ls-remote --heads origin "refs/heads/$PROGRAM_BRANCH" | awk '{print $1}')"
+  if test -n "$REMOTE_PROGRAM_SHA"; then
+      git merge-base --is-ancestor "$REMOTE_PROGRAM_SHA" "$CANDIDATE_SHA"
+  fi
+  git push origin "$CANDIDATE_SHA:refs/heads/$PROGRAM_BRANCH"
+  test "$(git ls-remote --heads origin "refs/heads/$PROGRAM_BRANCH" | awk '{print $1}')" = "$CANDIDATE_SHA"
+  PR_NUMBER="$(gh pr list --state open --base release/0.7.1 --head feat/aws-ecs-program --json number,headRefOid --jq 'map(select(.headRefOid == env.CANDIDATE_SHA)) | first | .number // empty')"
   if test -z "$PR_NUMBER"; then
-      PR_URL="$(gh pr create --base main --head release/0.7.1 --title 'release: 0.7.1' --body 'Release candidate for AWS ECS runtime readiness. Do not merge until Plan 12 Task 9 returns GO.')"
+      PR_URL="$(gh pr create --base release/0.7.1 --head feat/aws-ecs-program --title 'release: AWS ECS 0.7.1 candidate' --body 'Candidate review surface only. Do not merge this PR; Plan 12 Task 9 performs the final exact-SHA fast-forward after Tasks 1-8 pass.')"
       PR_NUMBER="${PR_URL##*/}"
   fi
-  test "$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)" = "$CANDIDATE_SHA"
-  test "$(gh pr view "$PR_NUMBER" --json baseRefName --jq .baseRefName)" = "main"
-  gh pr checks "$PR_NUMBER" --watch --interval 30
-  ```
+  test "$(gh pr view "$PR_NUMBER" --json state,baseRefName,headRefName,headRefOid --jq '.state + ":" + .baseRefName + ":" + .headRefName + ":" + .headRefOid')" = "OPEN:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA"
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  ~~~
 
-  If the integration owner lacks push/PR authority, obtain this operator
-  action. Do not merge the PR during this task; live AWS acceptance still
-  remains. The PR's own merge-ref checks may run and must not be red, but they
-  do not substitute for the exact-head proof below.
+  If the coordinator lacks feature-branch push authority, obtain the named
+  release operator action. A non-fast-forward remote program branch, missing
+  authority, or any release-branch movement is blocked. Hosted exact-SHA proof
+  comes from the immutable temporary ref below; the unmerged candidate-review
+  PR exists to bind review/control-manifest metadata and its merge ref may not
+  substitute.
 
 - [ ] Trigger separate exact-SHA runs through the workflows' existing `RC*`
   push selector. Use a candidate-derived, immutable temporary ref; never
@@ -560,8 +592,8 @@ Task 1 starts and records the matrix in the protected gate ledger.
   Record all three run IDs/URLs plus `CI_REF`, then delete the compare-verified
   temporary ref before leaving Task 6. The EXIT trap performs the same guarded
   deletion on failure, because Task 8 has not yet been armed. An absent
-  eligible run, a red PR check, a moved pre-existing ref, failed ref deletion,
-  or a non-push/merge-ref run is blocked, not passed.
+  eligible run, a moved pre-existing ref, failed ref deletion, or a
+  non-push/merge-ref run is blocked, not passed.
 
   **Expected result:** every command exits 0. The `CI Success` job is the
   repository-owned aggregate for static analysis, the Python 3.12/3.13 test
@@ -572,12 +604,13 @@ Task 1 starts and records the matrix in the protected gate ledger.
 **Definition of Done:**
 
 - [ ] A completed successful `ci.yaml` run exists for the exact candidate SHA.
-- [ ] The unmerged `release/0.7.1` → `main` PR points at that SHA, and the
-  acceptance run was an exact-SHA `push` event on its immutable temporary
-  `RC*` ref rather than a PR merge-ref run.
+- [ ] The remote `feat/aws-ecs-program` branch and its unmerged review PR to
+  `release/0.7.1` point at the candidate while the release branch remains at
+  `RELEASE_START_SHA`; the acceptance run was an exact-SHA `push` event on its
+  immutable temporary `RC*` ref.
 - [ ] Its `CI Success` umbrella job concluded successfully.
 - [ ] The exact-SHA CI, CodeQL, and signed-allowlist run IDs/URLs are recorded,
-  all succeeded, the PR checks are green, and the temporary RC ref is absent.
+  all succeeded and the temporary RC ref is absent.
 
 ---
 
@@ -1766,24 +1799,56 @@ and cleanup completed on time.
   **Expected result:** all commands exit 0, and the SHA matches the candidate
   recorded in Task 1.
 
-- [ ] Reconfirm the remote/release boundary immediately before verdict:
+- [ ] Reconfirm the candidate and hosted-CI boundary, then perform the one
+  final fast-forward into the paused release branch. This is the only step
+  authorized to update release/0.7.1.
 
-  ```bash
-  CI_REF="RC0.7.1-${CANDIDATE_SHA:0:12}"
+  ~~~bash
+  set -Eeuo pipefail
+  test "$(git branch --show-current)" = "feat/aws-ecs-program"
+  test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+  test -z "$(git status --porcelain)"
+
+  CI_REF="$(printf 'RC0.7.1-%s' "$(printf '%s' "$CANDIDATE_SHA" | cut -c1-12)")"
   PR_NUMBER="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field release_pr_number)"
   CI_RUN_ID="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field ci_run_id)"
-  test "$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')" = "$CANDIDATE_SHA"
-  test "$(gh pr view "$PR_NUMBER" --json state,baseRefName,headRefName,headRefOid --jq '.state + ":" + .baseRefName + ":" + .headRefName + ":" + .headRefOid')" = "OPEN:main:release/0.7.1:$CANDIDATE_SHA"
+  test "$(git ls-remote --heads origin refs/heads/feat/aws-ecs-program | awk '{print $1}')" = "$CANDIDATE_SHA"
+  test "$(gh pr view "$PR_NUMBER" --json state,baseRefName,headRefName,headRefOid --jq '.state + ":" + .baseRefName + ":" + .headRefName + ":" + .headRefOid')" = "OPEN:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA"
   test "$(gh run view "$CI_RUN_ID" --json event,headSha,status,conclusion --jq '.event + ":" + .headSha + ":" + .status + ":" + .conclusion')" = "push:$CANDIDATE_SHA:completed:success"
-  test -z "$(git ls-remote --heads origin "refs/heads/${CI_REF}")"
+  test -z "$(git ls-remote --heads origin "refs/heads/$CI_REF")"
   test "$(gh release list --limit 100 --json tagName --jq '[.[] | select(.tagName == "v0.7.1")] | length')" = "0"
   test -z "$(git tag --list v0.7.1)"
   test -z "$(git ls-remote --tags origin refs/tags/v0.7.1 'refs/tags/v0.7.1^{}')"
-  ```
 
-  **Expected result:** the release branch and open PR still point to the
-  candidate, the exact-SHA run is unchanged and green, the temporary RC ref is
-  absent, and no local or GitHub `v0.7.1` release/tag exists prematurely.
+  test "$(git -C /home/john/elspeth branch --show-current)" = "release/0.7.1"
+  test -z "$(git -C /home/john/elspeth status --porcelain)"
+  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$RELEASE_START_SHA"
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  REMOTE_RELEASE_SHA="$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')"
+  test -z "$REMOTE_RELEASE_SHA" || test "$REMOTE_RELEASE_SHA" = "$RELEASE_START_SHA"
+  git -C /home/john/elspeth merge --ff-only "$CANDIDATE_SHA"
+  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$CANDIDATE_SHA"
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$CANDIDATE_SHA"
+  test -z "$(git -C /home/john/elspeth status --porcelain)"
+  git -C /home/john/elspeth push origin release/0.7.1
+  test "$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')" = "$CANDIDATE_SHA"
+
+  filigree plan elspeth-6343920a47 --json --detail full > /tmp/aws-ecs-final-plan.json
+  test "$(jq '[.phases[].steps[] | select(.issue_id != "elspeth-05396fed38")] | length' /tmp/aws-ecs-final-plan.json)" -eq 19
+  while read -r anchor; do
+      test -n "$anchor"
+      [[ "$anchor" =~ ^feat/aws-ecs-program@[0-9a-f]{40}$ ]]
+      CLOSE_SHA="$(printf '%s' "$anchor" | cut -d@ -f2)"
+      git -C /home/john/elspeth merge-base --is-ancestor "$CLOSE_SHA" release/0.7.1
+  done < <(jq -r '.phases[].steps[] | select(.issue_id != "elspeth-05396fed38") | .close_commit' /tmp/aws-ecs-final-plan.json)
+  ~~~
+
+  **Expected result:** the program worktree and candidate are unchanged, the
+  exact-SHA hosted run remains green, no temporary/ref/tag leak exists, the
+  local and remote release branch started at RELEASE_START_SHA and now equal
+  CANDIDATE_SHA by fast-forward, both worktrees are clean, and all 19
+  prerequisite close SHAs are release ancestors. Any failure is NO-GO; do not
+  create a merge commit, force-push, or issue a partial verdict.
 
 - [ ] Return **GO** only when every checkbox in Tasks 1–8 is backed by an exit-0
   result or explicit live acceptance evidence bound to that SHA. Report the
@@ -1811,13 +1876,16 @@ and cleanup completed on time.
 - [ ] On GO only, finalize and checksum the protected gate ledger, add the
   candidate SHA, exact-SHA workflow IDs, AWS change-record ID, cleanup receipt,
   and verdict as a sanitized Filigree comment, then close
-  `elspeth-05396fed38` with that reason under `INTEGRATION_OWNER`. Re-read the
-  issue and require done status, matching assignee/close commit, and no missing
-  evidence fields. No earlier task may close it.
+  `elspeth-05396fed38` with that reason under `INTEGRATION_OWNER` and exact
+  anchor `release/0.7.1@$CANDIDATE_SHA`. Re-read the issue and require done
+  status, matching assignee/close commit, and no missing evidence fields. No
+  earlier task may close it.
 
 **Definition of Done:**
 
-- [ ] One unchanged `release/0.7.1` commit passed every required gate.
+- [ ] One unchanged `feat/aws-ecs-program` candidate passed every required
+  gate, then `release/0.7.1` was fast-forwarded to that exact SHA with no merge
+  commit.
 - [ ] The exact candidate image passed live AWS deployment, persistence,
   observation, and rollback acceptance.
 - [ ] Both disposable scenarios and temporary identities/tags passed the Task 8

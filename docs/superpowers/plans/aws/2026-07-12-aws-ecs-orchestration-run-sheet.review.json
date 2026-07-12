@@ -1,14 +1,14 @@
 {
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_ORCHESTRATE",
-  "summary": "The run sheet is ready for an orchestration agent. It binds the reviewed AWS plans to the live 20-step Filigree DAG, serializes release integration and closure, defines exact-owner fresh/resume/reopen behavior, preserves the Plan 02 to 06 to 07 lock chain, and gives Plans 10 and 12 explicit rollback and closeout protocols.",
+  "summary": "The run sheet is ready for orchestration. One coordinator owns one ignored feat/aws-ecs-program worktree, serializes all mutations, closes slices on truthful program-branch anchors, preserves the Plan 02 to 06 to 07 lock chain, runs the full suite only in final washup, and fast-forwards the exact tested candidate into release/0.7.1 before GO.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-  "plan_sha256": "462d52a189d0107ecad972dfbc4f92ddb40475f6898bdb18ba37c719bdec74b4",
-  "reviewed_at": "2026-07-12T09:23:13Z",
+  "plan_sha256": "cc0310767206c68db1700c47109bd221eb8930bcd03592b68aff4f61a53c6cba",
+  "reviewed_at": "2026-07-12T11:58:37Z",
   "review_basis": {
     "branch": "release/0.7.1",
-    "head": "07fc10b42fa0f8683630f249489368b5b072f8ff",
-    "process": "Independent reality, quality/security, and systems/dependency reviews followed by repeated executable-command, checksum, link, JSON, shell-syntax, tracker-path, and live-DAG parity checks."
+    "head": "b50b5da62a2fee91128e9993df0828f50feaf8fc",
+    "process": "Independent xhigh reality, architecture, quality/security, and systems re-review followed by source-diff inspection, stale-term search, checksum, link, JSON, shell-syntax, workflow-trigger, tracker-path, live-DAG, critical-path, and final-fast-forward checks."
   },
   "blocking_issues": [],
   "warnings": [
@@ -37,7 +37,7 @@
     {
       "id": "B-RUN-3",
       "status": "RESOLVED",
-      "resolution": "Plan 12 is excluded from feature-worktree integration and runs directly under the coordinator on release/0.7.1, with Task 1 owning claim, release commit, and candidate freeze ordering."
+      "resolution": "Plan 12 runs Tasks 1 through 8 on one frozen feat/aws-ecs-program candidate; Task 9 alone fast-forwards the paused release branch to that exact tested SHA before GO."
     },
     {
       "id": "B-RUN-4",
@@ -47,12 +47,12 @@
     {
       "id": "B-RUN-5",
       "status": "RESOLVED",
-      "resolution": "Worker and integrated evidence use closed schemas requiring zero exit, zero skips, full collected-test accounting, and a distinct post-rebase envelope bound to the rebased SHA."
+      "resolution": "Slice and integrated evidence use closed schemas requiring zero exit, zero skips, full collected-test accounting, and an envelope bound to the current shared program tip."
     },
     {
       "id": "B-RUN-6",
       "status": "RESOLVED",
-      "resolution": "Fresh and interrupted work use exact-owner historical claim anchors, recover partial setup without abandoning WIP, heartbeat long leases, and close only after fast-forward integration and anchor revalidation."
+      "resolution": "Fresh and interrupted work use exact-owner historical claim anchors, recover partial setup without abandoning WIP, heartbeat long leases, and close only after focused program-tip verification and anchor revalidation."
     },
     {
       "id": "B-RUN-7",
@@ -85,7 +85,7 @@
     "all local run-sheet links resolve",
     "all AWS review JSON parses",
     "all Markdown code fences are balanced",
-    "all 30 dedented Bash fences pass bash -n",
+    "all 56 Bash or shell fences in the five reviewed sources pass bash -n",
     "git diff --check passes",
     "no pre-relocation AWS plan path remains in repository or live milestone data",
     "live Filigree milestone contains exactly 20 expected steps and every direct dependency matches",

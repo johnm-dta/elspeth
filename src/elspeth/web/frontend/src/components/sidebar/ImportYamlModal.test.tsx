@@ -6,6 +6,7 @@ import { parseDocument } from "yaml";
 import {
   ImportYamlModal,
   ImportYamlModalHost,
+  analyseImportYamlDraft,
   buildImportConfirmMessage,
   buildImportSuccessMessage,
   findImportYamlSourceBindingCandidates,
@@ -97,6 +98,44 @@ const ADVANCED_EXPERIMENT_YAML =
   "    options:\n" +
   "      path: outputs/experiment_compare.jsonl\n" +
   "      format: jsonl\n";
+
+// Two named sources publish into a declared `queue` named `inbound`; a
+// downstream transform consumes it. Exercises queue import preflight
+// recognition and step counting.
+const QUEUE_PIPELINE_YAML =
+  "sources:\n" +
+  "  orders:\n" +
+  "    plugin: csv\n" +
+  "    on_success: inbound\n" +
+  "  refunds:\n" +
+  "    plugin: csv\n" +
+  "    on_success: inbound\n" +
+  "queues:\n" +
+  "  inbound:\n" +
+  "    description: Orders and refunds interleave here\n" +
+  "transforms:\n" +
+  "  - name: summarize\n" +
+  "    plugin: llm\n" +
+  "    input: inbound\n" +
+  "    on_success: result\n" +
+  "sinks:\n" +
+  "  result:\n" +
+  "    plugin: json\n";
+
+// The top-level `queues` value is a mapping (so preflight counts it), but the
+// `inbound` entry is a bare scalar rather than a mapping — an entry-level
+// defect the SERVER validation path must catch, not one the client silently
+// discards.
+const QUEUE_MALFORMED_ENTRY_YAML =
+  "sources:\n" +
+  "  orders:\n" +
+  "    plugin: csv\n" +
+  "    on_success: inbound\n" +
+  "queues:\n" +
+  "  inbound: not-a-mapping\n" +
+  "sinks:\n" +
+  "  result:\n" +
+  "    plugin: json\n";
 
 function makeBlob(overrides: Partial<BlobMetadata> = {}): BlobMetadata {
   return {
@@ -463,6 +502,21 @@ describe("ImportYamlModal", () => {
     expect(
       screen.getByText("1 source, 2 processing steps, 1 output"),
     ).toBeInTheDocument();
+  });
+
+  it("recognises a top-level queues section and counts queue nodes as processing steps", () => {
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(QUEUE_PIPELINE_YAML);
+
+    expect(screen.getByText("Parsed preview")).toBeInTheDocument();
+    // Two sources; the queue node AND the transform each count as one
+    // processing step; one sink. A queue must not be flagged as an unknown
+    // section, nor counted as a source/output.
+    expect(
+      screen.getByText("2 sources, 2 processing steps, 1 output"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Ready for server validation/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^import$/i })).not.toBeDisabled();
   });
 
   it("preflights a very large paste without throwing", () => {
@@ -1114,5 +1168,38 @@ describe("ImportYamlModal", () => {
       expect(screen.getByText(buildImportSuccessMessage(8))).toBeInTheDocument(),
     );
     expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", PIPELINE_YAML);
+  });
+});
+
+describe("analyseImportYamlDraft queue recognition", () => {
+  it("counts a queue section as a processing step, not a source or output", () => {
+    const analysis = analyseImportYamlDraft(QUEUE_PIPELINE_YAML);
+    expect(analysis.sectionsParsed).toBe(true);
+    expect(analysis.canImport).toBe(true);
+    expect(analysis.sourceCount).toBe(2);
+    // queue `inbound` + transform `summarize`.
+    expect(analysis.stepCount).toBe(2);
+    expect(analysis.outputCount).toBe(1);
+  });
+
+  it("keeps a malformed queue entry importable so the server validates it", () => {
+    const analysis = analyseImportYamlDraft(QUEUE_MALFORMED_ENTRY_YAML);
+    // The `queues` section is a mapping (so the queue still counts as a
+    // structural step); the bad entry value is left for the server rather than
+    // being silently discarded client-side.
+    expect(analysis.canImport).toBe(true);
+    expect(analysis.stepCount).toBe(1);
+  });
+
+  it("leaves queue-free import preflight unchanged", () => {
+    const analysis = analyseImportYamlDraft(PIPELINE_YAML);
+    expect(analysis.sourceCount).toBe(1);
+    expect(analysis.stepCount).toBe(0);
+    expect(analysis.outputCount).toBe(1);
+    expect(analysis.canImport).toBe(true);
+  });
+
+  it("names queues in the required-section message", () => {
+    expect(IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE).toContain("queues");
   });
 });

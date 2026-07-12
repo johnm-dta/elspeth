@@ -48,7 +48,8 @@
   .type-badge-gate,
   .type-badge-sink,
   .type-badge-aggregation,
-  .type-badge-coalesce {
+  .type-badge-coalesce,
+  .type-badge-queue {
     border-width: 2px;
     forced-color-adjust: none;
   }

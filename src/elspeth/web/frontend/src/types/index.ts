@@ -98,12 +98,22 @@ export interface SourceSpec {
 }
 
 /**
+ * Closed vocabulary of composer processing-node types.
+ *
+ * Mirrors the backend `NodeType` / `COMPOSER_NODE_TYPES` in
+ * src/elspeth/web/composer/state.py. `queue` is the structural fan-in
+ * primitive: id == input, plugin null, description-only options — one or more
+ * upstream producers, exactly one ordinary downstream consumer.
+ */
+export type NodeType = "transform" | "gate" | "aggregation" | "coalesce" | "queue";
+
+/**
  * A node in the pipeline composition DAG.
  * Matches backend CompositionState.to_dict() node serialization.
  */
 export interface NodeSpec {
   id: string;
-  node_type: "transform" | "gate" | "aggregation" | "coalesce";
+  node_type: NodeType;
   plugin: string | null;
   input: string;
   on_success: string | null;

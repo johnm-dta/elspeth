@@ -66,6 +66,13 @@
   border: 1px solid var(--color-badge-coalesce-border);
 }
 
+/* Queue — pink (structural fan-in; interleaves incoming rows) */
+.type-badge-queue {
+  background-color: var(--color-badge-queue-bg);
+  color: var(--color-badge-queue);
+  border: 1px solid var(--color-badge-queue-border);
+}
+
 
 /* ---------------------------------------------------------------------------
    Status Badge Utility Classes

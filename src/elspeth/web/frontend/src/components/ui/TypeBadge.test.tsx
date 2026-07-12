@@ -27,4 +27,19 @@ describe("TypeBadge", () => {
     const badge = screen.getByTestId("tb");
     expect(badge).toHaveClass("type-badge", "type-badge-source", "x");
   });
+  it("renders a queue badge with the base + queue modifier class and accessible label", () => {
+    render(<TypeBadge type="queue" />);
+    const badge = screen.getByText("queue");
+    expect(badge).toHaveClass("type-badge", "type-badge-queue");
+  });
+  it("lets children override the queue label while keeping the queue class (compact contexts)", () => {
+    render(<TypeBadge type="queue">Inbound queue</TypeBadge>);
+    const badge = screen.getByText("Inbound queue");
+    expect(badge).toHaveClass("type-badge-queue");
+  });
+  it("forwards className and DOM props for a queue badge", () => {
+    render(<TypeBadge type="queue" className="x" data-testid="qb" />);
+    const badge = screen.getByTestId("qb");
+    expect(badge).toHaveClass("type-badge", "type-badge-queue", "x");
+  });
 });

@@ -77,6 +77,10 @@
      a greener semantic token, so a completed badge next to a coalesce node
      no longer collapses into one hue. */
   --color-badge-coalesce:    #18c2c0;
+  /* Queue — pink, outside every other badge family so structural fan-in reads
+     as its own primitive. Shares one reviewed palette with the website
+     hand-mirror; #ff91c8 on #4a2238 is ~6.43:1 (clears the 3:1 badge gate). */
+  --color-badge-queue:       #ff91c8;
 
   /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
   --color-badge-source-bg:   #184244;
@@ -85,6 +89,7 @@
   --color-badge-sink-bg:     #2e3737;
   --color-badge-aggregation-bg: #1b4753;
   --color-badge-coalesce-bg: #10434a;
+  --color-badge-queue-bg:    #4a2238;
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(77, 184, 154, 0.3);
@@ -93,6 +98,7 @@
   --color-badge-sink-border:        rgba(224, 112, 64, 0.3);
   --color-badge-aggregation-border: rgba(97, 218, 255, 0.3);
   --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
+  --color-badge-queue-border:       rgba(255, 145, 200, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
   --color-success:           #63d487;
@@ -349,6 +355,9 @@
   /* Coalesce shifted cyan-ward to break the proximity to --color-success
      (#0d8a88) on light mode; sits between aggregation and success. */
   --color-badge-coalesce:    #0e8090;
+  /* Queue — deep pink, mirror of the dark #ff91c8; #a13770 on #f3e1eb is
+     ~5.09:1 (clears the 3:1 badge gate). */
+  --color-badge-queue:       #a13770;
 
   /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
   --color-badge-source-bg:   #dcebe9;
@@ -357,6 +366,7 @@
   --color-badge-sink-bg:     #ede4e1;
   --color-badge-aggregation-bg: #dcecf1;
   --color-badge-coalesce-bg: #d8eaec;
+  --color-badge-queue-bg:    #f3e1eb;
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(42, 138, 112, 0.35);
@@ -365,6 +375,7 @@
   --color-badge-sink-border:        rgba(184, 85, 48, 0.35);
   --color-badge-aggregation-border: rgba(40, 144, 184, 0.35);
   --color-badge-coalesce-border:    rgba(14, 128, 144, 0.35);
+  --color-badge-queue-border:       rgba(161, 55, 112, 0.35);
 
   /* Per-node validation indicator borders */
   --color-node-valid: #0d8a88;

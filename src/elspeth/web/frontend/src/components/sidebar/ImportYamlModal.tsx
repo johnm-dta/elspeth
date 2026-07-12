@@ -57,7 +57,7 @@ const IMPORT_YAML_GENERIC_ERROR_DETAIL = "Failed to import YAML. Please try agai
 // syntactically valid YAML, mapping root, and at least one runtime pipeline
 // section. Plugin/schema validation remains server-owned.
 export const IMPORT_YAML_SECTIONS_REQUIRED_MESSAGE =
-  "Pipeline YAML must define at least one pipeline section: sources, source, transforms, gates, aggregations, coalesce, or sinks.";
+  "Pipeline YAML must define at least one pipeline section: sources, source, transforms, gates, aggregations, coalesce, queues, or sinks.";
 
 interface ImportErrorInfo {
   title: string;
@@ -124,6 +124,7 @@ type ImportYamlSection =
   | "aggregations"
   | "coalesce"
   | "gates"
+  | "queues"
   | "sinks"
   | "source"
   | "sources"
@@ -133,6 +134,7 @@ const IMPORT_YAML_SECTION_ALIASES: Record<string, ImportYamlSection> = {
   aggregations: "aggregations",
   coalesce: "coalesce",
   gates: "gates",
+  queues: "queues",
   sinks: "sinks",
   source: "source",
   sources: "sources",
@@ -204,7 +206,7 @@ function countParsedSectionEntries(
   if (section === "source") {
     return isRecord(value) ? 1 : 'Section "source" must be a mapping.';
   }
-  if (section === "sources" || section === "sinks") {
+  if (section === "sources" || section === "queues" || section === "sinks") {
     return countRecordEntries(value, section);
   }
   return countSequenceEntries(value, section);

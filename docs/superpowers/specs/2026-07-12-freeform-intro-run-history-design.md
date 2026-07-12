@@ -10,11 +10,43 @@ Replace the interactive freeform starter-example splash with a short, quiet intr
 
 ## Freeform empty state
 
-The empty freeform conversation renders one compact guide card:
+The empty freeform conversation renders one static, scannable operator primer.
+It introduces ELSPETH's vocabulary without adding disclosures, carousels,
+template selection, or other interaction:
 
-- Heading: **Build a pipeline**
-- Copy: “Describe what ELSPETH should read, how the data should change, and where the results should go. ELSPETH will propose an auditable pipeline for you to review before it runs.”
+- Heading: **How pipelines work**
+- Opening: “A pipeline is a controlled route for information. You choose what
+  enters, what happens to it, and where the result goes. ELSPETH records each
+  step so you can review how every output was produced.”
+- **The three building blocks**:
+  - **Sources** bring records into the pipeline from files, databases, APIs, or
+    text. ELSPETH tracks each incoming record through the run.
+  - **Transforms** examine or change records. They can clean fields, enrich
+    content, apply an LLM, or prepare data for the next step.
+  - **Sinks** receive records at the end of a route. They can write results to
+    files, data stores, or other configured destinations; records requiring
+    attention can follow a separate route.
+- **Wiring the flow**: “Wiring is the set of connections between these
+  components. A simple pipeline runs from source to transforms to sink. More
+  involved pipelines can use flow operators:”
+  - **Gate** directs each record according to a stated condition.
+  - **Fork** copies a record into parallel, independently tracked paths.
+  - **Coalesce** waits for related fork paths and combines their results.
+  - **Aggregate** collects a group of records and processes them together, for
+    example to produce totals, statistics, or a report.
+  - **Queue** coordinates several upstream paths feeding one next step while
+    keeping their records separate.
+  - **Expand** turns one record containing several items into separately
+    tracked records.
+- Closing: “Describe the outcome you need in ordinary language. ELSPETH will
+  propose the components and their wiring; review the graph and details before
+  you run it.”
 - Secondary action: **Don’t show this again**
+
+The content uses headings and a definition list so an operator can scan it
+without reading every sentence. The card remains visually quiet and bounded;
+it may grow wider than the original brief card but must not become a full-page
+welcome splash.
 
 The template-card grid, starter-examples disclosure, and all example-selection interaction are removed from this surface. After dismissal, an empty freeform conversation renders no replacement artwork or placeholder; the conversation background remains blank and the composer stays available.
 
@@ -71,7 +103,9 @@ On narrow containers, metadata and actions wrap below the primary label without 
 
 - Backend model, schema, service, and route tests cover default null, timestamp persistence, absent-field preservation, explicit-null reset, and account isolation.
 - Frontend store tests cover bootstrap, successful dismissal, failed dismissal, and persistence across a fresh render.
-- Empty-state component and `ChatPanel` tests confirm the intro gating, exact copy, disabled saving state, removal after success, blank dismissed state, and absence of template cards.
+- Empty-state component and `ChatPanel` tests confirm the intro gating, operator
+  primer headings and terms, disabled saving state, removal after success,
+  blank dismissed state, and absence of template cards.
 - Run-history tests confirm deterministic ordinals, newest-first display, locale-safe complete timestamps, UUID secondary metadata, accessible action names, empty history, and live-run cancellation.
 - Accessibility tests cover the introduction and updated run-history dialog.
 - Playwright verifies desktop and narrow layouts, persistent dismissal after reload, blank dismissed freeform state, readable run rows, keyboard focus, and zero console errors.

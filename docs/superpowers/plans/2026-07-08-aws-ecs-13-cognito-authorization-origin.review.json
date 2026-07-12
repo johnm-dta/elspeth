@@ -1,0 +1,140 @@
+{
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_EXECUTE_AFTER_PLAN_01_AND_SHARED_VERIFICATION_BASELINE",
+  "summary": "Plan 13 is implementation-ready after its two live blockers close. The repaired plan replaces the insecure implicit browser grant with public-client authorization code plus S256 PKCE, validates an exact issuer-bound authorization/token endpoint pair, hardens URL parser differentials and browser callback handling, validates Cognito access tokens with an explicit client_id profile, and makes CSP, logging, redaction, shared-provider regressions, repository gates, and tracker handoff executable.",
+  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-13-cognito-authorization-origin.md",
+  "reviewed_at": "2026-07-12T05:23:29Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "41039f85a922a9ada297048042998d3256a3ab02",
+    "baseline": "Live Plan 13, Plans 00/01/10/12, the runtime-readiness specification, public release guarantee, current WebSettings/app/discovery/JWKS/OIDC/Entra/routes/CLI/LoginPage/CSP code and tests, current Filigree DAG, and current dirty-worktree state were inspected. Loomweave was refreshed at the live HEAD. Primary RFC, AWS Cognito, and PyJWT documentation supplied the OAuth, token-claim, PKCE, and expiry-requirement authority."
+  },
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "R13-1",
+      "status": "DEPENDENCY",
+      "detail": "Plan 13 remains pending and unassigned. It is correctly blocked by Plan 01 elspeth-b9e8b5d24b and shared signed-tier/trust-boundary/Wardline baseline elspeth-8166b310e7. This review did not claim or transition it."
+    },
+    {
+      "id": "R13-2",
+      "status": "UPSTREAM_LOGGING_POLICY",
+      "detail": "Cognito necessarily returns the short-lived PKCE-bound code in the callback query. Plan 13 disables Uvicorn raw access logs and adds no-referrer/no-cache handling; Plan 12 proves the disposable ALB has access logging disabled. A production ALB that enables access logs needs an approved retention/access policy because frontend cleanup cannot redact an upstream request log."
+    },
+    {
+      "id": "R13-3",
+      "status": "EXISTING_SESSION_POLICY",
+      "detail": "The accepted access token continues through ELSPETH's existing auth-store localStorage session policy. Plan 13 does not silently redesign product-wide session persistence; it prevents persistence of authorization codes, PKCE verifiers, ID/refresh tokens, raw token responses, and acceptance evidence."
+    },
+    {
+      "id": "R13-4",
+      "status": "LIVE_CORS_PROOF",
+      "detail": "The browser token exchange must pass the exact dynamic CSP and Cognito CORS behavior in Plan 10's real hosted-UI lane. Failure is NO-GO; workers may not fall back to implicit tokens, widen connect-src, or introduce a browser client secret."
+    },
+    {
+      "id": "R13-5",
+      "status": "CONCURRENT_WORKTREE",
+      "detail": "The shared worktree contains earlier plan-review changes and unrelated concurrent work. The review preserved them. Plan 13 execution requires a clean isolated worktree and exact changed-versus-staged path equality before commit."
+    }
+  ],
+  "resolved_findings": [
+    {
+      "id": "B13-1",
+      "status": "RESOLVED",
+      "resolution": "Replaced the implicit response_type=token architecture with a public-client authorization-code flow using transaction-specific S256 PKCE, immediate callback cleanup, and no client secret; Plans 10/12 and the specification now require code-only live acceptance."
+    },
+    {
+      "id": "B13-2",
+      "status": "RESOLVED",
+      "resolution": "Specified a paired authorization/token endpoint validator with exact normalized origins, independent allowlist validation, explicit port semantics, ASCII A-label policy, browser/parser differential rejection, unsafe-IP controls, and honest initial-destination-only scope."
+    },
+    {
+      "id": "B13-3",
+      "status": "RESOLVED",
+      "resolution": "Added issuer-bound browser and JWKS discovery, explicit endpoint-pair configuration, generic JSON collection wiring, model-time allowlist validation, exact public config shape, and raw-input-redacted settings failures."
+    },
+    {
+      "id": "B13-4",
+      "status": "RESOLVED",
+      "resolution": "Changed the browser transaction to store only state, verifier, and timestamp; set an exact five-minute lifetime; scrub before async work; require fresh backend auth config; remove URI bearer-token paths; and cover duplicate/error/mismatch/StrictMode replay."
+    },
+    {
+      "id": "B13-5",
+      "status": "RESOLVED",
+      "resolution": "Added a 64 KiB streamed token-response cap, 16 KiB access-token cap, no-redirect/no-credentials/no-referrer/no-store fetch posture, static errors, and no persistence of ID/refresh tokens or raw responses."
+    },
+    {
+      "id": "B13-6",
+      "status": "RESOLVED",
+      "resolution": "Removed the conflicting static CSP meta policy and required an equivalent dynamic response-header CSP whose connect-src adds only the validated token origin; added CSP, Referrer-Policy, callback cache, and built-index tests."
+    },
+    {
+      "id": "B13-7",
+      "status": "RESOLVED",
+      "resolution": "Made callback-query logging explicit: Uvicorn raw access logs are disabled and tested, the runbook documents upstream retention, and live acceptance proves its disposable ALB access logs are disabled."
+    },
+    {
+      "id": "B13-8",
+      "status": "RESOLVED",
+      "resolution": "Defined the Cognito client_id token profile as exact client ID plus token_use=access, required exp/iat/iss/sub/client_id/token_use, issuer/signature/key-ID checks, and Cognito RS256 independent of the untrusted header; default aud mode gains an explicit exp requirement."
+    },
+    {
+      "id": "B13-9",
+      "status": "RESOLVED",
+      "resolution": "Pinned audience_claim as keyword-only after cache arguments, added create_app wiring proof and Entra shared-validator regressions, and corrected public guarantee/trust-boundary metadata from ID-token/nonce claims to the actual access-token/PKCE boundary."
+    },
+    {
+      "id": "B13-10",
+      "status": "RESOLVED",
+      "resolution": "Added full Python/frontend/build/contracts/signed-tier/trust-boundary/Wardline gates, expanded elspeth-8166b310e7 to own the known honesty failure, and made that shared baseline a direct Plan 13 dependency."
+    },
+    {
+      "id": "B13-11",
+      "status": "RESOLVED",
+      "resolution": "Added isolated-worktree execution, atomic Filigree start/comment/close, exact changed-path equals staged-path proof, pre-commit and clean-post-commit requirements, and aligned typed tracker fields without claiming the issue during review."
+    },
+    {
+      "id": "B13-12",
+      "status": "RESOLVED",
+      "resolution": "Strengthened Plan 12 rollback-baseline source sentinels and Cognito app-client preflight so a partial Plan 13 implementation or implicit-enabled client cannot qualify."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "architecture_and_security": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "quality_and_executability": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "synthesis_and_current_head": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    }
+  },
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-12T05:02:00Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial review found a production implicit-token grant, incomplete origin canonicalization, optional expiry, unbound discovery, incomplete callback cleanup, raw-input reflection, insufficient shared-provider/gate coverage, and unsafe tracker/staging handoff."
+    },
+    {
+      "reviewed_at": "2026-07-12T05:15:00Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "First repair pass closed the OAuth/JWT/origin core but exposed runtime CSP blocking, mutable sessionStorage authority, unbounded token responses, callback-query logging, and incomplete signed/staging guarantees."
+    }
+  ],
+  "verification": [
+    "Three independent reviewers returned APPROVED after repairs.",
+    "Loomweave was refreshed at the live release/0.7.1 HEAD and current endpoint/JWKS/settings/app/frontend call surfaces were rechecked.",
+    "Plan 10 and Plan 12 Bash fences concatenate and pass bash -n; Markdown fences are balanced.",
+    "git diff --check passes for the repaired plan/spec set; stale implicit-enabled preflight, oidc_state rollback sentinel, and memory-only access-token claims are absent except where explicitly described as removed or forbidden behavior.",
+    "Filigree Plan 13 fields and dependency edges match the repaired plan; the issue remains pending, unassigned, and blocked. The shared baseline issue now owns signed tier, trust-boundary honesty, and Wardline restoration.",
+    "This review did not implement Plan 13, start/claim/close its issue, commit, push, merge, tag, deploy, or stage unrelated files."
+  ]
+}

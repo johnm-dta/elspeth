@@ -1,216 +1,285 @@
 # AWS ECS Doctor CLI Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `elspeth doctor aws-ecs [--init-schema] --json`, a read-only-by-default preflight (mutating only under `--init-schema`) that reports settings, DB, schema, filesystem, dependency, and plugin readiness for the AWS ECS deployment target.
+**Goal:** Add `elspeth doctor aws-ecs [--init-schema] --json`, a non-persisting-by-default preflight that reports settings, database, schema, filesystem, dependency, and plugin readiness; only `--init-schema` may create schema objects.
 
-**Architecture:** A new orchestration module `src/elspeth/web/doctor.py` builds `list[ContractCheck]` by consuming plan 01's pure `validate_aws_ecs_settings` and plan 02's `probe_*`/`init_*`, plus three novel local pieces: an exception sanitizer, a create/read/fsync/delete writability probe, and engine construction that avoids `LandscapeDB(url)`/`LandscapeDB.from_url()` (the bare constructor eagerly creates/migrates schema; `from_url(create_tables=False)` still eagerly calls `_validate_schema()`, which raises on STALE instead of returning a classification — both conflict with plan 02's non-raising `probe_landscape_schema` contract this plan needs). The connectivity/schema probe reads `settings.session_db_url`/`settings.landscape_url` directly, never `get_session_db_url()`/`get_landscape_url()` — those getters silently fall back to a local SQLite path, and doctor must never construct an engine, let alone mutate schema under `--init-schema`, against a database the operator never configured. A thin `@doctor_app.command("aws-ecs")` in `cli.py` loads settings, calls the module, and emits a bare JSON list + exit code, mirroring the existing `plugins_app` sub-Typer pattern rather than `health`'s inline dict-of-checks shape.
+**Architecture:** `src/elspeth/web/doctor.py` consumes Plan 01's pure deployment checks and Plan 02's target/probe/init APIs. Collection has four ordered phases: pure settings and logical-target validation; ephemeral filesystem and dependency/plugin checks; read-only connectivity/schema inspection of both databases; and, only for an eligible all-green preflight, initialization of repairable schema states followed by final verification. The target gate runs before any engine exists, both databases are inspected before either is mutated, and every one-shot engine is disposed in `finally`. A thin Typer subcommand emits the complete ordered `ContractCheck` report without opening `auth.db`.
 
-**Tech Stack:** Python, Typer, SQLAlchemy, pytest, CliRunner, `testcontainers[postgres]` (Task 3).
+**Read-only terminology:** The design spec requires doctor to prove filesystem permissions by creating, reading, flushing/fsyncing, and deleting a probe file as the runtime user. Therefore “read-only by default” means no persistent application, schema, configuration, or directory state is created or changed. The active probe runs in both modes, uses an unpredictable exclusive temporary file, unlinks it immediately while its descriptor remains open, and leaves no named artifact. `--init-schema` is the only mode that may persist changes, and those changes are limited to Plan 02's schema initializers.
 
-**Depends on:** Tasks 1–2: `2026-07-08-aws-ecs-01-deployment-contract.md` (`ContractCheck`, `validate_aws_ecs_settings`, `DEPLOYMENT_TARGET_AWS_ECS`), `2026-07-08-aws-ecs-02-postgres-schema-support.md` (`SchemaState`, `probe_session_schema`, `probe_landscape_schema`, `init_session_schema`, `init_landscape_schema` — advisory locking lives inside the `init_*` functions, not here; `init_landscape_schema` creates on MISSING **and** PARTIAL via `create_all(checkfirst=True)`, `init_session_schema` creates on MISSING **only** — session PARTIAL is unreachable-defensive and raises like STALE, per plan 02's probe semantics). The plugin/dependency checks in Tasks 1–2 degrade gracefully (they *report* not-registered/not-importable; unit tests monkeypatch them), so Tasks 1–2 do **not** need the plugin plans. **Task 3 additionally depends on** `…-06-s3-source.md` + `…-07-s3-sink.md` (its `all(c.ok)` assertion requires `aws_s3` registered as source *and* sink, plus `boto3` via the `aws` extra) and `…-09-bedrock-provider.md` (`bedrock` in `_PROVIDERS`) — it is a Wave 3 task even though Tasks 1–2 are Wave 2.
+**Tech Stack:** Python 3.13, Typer, SQLAlchemy 2.0, psycopg v3, pytest, `testcontainers[postgres]`.
 
-**Global Constraints:** "The command is read-only by default... `--init-schema` is the only mutating mode. It may create missing schema objects in fresh Aurora databases. It must not drop, truncate, or auto-repair existing data." "If a database contains stale or incompatible schema, doctor must fail with explicit pre-1.0 operator instructions: drop or recreate the affected Aurora database/schema..." "`elspeth doctor aws-ecs` must not open `auth.db`" — this plan's checks touch only session/landscape DBs and data/payload/blob dirs, never `auth.db`. **PARTIAL semantics (binding, cross-plan):** PARTIAL is a correct-shape-but-incomplete schema (e.g. interrupted init), additively completable by `init_*`; it is never STALE and never gets the destructive drop/recreate message. `--init-schema` creates/completes on MISSING **and** PARTIAL; the drop/recreate message fires on STALE only. Read-only mode fails closed on MISSING/PARTIAL/STALE alike but the message differs: MISSING/PARTIAL → "rerun with --init-schema"; STALE → drop/recreate. **PARTIAL is landscape-only in practice:** `probe_session_schema` never returns it — an incomplete session table set is shape-unverifiable (`_validate_current_schema` raises on any table-set mismatch before checking shapes) and classifies STALE, so the session DB surfaces only MISSING/CURRENT/STALE here (plan 02). **Note (accepted gap, mitigated in the runbook — round 3):** the spec's 45s bounded-retry-with-backoff for Aurora cold starts (spec "Aurora Serverless v2 Considerations") is scoped to "the startup validate path" (plan 04's `_probe_with_connection_budget`/`enforce_aws_ecs_contract`), not to doctor. Doctor's one-shot connectivity probe uses only the 10s `connect_timeout` — fail-fast is the right shape for an interactive/one-shot pre-traffic task, and doctor is idempotent and safe to re-run — but against a min-0-ACU Aurora cluster the *first* `--init-schema` can false-fail while the cluster wakes, which is a first-deploy flake at the one step that cannot proceed without succeeding. Plan 10's runbook therefore carries the operator precondition (item 7: set a non-zero minimum ACU or issue a warm-up connection before the first `--init-schema`); extending plan 04's retry helper to doctor remains available if this proves disruptive in practice.
+**Depends on:**
 
-### Task 1: Read-only `web/doctor.py` module + `doctor aws-ecs` command
+- Tasks 1-2 / Filigree `elspeth-dffe064287`: Plans 01 and 02.
+- Task 3 / Filigree `elspeth-397ac915b8`: Plans 06, 07, and 09 must also be integrated so `aws_s3`, `boto3`, Jinja2-backed S3 key templates, and `bedrock` can pass. The integrated tree must already include Plan 08's load-bearing web-authorship gate before the Plan 06/07 registrations, as required by the program DAG.
+- Plan 12 owns the final integrated, zero-skip Docker evidence. Plan 03 records the exact command it must repeat.
+
+**Plan 02 interfaces consumed:** `SchemaState`, `DatabaseTargetConflictError`, `SchemaInitBusyError`, `SchemaLockCleanupError`, `postgres_engine_kwargs`, `require_distinct_postgres_targets`, `probe_session_schema`, `probe_landscape_schema`, `init_session_schema`, and `init_landscape_schema`. Do not add another URL/search-path parser.
+
+**Global Constraints:**
+
+- Read raw `settings.session_db_url`, `settings.landscape_url`, and `settings.payload_store_path`; never use getters that silently fall back to local SQLite or derived paths.
+- A failed/absent/non-PostgreSQL Plan 01 URL check or failed Plan 02 target check prevents all engine construction, probes, and initialization. Same-database targets pass only when Plan 02 proves distinct explicit single-schema search paths.
+- The filesystem probe never calls `mkdir`. Missing `data_dir`, payload, or blob directories are provisioning/EFS failures in both modes; `--init-schema` does not create them or their parents. Before probing payload writability, apply the same existing-directory contract as `FilesystemPayloadStore`: no symlink and no group/world-write bits.
+- `MISSING` and Landscape `PARTIAL` are repairable only under `--init-schema`. Session partial presence classifies `STALE`. `STALE` is never mutated and receives static drop/recreate instructions.
+- Both database states must be known before either initializer runs. Any settings, target, filesystem, dependency, plugin, connectivity, or `STALE` failure blocks both initializers. A race after that preflight can still leave one target initialized and the other failed; initialization is idempotent, so the remedy is to resolve the reported failure and rerun.
+- Errors expose static context plus exception class only. Never emit URLs, credentials, SQL, driver text, paths, exception messages, or `repr()` values.
+- JSON output is a bare ordered list of `{name, ok, detail}` objects. Check names are unique and deterministic. Exit 1 when any check fails; text mode prints one line per check.
+- Doctor never opens, creates, stats, or migrates `auth.db`.
+
+---
+
+### Task 1: Add the safe report shell and CLI
 
 **Files:**
+
 - Create: `src/elspeth/web/doctor.py`
-- Modify: `src/elspeth/cli.py:60` (mirror `app.add_typer(composer_app, name="composer")` — add `doctor_app = typer.Typer(help=...)` + `app.add_typer(doctor_app, name="doctor")`; command body follows the `health` command pattern at `cli.py:2937` for lazy in-function imports, but NOT its `{status, value}` JSON shape, and NOT its `str(e)` leaks at `cli.py:3057-3061,3123-3127,3186-3191` — doctor's new code avoids repeating that anti-pattern via `sanitize_error`, it does not retroactively fix `health`)
-- Test: `tests/unit/web/test_doctor.py`, `tests/unit/cli/test_doctor_command.py`
+- Modify: `src/elspeth/cli.py` (add a `doctor` sub-Typer beside the existing sub-app registrations)
+- Create: `tests/unit/web/test_doctor.py`
+- Create: `tests/unit/cli/test_doctor_command.py`
 
-**Interfaces:**
-- Consumes: `validate_aws_ecs_settings(settings) -> list[ContractCheck]` (plan 01); `probe_session_schema(engine) -> SchemaState`, `probe_landscape_schema(engine) -> SchemaState` (plan 02); `create_session_engine(url, **kwargs) -> Engine` (`src/elspeth/web/sessions/engine.py:34` — required by the `contract_invariants.session_engine_factory` lint; note its WAL/FK PRAGMA probe raises a bare `RuntimeError` embedding `engine.url!r`, so it must be caught alongside `SQLAlchemyError`, never left to propagate); `WebSettings.session_db_url`/`.landscape_url` (raw `Optional[str]` fields, config.py — read directly, **not** `get_session_db_url()`/`get_landscape_url()`, which silently fall back to a local `sqlite:///{data_dir}/...` path); `WebSettings.get_payload_store_path()` (config.py:653-657 — no silent-fallback hazard for a writability probe); `allowed_source_directories(str(settings.data_dir))[0]` for the blob root (`src/elspeth/web/paths.py:43-46`; signature is `(data_dir: str)`, cast `Path` with `str()` per the convention at `execution/service.py:538`); `_settings_from_env() -> WebSettings` (`src/elspeth/web/app.py:547`); `get_shared_plugin_manager()` (`src/elspeth/plugins/infrastructure/manager.py:297`) and `_PROVIDERS` (`src/elspeth/plugins/transforms/llm/transform.py:251`, imported lazily inside its check, wrapped in `try/except ImportError` so a missing `llm`/`aws` extra reports itself instead of crashing); `make_url` (`sqlalchemy.engine.url` — same safe-unguarded justification as plan 01's `_check_postgres_url`: `WebSettings._validate_db_url`, config.py:334-342, guarantees any non-`None` `session_db_url`/`landscape_url` is already parseable).
-- Produces: `sanitize_error(context, exc) -> str` = `f"{context}: {type(exc).__name__}"`; `probe_writable(label, path) -> ContractCheck`; `schema_check(label, state) -> ContractCheck`; `_probe_and_check_schema(label, raw_url, probe_fn) -> ContractCheck` (private); `_check_separate_db_targets(session_url, landscape_url) -> ContractCheck` (private, advisory-only — always `ok=True`); `collect_checks(settings: WebSettings) -> list[ContractCheck]`.
+**Interfaces — Produces:**
 
 ```python
-def sanitize_error(context: str, exc: Exception) -> str:
-    return f"{context}: {type(exc).__name__}"
+def sanitize_error(context: str, exc: BaseException) -> str: ...
 
-def probe_writable(
+def probe_directory_writable(label: str, path: Path | None) -> ContractCheck: ...
+
+def plugin_and_dependency_checks() -> list[ContractCheck]: ...
+
+def collect_checks(settings: WebSettings, *, init_schema: bool = False) -> list[ContractCheck]: ...
+```
+
+`probe_directory_writable` has one implementation for both modes:
+
+1. Return a static failure when `path is None` or is not an existing directory. Never create it.
+2. Call `tempfile.mkstemp(prefix=".doctor-probe-", dir=path)` so creation is unpredictable, exclusive (`O_EXCL`), and mode-restricted by the standard library.
+3. Immediately `os.unlink(probe_name)` while the file descriptor is still open; wrap it with `os.fdopen(fd, "w+b")`, write a sentinel, flush, `os.fsync`, seek, and read the sentinel through the same descriptor. Do not reopen by pathname.
+4. In `finally`, close any still-owned descriptor and unlink the name if the early unlink did not complete. Cleanup failure is a failing sanitized check, not success.
+
+Use raw `settings.payload_store_path`. Derive the blob directory with `allowed_source_directories(str(settings.data_dir))[0]`, but only inspect it; no descendant creation is permitted. Before the payload active probe, use `lstat` to reject symlinks, non-directories, and `stat.S_IWGRP | stat.S_IWOTH`, then require `resolve(strict=True)`; convert every validation/stat/resolve failure to static label-only detail. This must match the constructor contract startup later enforces, so doctor cannot approve a path `FilesystemPayloadStore` rejects. Keep the three names `data_dir_writable`, `payload_store_writable`, and `blob_writable`.
+
+`plugin_and_dependency_checks` isolates each capability so one failure preserves the rest of the report:
+
+- `aws_s3_plugin`: call `get_shared_plugin_manager()` inside its own `try`, require `aws_s3` in both source and sink registrations, and catch sanitized `Exception`.
+- `bedrock_provider`: lazily import `_PROVIDERS` and require `bedrock`; this is an explicit narrow private-registry read until the provider registry publishes a public capability accessor. Catch sanitized `Exception`, not only `ImportError`.
+- `psycopg_dependency`, `boto3_dependency`, `ijson_dependency`, and
+  `jinja2_dependency`: independently call `importlib.import_module` and
+  independently catch sanitized `Exception`. The latter three prove the final
+  source+sink `aws` extra, rather than letting plugin discovery's lazy imports
+  mask an incomplete production install.
+
+The CLI command lazily imports `_settings_from_env`, `ContractCheck`, `collect_checks`, and `sanitize_error`. Settings construction failure becomes the sole `settings_load` check. `collect_checks` retains a last-resort `doctor_internal_error` conversion, but ordinary filesystem, plugin, dependency, target, engine, probe, and init failures are caught at their own check boundary so successful checks are not discarded. Render JSON with `dataclasses.asdict`; text uses `OK`/`FAIL` lines.
+
+- [ ] Write failing filesystem and capability tests first:
+
+  - existing directory succeeds and no `.doctor-probe-*` name remains;
+  - missing directory and `None` fail without creating anything;
+  - payload symlink and group/world-writable directories fail before the active probe, matching `FilesystemPayloadStore`, with no secret path in detail;
+  - a spy around `tempfile.mkstemp` proves unpredictable exclusive creation is used;
+  - write/read/fsync/unlink/cleanup failures are sanitized and leave no named file when cleanup is possible;
+  - two concurrent probes of the same directory do not collide;
+  - raw exception messages containing a credential URL and secret path never appear;
+  - missing/broken S3 manager, Bedrock registry import, psycopg, boto3, ijson,
+    and Jinja2 each yield their named failure while all other checks remain
+    present;
+  - `collect_checks` uses raw `payload_store_path=None` rather than the fallback from `get_payload_store_path()`;
+  - a pre-existing `auth.db` has identical bytes and stat metadata after collection and no check name contains `auth`.
+
+- [ ] Implement `sanitize_error`, the active filesystem probe, isolated capability checks, and the initial ordered collector. At this task boundary, database checks may be static `not implemented until Task 2` failures; do not construct a temporary SQLite path or duplicate Plan 02 behavior.
+- [ ] Add CLI tests for bare-list JSON, deterministic text output, exit 0/1, `--no-dotenv`, sanitized settings-load failure, and propagation of `--init-schema` to `collect_checks`.
+- [ ] Add `doctor_app` and `doctor aws-ecs` to `cli.py`. Pin the exact ordered, unique output names in a unit test so later phases replace check values in place rather than reorder them.
+- [ ] Run:
+
+  ```bash
+  uv run pytest tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py -q
+  ```
+
+  Expected: all Task 1 tests pass.
+
+- [ ] Commit only Task 1 files:
+
+  ```bash
+  git add src/elspeth/web/doctor.py src/elspeth/cli.py tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py
+  git commit -m "feat(cli): add aws-ecs doctor report shell"
+  ```
+
+---
+
+### Task 2: Add fail-closed two-phase database inspection and initialization
+
+**Files:**
+
+- Modify: `src/elspeth/web/doctor.py`
+- Modify: `tests/unit/web/test_doctor.py`
+- Modify: `tests/unit/cli/test_doctor_command.py`
+
+**Interfaces — Produces:**
+
+```python
+def database_target_check(session_url: str | None, landscape_url: str | None) -> ContractCheck: ...
+
+def schema_check(label: str, state: SchemaState) -> ContractCheck: ...
+
+def _inspect_database(
     label: str,
-    path: Path,
-    *,
-    allow_create: bool = False,
-    missing_remedy: str = "rerun with --init-schema to create it, or verify the EFS mount",
-) -> ContractCheck:
-    # Read-only-by-default discipline applies to the FILESYSTEM too: never
-    # mkdir unless the caller is in the explicit mutating mode. Creating a
-    # missing directory here would mask an unmounted EFS volume by silently
-    # writing into the container's overlay filesystem — the probe would pass
-    # while production state lands on ephemeral storage.
-    if not path.is_dir():
-        if not allow_create:
-            return ContractCheck(f"{label}_writable", False, f"directory does not exist; {missing_remedy}")
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return ContractCheck(f"{label}_writable", False, sanitize_error(f"{label} not creatable", exc))
-    # PID-suffixed filename: two doctor invocations racing the same EFS dir
-    # (spec's deploy-retry scenario) never contend for one probe path.
-    probe = path / f".doctor-probe-{os.getpid()}"
-    try:
-        with probe.open("wb") as fh:
-            fh.write(b"ok")
-            fh.flush()
-            os.fsync(fh.fileno())
-        probe.read_bytes()
-        probe.unlink()
-    except OSError as exc:
-        return ContractCheck(f"{label}_writable", False, sanitize_error(f"{label} not writable", exc))
-    return ContractCheck(f"{label}_writable", True, "writable")
+    raw_url: str,
+    probe_fn: Callable[[Engine | Connection], SchemaState],
+) -> tuple[SchemaState | None, ContractCheck]: ...
 
-def schema_check(label: str, state: SchemaState) -> ContractCheck:
-    # Single source of truth for classification-detail text in BOTH modes.
-    if state is SchemaState.CURRENT:
-        return ContractCheck(f"{label}_schema", True, "current")
-    if state in (SchemaState.MISSING, SchemaState.PARTIAL):
-        return ContractCheck(f"{label}_schema", False, "schema missing or incomplete; rerun with --init-schema to create/complete it")
-    return ContractCheck(  # STALE only: the destructive drop/recreate message
-        f"{label}_schema", False,
-        f"STALE: drop or recreate the {label} database via your environment's normal procedures, then rerun 'elspeth doctor aws-ecs --init-schema'"
-        + (" (note: an interrupted --init-schema also classifies the session database as STALE — its partial table set is shape-unverifiable, and dropping a partially-initialized database loses nothing)" if label == "session" else ""),
-    )
-
-def _probe_and_check_schema(label: str, raw_url: str | None, probe_fn: Callable[[Engine], SchemaState]) -> ContractCheck:
-    if raw_url is None:
-        return ContractCheck(f"{label}_schema", False, "cannot probe: URL not configured")
-    connect_args = {"connect_timeout": 10} if raw_url.startswith("postgresql") else {}
-    build = create_session_engine if label == "session" else (lambda url, **kw: create_engine(url, pool_pre_ping=True, **kw))
-    try:
-        engine = build(raw_url, connect_args=connect_args)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        state = probe_fn(engine)
-    except Exception as exc:  # bare RuntimeError (session PRAGMA probe) and SQLAlchemyError both land here
-        return ContractCheck(f"{label}_schema", False, sanitize_error(f"{label} connection failed", exc))
-    return schema_check(label, state)
-
-def _target_key(raw_url: str) -> tuple[str, str, str]:
-    # host/database never carry credentials in a parsed URL (those live in
-    # separate .username/.password attributes, untouched here); "options" is
-    # the conventional carrier for an explicit Postgres schema (e.g.
-    # "-c search_path=landscape") and is compared opaquely -- classifying
-    # sameness doesn't need to parse search_path itself.
-    url = make_url(raw_url)
-    return (url.host or "", url.database or "", url.query.get("options", ""))
-
-def _check_separate_db_targets(session_url: str | None, landscape_url: str | None) -> ContractCheck:
-    # Advisory only (spec's "should", not "must") -- ok=True on every branch,
-    # per plan 01's framing: ContractCheck.ok is binary with no severity
-    # tier, so an ok=False here would over-enforce a soft recommendation.
-    # This IS the doctor-owned advisory output plan 01 deferred to, not a
-    # new gate.
-    if session_url is None or landscape_url is None:
-        return ContractCheck("separate_db_targets", True, "cannot compare: one or both URLs not configured")
-    if _target_key(session_url) == _target_key(landscape_url):
-        return ContractCheck(
-            "separate_db_targets", True,
-            "session and landscape URLs resolve to the same logical target (host+database+schema); "
-            "the spec recommends separate databases or schemas even when sharing one Aurora cluster",
-        )
-    return ContractCheck("separate_db_targets", True, "separate targets")
-
-def collect_checks(settings: WebSettings) -> list[ContractCheck]:
-    checks = list(validate_aws_ecs_settings(settings))
-    # data_dir root: allow_create NEVER passed — a missing root IS the
-    # unmounted-EFS signal, and --init-schema must not create it either
-    # (Task 2 threads allow_create into the two SUBDIR probes only).
-    checks.append(probe_writable(
-        "data_dir", settings.data_dir,
-        missing_remedy="verify the EFS volume is mounted at ELSPETH_WEB__DATA_DIR (doctor never creates the data_dir root)",
-    ))
-    checks.append(probe_writable("payload_store", settings.get_payload_store_path()))
-    checks.append(probe_writable("blob", allowed_source_directories(str(settings.data_dir))[0]))
-    checks.append(_probe_and_check_schema("session", settings.session_db_url, probe_session_schema))
-    checks.append(_probe_and_check_schema("landscape", settings.landscape_url, probe_landscape_schema))
-    checks.append(_check_separate_db_targets(settings.session_db_url, settings.landscape_url))
-    checks.extend(_plugin_and_dependency_checks())
-    return checks
-
-def _plugin_and_dependency_checks() -> list[ContractCheck]:
-    checks: list[ContractCheck] = []
-    try:
-        manager = get_shared_plugin_manager()
-        has_s3 = "aws_s3" in {s.name for s in manager.get_sources()} and "aws_s3" in {s.name for s in manager.get_sinks()}
-        checks.append(ContractCheck("aws_s3_plugin", has_s3, "registered" if has_s3 else "aws_s3 source/sink not registered"))
-    except Exception as exc:
-        checks.append(ContractCheck("aws_s3_plugin", False, sanitize_error("aws_s3 plugin check failed", exc)))
-    try:
-        from elspeth.plugins.transforms.llm.transform import _PROVIDERS
-        checks.append(ContractCheck("bedrock_provider", "bedrock" in _PROVIDERS, "registered" if "bedrock" in _PROVIDERS else "bedrock provider not registered"))
-    except ImportError as exc:
-        checks.append(ContractCheck("bedrock_provider", False, sanitize_error("bedrock provider check failed", exc)))
-    for mod in ("psycopg", "boto3"):
-        try:
-            importlib.import_module(mod)
-            checks.append(ContractCheck(f"{mod}_dependency", True, "importable"))
-        except ImportError as exc:
-            checks.append(ContractCheck(f"{mod}_dependency", False, sanitize_error(f"{mod} dependency missing", exc)))
-    return checks
+def _initialize_database(
+    label: str,
+    raw_url: str,
+    probe_fn: Callable[[Engine | Connection], SchemaState],
+    init_fn: Callable[[Engine], None],
+) -> ContractCheck: ...
 ```
 
-CLI wiring wraps settings load AND `collect_checks()` separately — a defect in one check must never crash the whole command with a raw traceback:
-```python
-try:
-    settings = _settings_from_env()
-except Exception as exc:
-    checks = [ContractCheck("settings_load", False, sanitize_error("settings load failed", exc))]
-else:
-    try:
-        checks = collect_checks(settings)
-    except Exception as exc:
-        checks = [ContractCheck("doctor_internal_error", False, sanitize_error("doctor check collection failed", exc))]
-```
-JSON output: `json.dumps([dataclasses.asdict(c) for c in checks])`. Text mode: one line per check, `f"{'OK' if c.ok else 'FAIL'} {c.name}: {c.detail}"`. `raise typer.Exit(1)` if any `not ok`.
+`database_target_check` calls only `require_distinct_postgres_targets`. `DatabaseTargetConflictError` becomes `ContractCheck("separate_db_targets", False, <static remedy>)`. If either Plan 01 database URL check failed, do not call it with bad input; return a static failure explaining that comparison was not attempted because the database URL contract failed.
 
-- [ ] Write failing tests in `tests/unit/web/test_doctor.py`: `test_probe_writable_reports_sanitized_detail_on_permission_error` (monkeypatch `Path.open` to raise `OSError` against an EXISTING `tmp_path` dir; `path` string absent from `detail`); `test_probe_writable_missing_dir_fails_closed_without_creating` (`probe_writable("data_dir", tmp_path / "nope")` → `ok is False`, `"does not exist"` in detail, and `(tmp_path / "nope").exists()` is still `False` afterward — the read-only probe must never mkdir, that's the unmounted-EFS mask); `test_probe_writable_allow_create_creates_missing_dir_and_probes` (same missing path with `allow_create=True` → `ok is True`, `detail == "writable"`, dir now exists); `test_schema_check_stale_reports_recreate_instructions` (`schema_check("session", SchemaState.STALE)` → `ok is False`, `"rerun"` in detail, `"drop"` in detail); `test_schema_check_partial_reports_init_schema_instructions_not_recreate` (`SchemaState.PARTIAL` → `ok is False`, `"--init-schema"` in detail, `"drop"` **not** in detail — closes the PARTIAL/STALE conflation); `test_collect_checks_includes_deployment_contract_and_writability_checks` (`WebSettings(session_db_url=None, ...)` → a check named `"session_db_url"` with `ok is False` is present, plus `"data_dir_writable"`/`"payload_store_writable"`/`"blob_writable"` all present); `test_probe_and_check_schema_skips_engine_construction_when_url_unset` (monkeypatch `create_session_engine` to raise if called; `_probe_and_check_schema("session", None, probe_session_schema)` → `ok is False`, `"not configured"` in detail, spy never invoked); `test_probe_and_check_schema_catches_engine_construction_runtime_error` (monkeypatch `create_session_engine` to raise `RuntimeError("... /secret/path ...")`; resulting `detail` omits the path); `test_collect_checks_never_touches_auth_db` (`tmp_path` with a pre-created `auth.db`; `session_db_url=landscape_url=None`; call `collect_checks`; assert `auth.db`'s bytes/mtime unchanged and no check name contains `"auth"`); `test_collect_checks_all_pass_returns_all_ok` (monkeypatch `elspeth.web.doctor.validate_aws_ecs_settings` to return all-`ok=True`, `probe_session_schema`/`probe_landscape_schema` to `SchemaState.CURRENT`, `_plugin_and_dependency_checks` to an all-`ok=True` list; settings use `session_db_url=landscape_url="sqlite:///:memory:"` — `create_session_engine` skips its WAL assertion for `:memory:`, so no real Postgres is needed; `all(c.ok for c in checks)`); `test_collect_checks_warns_when_session_and_landscape_share_same_target` (`session_db_url=landscape_url="postgresql://u:p@host/samedb"` → the `"separate_db_targets"` check has `ok is True` and `"same logical target"` in detail — advisory, not fail-closed); `test_collect_checks_reports_separate_targets_for_distinct_urls` (`session_db_url="postgresql://u:p@host/sessiondb"`, `landscape_url="postgresql://u:p@host/landscapedb"` → `ok is True`, detail `== "separate targets"`). Run `pytest tests/unit/web/test_doctor.py -x` — expect `ModuleNotFoundError: elspeth.web.doctor`.
-- [ ] Implement `doctor.py` per above. Run again — expect PASS.
-- [ ] Write `tests/unit/cli/test_doctor_command.py::test_doctor_aws_ecs_json_reports_checks_and_exits_nonzero_on_failure` — invoke `runner.invoke(app, ["--no-dotenv", "doctor", "aws-ecs", "--json"])` (repo has a real `.env`; mirror `test_web_command.py:97`'s `--no-dotenv` guard) with `ELSPETH_WEB__SESSION_DB_URL` unset via `monkeypatch.delenv`; assert `exit_code == 1`, `json.loads(result.stdout)` is a list of `{"name","ok","detail"}` dicts; `test_doctor_aws_ecs_exits_zero_and_prints_ok_lines_when_all_pass` (monkeypatch `doctor.collect_checks` to an all-`ok=True` list; `exit_code == 0`, text-mode stdout contains `"OK "`); `test_doctor_aws_ecs_reports_sanitized_error_on_settings_load_failure` (`--no-dotenv`, `ELSPETH_WEB__PORT=notanumber`; `exit_code == 1`, a `"settings_load"` entry present, raw exception text absent from stdout).
-- [ ] Wire `doctor_app`/`doctor_aws_ecs` in `cli.py` per the CLI wiring block above. Run — expect PASS.
-- [ ] `git add src/elspeth/web/doctor.py src/elspeth/cli.py tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py && git commit -m "feat(cli): add read-only elspeth doctor aws-ecs command"`
+Both engine helpers:
 
-### Task 2: `--init-schema` mutating mode
+- identify PostgreSQL with `make_url(raw_url).drivername.split("+")[0] == "postgresql"`;
+- add `connect_args={"connect_timeout": 10}` only for PostgreSQL;
+- create session engines with `create_session_engine(raw_url, connect_args=..., **postgres_engine_kwargs(raw_url))`;
+- create Landscape engines with `create_engine(raw_url, connect_args=..., **postgres_engine_kwargs(raw_url))` (do not pass a second `pool_pre_ping`);
+- in `_inspect_database`, execute `SELECT 1` and call the Plan 02 probe through the same open `Connection`;
+- in `_initialize_database`, call the Plan 02 initializer with the helper-owned engine while no outer connection is held. The initializer owns one checkout and performs DDL plus its postcondition probe on that lock-owning connection; after it returns, open one new connection and run `SELECT 1` plus the final doctor probe together on that connection;
+- dispose every successfully constructed engine in `finally`, on success and on connect, probe, init, busy-lock, cleanup-uncertainty, compatibility, and unexpected-error paths.
 
-**Files:** Modify `src/elspeth/web/doctor.py` (Task 1 anchor), `src/elspeth/cli.py` (Task 1 anchor); Test: `tests/unit/web/test_doctor.py`, `tests/unit/cli/test_doctor_command.py`.
+`collect_checks` implements this exact orchestration:
 
-**Interfaces:** Consumes `init_session_schema(engine) -> None`, `init_landscape_schema(engine) -> None` (plan 02); `SessionSchemaError` (`src/elspeth/web/sessions/schema.py:68`, a `RuntimeError` subclass, not `SQLAlchemyError`); `SchemaCompatibilityError` (`src/elspeth/core/landscape/database.py:130`, a bare `Exception` subclass, not `SQLAlchemyError`); `sqlalchemy.exc.SQLAlchemyError`. Produces: `_probe_and_check_schema` gains `init_fn` and `init_schema` params; `collect_checks(settings, *, init_schema: bool = False)`. `collect_checks` also threads `allow_create=init_schema` into the `payload_store` and `blob` `probe_writable` calls — creating those subdirectories is a legitimate act of the explicit mutating mode — but **never** into the `data_dir` root probe, whose absence must keep reading as an unmounted EFS volume even under `--init-schema`.
+1. Run Plan 01 checks and index them by name. URL eligibility requires passing `session_db_url` and `landscape_url`; deployment eligibility also requires `deployment_target`.
+2. Run the Plan 02 target check before any engine construction. On conflict or URL-contract failure, emit static blocked schema checks and skip all database work.
+3. Run filesystem, dependency, and plugin checks. They remain visible even if a database prerequisite failed.
+4. If database prerequisites pass, inspect both targets read-only and retain both states. `CURRENT` is ready; `MISSING` and `PARTIAL` are repairable; `STALE` and operational errors are blockers.
+5. In default mode, render both states with `schema_check`: `CURRENT` passes; `MISSING/PARTIAL` says rerun with `--init-schema`; `STALE` gives static drop/recreate instructions. Remove the unprovable claim that dropping any partially initialized database “loses nothing.”
+6. In init mode, compute one eligibility decision after both probes. Every non-schema check must pass, and each database must be `CURRENT`, `MISSING`, or allowed `PARTIAL`. If not eligible, call neither initializer and retain/replace repairable schema checks with a static “not initialized because the complete preflight failed” detail.
+7. Initialize only repairable targets. `_initialize_database` calls the Plan 02 initializer, whose return contract already means its lock-owning same-connection postcondition probe reached `CURRENT`; after return, doctor performs an independent `SELECT 1` and final probe on one new connection. Success requires that after-return probe to be `CURRENT` and reports `current; initialization completed or was already completed`. An already-current target is not initialized.
+8. Catch in this order:
+   - `SchemaInitBusyError`: static “another schema initialization is in progress; wait for it to finish and rerun”;
+   - `SchemaLockCleanupError`: static “initialization may have completed but lock cleanup was not verified; investigate the database connection and rerun”;
+   - `SessionSchemaError` / `SchemaCompatibilityError`: render `STALE` drop/recreate instructions;
+   - other exceptions: a sanitized operational failure.
 
-`_probe_and_check_schema` extends Task 1's version — same connect/probe try/except, then, before falling through to `schema_check`:
-```python
-def _probe_and_check_schema(label, raw_url, probe_fn, init_fn, *, init_schema: bool) -> ContractCheck:
-    ...  # unchanged connect + probe_fn(engine) -> state, same except Exception branch
-    if init_schema and state in (SchemaState.MISSING, SchemaState.PARTIAL):
-        try:
-            init_fn(engine)
-            return ContractCheck(f"{label}_schema", True, "created")
-        except (SessionSchemaError, SchemaCompatibilityError):
-            # init_fn raises exactly these two types on its fail-closed
-            # paths (plan 02 Task 3): its advisory-locked re-probe found
-            # STALE — a race this function's outer probe_fn(engine) couldn't
-            # have seen — or, session-side only, the defensive PARTIAL arm
-            # (unreachable from probe_session_schema, which never returns
-            # PARTIAL). Surface schema_check's STALE detail (the
-            # drop/recreate operator instructions) rather than a sanitized
-            # class name that would discard them.
-            return schema_check(label, SchemaState.STALE)
-        except SQLAlchemyError as exc:
-            return ContractCheck(f"{label}_schema", False, sanitize_error(f"{label} schema init failed", exc))
-    return schema_check(label, state)
-```
-`collect_checks` threads `init_fn=init_session_schema`/`init_landscape_schema` and `init_schema=init_schema` into both calls. STALE is never overridden (falls through to `schema_check`'s drop/recreate branch) regardless of `init_schema`.
+- [ ] Write failing target-gate tests for identical URLs, same database with absent/ambiguous search paths, and same database with two explicitly distinct parseable schemas. On every failing case, engine/probe/init spies must remain untouched. Assert the detail contains no supplied URL, user, password, host, database, or options text.
+- [ ] Write failing engine-lifecycle tests that assert Plan 02 pool kwargs and PostgreSQL `connect_timeout=10` reach both factories, `SELECT 1` and the schema probe share one connection, and `dispose()` runs after success, connect failure, probe failure, initializer failure, busy lock, and cleanup uncertainty. Assert non-PostgreSQL input is blocked by Plan 01 before these helpers are reached through `collect_checks`.
+- [ ] Write failing state tests for session `MISSING/CURRENT/STALE`, Landscape `MISSING/PARTIAL/CURRENT/STALE`, static and redacted details, and exact unique check ordering.
+- [ ] Write failing two-phase tests:
 
-- [ ] Write failing tests: `test_collect_checks_init_schema_creates_missing_subdirs_never_data_dir_root` (settings with `data_dir=tmp_path` existing but `payload_store_path`/blob subdirs absent; `collect_checks(settings, init_schema=True)` → `payload_store_writable`/`blob_writable` both `ok is True` and the subdirs now exist; then a second settings whose `data_dir=tmp_path / "unmounted"` does NOT exist → `collect_checks(settings, init_schema=True)` leaves it uncreated and `data_dir_writable.ok is False` with `"EFS"` in detail); `test_collect_checks_init_schema_creates_on_missing` (probe monkeypatched to `MISSING`, spy `init_session_schema`; `ok is True`, `detail == "created"`, spy called once); `test_collect_checks_init_schema_creates_on_partial` (same, `PARTIAL` — closes the high-severity MISSING-only gap); `test_collect_checks_init_schema_still_fails_closed_on_stale` (`STALE`; `ok is False`, spy **not** called, `"drop"` in detail); `test_collect_checks_init_schema_reports_stale_recreate_detail_on_race` (`MISSING`, spy `init_session_schema` raises `SessionSchemaError("stale race")`; `collect_checks` returns normally with `ok is False` and `"drop"` in detail — plan 02's drop/recreate operator instructions surface here, not a sanitized class name, and not a propagated exception); `test_collect_checks_init_schema_reports_sanitized_error_on_other_init_failure` (`MISSING`, spy `init_session_schema` raises `SQLAlchemyError("connection lost")`; `ok is False`, a sanitized detail, `"drop"` **not** in detail — distinguishes a genuine init-time DB error from the STALE-race path above). Run `pytest tests/unit/web/test_doctor.py -k init_schema` — expect `TypeError: collect_checks() got an unexpected keyword argument 'init_schema'`.
-- [ ] Extend `_probe_and_check_schema`/`collect_checks` per above.
-- [ ] Add `--init-schema` flag to `doctor_aws_ecs`, threaded to `collect_checks(settings, init_schema=init_schema)`. Add `tests/unit/cli/test_doctor_command.py::test_doctor_init_schema_flag_threads_through` (`--no-dotenv`). Run full file — expect PASS.
-- [ ] `git add -A && git commit -m "feat(cli): add --init-schema mutating mode to doctor aws-ecs"`
+  - session `MISSING` plus Landscape `STALE` initializes neither;
+  - session `MISSING` plus Landscape connection failure initializes neither;
+  - any filesystem, dependency, or plugin failure initializes neither;
+  - both repairable states initialize and finish `CURRENT`;
+  - one current and one repairable target calls only the repairable initializer;
+  - a compatibility race becomes `STALE` without leaking its message;
+  - busy and cleanup exceptions remain their named schema checks and never collapse to `doctor_internal_error`;
+  - after the first initializer succeeds and the second fails, the report remains truthful and a rerun is safe/idempotent.
 
-### Task 3: PostgreSQL integration proof
+- [ ] Implement the target gate, engine helpers, two read-only probes before mutation, one eligibility decision, and final init verification. Delete the old `_target_key`/advisory comparison design entirely.
+- [ ] Extend CLI tests so both lock-domain exceptions produce exit 1, valid complete JSON, their static remedy, and no raw cause text.
+- [ ] Run:
 
-**Files:** Create `tests/integration/web/test_doctor_aws_ecs_postgres.py`.
+  ```bash
+  uv run pytest tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py -q
+  uv run pytest tests/unit/web/test_deployment_contract.py tests/unit/web/test_schema_probe.py tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py -q
+  ```
 
-**Interfaces:** Consumes `PostgresContainer` (fixture pattern: `tests/integration/web/test_blobs_ready_hash_postgres.py:59-73`), `elspeth.web.doctor.collect_checks`. Closes the spec's Testing Strategy line naming this exact CLI invocation, otherwise untested by any subplan. **Note (accepted deviation):** the spec's Testing Strategy also names two *concurrent* `elspeth doctor aws-ecs --init-schema` CLI runs; that scenario is proxied, not re-run, here — it's covered at the `init_*` level by plan 02 Task 5's `test_concurrent_init_session_schema_serializes_via_advisory_lock`, since the advisory lock lives inside `init_session_schema`/`init_landscape_schema`, not in this task's single `collect_checks` invocation.
+  Expected: all tests pass.
 
-- [ ] Write `test_doctor_init_schema_succeeds_against_fresh_postgres` (`pytest.mark.testcontainer`): two fresh `PostgresContainer("postgres:16-alpine", driver="psycopg")`; build `WebSettings` with both URLs pointed at the containers, `data_dir`/`payload_store_path` under `tmp_path` (mkdir the `data_dir` root in the test's arrange step — doctor never creates it, even under `--init-schema`; the payload/blob subdirs are left absent so `init_schema=True` exercises their `allow_create` path), production-shaped `secret_key`/`shareable_link_signing_key`, `host="0.0.0.0"`; `collect_checks(settings, init_schema=True)` → `all(c.ok for c in checks)`.
-- [ ] Run `pytest tests/integration/web/test_doctor_aws_ecs_postgres.py -m testcontainer` — expect PASS (clean skip without Docker).
-- [ ] `git add tests/integration/web/test_doctor_aws_ecs_postgres.py && git commit -m "test: verify elspeth doctor aws-ecs --init-schema against real PostgreSQL"`
+- [ ] Commit only the shared Task 2 files:
+
+  ```bash
+  git add src/elspeth/web/doctor.py tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py
+  git commit -m "feat(cli): add safe schema initialization to aws-ecs doctor"
+  ```
+
+---
+
+### Task 3: Prove the real CLI and concurrent initialization on PostgreSQL
+
+**Files:**
+
+- Create: `tests/testcontainer/web/test_doctor_aws_ecs_postgres.py`
+
+Keep this file outside `tests/integration/`: that directory's `conftest.py` auto-adds the unrelated `integration` marker. Mark the new tests `pytest.mark.testcontainer`; the normal unit lane continues to exclude that marker.
+
+Use one module-scoped `PostgresContainer("postgres:16-alpine", driver="psycopg")`. For each test, create two uniquely named logical databases from an autocommit admin connection, then derive `postgresql+psycopg` URLs with `URL.set(database=...).render_as_string(hide_password=False)`. Do not use `str(URL)`, which masks the password as `***` and produces an unusable subprocess environment URL. Drop the databases in fixture cleanup. This gives session and Landscape distinct Plan 02 targets without paying for two containers per test.
+
+Create the `data_dir`, explicit `payload_store_path`, and derived blob directory before invoking doctor; their absence is an EFS provisioning failure and doctor never creates them. Supply complete production-shaped environment values, including `ELSPETH_WEB__DEPLOYMENT_TARGET=aws-ecs`, both DB URLs, host, secret key, shareable-link signing key, and explicit paths.
+
+- [ ] Add `test_doctor_init_schema_cli_succeeds_against_fresh_postgres`: invoke `runner.invoke(app, ["--no-dotenv", "doctor", "aws-ecs", "--init-schema", "--json"], env=...)`; require exit 0, parse a bare list, require unique names and `all(item["ok"] for item in report)`, then independently construct engines and assert both Plan 02 probes return `SchemaState.CURRENT`.
+- [ ] Add `test_concurrent_doctor_init_schema_cli_runs_are_safe`: launch two real subprocesses with the same environment and fresh database pair using
+
+  ```python
+  [sys.executable, "-m", "elspeth.cli", "--no-dotenv", "doctor", "aws-ecs", "--init-schema", "--json"]
+  ```
+
+  Start both before waiting. Use `try/finally`: on a timeout or assertion failure, terminate each live child, then kill and bounded-wait for any child that does not terminate, so fixture teardown can never race leaked doctor processes. Require both processes to exit 0 within a bounded timeout, both stdout payloads to be valid all-green JSON lists, credentials and URLs to be absent from both stdout and stderr, and independent final probes to report both schemas `CURRENT`. This proves concurrent-safe CLI composition. Plan 02 Task 6's `pg_locks` contention test remains the evidence that the advisory lock actually serialized the overlapping critical sections; both tests are required.
+- [ ] Verify Docker first, then run the file with no accepted skips:
+
+  ```bash
+  docker info
+  uv run pytest tests/testcontainer/web/test_doctor_aws_ecs_postgres.py -m testcontainer -q
+  ```
+
+  Expected: both commands exit 0 and pytest reports zero skips. If Docker is unavailable, status is `BLOCKED`, not pass/skip.
+
+- [ ] Commit:
+
+  ```bash
+  git add tests/testcontainer/web/test_doctor_aws_ecs_postgres.py
+  git commit -m "test: prove aws-ecs doctor CLI against PostgreSQL"
+  ```
+
+---
+
+### Task 4: Run Plan 03 handoff gates
+
+**Files:** Verify only files touched by Tasks 1-3. No new implementation files are expected.
+
+- [ ] Run focused and subsystem tests:
+
+  ```bash
+  uv run pytest tests/unit/web/test_deployment_contract.py tests/unit/web/test_schema_probe.py tests/unit/web/test_doctor.py tests/unit/cli/test_doctor_command.py -q
+  uv run pytest tests/unit/web/ tests/unit/cli/ -q
+  docker info
+  uv run pytest tests/testcontainer/web/test_doctor_aws_ecs_postgres.py -m testcontainer -q
+  ```
+
+  Expected: every command exits 0 and the Docker-backed file reports zero skips.
+
+- [ ] Run repository static gates exactly:
+
+  ```bash
+  uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/
+  uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/
+  uv run mypy src/ elspeth-lints/src/
+  git diff --check
+  ```
+
+  Expected: every command exits 0.
+
+- [ ] Because this slice handles external URLs, database state, and filesystem paths, use the `wardline-gate` skill and run:
+
+  ```bash
+  wardline scan . --fail-on ERROR
+  ```
+
+  Expected: exit 0. On a finding, follow scan → explain → boundary fix → rescan. Do not add a waiver or signed allowlist entry in this plan.
+
+- [ ] Record the downstream handoff in the Plan 03 closeout comment:
+
+  - Plan 10 provisions and mounts the `data_dir`, explicit payload, and blob directories before doctor; doctor never creates directories.
+  - Plan 12 runs `docker info` followed by
+
+    ```bash
+    uv run pytest tests/testcontainer/web/test_schema_probe_postgres.py tests/testcontainer/web/test_doctor_aws_ecs_postgres.py -m testcontainer -q
+    ```
+
+    and requires both files to execute with zero skips on the integrated candidate.
+  - The complete report and both CLI exits remain redacted; neither a successful unit lane nor Plan 02's helper-level concurrency proof substitutes for the real CLI evidence.
+
+- [ ] A final commit is needed only if verification required a scoped correction. Stage exact paths; never use `git add -A` in a shared worktree and do not create an empty verification commit.

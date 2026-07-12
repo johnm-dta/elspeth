@@ -1,0 +1,144 @@
+{
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
+  "summary": "Plan 10 is implementation-ready after its existing Filigree dependencies close. The repaired plan now owns a validated platform-bound lean image, executable and syntax-tested ECS runbook, fresh-baseline schema bootstrap, forced deployment identities, exact task-definition/EFS/IAM/health/Exec gates, bounded and redacted acceptance tooling, non-root payload/local-auth proof, ECS task-role S3/Bedrock proof, isolated Cognito browser evidence, and cleanup-before-GO with tag-based orphan detection. Plan 12 was repaired with the corresponding live ordering and teardown gates.",
+  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-10-packaging-docker.md",
+  "reviewed_at": "2026-07-11T23:16:00Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "9a7b6243c7386865637d7a1497cf1fb93135000e",
+    "baseline": "Live source, Dockerfile, build workflow, tests, runtime-readiness spec, Plans 00/06/07/09/12/13, and Filigree DAG inspected. Loomweave was incrementally refreshed after the branch advanced; run d61b4d7d-cfa6-41d0-90cf-1950e8e97651 is fresh at the recorded HEAD, including the current composer YAML importer seam. Current AWS ECS, ECS Exec, Fargate architecture/health, and ECR scanning semantics were checked against official AWS documentation."
+  },
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "R10-1",
+      "status": "DEPENDENCY",
+      "detail": "Filigree elspeth-6285c29c07 remains pending, unassigned, and correctly blocked by every earlier implementation slice. Task 0 must not record the rollback-baseline SHA until those dependencies are done and the integrated tree is clean."
+    },
+    {
+      "id": "R10-2",
+      "status": "OPERATOR_ACTION",
+      "detail": "Any diagnosed signed trust-tier/trust-boundary drift requires the operator-held review and signing path. The implementing agent diagnoses and reruns required-mode gates; it does not receive keys or self-sign allowlist repairs."
+    },
+    {
+      "id": "R10-3",
+      "status": "PUBLICATION_OUT_OF_SCOPE",
+      "detail": "The local ECR acceptance images are temporary digest-pinned evidence artifacts and are always deleted before GO. Durable lean-image publication needs a separate trusted workflow for the GO SHA and approved platforms with verified SBOM, provenance, signature, and vulnerability policy; the current default-all GHCR/ACR workflow is not that path."
+    },
+    {
+      "id": "R10-4",
+      "status": "EXTERNAL_PREREQUISITE",
+      "detail": "The disposable Terraform stacks, IAM policies, Cognito identity, ECR repository, browser runner, evidence destination, and resource-tag coverage are outside this repository. Missing operator inventory or permission is BLOCKED in Plan 12, never a local substitute for live acceptance."
+    }
+  ],
+  "resolved_findings": [
+    {
+      "id": "B10-1",
+      "status": "RESOLVED",
+      "resolution": "The impossible post-dependency RED extras step is now a passing frozen-lock precondition that returns ownership to Plans 02/06/07 on failure."
+    },
+    {
+      "id": "B10-2",
+      "status": "RESOLVED",
+      "resolution": "INSTALL_EXTRAS is non-empty, glob-disabled, token-validated, positional-argument based, mirrored across both sync layers, and exercised by invalid as well as default/lean Docker builds."
+    },
+    {
+      "id": "B10-3",
+      "status": "RESOLVED",
+      "resolution": "The Dockerfile's stale health guidance is repaired; the runbook uses parseable JSON for a proxy-independent exact-200 Python loopback health command and mechanically checks start period, service grace, Fargate 1.4, platform mapping, and task architecture."
+    },
+    {
+      "id": "B10-4",
+      "status": "RESOLVED",
+      "resolution": "The acceptance HTTP boundary now has one exact origin, explicit auth-mode exclusivity, no redirects, same-origin enforcement, concrete time/size budgets, strict atomic state handling, and adversarial tests."
+    },
+    {
+      "id": "B10-5",
+      "status": "RESOLVED",
+      "resolution": "Every intentional service launch/rollback forces and proves a new deployment identity; Scenario B initializes fresh Aurora with the rollback image before baseline web startup, then runs the candidate doctor before mutation."
+    },
+    {
+      "id": "B10-6",
+      "status": "RESOLVED",
+      "resolution": "Root-running ECS Exec is no longer credited for EFS or SQLite proof. Payload and local-auth verification use explicit-UID one-shot task definitions, with local auth drained to fixed 503 and desired-zero before opening auth.db read-only."
+    },
+    {
+      "id": "B10-7",
+      "status": "RESOLVED",
+      "resolution": "The controller-side real-S3 suite is supplemented by per-task ECS task-role/default-chain S3 source/sink/hash/collision/cleanup proof with exact test-only prefix-scoped permissions and environment names."
+    },
+    {
+      "id": "B10-8",
+      "status": "RESOLVED",
+      "resolution": "The OIDC harness is single-spec, single-worker, artifact-disabled, custom-redacted, bounded, atomic-evidence writing, and credential-free under --list; Plan 12 proves Chromium before external mutation."
+    },
+    {
+      "id": "B10-9",
+      "status": "RESOLVED",
+      "resolution": "EventBridge validation now checks the CloudWatch Logs resource policy and no RoleArn, then proves delivery with a temporary custom-source canary rule targeting the same destination and removes it before deployment."
+    },
+    {
+      "id": "B10-10",
+      "status": "RESOLVED",
+      "resolution": "All AWS CLI calls are routed through the bounded stdout/stderr capture wrapper and closed evidence projector; raw logs, provider errors, task definitions, and AWS stderr are never retained as acceptance evidence."
+    },
+    {
+      "id": "B10-11",
+      "status": "RESOLVED",
+      "resolution": "Task 8 always deletes temporary image tags, confirms the original acceptance-run tag/service orphan sweep before clearing CLEANUP_REQUIRED, and cannot promote an image before final GO."
+    },
+    {
+      "id": "B10-12",
+      "status": "RESOLVED",
+      "resolution": "The fixed YAML is parsed and runtime-validated against the live importer with explicit source binding, sink policy, schema, and allowlisted unique output path instead of relying on HTTP mocks."
+    },
+    {
+      "id": "B10-13",
+      "status": "RESOLVED",
+      "resolution": "The runbook has Bash syntax and safety-contract regression coverage; Plan 10 adds manifest, inventory, static, signed-trust, Wardline, frontend, staged-hook, and affected-route closeout gates without --no-verify."
+    },
+    {
+      "id": "B10-14",
+      "status": "RESOLVED",
+      "resolution": "Plan 10 and Plan 12 Filigree fields now name the real file set, force-new/baseline/non-root/task-role/platform/evidence/cleanup obligations, while both issues remain unclaimed and untransitioned."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality_and_architecture": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "systems_and_deployment": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "quality_security_and_executability": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "synthesis_and_current_head": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    }
+  },
+  "verification": [
+    "Loomweave incremental refresh completed fresh at current HEAD after the composer YAML commit",
+    "Dockerfile, .dockerignore, pyproject extras/lock ownership, build-push workflow, release checks, REST routes, settings loader, LandscapeDB, payload store, and YAML importer reconciled against live source",
+    "official AWS ECS deployment, runtimePlatform, health-check, ECS Exec, task-role, and ECR scanning documentation reconciled",
+    "Plans 00, 06, 07, 09, 10, 12, 13 and the runtime-readiness spec reconciled",
+    "POSIX INSTALL_EXTRAS validation executed against valid, empty, whitespace, leading-option, uppercase, glob, and metacharacter inputs",
+    "task-definition health command parsed as JSON",
+    "Plan 10 and Plan 12 tracker fields updated through typed Filigree MCP without claim or status transition",
+    "review JSON parsed with jq",
+    "git diff --check",
+    "three independent specialist re-reviews plus current-HEAD synthesis reported zero remaining blockers"
+  ],
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-11T22:40:00Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial review found unsafe extras parsing, stale/non-executable health wiring, unbound architecture, unforced desired-zero launches, missing rollback-baseline schema initialization, root-masked EFS and concurrent SQLite verification, no ECS task-role S3 proof, raw evidence paths, incomplete OIDC isolation, absent EventBridge delivery proof, premature image promotion, and state-empty-only cleanup."
+    }
+  ]
+}

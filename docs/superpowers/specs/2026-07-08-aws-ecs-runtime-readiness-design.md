@@ -1,8 +1,8 @@
 # AWS ECS Runtime Readiness Design
 
 Date: 2026-07-08
-Status: approved design, pending implementation plan
-Branch context: `release/0.7.0`
+Status: approved design; implementation governed by plans 01–13
+Branch context: `release/0.7.1`
 
 ## Purpose
 
@@ -303,6 +303,21 @@ For the first ECS milestone, EFS is the local-state substrate:
 - Local auth is allowed as an explicit single-task option, with its SQLite
   auth DB on EFS.
 - Cognito/OIDC remains the recommended production auth path.
+- Cognito hosted authorization domains are cross-origin from user-pool issuer
+  URLs. Operators may declare the one exact HTTPS authorization origin; the
+  paired authorization and token endpoints must share it, the default remains
+  same-origin-only, and wildcards/suffix matching are forbidden.
+- Browser login uses a public Cognito app client with no client secret and an
+  authorization-code grant with S256 PKCE. A short-lived, tab-scoped,
+  single-use state/verifier transaction is consumed before callback decisions;
+  bearer tokens are never accepted from a callback URL. The implicit token
+  grant is not an approved production path.
+- Generic OIDC token validation continues to bind the configured audience to
+  `aud`. Cognito deployments explicitly select `client_id` audience mode for
+  access tokens; that mode requires an exact app-client ID match and
+  `token_use=access`, with signature, issuer, expiry, algorithm, and key-ID
+  validation enabled, an explicit expiry requirement, and Cognito's RS256
+  profile. Neither audience claim is a fallback for the other.
 
 The doctor and readiness checks cannot reliably prove from inside the
 container that a path is EFS. They must prove the runtime contract Elspeth
@@ -426,9 +441,11 @@ region, model identifier, and no embedded AWS keys.
 
 Composer acceptance must be falsifiable rather than a confirmation
 narrative: unit tests assert that Bedrock-shaped LiteLLM responses parse
-token, cost, and prompt-cache metadata correctly, and an opt-in live smoke
-test completes one `bedrock/anthropic...` request when explicit AWS
-credentials, region, and model settings are present. Unit tests for the
+token, cost, and prompt-cache metadata correctly, and an explicitly selected
+live smoke completes one `bedrock/anthropic...` request with region and model
+settings while credentials resolve through the ordinary AWS default chain.
+Acceptance must not require embedded access-key fields or infer credential
+availability from a partial list of environment variables. Unit tests for the
 pipeline `bedrock` provider cover model/config validation and safe error
 handling without requiring AWS access.
 
@@ -439,10 +456,10 @@ Add production extras so the runtime image can avoid `--extra all`:
 - `postgres` for the chosen PostgreSQL DBAPI driver;
 - `aws` for boto3/botocore and any Bedrock/LiteLLM AWS support dependencies
   not already covered by `llm`;
-- existing web and LLM extras as needed.
+- existing `webui` and `llm` extras as needed.
 
 The Docker build should support a production install with only production
-extras, for example web, llm, aws, and postgres. Dev and test dependencies,
+extras, for example `webui`, `llm`, `aws`, and `postgres`. Dev and test dependencies,
 including testcontainers, should not be required in the final runtime image.
 
 The existing non-root runtime user remains required. AWS credentials should be
@@ -491,6 +508,18 @@ Integration tests:
 - web startup in ECS validate-only mode after doctor initialization;
 - optional LocalStack-backed S3 source/sink tests if LocalStack is available;
 - optional live Bedrock smoke test only when explicitly configured.
+- live acceptance harness: authenticated session/blob upload, fixed YAML import,
+  execution, blob/artifact hash capture, task replacement, API re-verification,
+  and explicit-UID one-shot payload-store integrity retrieval on real EFS;
+- candidate-task-role S3 source/sink write/read/hash/cleanup proof through the
+  ordinary AWS default chain, with no static credential/profile/role/endpoint
+  override;
+- local-auth SQLite verification only after traffic drain and service
+  desired-zero, from one explicit-UID verifier process sharing the EFS mount;
+- both disposable deployment state machines: first deploy → drain/scale-zero →
+  constrained recovery, and qualified Plan-13-capable rollback baseline →
+  candidate → rollback → candidate, each with zero task overlap and a fresh
+  20-sample observation.
 
 Security and boundary checks:
 
@@ -498,6 +527,23 @@ Security and boundary checks:
 - ensure provider errors, DB URLs, and secret-backed settings are redacted in
   doctor, readiness, and plugin error surfaces;
 - preserve fail-closed behavior for unknown provider modes and stale schemas.
+
+Whole-program closeout is a required testing stage, not an optional follow-up.
+After implementation plans 01–11 and 13 have landed in one integrated tree, execute
+`docs/superpowers/plans/2026-07-08-aws-ecs-12-integration-closeout.md` in full.
+Plan 12 owns the exact 0.7.1 version boundary, tracker-completion verification,
+the unscoped pytest run, CI-aligned Ruff and strict-mypy checks, repository
+contract guards, Wardline scan, lean ECS Docker build/runtime verification,
+the hosted `CI Success` umbrella plus CodeQL and signed-allowlist gates on an
+exact-SHA temporary `RC*` push (not a PR synthetic merge SHA), and live
+Aurora/EFS/ECS/ALB deployment, reproducible API/payload persistence,
+observation, both first/upgrade rollback-mode evidence, durable sanitized
+evidence export, reviewed saved-plan Terraform apply/destroy bound to distinct
+remote state identities, an interruption-safe cleanup manifest, and verified
+teardown of both disposable environments and their temporary identities/tags.
+Scoped tests from plans 01–11 and 13 do not substitute for this gate. Any non-zero
+command or unmet prerequisite in Plan 12 blocks acceptance; fix the owning
+surface and restart the closeout sequence from its first step.
 
 ## Acceptance Criteria
 
@@ -507,8 +553,12 @@ Security and boundary checks:
   are missing, malformed, or SQLite-backed.
 - In `ELSPETH_WEB__DEPLOYMENT_TARGET=aws-ecs`, the web app refuses to start
   unless explicit PostgreSQL session and landscape URLs are provided.
-- In ECS mode, web startup validates existing schema and does not create or
-  mutate schema objects.
+- In ECS mode, web startup and every post-start web request path validate/use
+  existing schema without creating, completing, indexing, or otherwise
+  mutating schema objects. The deployment-target-to-`create_tables` mapping
+  fails closed on unknown vocabulary; a direct web-layer constructor/import
+  regression guard and a DDL-denied PostgreSQL request-writer test are required
+  acceptance evidence.
 - Stale Aurora schema fails with operator instructions to drop/recreate data;
   no Elspeth command auto-drops Aurora data.
 - `/api/health` remains shallow liveness and returns 200 even when Aurora,
@@ -520,6 +570,15 @@ Security and boundary checks:
 - Local auth works as an explicit single-task option on EFS; `elspeth doctor
   aws-ecs` never opens `auth.db`.
 - Cognito/OIDC is documented as the recommended production auth path.
+- A real Cognito hosted-UI authorization-code + S256 PKCE flow succeeds before
+  and after the upgrade rollback/redeploy scenario, with issuer, audience/
+  client ID, subject, and authenticated API use verified without persisting
+  credentials, authorization codes, PKCE verifiers, or token material in
+  acceptance evidence; the accepted access token follows ELSPETH's existing
+  auth-store session policy.
+- The upgrade rollback target is a mechanically complete pre-Plan-10 baseline
+  containing Plan 13, bound to an immutable image digest and exact task
+  definition; an older release without that Cognito contract is not eligible.
 - `aws_s3` source and sink read/write CSV, JSON, and JSONL using AWS default
   credentials.
 - `aws_s3` pipeline config contains no AWS access-key or secret-key fields.
@@ -535,6 +594,21 @@ Security and boundary checks:
 - Two concurrent `elspeth doctor aws-ecs --init-schema` runs against the same
   database serialize through the advisory lock without corrupting schema.
 - Production image installation no longer depends on `--extra all`.
+- Plan 12 completes on one integrated `release/0.7.1` commit with every
+  implementation tracker slice closed and every required local test,
+  static/contract guard, Wardline scan, lean-image check, and hosted
+  `CI Success` lane passing on that exact SHA, followed by live Aurora/EFS
+  doctor, one-task ECS/ALB, persistence-across-replacement, observation, and
+  both first-recovery and qualified-baseline rollback/redeploy evidence for the
+  same immutable candidate image, followed by durable evidence export and
+  verified teardown of both disposable stacks, test identities/secrets, and
+  run-scoped temporary ECR tags before runtime GO. That GO accepts the tested
+  source/runtime contract on the one target platform and digest only; it does
+  not authorize a rebuilt or other-platform release artifact. A later durable
+  artifact must match the recorded accepted digest or repeat artifact/live
+  acceptance, and must independently pass scan, SBOM/provenance, and signature
+  gates before publication. A
+  partial, skipped, local-only, or warning-only Plan 12 run is not acceptance.
 
 ## Follow-Up Work
 

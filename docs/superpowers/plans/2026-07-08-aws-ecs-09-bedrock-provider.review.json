@@ -1,0 +1,129 @@
+{
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_IMPLEMENT_AFTER_PLAN_06",
+  "summary": "Plan 09 is implementation-ready after Plan 06 supplies the AWS SDK extra and its transitive gate baseline. The repaired plan now covers the real LiteLLM 1.85.0 Bedrock dependency and response shapes, bounded keyless configuration, lifecycle and limiter dispatch, data-only error/cost extraction, pipeline and composer redaction, plugin hash/catalog golden updates, signed-trust/Wardline closeout, and zero-skip ECS task-role acceptance owned by Plans 10/12.",
+  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-09-bedrock-provider.md",
+  "reviewed_at": "2026-07-11T18:26:54Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "2b20de8e9e19b60ac8857856e4923562e9192878",
+    "baseline": "Live source inspection after a current-HEAD Loomweave refresh failed/stayed locked by the existing analyzer process; installed LiteLLM 1.85.0 source and runtime shapes, plan/spec cross-links, signed-tier diagnosis, packaging, tests, and Filigree DAG were inspected directly."
+  },
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "R09-1",
+      "status": "DEPENDENCY",
+      "detail": "Plan 09 is not executable now. Filigree elspeth-e8dc754360 depends on Plan 06 elspeth-7fe6aa531f because real LiteLLM Bedrock calls require boto3/botocore; Plan 06 transitively carries the shared signed-tier/Wardline baseline."
+    },
+    {
+      "id": "R09-2",
+      "status": "OPERATOR_ACTION",
+      "detail": "Current read-only diagnosis still reports existing signed source-binding drift. The implementing agent diagnoses only; an operator reviews and repairs diagnosed rows with operator-held credentials, then the agent reruns diagnosis and trust gates."
+    },
+    {
+      "id": "R09-3",
+      "status": "TOOLING_BLOCKER",
+      "detail": "The shared gate-baseline issue still records Wardline WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT. Plan 09 may not close on a narrowed, baselined, waived, or degraded scan."
+    },
+    {
+      "id": "R09-4",
+      "status": "PINNED_PRIVATE_API",
+      "detail": "LiteLLM response cost is stored in ModelResponse.__pydantic_private__['_hidden_params']['response_cost']. The plan uses a data-only helper plus a real ModelResponse regression so LiteLLM drift fails visibly."
+    },
+    {
+      "id": "R09-5",
+      "status": "LIVE_ACCEPTANCE",
+      "detail": "The local opt-in smoke is developer evidence only. Runtime GO requires Plan 10's production verify-bedrock helper to execute inside each candidate ECS task through its task role under Plan 12 with zero skips/failures."
+    }
+  ],
+  "resolved_findings": [
+    {
+      "id": "B09-1",
+      "status": "RESOLVED",
+      "resolution": "The false no-dependency claim was replaced by a Plan 06 edge in the plan, overview, and Filigree DAG; installed LiteLLM was verified to require boto3/botocore for Bedrock."
+    },
+    {
+      "id": "B09-2",
+      "status": "RESOLVED",
+      "resolution": "BedrockConfig now has explicit bounded model/region rules and tests for empty suffixes, whitespace/control input, and every forbidden credential/endpoint field."
+    },
+    {
+      "id": "B09-3",
+      "status": "RESOLVED",
+      "resolution": "The unsafe getattr status-code fallback was replaced in the plan by an exact-int instance-data read with malicious/unhashable/property-trap tests."
+    },
+    {
+      "id": "B09-4",
+      "status": "RESOLVED",
+      "resolution": "The proposed dynamic _hidden_params getattr and fake-only fixture were replaced by a data-only Pydantic-private helper, real LiteLLM ModelResponse test, property trap, and precise _hidden_params.response_cost provenance."
+    },
+    {
+      "id": "B09-5",
+      "status": "RESOLVED",
+      "resolution": "Cost precedence is explicit: absent usage.cost may fall back; present malformed primary metadata remains unavailable. Contract serialization and full build_llm_call_record persistence are covered."
+    },
+    {
+      "id": "B09-6",
+      "status": "RESOLVED",
+      "resolution": "The incomplete provider test surface now includes the test helper's Bedrock branch, public config dispatch, provider construction, on_start/close lifecycle, limiter dispatch, adapter kwargs, catalog field ordering, and real exception/response shapes."
+    },
+    {
+      "id": "B09-7",
+      "status": "RESOLVED",
+      "resolution": "Pipeline raw provider errors are retained only in the authoritative internal audit and re-raised outside the provider boundary as static typed errors; composer redaction gains AWS-shaped sentinels."
+    },
+    {
+      "id": "B09-8",
+      "status": "RESOLVED",
+      "resolution": "LLMTransform.source_file_hash recomputation, transform knob-schema golden regeneration, focused plugin contract checks, Ruff, formatting, mypy, signed trust gates, and full Wardline are mandatory before close."
+    },
+    {
+      "id": "B09-9",
+      "status": "RESOLVED",
+      "resolution": "The live test no longer guesses credential availability from environment variables; explicit selection uses the AWS default chain and a bounded timeout."
+    },
+    {
+      "id": "B09-10",
+      "status": "RESOLVED",
+      "resolution": "Plans 10 and 12 now own a production verify-bedrock subcommand executed by ECS Exec inside each candidate task, with sanitized metadata evidence and no live skip."
+    },
+    {
+      "id": "B09-11",
+      "status": "RESOLVED",
+      "resolution": "Plan 09, Plan 03B, Plan 10, and Plan 12 Filigree fields now name current files and verification obligations; Plan 09 remains pending and unassigned."
+    }
+  ],
+  "reviewer_summaries": {
+    "architecture_and_reality": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "security_and_crossplan": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "tests_static_and_gates": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    }
+  },
+  "verification": [
+    "installed LiteLLM 1.85.0 path, exception constructors, Bedrock boto dependency, ModelResponse private storage, and ResponseMetadata response_cost path inspected",
+    "pipeline provider protocol, AuditedLLMClient, limiter dispatch, config registry, composer parser, catalog golden, plugin hash, and test helpers reconciled against live source",
+    "Plans 00, 03B, 06, 10, 12 and the runtime-readiness spec reconciled",
+    "Filigree dependency Plan 09 -> Plan 06 added without claiming or transitioning implementation work",
+    "Plan 09 and downstream tracker fields updated through typed MCP field writes",
+    "read-only signed-entry diagnosis executed and existing drift surfaced rather than bypassed",
+    "review JSON parsed with jq",
+    "git diff --check",
+    "three independent specialist reviews reconciled after repair"
+  ],
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-11T18:05:00Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial review found a false dependency claim, incomplete config/lifecycle/redaction coverage, unsafe dynamic property reads, a fake-only private-cost test, ambiguous cost precedence, missing plugin hash/golden/static/signed/Wardline closeout, and no ECS task-role Bedrock acceptance."
+    }
+  ]
+}

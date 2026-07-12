@@ -1,7 +1,7 @@
 {
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
-  "summary": "Plan 06 is executable after Plan 02 and Plan 08 Tasks 1-2: it now defines an atomic complete aws_s3 source registration, isolated optional-extra proofs, bounded spooled download and incremental parsing, pre-allocation JSON token and aggregate-item limits, exact lifecycle ownership, redacted audit-primary failures, CI-exact plugin gates, and offline plus real-S3 acceptance.",
+  "summary": "Plan 06 is executable after Plan 02 and complete Plan 08A: it now defines an atomic complete aws_s3 source registration, isolated optional-extra proofs, bounded spooled download and incremental parsing, pre-allocation JSON token and aggregate-item limits, exact lifecycle ownership, redacted audit-primary failures, CI-exact plugin gates, and offline plus real-S3 acceptance.",
   "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-06-s3-source.md",
   "reviewed_at": "2026-07-11T11:44:32Z",
   "review_basis": {
@@ -14,7 +14,7 @@
     {
       "id": "R06-1",
       "status": "DEPENDENCY",
-      "detail": "Implementation starts only after Plan 02 and Plan 08 Tasks 1-2. Plan 06 must rebase onto Plan 02 and regenerate the combined lockfile; it must not text-merge uv.lock."
+      "detail": "Implementation starts only after Plan 02 and complete Plan 08A. Plan 06 must rebase onto Plan 02 and regenerate the combined lockfile; it must not text-merge uv.lock."
     },
     {
       "id": "R06-2",

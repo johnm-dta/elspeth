@@ -1,204 +1,320 @@
 # AWS ECS Readiness Endpoint Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a dependency-aware, unauthenticated `GET /api/ready` endpoint with budgeted, redacted, cached checks, while proving `GET /api/health` and process startup both stay independent of Aurora/EFS availability.
+**Goal:** Add an unauthenticated, dependency-aware `GET /api/ready` with deterministic redacted checks, hard request/per-check budgets, cancellation-safe single-flight caching, and bounded probe admission, while keeping `GET /api/health` shallow after Plan 04's pre-bind startup gate succeeds.
 
-**Architecture:** A new module `src/elspeth/web/readiness.py` exposes `readiness_report()`, an async orchestrator running five grouped dependency probes (session DB, landscape DB, three writable-directory probes) concurrently, each capped at 2s, the whole computation capped at 5s, plus a pure in-process auth-mode check — two deliberate deviations from a literal spec reading, below. `app.py` wires a single-flight `ReadinessCache` (2s TTL) around it at `GET /api/ready`, unauthenticated, alongside the untouched `GET /api/health` (`app.py:1157-1159`). The 5s ceiling is a backstop, not an SLA: five 2s-capped checks running concurrently make it unreachable barring a bug in `bounded()`; on that timeout the response discards any already-completed results for one synthetic `overall` check — accepted, not a defect.
+**Architecture:** `src/elspeth/web/readiness.py` owns immutable report types, a five-label readiness probe runner, a cancellation-safe 2-second cache, and the dependency checks. The runner admits at most one unresolved future per closed label, uses a dedicated five-worker executor, and refuses duplicate/saturated work rather than feeding `ThreadPoolExecutor`'s unbounded queue. PostgreSQL checks use dedicated, tightly bounded one-shot engines and connection-bound Plan 02 probes; filesystem checks use the same exclusive/unlinked descriptor algorithm as doctor. `app.py` wires the runner/cache/route and degrades the complete post-gate orphan-cleanup unit without weakening Plan 04's startup validation.
 
-**Tech Stack:** Python 3.13, `asyncio`, SQLAlchemy 2.x sync `Engine`, FastAPI/Starlette, pytest, `pytest-asyncio` (strict mode — every async test needs an explicit `@pytest.mark.asyncio`, per existing usage at `tests/unit/web/test_app.py:334-370`).
+**Tech Stack:** Python 3.13, asyncio, `concurrent.futures`, SQLAlchemy 2.0, psycopg v3, FastAPI/Starlette, pytest, pytest-asyncio, PostgreSQL 16 testcontainers.
 
-**Depends on:** `2026-07-08-aws-ecs-01-deployment-contract.md` and `2026-07-08-aws-ecs-02-postgres-schema-support.md` (for `SchemaState`, `probe_session_schema(engine)`, `probe_landscape_schema(engine)`, `postgres_engine_kwargs(url)` in `elspeth.web.schema_probe`) — must land first per wave ordering; not otherwise used here.
+**Depends on:**
 
-**Global Constraints (verbatim spec):** 2s per-check timeout; 5s whole-endpoint ceiling; 2s TTL result cache is the stampede control, not authentication — `/api/ready` stays unauthenticated. Checks: session DB connectivity, session schema validity, landscape DB connectivity, landscape schema validity, `data_dir`/payload-store/blob-dir writability (create/read/fsync-or-close/delete probe file, no path or secret leakage), configured auth-mode requirements. `/api/health` "must not depend on Aurora, EFS, or remote providers."
+- Plan 04 (`elspeth-03cf981d4a`) is the direct hard dependency and already carries Plans 01/02 transitively. Task 3 consumes Plan 04's pre-auth ordering, orphan-cleanup `create_tables` argument, and exception imports.
+- Plan 02 provides `SchemaState`, `postgres_engine_kwargs`, and connection-bound probes.
+- Plan 03 provides the filesystem-probe security contract this plan mirrors exactly; no runtime import from doctor is introduced.
+- Filigree implementation step: `elspeth-1a1c31bcce`. This planning repair does not claim it.
 
-**Deviations:** (1) Session/landscape checks share one 2s connectivity+schema budget per DB instead of four independently-budgeted checks — recorded per panel review rather than argued away in prose only. (2) Readiness probes dispatch onto a dedicated 4-worker pool inside `readiness.py`, never the shared pool `run_sync_in_worker` (`async_workers.py:82`) uses elsewhere — a wedged Aurora/EFS connect on the shared pool starves session/execution/composer/auth routes app-wide (panel finding, HIGH); nothing can kill a wedged thread, only abandon it, so isolating the pool is the available mitigation.
+**Required downstream handoffs:** Plan 10/12 must mechanically verify the ALB target group is configured to probe exactly `/api/ready`, not merely curl the route manually. Plan 12 also owns the zero-skip PostgreSQL readiness file from Task 4.
 
-**Residual limitation:** A hard, sustained wedge (e.g. a dropped-SYN security-group misconfiguration) still exhausts readiness's own 4-worker pool over repeated cache-refresh cycles, degrading `/api/ready` further without affecting the rest of the app. The ops doc (Task 2) tells operators that persistent `/api/ready` failures beyond a few polling cycles may need manual task recycling, since `/api/health` alone will not detect an internally wedged pool. A driver-level `connect_timeout` remains a follow-up. **Accepted residuals (round 3):** the module-global `_READINESS_EXECUTOR` spins up at import and has no shutdown hook (process-lifetime by design; harmless for the single long-lived web process and for test runs); `_check_landscape` builds and disposes a pooled engine per cache miss (the pool never amortizes — bounded by the 2s cache, waste not correctness); and `_check_session` probes on the shared `session_engine` pool, so a wedged 2s session probe can briefly contend with live session traffic (bounded by the per-check timeout + cache).
+**Global Constraints:**
 
-### Task 1: `readiness.py` — checks, cache, orchestrator
+- `/api/ready` is unauthenticated because ALB cannot present credentials. Cache single-flight plus bounded admission is the DoS/stampede control.
+- Every response has exactly eight unique, ordered checks: `auth_mode`, `session_db`, `session_schema`, `landscape_db`, `landscape_schema`, `data_dir`, `payload_store`, `blob_dir`. A dependency failure never deletes its paired schema check; it reports static “not checked”/failure detail.
+- Each dependency group returns within 2 seconds of wall-clock time. The entire route, including cache waiting, returns within 5 seconds. Deadlines use `loop.time()`, never synthetic polling counters.
+- A timed-out/cancelled queued future is cancelled. A running future remains registered under its label until its completion callback drains it; later refreshes return a static in-flight/saturated failure without submitting duplicate work.
+- Cancellation of the leading request never cancels the shared computation. Followers await the same shielded task; no request owns probe lifetime.
+- PostgreSQL readiness engines use raw AWS URLs, connection/pool/statement timeouts below the 2-second async ceiling, small isolated pools, connection-bound probes, and `BaseException`-safe disposal. Default-mode file-backed SQLite may use the live session engine in the worker. A `sqlite:///:memory:` session engine is never checked out from the readiness worker: SQLAlchemy's live `SingletonThreadPool` would expose a different empty database per thread and may violate SQLite thread affinity, so readiness returns a deterministic paired not-ready result instructing the developer/test operator to use file-backed SQLite.
+- No filesystem path derivation, stat, create/read/fsync/delete operation, database connect, or schema inspection runs on the event-loop thread.
+- Filesystem probes never call `mkdir` and never reopen a probe by pathname. Payload checks reject the same symlink/unsafe-mode shapes as Plans 03/04 and `FilesystemPayloadStore`.
+- Response bodies and logs contain only closed check names, schema enum names, static remedies, and exception class names. Never expose URLs, credentials, SQL, DBAPI messages, paths, exception messages, or tracebacks.
+- `GET /api/health` remains the existing constant shallow response. Plan 04 intentionally remains dependency-sensitive before socket bind; this plan covers liveness after successful startup and post-gate outages.
+
+---
+
+### Task 1: Implement bounded probe admission and cancellation-safe caching
 
 **Files:**
-- Create: `src/elspeth/web/readiness.py`
-- Test: `tests/unit/web/test_readiness.py`
 
-**Interfaces:**
-- Consumes: `SchemaState`, `probe_session_schema(engine)`, `probe_landscape_schema(engine)`, `postgres_engine_kwargs(url)` (`elspeth.web.schema_probe`); `WebSettings.get_landscape_url()/get_payload_store_path()` (`config.py:646-657`); SQLAlchemy `create_engine`/`text`; `create_session_engine`/`initialize_session_schema` (mirrors `app.py:874-875`, test-fixture use only). Deliberately NOT `LandscapeDB.from_url()` for the live probe path — see Task 1 prose below.
-- Produces (Task 2 consumes): `ReadinessCheck(name, ok, detail)`, `ReadinessReport(ready, checks)`, `ReadinessCache`, `async def readiness_report(settings, session_engine) -> ReadinessReport`. Not `elspeth.web.audit_readiness.service.ReadinessService` (per-run audit snapshot — unrelated, name collision only).
+- Create: `src/elspeth/web/readiness.py`
+- Create: `tests/unit/web/test_readiness.py`
+
+**Interfaces — Produces:**
 
 ```python
-from __future__ import annotations
-import functools
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-import structlog
-from sqlalchemy import create_engine, text
-from elspeth.web.schema_probe import SchemaState, probe_session_schema, probe_landscape_schema, postgres_engine_kwargs
-
-_PROBE_TIMEOUT_SECONDS = 2.0
-_TOTAL_TIMEOUT_SECONDS = 5.0
-_READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="readiness-worker")
-_LOGGER = structlog.get_logger()
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadinessCheck:
     name: str
     ok: bool
     detail: str
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class ReadinessReport:
     ready: bool
     checks: tuple[ReadinessCheck, ...]
 
-def _probe_directory_writable(name: str, directory: Path) -> ReadinessCheck:
-    # NEVER mkdir here: readiness is a pure observer. Creating a missing
-    # directory would report ready while an unmounted EFS volume silently
-    # redirects production state into the container's overlay filesystem —
-    # the exact failure this check exists to catch. Missing dir = not ready;
-    # `elspeth doctor aws-ecs --init-schema` (or the EFS mount) creates dirs.
-    if not directory.is_dir():
-        return ReadinessCheck(name, False, f"{name} directory missing (EFS mount absent, or doctor --init-schema not yet run)")
-    probe_path = directory / f".readiness-probe-{uuid4().hex}"
-    try:
-        with probe_path.open("wb") as fh:
-            fh.write(b"ok"); fh.flush(); os.fsync(fh.fileno())
-        if probe_path.read_bytes() != b"ok":
-            return ReadinessCheck(name, False, f"{name} probe file content mismatch")
-    except OSError as exc:
-        return ReadinessCheck(name, False, f"{name} is not writable ({type(exc).__name__})")
-    finally:
-        probe_path.unlink(missing_ok=True)
-    return ReadinessCheck(name, True, f"{name} is writable")
 
-def _dir_check(name: str, directory: Path) -> tuple[ReadinessCheck, ...]:
-    return (_probe_directory_writable(name, directory),)
+class ReadinessProbeRunner:
+    async def run(
+        self,
+        label: ReadinessProbeLabel,
+        check_names: tuple[str, ...],
+        fn: Callable[..., tuple[ReadinessCheck, ...]],
+        *args: object,
+    ) -> tuple[ReadinessCheck, ...]: ...
 
-def _check_session(engine: Engine) -> tuple[ReadinessCheck, ...]:
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    state = probe_session_schema(engine)
-    return (
-        ReadinessCheck("session_db", True, "connected"),
-        ReadinessCheck("session_schema", state is SchemaState.CURRENT, f"schema state: {state.name}"),
-    )
+    def close(self) -> None: ...
 
-def _check_landscape(settings: WebSettings) -> tuple[ReadinessCheck, ...]:
-    engine = create_engine(settings.get_landscape_url(), **postgres_engine_kwargs(settings.get_landscape_url()))
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        state = probe_landscape_schema(engine)
-    finally:
-        engine.dispose()
-    return (
-        ReadinessCheck("landscape_db", True, "connected"),
-        ReadinessCheck("landscape_schema", state is SchemaState.CURRENT, f"schema state: {state.name}"),
-    )
 
 class ReadinessCache:
-    def __init__(self, ttl_seconds: float = 2.0, clock: Callable[[], float] = time.monotonic) -> None:
-        self._ttl, self._clock, self._lock = ttl_seconds, clock, asyncio.Lock()
-        self._report: ReadinessReport | None = None
-        self._computed_at = float("-inf")
-
-    async def get(self, compute: Callable[[], Awaitable[ReadinessReport]]) -> ReadinessReport:
-        async with self._lock:
-            if self._report is not None and self._clock() - self._computed_at < self._ttl:
-                return self._report
-            self._report = await compute()
-            self._computed_at = self._clock()
-            return self._report
-
-def _drain(future: asyncio.Future[object]) -> None:
-    if not future.cancelled():
-        future.exception()  # retrieve so an abandoned wedged probe never logs "exception never retrieved"
-
-async def bounded(label: str, fn: Callable[..., tuple[ReadinessCheck, ...]], *args: object) -> tuple[ReadinessCheck, ...]:
-    # Polls in 0.1s ticks like run_sync_in_worker (async_workers.py:82-118), not a
-    # bare wait_for(future) — an executor future is exactly the case that loop
-    # guards against (selector wake can lag in this repo's sandboxed CI);
-    # readiness_report's wait_for below wraps coroutines instead, a different case.
-    loop = asyncio.get_running_loop()
-    future = loop.run_in_executor(_READINESS_EXECUTOR, functools.partial(fn, *args))
-    elapsed = 0.0
-    try:
-        while elapsed < _PROBE_TIMEOUT_SECONDS:
-            done, _pending = await asyncio.wait({future}, timeout=0.1)
-            if done:
-                return future.result()
-            elapsed += 0.1
-        return (ReadinessCheck(label, False, f"probe timed out after {_PROBE_TIMEOUT_SECONDS}s"),)
-    except Exception as exc:  # a probe must degrade, never crash /api/ready (BLE not in this repo's ruff select — no noqa needed)
-        return (ReadinessCheck(label, False, f"probe failed ({type(exc).__name__})"),)
-    finally:
-        if not future.done():
-            future.add_done_callback(_drain)
-
-def _finalize(report: ReadinessReport) -> ReadinessReport:
-    # ALB discards the response body, so the JSON detail is invisible to
-    # anyone watching CloudWatch — a not-ready check must ALSO land in the
-    # structured log or an ECS operator sees only an unexplained 503. Details
-    # are already redacted (class-name-only), so logging them leaks nothing.
-    # Called once per computation; the 2s cache throttles it per-poll.
-    for check in report.checks:
-        if not check.ok:
-            _LOGGER.warning("readiness_check_not_ready", check=check.name, detail=check.detail)
-    return report
-
-async def readiness_report(settings: WebSettings, session_engine: Engine) -> ReadinessReport:
-    try:
-        grouped = await asyncio.wait_for(asyncio.gather(
-            bounded("session_db", _check_session, session_engine),
-            bounded("landscape_db", _check_landscape, settings),
-            bounded("data_dir", _dir_check, "data_dir", settings.data_dir),
-            bounded("payload_store", _dir_check, "payload_store", settings.get_payload_store_path()),
-            bounded("blob_dir", _dir_check, "blob_dir", settings.data_dir / "blobs"),
-        ), timeout=_TOTAL_TIMEOUT_SECONDS)
-    except TimeoutError:
-        return _finalize(ReadinessReport(False, (ReadinessCheck("overall", False, f"exceeded {_TOTAL_TIMEOUT_SECONDS}s ceiling"),)))
-    try:
-        checks = [_check_auth_mode(settings)]
-    except Exception as exc:  # WebSettings._validate_auth_fields makes this unreachable today; guards a future auth-mode literal added without updating this mirror
-        checks = [ReadinessCheck("auth_mode", False, f"probe failed ({type(exc).__name__})")]
-    for group in grouped:
-        checks.extend(group)
-    return _finalize(ReadinessReport(ready=all(c.ok for c in checks), checks=tuple(checks)))
+    async def get(
+        self,
+        compute: Callable[[], Awaitable[ReadinessReport]],
+    ) -> ReadinessReport: ...
 ```
-`_check_session`/`_check_landscape` mirror only the connectivity shape of the CLI DB check (`cli.py:3044-3067`: `with engine.connect() as conn: conn.execute(text("SELECT 1"))`) — never its `except Exception as e: ...str(e)` branch (`cli.py:3057-3060`, a known leak pattern); both let every exception propagate to `bounded()`'s single, already-redacted (`type(exc).__name__`-only) catch. `_check_landscape` opens a short-lived bare `Engine` via `create_engine`, not `LandscapeDB.from_url()`: `from_url()` eagerly calls `_validate_schema()` (`database.py:971,1385`), which raises `SchemaCompatibilityError` (a bare `Exception` subclass) for any non-`CURRENT` schema — this repo's own `data/runs/audit.db` is in exactly that state today — making `probe_landscape_schema` unreachable and collapsing two named checks into one. `_check_auth_mode(settings) -> ReadinessCheck` mirrors `settings.auth_provider` at `app.py:830-857`; `WebSettings._validate_auth_fields` (`config.py:478-548`) already makes its failure branches unreachable through normal construction, so `ok=False` here is defense-in-depth against a future auth-mode literal, not a live signal — note this in the ops doc (Task 2).
 
-**Steps:**
-- [ ] Write `test_probe_directory_writable_reports_not_ready_when_dir_missing` (`_probe_directory_writable("data_dir", tmp_path / "nope")` → `ok is False`, `"missing"` in detail, and `(tmp_path / "nope").exists()` is still `False` — the probe must never create the directory; a missing EFS mount has to surface as not-ready, not get papered over into the overlay FS), `test_probe_directory_writable_cleans_up_probe_file` (existing dir → `ok is True` and no `.readiness-probe-*` file left behind), `test_probe_directory_writable_reports_exception_class_only_no_path` (existing dir, `Path.open` monkeypatched to raise `OSError`), `test_probe_directory_writable_reports_exception_class_only_when_unlink_fails` (monkeypatch `Path.unlink` to raise `OSError("EIO")`; the failure propagates through `_dir_check` to `bounded()`'s catch, which must still redact to `type(exc).__name__` only) as plain sync tests. Mark every `TestReadinessCache`/`TestReadinessReport` test `@pytest.mark.asyncio` (strict-mode `pytest-asyncio`, mirrors `test_app.py:334`). `TestReadinessCache::{test_returns_cached_within_ttl, test_recomputes_after_ttl, test_concurrent_callers_collapse_to_one_compute}` (fake clock + counting async `compute`).
-- [ ] `TestReadinessReport`: pre-seed a landscape DB via `LandscapeDB.from_url(f"sqlite:///{tmp_path}/landscape.db", create_tables=True)` (test-fixture only) and pass that explicit `landscape_url` to `_settings(...)` (sidesteps `create_app`'s `runs/`-dir creation at `app.py:818`, which a direct `readiness_report()` call never runs); build `session_engine` via `create_session_engine` + `initialize_session_schema` (mirrors `app.py:874-875`). `test_ready_true_when_all_checks_pass`: assert `ready is True` and exactly 8 named checks, all `ok`. `test_ready_false_and_no_leakage_when_session_db_unreachable` / `..._landscape_unreachable`: `monkeypatch.setattr(readiness, "_check_session"/"_check_landscape", ...)` with a stub raising `OperationalError("connect", {}, Exception("...sentinel-credential-9f3a..."))`; assert `ready is False`, exactly 7 checks (the paired `*_schema` check is absent because connectivity itself failed), the surviving `*_db` check's `detail == "probe failed (OperationalError)"`, and `"sentinel-credential-9f3a"` in no detail. This is driver-independent, unlike a live bad DSN: psycopg v3 isn't installed in this repo, so `postgresql+psycopg://...` raises `ModuleNotFoundError` before any socket attempt, letting a leaking `str(exc)` implementation pass a live-DSN test vacuously. `test_ready_false_when_landscape_schema_stale`: `monkeypatch.setattr(readiness, "probe_landscape_schema", lambda engine: SchemaState.STALE)` against the reachable pre-seeded landscape DB; assert 8 checks, `landscape_db.ok is True`, `landscape_schema.ok is False` and `detail == "schema state: STALE"`. `test_overall_check_on_5s_ceiling`: `monkeypatch.setattr(readiness, "_TOTAL_TIMEOUT_SECONDS", 0.001)`; assert `detail == "exceeded 0.001s ceiling"`. `test_not_ready_checks_emit_structured_log` (round-3 addition — a 503 is diagnosable from CloudWatch, not only from a response body ALB throws away): reuse the `_check_landscape`-raises-sentinel monkeypatch, wrap the `readiness_report(...)` call in `structlog.testing.capture_logs()`; assert exactly one captured entry has `event == "readiness_check_not_ready"` with `check == "landscape_db"`, its `detail == "probe failed (OperationalError)"`, and `"sentinel-credential-9f3a"` appears nowhere in any captured entry (redaction holds in the log path too).
-- [ ] `TestCheckAuthMode` (direct, bypassing `WebSettings`'s validator so both branches are reachable): call `_check_auth_mode` with `types.SimpleNamespace(auth_provider=..., oidc_issuer=..., oidc_audience=..., entra_tenant_id=...)` stubs covering local / oidc-complete / oidc-missing-issuer / entra-complete; assert `ok` matches field presence.
-- [ ] Run `pytest tests/unit/web/test_readiness.py -v` → `ModuleNotFoundError: No module named 'elspeth.web.readiness'`.
-- [ ] Implement `readiness.py` as above.
-- [ ] Run again → all pass.
-- [ ] `git add src/elspeth/web/readiness.py tests/unit/web/test_readiness.py && git commit -m "feat(web): add budgeted, cached, redacted readiness probes on a dedicated worker pool"`
+`ReadinessProbeLabel` is the closed literal `"session" | "landscape" | "data_dir" | "payload_store" | "blob_dir"`. The runner owns `ThreadPoolExecutor(max_workers=5, thread_name_prefix="readiness-worker")`, a `threading.Lock`, and `dict[label, concurrent.futures.Future[tuple[ReadinessCheck, ...]]]`.
 
-### Task 2: Wire `GET /api/ready`, guard startup orphan-finalization, prove liveness independence, document probe wiring
+Submission/lifecycle rules:
+
+1. Under the lock, if the same label has an unresolved future, return one static failed check for each requested `check_names`; submit nothing.
+2. Otherwise call `executor.submit` and store the future before releasing the lock. There are only five labels and at most one future per label, so submitted+running work is bounded at five and the executor queue cannot grow across refreshes.
+3. Attach the completion callback only **after releasing the lock**. A concurrent future may already be complete, in which case `add_done_callback` invokes synchronously; attaching under the registry lock would deadlock. The callback reacquires the lock, removes only the identical registered future, releases the lock, and then calls `future.exception()` unless cancelled, so late failures are always retrieved without logging their text.
+4. Wrap the concurrent future once with `asyncio.wrap_future`, immediately attach an asyncio-side done callback that calls `wrapped.exception()` unless cancelled, then poll it with `asyncio.wait({wrapped}, timeout=min(0.1, deadline - loop.time()))` against `deadline = loop.time() + 2.0`. Do not use an unshielded short `asyncio.wait_for`, which would cancel the shared wrapper on its first polling timeout. Event-loop delay therefore consumes the real budget.
+5. On per-check timeout, whole-report cancellation, caller cancellation, or runner close, cancel/drain **both** layers: call `wrapped.cancel()` and `future.cancel()`, retrieving an already-completed wrapper exception without rendering or logging it. If the source future was already running, retain it in the registry until the source callback completes; never remove early and resubmit. The asyncio done callback consumes any late source exception so the event loop cannot emit a credential/path-bearing `Future exception was never retrieved` message.
+6. `close()` is idempotent. Under the lock it marks the runner closed and snapshots the registered futures, then releases the lock before calling `future.cancel()` or `executor.shutdown(wait=False, cancel_futures=True)`: cancelling a queued future may invoke its callback synchronously, so neither cancellation nor shutdown may occur while holding the registry lock. No new submission is accepted afterward.
+
+Failure rendering is deterministic: runner timeout/capacity/exception paths emit all names in `check_names`, using class-only/static details. For a DB exception, `<kind>_db` says `probe failed (ClassName)` and `<kind>_schema` says `not checked: connectivity probe failed`; for timeout/in-flight saturation both use static label-only details.
+
+`ReadinessCache` stores a shared `asyncio.Task[ReadinessReport]`, not a coroutine awaited while holding the lock:
+
+- the lock protects only freshness/task selection and result publication;
+- every caller awaits `asyncio.shield(shared_task)` outside the lock;
+- cancelling the leader leaves the task alive and visible to followers;
+- a completed task is harvested under the lock before any replacement is created, even if its original requester disappeared;
+- successful reports receive a completion timestamp and 2-second TTL; failed task exceptions clear the task without poisoning the prior cached report;
+- cache waiting is ultimately bounded by the route's separate 5-second absolute deadline.
+
+- [ ] Write runner tests with `threading.Event`-blocked functions. Prove one submission per label, repeated refreshes do not increase submitted/running counts, a different free label can still run, queued cancellation removes only after completion/cancel callback, and `close()` rejects new work. Add immediate-completion-before-callback-registration and concurrent-`close()` regression tests with a short hard test timeout to prove neither callback path deadlocks. Release every event in `finally` so pytest cannot retain non-daemon worker threads.
+- [ ] Add a wall-clock test using an event-loop heartbeat and a blocking worker: `run` returns at 2 seconds within a narrow monotonic tolerance while the loop continues ticking. Add a deliberate event-loop stall and prove deadline calculation uses `loop.time()` rather than 20 synthetic 0.1-second iterations.
+- [ ] Add cancellation tests: cancel an awaiting runner caller and prove the running future stays registered; after releasing it, its exception/result is drained and the label becomes admissible again. A queued future must be cancelled immediately. Install a capturing event-loop exception handler, make an abandoned worker fail late with credential/path sentinels, force callback/GC turns, and assert the handler receives neither an unretrieved-future event nor any sentinel.
+- [ ] Write cache tests for fresh-hit TTL, recompute after TTL, 50 concurrent callers collapsing to one task, cancelled leader plus surviving follower, completed-task harvesting with no original waiter, compute exception recovery, and a follower never waiting for two sequential computations.
+- [ ] Implement the types, runner, and cache. Use correctly parameterized `concurrent.futures.Future[...]`; do not pass `asyncio.Future[object]` to a callback expecting a narrower result type.
+- [ ] Run:
+
+  ```bash
+  uv run pytest tests/unit/web/test_readiness.py -k "ProbeRunner or ReadinessCache" -q
+  ```
+
+  Expected: all Task 1 tests pass.
+
+- [ ] Commit:
+
+  ```bash
+  git add src/elspeth/web/readiness.py tests/unit/web/test_readiness.py
+  git commit -m "feat(web): add bounded readiness probe runner and cache"
+  ```
+
+---
+
+### Task 2: Add redacted database, filesystem, auth, and report checks
 
 **Files:**
-- Modify: `src/elspeth/web/app.py:896` (insert `app.state.readiness_cache = ReadinessCache()`); `app.py:1159` (insert the `/api/ready` route); `app.py:293` (wrap `_finalize_orphaned_landscape_runs(...)` — **note:** by the time this task executes, Plan 04 Task 3 has already added a `create_tables` kwarg to this same call and widened `_periodic_orphan_cleanup`'s except tuple at `app.py:230-269`/`:237` from `(SQLAlchemyError, OSError)` to `except (SQLAlchemyError, OSError, SchemaCompatibilityError)`; wrap the already-modified `:293` call in that identical 3-tuple, not the narrower pair — `:293` is startup *cleanup*, not the schema *validation gate* (Plan 04's `validate_only_schema_or_raise` is the real fail-closed gate), so a landscape schema lost or drifted after boot raising `SchemaCompatibilityError` under Plan 04's `create_tables=False` belongs in the same recoverable-failure class as the other two here too, letting `/api/health`/`/api/ready` come up during a landscape outage. `SchemaCompatibilityError` is already imported at `app.py:41` by Plan 04 Task 3 — no new import needed here. `exc_class`-only logging — see Steps for why). Add imports (`dataclasses.asdict`, `elspeth.web.readiness.{ReadinessCache, readiness_report}`).
-- Modify: `tests/unit/web/test_app.py` (extend `TestHealthEndpoint`; add `TestReadyEndpoint`, `TestLifespanLandscapeOutage`).
-- Create: `docs/operator/aws-ecs-health-and-readiness.md`.
 
-**Interfaces:** Produces `GET /api/ready` returning `{"ready": bool, "checks": [{"name", "ok", "detail"}, ...]}`, status 200 if ready else 503, via `request.app.state.readiness_cache.get(lambda: readiness_report(request.app.state.settings, request.app.state.session_engine))`.
+- Modify: `src/elspeth/web/readiness.py`
+- Modify: `tests/unit/web/test_readiness.py`
+
+**Database check contract:**
+
+- In AWS mode use raw `settings.session_db_url` / `settings.landscape_url`, asserted present after Plan 04 startup. Never call fallback getters.
+- For PostgreSQL create an owned one-shot engine per DB check. Session uses `create_session_engine`; Landscape uses `create_engine`. Start from `postgres_engine_kwargs(url)` but override to `pool_size=1`, `max_overflow=0`, and `pool_timeout=0.5`; add `connect_args={"connect_timeout": 1}`.
+- Inside one `with engine.connect() as conn`, execute the static `SET LOCAL statement_timeout = '1000ms'`, then `SELECT 1`, then `probe_session_schema(conn)` or `probe_landscape_schema(conn)`. Connectivity and shape therefore use the same checkout.
+- Dispose every owned engine in `finally` for success, `Exception`, and `BaseException` paths.
+- In default mode, reuse `app.state.session_engine` only for file-backed SQLite. Detect `sqlite:///:memory:` inside the session worker and return deterministic `session_db`/`session_schema` not-ready checks with the static remedy `in-memory SQLite is not readiness-probeable; use a file-backed session database`; never checkout that engine on the readiness thread or claim schema currency. Landscape/default uses its resolved configured/fallback URL and an owned engine. No PostgreSQL check may borrow the live session pool.
+
+Each DB function returns exactly two checks. `CURRENT` passes schema; any other `SchemaState` produces `ok=False` with `schema state: <NAME>`. Exceptions escape to the runner, which emits the deterministic paired failures.
+
+**Filesystem check contract:**
+
+- Resolve/check every directory inside its worker function. `blob_dir` calls `allowed_source_directories(str(settings.data_dir))[0]` inside the runner boundary; path-resolution failure becomes a static check, never route 500 or event-loop EFS I/O.
+- For payload, use raw AWS `payload_store_path`; default mode may use its fallback. Before the active probe, use `lstat`, reject symlink/non-directory/`stat.S_IWGRP | stat.S_IWOTH`, and require strict resolution.
+- Active probe uses `tempfile.mkstemp(prefix=".readiness-probe-", dir=directory)`, immediately unlinks the name while the FD is open, wraps with `os.fdopen(fd, "w+b")`, writes, flushes, fsyncs, seeks, and reads the sentinel through that descriptor. Cleanup closes any owned FD and removes a still-named file in `finally`; cleanup uncertainty is failure.
+
+**Auth check contract:** `_check_auth_mode` is pure and total. Local passes. OIDC requires `oidc_issuer`, `oidc_audience`, and `oidc_client_id`. Entra requires `entra_tenant_id`, `oidc_audience`, and `oidc_client_id`. An unknown provider fails. It does not perform discovery; Plan 04/lifespan already validates/resolves that startup contract.
+
+`readiness_report(settings, session_engine, runner)` gathers the five runner calls concurrently, prepends `auth_mode`, and returns the exact eight-name order. It has its own 5-second ceiling, but route-level Task 3 timing also includes cache wait. Any unexpected path/auth/gather error becomes one deterministic eight-check not-ready report via a final static boundary; it never escapes as HTTP 500. `_finalize` logs one `readiness_check_not_ready` event per failing check with `check` and already-redacted `detail` only.
+
+- [ ] Add DB tests proving raw AWS URLs, isolated pool/connect/statement timeout kwargs, session factory usage, same-Connection `SELECT 1`+probe, no live PostgreSQL pool checkout, file-backed default SQLite identity reuse, deterministic not-ready/no-checkout behavior for `sqlite:///:memory:`, all schema states, paired deterministic failures, and owned-engine disposal under success/exception/`KeyboardInterrupt`.
+- [ ] Inject credential-bearing URL/SQL/DBAPI sentinels into construction, connection, statement, and probe failures. Assert no response detail or captured log contains them; only exception classes appear.
+- [ ] Add filesystem tests for missing/non-directory, payload symlink/unsafe mode, secret-bearing resolve/stat failure, concurrent probes, exclusive creation, immediate unlink, same-FD readback, fsync failure, cleanup failure, and no leftover named file. A blocking blob resolver must time out through the runner while an event-loop heartbeat continues.
+- [ ] Add auth tests for every required field independently, including missing `oidc_client_id` for both OIDC and Entra, and unknown provider.
+- [ ] Add report tests pinning exact ordered unique names, all-green readiness, each individual failure, 2-second grouped timeout, 5-second overall timeout, class-only logging, and no exception/path/URL/SQL leakage.
+- [ ] Run:
+
+  ```bash
+  uv run pytest tests/unit/web/test_readiness.py -q
+  ```
+
+  Expected: all tests pass.
+
+- [ ] Commit:
+
+  ```bash
+  git add src/elspeth/web/readiness.py tests/unit/web/test_readiness.py
+  git commit -m "feat(web): add bounded dependency readiness checks"
+  ```
+
+---
+
+### Task 3: Wire the route, complete post-gate cleanup degradation, and document probes
+
+**Files:**
+
+- Modify: `src/elspeth/web/app.py` (readiness state/route, lifespan cleanup and shutdown)
+- Modify: `src/elspeth/web/sessions/protocol.py` (durable reconciliation-candidate methods)
+- Modify: `src/elspeth/web/sessions/service.py` (pending/complete orphan-reconciliation marker queries)
+- Modify: `tests/unit/web/test_app.py`
+- Modify: `tests/unit/web/sessions/test_service.py`
+- Create: `docs/operator/aws-ecs-health-and-readiness.md`
+
+After the session engine is established in either runtime mode, create one `ReadinessProbeRunner` and `ReadinessCache`, store both on `app.state`, and register an idempotent app finalizer for the runner. In AWS mode this construction occurs only after Plan 04's pre-bind gate succeeds; in default mode the route receives the same state and remains usable. Lifespan shutdown calls `runner.close()` after cancelling periodic cleanup and before final engine disposal.
+
+Route contract:
 
 ```python
 @app.get("/api/ready")
 async def ready(request: Request) -> JSONResponse:
-    cache: ReadinessCache = request.app.state.readiness_cache
-    report = await cache.get(lambda: readiness_report(request.app.state.settings, request.app.state.session_engine))
-    return JSONResponse(status_code=200 if report.ready else 503,
-                         content={"ready": report.ready, "checks": [asdict(c) for c in report.checks]})
+    async def compute() -> ReadinessReport:
+        return await readiness_report(
+            request.app.state.settings,
+            request.app.state.session_engine,
+            request.app.state.readiness_probe_runner,
+        )
+
+    try:
+        async with asyncio.timeout(5.0):
+            report = await request.app.state.readiness_cache.get(compute)
+    except TimeoutError:
+        report = overall_timeout_report()
+    return JSONResponse(
+        status_code=200 if report.ready else 503,
+        content={"ready": report.ready, "checks": [asdict(check) for check in report.checks]},
+    )
 ```
 
-**Steps:**
-- [ ] In `test_app.py`, add `TestReadyEndpoint::test_ready_returns_200_when_all_checks_pass` (Task 1's pass-case fixture; 8 named checks all `ok`) and `test_ready_returns_503_with_redacted_body_when_landscape_unreachable` (monkeypatch `_check_landscape` per Task 1's technique; 503, `body["ready"] is False`, no sentinel in the response text). Extend `TestHealthEndpoint` with `test_health_independent_of_ready_when_landscape_unreachable` (same monkeypatch: `/api/health`→200, `/api/ready`→503 on one app instance) — docstring-note this proves only the route handler is dependency-free, since `_sync_asgi_client.py`'s `ASGITransport` never runs lifespan.
-- [ ] Add `TestLifespanLandscapeOutage::test_lifespan_survives_landscape_unreachable_during_orphan_finalization`, mirroring `test_lifespan_startup_orphan_cleanup_terminalizes_landscape_run` (`test_app.py:739-776`) but simpler: seed a `running` web run with a `landscape_run_id` first (session-side only, no landscape row needed), then `monkeypatch.setattr(LandscapeDB, "from_url", staticmethod(lambda *a, **kw: (_ for _ in ()).throw(OperationalError("connect", {}, Exception("boom")))))` (deterministic, driver-independent). `async with lifespan(app): pass` — before the `app.py:293` fix this raises uncaught (the liveness-independence gap this plan's Goal claims to close); after, it must not raise, and `(await session_service.get_run(web_run.id)).status == "cancelled"` (session-side cancellation lands even though landscape finalization is skipped and logged).
-- [ ] Run `pytest tests/unit/web/test_app.py -k "TestReadyEndpoint or test_health_independent or TestLifespanLandscapeOutage" -v` → route tests fail `AttributeError: 'State' object has no attribute 'readiness_cache'`; the lifespan test fails by raising `OperationalError` uncaught.
-- [ ] Wire `app.state.readiness_cache` and the route as above; wrap the `app.py:293` call per Files.
-- [ ] Run again → all pass. Run `pytest tests/unit/web/test_app.py -v` → no regressions (confirms `/api/health` unchanged).
-- [ ] Create `docs/operator/aws-ecs-health-and-readiness.md` stating the four-way probe contract: ECS container `healthCheck` → `GET /api/health` (liveness only, never restarts on dependency failure); ALB target-group health check → `GET /api/ready` (200/503, 2s/5s/2s budgets, unauthenticated since ALB presents no credentials); `elspeth doctor aws-ecs [--init-schema]` runs once as a pre-traffic task before the service update shifts traffic; `elspeth health` is explicitly **not** wired to any ECS probe. State the startup-window sizing obligation (round-3 hardening; spec §Operational Budgets carries the authoritative wording): Plan 04's validate-only gate runs inside `create_app()` **before uvicorn binds the socket**, so for the whole validation window the port is closed — connection-refused, not 503 — and **both** the container `healthCheck.startPeriod` **and** the ECS service `healthCheckGracePeriodSeconds` (the knob governing ALB-driven task replacement) must be sized to the two-cold-cluster worst case *plus margin* (~150s; the ~90s figure excludes probe time). Sizing only `startPeriod` lets ALB kill a cold-starting task mid-validation into a restart loop that never converges. Also state this plan's Residual limitation (dedicated pool isolates but doesn't prevent exhaustion under a sustained wedge; manual task recycling may be needed) and that `auth_mode` reflects startup-validated settings, not a live probe.
-- [ ] `git add src/elspeth/web/app.py tests/unit/web/test_app.py docs/operator/aws-ecs-health-and-readiness.md && git commit -m "feat(web): wire GET /api/ready, guard startup orphan-finalization against landscape outages, document ECS probe contract"`
+The route timeout covers lock/task selection, follower waiting, and computation. `ReadinessCache.get` shields the shared task, so route timeout/caller cancellation does not cancel the batch. `overall_timeout_report()` returns the same exact eight names with static timeout details and passes through the normal class-free `_finalize` logging path.
+
+Make Landscape orphan reconciliation durable without a schema migration by using exact closed markers in the existing session-run `error` reason. Define startup and periodic reason constants that retain the human-readable reason and end in `[landscape-reconciliation:pending]`. Add protocol/service methods that (a) list every `cancelled` row with that exact pending suffix, including rows whose `landscape_run_id` is null, and (b) atomically replace only that suffix with an outcome-specific closed suffix for specified run IDs: `[landscape-reconciliation:complete]` for a null anchor or an existing Landscape row, and `[landscape-reconciliation:absent]` when a non-null anchor has no Landscape row. No substring/prefix inference, arbitrary error rewriting, or new database column is allowed.
+
+The live execution order persists `status=running` plus `landscape_run_id` before constructing Landscape and before `begin_run`, so SIGKILL can legitimately leave a non-null anchor with no Landscape run row. The same observed absence could also mean later audit-row loss; it must never be silently blessed as ordinary completion. Reconciliation therefore has three idempotent outcomes: a running Landscape row becomes `INTERRUPTED`; an existing terminal row is already complete; and an absent row needs no possible Landscape mutation but receives the distinct durable `absent` marker. For absence, emit one static `orphan_landscape_run_absent` error event with an outcome/count and `operator_action="investigate audit-row absence"` only — no run ID, URL, path, or exception text. The distinct marker closes automatic retry while preserving the audit exception for operator investigation. A null `landscape_run_id` is a normal no-op candidate and receives the ordinary complete marker rather than remaining pending forever.
+
+Wrap the complete startup orphan-cleanup/reconciliation unit after Plan 04's validation:
+
+1. initialize `cancelled_runs = []`;
+2. inside one try, await `cancel_all_orphaned_run_records` using the exact pending-marker startup reason;
+3. list **all** durable pending reconciliation candidates, including rows committed by an earlier failed process;
+4. partition null anchors as no-op, then call idempotent `_finalize_orphaned_landscape_runs(..., create_tables=<Plan 04 policy>)` for anchored candidates — running rows become interrupted, already-terminal rows are not rewritten, and absent pre-begin rows return the static absent outcome rather than raising `AuditIntegrityError`;
+5. only after the whole Landscape pass succeeds, atomically mark null/existing-row candidates complete and missing-row candidates absent in the session database; if Landscape fails partway or either marker update fails, pending markers remain and the entire idempotent set is retried;
+6. catch `(SQLAlchemyError, OSError, SchemaCompatibilityError)` and log only `lifespan_orphan_cleanup_failed`, `exc_class`;
+7. still emit cancellation telemetry for any new session cancellations that completed before Landscape failure.
+
+Apply the same list → idempotent Landscape finalize → complete-marker sequence in Plan 04's periodic loop after cancelling new orphans with the periodic pending-marker reason. Thus periodic cleanup and the next process startup can recover a session row already committed as `cancelled`; neither relies on `cancel_all_orphaned_run_records` returning that row again.
+
+This does not weaken the pre-bind gate: it handles a dependency lost after validation but before/during lifespan. `/api/health` remains the existing constant 200 route.
+
+- [ ] Add route tests for 200/all-green and 503/every dependency failure, exact eight-check JSON, no sentinel leakage, and the route's true 5-second ceiling including a waiter behind a shared compute.
+- [ ] Add cancellation/single-flight ASGI tests: cancel the leading readiness request, keep a follower, and prove one batch; after route timeout, a later request sees the same in-flight labels rather than submitting duplicates.
+- [ ] Extend `TestHealthEndpoint`: with readiness DB/EFS checks blocked or failing, `/api/health` still returns its unchanged 200 body while `/api/ready` returns bounded 503 on the same app. Verify an event-loop heartbeat/health call remains responsive while blob resolution is blocked in the readiness worker.
+- [ ] Add session-service tests pinning exact pending-marker selection (including null anchors), exclusion of unrelated/user errors and every closed marker, outcome-specific compare-and-update behavior, and preservation of the human-readable reason. Add startup/periodic lifespan tests that fail after the session cancellation commit but before Landscape completion, then retry and prove the same durable candidate becomes `INTERRUPTED` and receives the complete marker. Also cover failure after Landscape completion but before session marker update; the next pass must idempotently mark complete. Reproduce the real SIGKILL window with a non-null session anchor but no Landscape row and prove startup emits only the static operator-action event, writes the distinct durable absent marker, and does not reselect it; prove a null-anchor candidate receives the ordinary complete marker without Landscape access. Use `composer_boot_probe_enabled=False`, a controllable short periodic interval where required (otherwise `3600`), and `patch("httpx.AsyncClient", return_value=_StaticAsyncClient([]))` so unrelated composer/OIDC/catalog work cannot escape. Assert class-only logs, no sentinel, session telemetry only for newly cancelled rows, and clean runner shutdown.
+- [ ] Create `docs/operator/aws-ecs-health-and-readiness.md` with the four exact surfaces: container health check → `/api/health`; ALB target group → `/api/ready`; doctor as one-shot pre-traffic task; `elspeth health` never wired. Document 2s/5s/2s budgets, bounded admission/saturation remedy, unauthenticated rationale, Plan 04's pre-bind connection-refused window, and both ~150s ECS startup/grace knobs. Also document that `[landscape-reconciliation:absent]` is a durable audit exception (possible pre-begin crash or later audit loss), name the static log event, and require operator investigation rather than treating it as successful audit reconciliation.
+- [ ] Run:
+
+  ```bash
+  uv run pytest tests/unit/web/test_readiness.py tests/unit/web/test_app.py tests/unit/web/sessions/test_service.py -q
+  ```
+
+  Expected: all tests pass.
+
+- [ ] Commit:
+
+  ```bash
+  git add src/elspeth/web/app.py src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py tests/unit/web/test_app.py tests/unit/web/sessions/test_service.py docs/operator/aws-ecs-health-and-readiness.md
+  git commit -m "feat(web): wire bounded readiness and resilient post-gate cleanup"
+  ```
+
+---
+
+### Task 4: Prove PostgreSQL readiness and bounded redacted failure
+
+**Files:**
+
+- Create: `tests/testcontainer/web/test_aws_ecs_readiness_postgres.py`
+
+Mark only `pytest.mark.testcontainer`; keep the file outside auto-`integration` marking. Reuse the Plan 04 pattern: one module Postgres 16 container, fresh distinct databases per test, safe UUID-derived/quoted identifiers, complete AWS settings, and pre-created data/payload/blob directories. Initialize schemas with owner engines, render credential-preserving runtime URLs, and dispose all engines/apps in fixture `finally`.
+
+- [ ] `test_ready_returns_200_for_current_postgres`: construct the Plan 04-validated app, call `/api/ready`, require status 200, exact eight unique names, all `ok`, and independently probe both schemas `CURRENT`.
+- [ ] `test_ready_returns_bounded_redacted_503_after_connect_revocation`: after app construction, use the admin connection to `ALTER ROLE <safely quoted runtime role> NOLOGIN` for one runtime role and terminate that role's existing backends so the next dedicated readiness connection must fail. (`REVOKE CONNECT` from the role alone is insufficient because a new PostgreSQL database grants `CONNECT` to `PUBLIC`.) Before exercising HTTP, assert that a fresh direct connection with the runtime URL actually fails; this proves the fault injection is effective. Then call `/api/ready`; require 503 in under 5 seconds, paired DB/schema failures, and absence of username/password/URL/SQL/driver text from body and captured logs. Restore `LOGIN`, release blocked work, and dispose connections in `finally`.
+- [ ] `test_repeated_failed_refreshes_do_not_grow_probe_work`: hold one database probe until after repeated cache expiries/requests; require at most one unresolved future for its label and at most five total runner futures, then release and prove recovery.
+- [ ] Verify Docker and zero skips:
+
+  ```bash
+  docker info
+  uv run pytest tests/testcontainer/web/test_aws_ecs_readiness_postgres.py -m testcontainer -q
+  ```
+
+  Expected: both commands exit 0 and the file reports zero skips. Docker unavailable is `BLOCKED`.
+
+- [ ] Commit:
+
+  ```bash
+  git add tests/testcontainer/web/test_aws_ecs_readiness_postgres.py
+  git commit -m "test(web): prove bounded PostgreSQL readiness"
+  ```
+
+---
+
+### Task 5: Run Plan 05 handoff gates
+
+**Files:** Verify only files touched by Tasks 1-4. No new implementation files are expected.
+
+- [ ] Run focused and subsystem tests:
+
+  ```bash
+  uv run pytest tests/unit/web/test_readiness.py tests/unit/web/test_app.py tests/unit/web/sessions/test_service.py -q
+  uv run pytest tests/unit/web/ -q
+  docker info
+  uv run pytest tests/testcontainer/web/test_aws_ecs_readiness_postgres.py -m testcontainer -q
+  ```
+
+  Expected: every command exits 0 and the Docker file reports zero skips.
+
+- [ ] Run repository static gates:
+
+  ```bash
+  uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/
+  uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/
+  uv run mypy src/ elspeth-lints/src/
+  git diff --check
+  ```
+
+  Expected: every command exits 0.
+
+- [ ] Because this is an unauthenticated external-input and filesystem/database boundary, use the `wardline-gate` skill and run:
+
+  ```bash
+  wardline scan . --fail-on ERROR
+  ```
+
+  Expected: exit 0. On a finding, follow scan → explain → boundary fix → rescan; add no waiver or signed allowlist entry.
+
+- [ ] Record Plan 10/12 handoffs: the target group must have `HealthCheckEnabled == true`, exact `HealthCheckPath == "/api/ready"`, exact success matcher `HttpCode == "200"`, and `HealthCheckTimeoutSeconds >= 6` (strictly beyond the 5-second endpoint ceiling). Plan 12 runs:
+
+  ```bash
+  docker info
+  uv run pytest tests/testcontainer/web/test_schema_probe_postgres.py tests/testcontainer/web/test_doctor_aws_ecs_postgres.py tests/testcontainer/web/test_aws_ecs_validate_only_startup.py tests/testcontainer/web/test_aws_ecs_readiness_postgres.py -m testcontainer -q
+  ```
+
+  All four files must execute with zero skips.
+
+- [ ] Create a final commit only if verification required a scoped correction. Stage exact files; never use `git add -A` or create an empty verification commit.

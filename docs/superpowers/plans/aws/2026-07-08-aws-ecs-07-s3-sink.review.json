@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
   "summary": "Plan 07 is executable after Plan 06 and Plan 08A: it now lands an unregistered bounded foundation followed by one atomic complete aws_s3 sink registration, extends the standalone aws extra with Jinja2, protects cumulative writes with IfNoneMatch then confirmed-ETag IfMatch, fails closed on ambiguous/audit-uncertain outcomes, and proves behavior through botocore plus real S3.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-07-s3-sink.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-07-s3-sink.md",
   "reviewed_at": "2026-07-11T17:25:01Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -153,5 +153,6 @@
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found two mergeable broken registration commits, incomplete config metadata and fixtures, missing standalone Jinja packaging, fake-only conditional-write evidence, unconditional cumulative overwrites, provider and recorder leakage, non-idempotent close, ambiguous remote-state claims, unbounded serialization, unsafe staging, and missing static/Wardline/live handoffs."
     }
-  ]
+  ],
+  "plan_sha256": "5e8847126113732c7d415e78f6cb628d6cd3eff32d6310f2693f7b7169359822"
 }

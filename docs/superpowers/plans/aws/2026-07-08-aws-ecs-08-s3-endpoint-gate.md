@@ -223,15 +223,18 @@ The central validation check remains authoritative. These tool checks are defens
 
   Task 3 edits scopes that already own signed tier-model entries (`_execute_set_source_from_blob` and `_execute_set_pipeline`), so signature drift is expected after the code change. The implementing agent reruns read-only diagnosis and stops. The operator follows the Task-0 repair workflow for only the diagnosed changed rows; the agent then reruns diagnosis plus the shape-only gate. The HMAC key stays operator-only and must never enter the agent environment.
 
-- [ ] Stage only Task-3 files, commit, close 08A, and verify Plan 06/07 become startable only through their remaining legitimate edges:
+- [ ] Stage only Task-3 files, commit, and hand 08A to the integration coordinator:
 
   ```bash
   git add src/elspeth/web/composer/tools/sources.py src/elspeth/web/composer/tools/outputs.py src/elspeth/web/composer/tools/sessions.py src/elspeth/web/composer/tools/secrets.py src/elspeth/web/composer/tools/blobs.py tests/unit/web/composer/test_tools.py tests/unit/web/composer/test_blob_inline_tools.py config/cicd/enforce_tier_model/web.yaml
   git commit -m "feat(web): gate aws_s3 endpoints in composer mutations"
-  filigree close elspeth-c0103e6c88
   ```
 
-  If a gate required changes to Task-1/2 files, explicitly stage those corrections too and restart all 08A gates before closing. Never use `git add -A`.
+  If a gate required changes to Task-1/2 files, explicitly stage those
+  corrections too and restart all 08A gates. Never use `git add -A`. The
+  worker does not close from the feature branch: the coordinator integrates,
+  reruns the handoff gates, then closes 08A with the integrated release SHA.
+  Plan 06/07 become startable only after that close.
 
 ---
 
@@ -259,13 +262,16 @@ The central validation check remains authoritative. These tool checks are defens
   wardline scan . --fail-on ERROR
   ```
 
-- [ ] Stage exactly, commit, and close 08B:
+- [ ] Stage exactly, commit, and hand 08B to the integration coordinator:
 
   ```bash
   git add src/elspeth/web/composer/guided/chat_solver.py tests/unit/web/composer/guided/test_chat_solver.py
   git commit -m "feat(web): guide aws_s3 authoring behind endpoint gate"
-  filigree close elspeth-a342f333a4
   ```
+
+  The worker reports evidence but does not close from its feature branch. The
+  coordinator integrates, reruns the 08B gates, and closes with the integrated
+  release SHA before Plan 10/12 may consume this slice.
 
 ## Cross-plan acceptance
 

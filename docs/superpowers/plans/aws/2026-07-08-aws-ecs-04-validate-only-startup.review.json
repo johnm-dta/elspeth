@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "summary": "Plan 04 is executable after repair: AWS startup now validates settings, logical targets, runtime-directory shape, connectivity, and both schemas before auth or service mutation; errors are redacted, retry and engine lifecycles are bounded, and DDL-free behavior has a zero-skip PostgreSQL proof.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-04-validate-only-startup.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-04-validate-only-startup.md",
   "reviewed_at": "2026-07-11T05:34:30Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -95,5 +95,6 @@
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found missing target separation, post-auth validation, incomplete mount gating, unsafe lifecycle/redaction behavior, stale Docker ownership, and absent final gates."
     }
-  ]
+  ],
+  "plan_sha256": "f6fda9c775007468f3a0b45b58528510f09c6890002699294aa3a12a65dd67ca"
 }

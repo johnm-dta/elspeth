@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_GATE_BASELINE",
   "summary": "Plan 08 is implementation-ready after its explicit gate-baseline prerequisite: 08A now owns the trust-declared endpoint predicate, the unconditional validation/execution backstop, source and sink YAML/seed evidence, and every composer mutation surface; 08B is only guided-source prompt parity after Plan 06. Live signed-tier drift and a Wardline analysis-budget failure are tracked separately and block 08A rather than being hidden in prose.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-08-s3-endpoint-gate.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-08-s3-endpoint-gate.md",
   "reviewed_at": "2026-07-11T17:59:45Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -126,5 +126,6 @@
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found a missing trust declaration, false authoring-path inventory, incomplete blob/secret/import/seed coverage, an unimplementable persisted-diagnostics assertion, weak import-boundary evidence, untested guided prose, absent static/Wardline closeout, stale tracker targets, and hidden signed-gate/tooling prerequisites."
     }
-  ]
+  ],
+  "plan_sha256": "4f13f03a4dacc89bb497c24d1d1dbff162e668b4d02faf5e62fe61aeefad0094"
 }

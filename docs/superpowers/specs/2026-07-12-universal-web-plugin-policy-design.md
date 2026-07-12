@@ -131,7 +131,9 @@ source:text
 sink:csv
 sink:json
 sink:text
+transform:field_mapper
 transform:llm
+transform:web_scrape
 ```
 
 Core membership cannot be removed by configuration. Startup fails if any core
@@ -139,15 +141,19 @@ plugin is missing from the installed registry. A future change to core
 membership is a reviewed product/code change with contract and migration
 tests, not an operator override.
 
-`transform:llm` being core means it is always authorized. It is available for
-authoring only when at least one web-approved provider/model configuration and
-its credential requirements are present.
+The canonical live tutorial is `csv|json source -> web_scrape -> llm ->
+field_mapper -> json sink`, so all three transforms belong to the required
+core. `field_mapper` is local. `web_scrape` remains constrained by its existing
+SSRF, public-host, and wire-visible operator-identity policy. `transform:llm`
+is available for authoring only when at least one operator-owned web LLM
+profile and its credential requirements are present.
 
 ## Operator Configuration
 
-`WebSettings` gains three closed settings. Environment values use JSON for
-collections and mappings and continue to reject unknown `ELSPETH_WEB__*`
-names.
+`WebSettings` gains three universal policy settings plus the plugin-specific
+LLM profile settings required to risk-manage the tutorial. Environment values
+use JSON for collections and mappings and continue to reject unknown
+`ELSPETH_WEB__*` names.
 
 ```yaml
 plugin_allowlist:
@@ -163,6 +169,15 @@ plugin_preferences:
 plugin_control_modes:
   prompt_shield: recommend
   content_safety: recommend
+
+llm_profiles:
+  tutorial-default:
+    provider: openrouter
+    model: openai/gpt-5-mini
+    credential_scope: server
+    credential_ref: OPENROUTER_API_KEY
+
+tutorial_llm_profile: tutorial-default
 ```
 
 ### `plugin_allowlist`
@@ -209,6 +224,25 @@ The settings layer converts explicitly into frozen runtime policy structures.
 Alignment tests cover every field and collection parser so an accepted
 setting cannot be silently ignored.
 
+### `llm_profiles` and `tutorial_llm_profile`
+
+- LLM profiles are operator-owned, typed provider/model bindings. Web-authored
+  YAML selects an opaque alias and safe row/prompt options; the server lowers
+  the alias to the explicit provider config after authoring and before
+  validation/execution.
+- Profile models validate provider-specific model, endpoint, credential-source,
+  retry, and cost restrictions. Raw provider credentials and arbitrary
+  endpoints remain forbidden in web-authored YAML.
+- Credential scope is explicit: `server` resolves only from the operator
+  server store and `user` resolves only from the current principal's store.
+  User-first fallback is never used for an operator-profile binding, so a user
+  secret cannot shadow a server credential.
+- `tutorial_llm_profile` must name exactly one configured LLM profile when the
+  tutorial is expected to be ready. When absent, the server still starts and
+  ordinary core pipelines work, but tutorial readiness is unhealthy.
+- The target LLM may see the alias and safe capability metadata, never the
+  resolved provider binding or credential reference name.
+
 ## Startup Policy Compilation
 
 Startup performs this deterministic sequence:
@@ -236,18 +270,28 @@ option. Each web-reachable plugin follows one of three configuration modes:
 
 - `user_configurable`: ordinary data plugins such as CSV, JSON, and text,
   subject to existing path and schema policies.
-- `user_configurable_with_policy`: plugins such as `transform:llm`, whose
-  authored options are constrained by a plugin-specific web policy covering
-  provider variants, models, endpoints, retry/cost budgets, and credential
-  sources.
+- `user_configurable_with_policy`: plugins whose user-authored options remain
+  visible but are narrowed by a plugin-specific web policy.
 - `operator_profiled`: privileged plugins such as Bedrock Guardrails. Web YAML
   may select only an opaque profile alias and safe row-level options. The
   server resolves private identifiers, versions, regions, and other bindings
   after authoring and before validation/execution.
 
+`transform:llm` is operator-profiled on the web so its provider/model/cost
+authority is as explicit as Guardrail authority. CLI/batch retains the
+provider-discriminated explicit configuration.
+
 Raw operator bindings are never accepted from web-authored YAML. User secrets
 cannot shadow operator-profile values. CLI/batch YAML may continue using the
 plugin's explicit expert configuration contract.
+
+Lowering produces two distinct values: an in-memory executable configuration
+and an audit-safe authored configuration. Only the executable copy may contain
+private provider/model/region/credential references. Landscape run/node
+configuration, exports, saved state, logs, errors, telemetry, and background
+job arguments receive only aliases, safe authored options, and non-reversible
+server-keyed generation fingerprints. Resolved secret values are never cached
+in either policy or snapshot.
 
 ## Typed Capability Contract
 
@@ -281,21 +325,27 @@ execution preflight, the server builds exactly one frozen
 
 - the process-lifetime `WebPluginPolicy`;
 - the installed registry identities;
-- locally valid operator-profile configuration;
-- the current principal's scoped secret-reference inventory; and
+- locally valid per-alias operator-profile configuration;
+- each alias's explicit server/user credential scope plus the current
+  principal's scoped secret-reference inventory; and
 - non-secret deployment settings required by the plugin.
 
-The snapshot records authorized, available-for-authoring, and unavailable
-identities with sanitized reason codes. Missing policy or principal context is
-fail-closed for any plugin that requires it. Per-user secrets may narrow the
-authorized set but never expand it.
+The snapshot records authorized, available-for-authoring, unavailable, and
+usable profile-alias identities with sanitized reason codes. An
+operator-profiled plugin is available only when at least one alias is usable,
+and its public schema exposes only usable aliases. Missing policy or principal
+context is fail-closed for any plugin that requires it. Per-user secrets may
+narrow the authorized set but never expand it; user-store values never satisfy
+or shadow a server-scoped alias.
 
 Live remote probes do not participate in `available_for_authoring`. Doctor and
 readiness expose operational health separately. This prevents a stale probe
 cache from becoming an authorization oracle while avoiding the false claim
 that configured means healthy.
 
-The snapshot has a stable fingerprint. All surfaces in one request or composer
+The snapshot has a stable fingerprint over code identities, safe alias state,
+selection, and a server-keyed binding-generation fingerprint, never raw or
+low-entropy private bindings. All surfaces in one request or composer
 turn receive the same object/fingerprint; no surface independently recomputes
 availability midway through a turn.
 
@@ -314,6 +364,12 @@ The UI catalog, guided pickers, guided prompts, freeform context, schema tools,
 recipe discovery, and repair suggestions all consume this view. Hard-coded
 plugin lists and hard-coded repair recommendations are removed or checked
 against the snapshot.
+
+Every principal-dependent catalog list, schema, assistance, and policy HTTP
+response is `Cache-Control: private, no-store` and varies on the authentication
+surfaces in use. Frontend caches are keyed by principal namespace plus snapshot
+fingerprint and are invalidated after user-secret mutation; browser/proxy cache
+behavior is not trusted as the only isolation control.
 
 The target LLM receives only:
 
@@ -359,7 +415,9 @@ plugin before changing state. Direct tool invocation cannot bypass discovery.
 Historical states containing unavailable plugins remain editable for
 remediation. Deleting or replacing an unavailable component is allowed;
 adding a new unavailable component is not. A bulk replacement is accepted
-only when every referenced plugin is available.
+only when every referenced plugin is available. Required-control coverage is
+not enforced on each incremental edit because that would prevent construction;
+it is enforced at explicit validation, guided completion, and execution.
 
 ### Guided authoring
 
@@ -387,6 +445,14 @@ unchanged. CLI loading is unaffected.
 returns component-attributed blockers for unauthorized or unavailable
 plugins. Required-control path coverage is evaluated from typed capability
 metadata and graph dominance, not names.
+
+In the initial closed policy, required prompt shielding must dominate every
+untrusted/user/external-content path into an LLM node. Required content safety
+must post-dominate every LLM output path before it reaches a sink. Queue,
+fan-in, fan-out, alternate-route, and cycle ambiguity fails safe. Ordinary
+incremental edits may temporarily lack coverage so users can construct or
+repair a graph; explicit validation, guided completion, and execution enforce
+the requirement.
 
 ### Execution
 
@@ -423,13 +489,13 @@ component.
 
 ## LLM Tutorial Risk Boundary
 
-`transform:llm` is required for the tutorial and belongs to the core, but its
-provider variants remain governed by the existing/extended web LLM policy.
-Web authoring may use only operator-approved providers, models, endpoint
-shapes, credential sources, and retry/cost budgets. Arbitrary base URLs,
-ambient-role provider selection, and unbounded retry/capacity settings remain
-rejected at the web boundary even though equivalent expert CLI configuration
-may be accepted.
+`transform:llm` is required for the tutorial and belongs to the core. Web
+authoring selects an operator-owned LLM profile alias and safe prompt/row
+options. The server resolves the profile to its approved provider, model,
+endpoint shape, credential source, and retry/cost budgets. Arbitrary base
+URLs, ambient-role provider selection, and unbounded retry/capacity settings
+remain rejected at the web boundary even though equivalent expert CLI
+configuration may be accepted.
 
 Tutorial readiness requires one preferred usable LLM provider/model
 configuration. If none exists, the tutorial reports a precise readiness
@@ -444,7 +510,9 @@ Add a built-in `sink:text` that is the line-oriented inverse of
 The sink contract includes:
 
 - required `path` and `field` options;
-- UTF-8 default with validated configurable encoding;
+- UTF-8 default with a closed ASCII-compatible encoding set (`utf-8`, `ascii`,
+  `latin-1`, `cp1252`) so canonical LF, byte hashing, and rollback offsets are
+  one contract;
 - `write|append` modes and the shared collision/resume policy;
 - exactly one configured string value written per row;
 - canonical `\n` record separators;
@@ -504,7 +572,10 @@ availability.
 
 ## Audit And Telemetry
 
-Landscape remains the authoritative audit store. Run evidence records:
+Landscape remains the authoritative audit store. A separate optional
+one-row-per-web-run `run_web_plugin_policy` record is inserted atomically with
+the run. CLI runs do not fabricate web policy evidence. Web run evidence
+records:
 
 - policy schema version and policy hash;
 - run availability-snapshot hash;

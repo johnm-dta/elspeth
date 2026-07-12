@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
   "summary": "Plan 10 is implementation-ready after its existing Filigree dependencies close. The repaired plan now owns a validated platform-bound lean image, executable and syntax-tested ECS runbook, fresh-baseline schema bootstrap, forced deployment identities, exact task-definition/EFS/IAM/health/Exec gates, bounded and redacted acceptance tooling, non-root payload/local-auth proof, ECS task-role S3/Bedrock proof, isolated Cognito browser evidence, and cleanup-before-GO with tag-based orphan detection. Plan 12 was repaired with the corresponding live ordering and teardown gates.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-10-packaging-docker.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md",
   "reviewed_at": "2026-07-11T23:16:00Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -140,5 +140,6 @@
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found unsafe extras parsing, stale/non-executable health wiring, unbound architecture, unforced desired-zero launches, missing rollback-baseline schema initialization, root-masked EFS and concurrent SQLite verification, no ECS task-role S3 proof, raw evidence paths, incomplete OIDC isolation, absent EventBridge delivery proof, premature image promotion, and state-empty-only cleanup."
     }
-  ]
+  ],
+  "plan_sha256": "ef0a764d3917487ae4207c61a0cc7f2aaa89fde71d7bf3094265de2c76e9c197"
 }

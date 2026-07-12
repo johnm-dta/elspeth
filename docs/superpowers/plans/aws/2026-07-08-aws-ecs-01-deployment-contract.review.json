@@ -1,0 +1,114 @@
+{
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_IMPLEMENT",
+  "summary": "Plan 01 is additive, executable in the project environment, and aligned with current WebSettings, environment loading, doctor consumers, static gates, redaction policy, and the Wardline handoff.",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-01-deployment-contract.md",
+  "reviewed_at": "2026-07-10T12:27:22Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "9f425de3daa82890892a538ad37ed6cc1687095e",
+    "baseline": "Current WebSettings, generic ELSPETH_WEB__ loader, deployment consumers, and repository Python 3.13 environment.",
+    "planned_tests": 17
+  },
+  "blocking_issues": [],
+  "warnings": [],
+  "resolved_findings": [
+    {
+      "id": "B01-1",
+      "status": "RESOLVED",
+      "resolution": "Every test command uses uv run pytest."
+    },
+    {
+      "id": "B01-2",
+      "status": "RESOLVED",
+      "resolution": "The contract now requires deployment_target=aws-ecs and pins default-fail/aws-ecs-pass behavior."
+    },
+    {
+      "id": "B01-3",
+      "status": "RESOLVED",
+      "resolution": "Database-scheme failures use static redacted detail with an adversarial credential-bearing test."
+    },
+    {
+      "id": "B01-4",
+      "status": "RESOLVED",
+      "resolution": "The embedded module snippet passes Ruff check and Ruff format-check."
+    },
+    {
+      "id": "B01-5",
+      "status": "RESOLVED",
+      "resolution": "The handoff includes Wardline explain/fix/rescan with no waiver for new findings."
+    },
+    {
+      "id": "W01-1",
+      "status": "RESOLVED",
+      "resolution": "Generic environment ingestion and model_fields_set provenance are directly tested."
+    },
+    {
+      "id": "W01-2",
+      "status": "RESOLVED",
+      "resolution": "The plan distinguishes settings-load failures from named post-construction ContractChecks."
+    },
+    {
+      "id": "W01-3",
+      "status": "RESOLVED",
+      "resolution": "CI-equivalent Ruff, format, and strict mypy gates are explicit."
+    },
+    {
+      "id": "W01-4",
+      "status": "RESOLVED",
+      "resolution": "Tests pin the exact ordered unique check-name sequence."
+    },
+    {
+      "id": "W01-5",
+      "status": "RESOLVED",
+      "resolution": "Dependencies name only actual Plan 01 consumers."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "architecture": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "quality": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "systems": {
+      "status": "APPROVED",
+      "blocking": 0
+    }
+  },
+  "verification": [
+    "git diff --check",
+    "third Python block piped to uv run ruff check --stdin-filename src/elspeth/web/deployment_contract.py -",
+    "third Python block piped to uv run ruff format --check --stdin-filename src/elspeth/web/deployment_contract.py -",
+    "all Plan 01 pytest commands are project-environment commands",
+    "exact target/dependency/redaction/static/Wardline checks present"
+  ],
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-10T10:57:18Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial review found five blockers and five warnings.",
+      "blocking_ids": [
+        "B01-1",
+        "B01-2",
+        "B01-3",
+        "B01-4",
+        "B01-5"
+      ],
+      "warning_ids": [
+        "W01-1",
+        "W01-2",
+        "W01-3",
+        "W01-4",
+        "W01-5"
+      ]
+    }
+  ],
+  "plan_sha256": "69b5de5a50cf948a4ce6bda04a1f0fac615fd4be0fe321ad720fe628e2c70f2d"
+}

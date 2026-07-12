@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_EXECUTE_AFTER_PLAN_01_AND_SHARED_VERIFICATION_BASELINE",
   "summary": "Plan 13 is implementation-ready after its two live blockers close. The repaired plan replaces the insecure implicit browser grant with public-client authorization code plus S256 PKCE, validates an exact issuer-bound authorization/token endpoint pair, hardens URL parser differentials and browser callback handling, validates Cognito access tokens with an explicit client_id profile, and makes CSP, logging, redaction, shared-provider regressions, repository gates, and tracker handoff executable.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-13-cognito-authorization-origin.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-13-cognito-authorization-origin.md",
   "reviewed_at": "2026-07-12T05:23:29Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -136,5 +136,6 @@
     "git diff --check passes for the repaired plan/spec set; stale implicit-enabled preflight, oidc_state rollback sentinel, and memory-only access-token claims are absent except where explicitly described as removed or forbidden behavior.",
     "Filigree Plan 13 fields and dependency edges match the repaired plan; the issue remains pending, unassigned, and blocked. The shared baseline issue now owns signed tier, trust-boundary honesty, and Wardline restoration.",
     "This review did not implement Plan 13, start/claim/close its issue, commit, push, merge, tag, deploy, or stage unrelated files."
-  ]
+  ],
+  "plan_sha256": "aa50f2c717cf2fb8944963fed70aa90386f7806643aff8b19ae29391e2bc5c1d"
 }

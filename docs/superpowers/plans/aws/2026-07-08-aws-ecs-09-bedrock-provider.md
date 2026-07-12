@@ -32,7 +32,7 @@ two small additive fixes to shared code used by all three providers:
 **Guardrails are explicitly out of this provider slice.** Mapping a successful
 LiteLLM response's `content_filter` finish reason is defensive provider error
 handling; it does not configure or prove prompt-attack or harmful-content
-screening. Plan 15 owns model-independent, field-level
+screening. Plan 15C owns model-independent, field-level
 `aws_bedrock_prompt_shield` and `aws_bedrock_content_safety` transforms using
 Bedrock `ApplyGuardrail`, with independent audit, routing, IAM, and live
 acceptance. Neither plan may claim the other control by implication.

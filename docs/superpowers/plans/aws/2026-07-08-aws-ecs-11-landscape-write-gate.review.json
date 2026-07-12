@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
   "summary": "Plan 11 is implementation-ready after Plans 01, 02, and 04 close. The repaired plan now owns a fail-closed settings-to-runtime schema-mutation policy, complete writer and test-seam migration, all-provider auth failure semantics, an import-aware direct-construction seal, real DDL-denied PostgreSQL request-writer proof, safe task-scoped Git operations, and full static, manifest, staged-hook, Wardline, and downstream closeout gates.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-11-landscape-write-gate.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-11-landscape-write-gate.md",
   "reviewed_at": "2026-07-12T04:05:04Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -123,5 +123,6 @@
     "Three independent reviewers returned PASS after repairs.",
     "Review JSON, Markdown fences, required/forbidden markers, direct-call and patch censuses, Plan 12 five-file contract, and git diff whitespace are mechanically checked before handoff.",
     "Plan 11, Plan 10, and Plan 12 remain pending, unassigned, and dependency-controlled; no implementation issue was claimed or transitioned."
-  ]
+  ],
+  "plan_sha256": "3784480855e6904d20802f726c683ad5061148b8a2ca214759266a9457897002"
 }

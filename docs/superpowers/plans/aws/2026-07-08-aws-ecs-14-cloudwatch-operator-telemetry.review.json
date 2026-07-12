@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_EXECUTE_AFTER_PLAN_13_AND_SHARED_VERIFICATION_BASELINE",
   "summary": "Plan 14 is implementation-ready after its dependencies close. It preserves Landscape as the audit source of truth, reuses the existing vendor-neutral OTLP exporter, makes AWS web telemetry operator-owned and non-redirectable, adds correct delivery/resource/status semantics, exports existing web metrics to a task-local CloudWatch Agent, and makes CloudWatch/X-Ray delivery, alarms, redaction, cardinality, and audit-survives-collector-outage behavior falsifiable in live acceptance.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-14-cloudwatch-operator-telemetry.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-14-cloudwatch-operator-telemetry.md",
   "reviewed_at": "2026-07-12T05:48:00Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -59,14 +59,24 @@
     }
   ],
   "reviewer_summaries": {
-    "telemetry_reality": {"status": "APPROVED_AFTER_REPAIRS", "blocking": 0},
-    "security_and_authority": {"status": "APPROVED_AFTER_REPAIRS", "blocking": 0},
-    "program_integration": {"status": "APPROVED_AFTER_REPAIRS", "blocking": 0}
+    "telemetry_reality": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "security_and_authority": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "program_integration": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    }
   },
   "verification": [
     "Repository inspection confirmed Landscape audit primacy and built-in console, otlp, azure_monitor, and datadog exporters.",
     "AWS Plans 10/12 previously covered logs/infrastructure signals but no ELSPETH OTLP/CloudWatch live path.",
     "The plan, specification, cross-plan dependencies, and Filigree graph now make the missing AWS operational telemetry slice explicit.",
     "This review did not implement Plan 14, start/claim/close its issue, commit, deploy, or disturb unrelated worktree changes."
-  ]
+  ],
+  "plan_sha256": "87b8ced5f0ec57ce000b2e3e768a33d2fd1bfef8d58f37583ea5fd5cf911311c"
 }

@@ -1,0 +1,102 @@
+{
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "scope_verdict": "GO_TO_ORCHESTRATE",
+  "summary": "The run sheet is ready for an orchestration agent. It binds the reviewed AWS plans to the live 20-step Filigree DAG, serializes release integration and closure, defines exact-owner fresh/resume/reopen behavior, preserves the Plan 02 to 06 to 07 lock chain, and gives Plans 10 and 12 explicit rollback and closeout protocols.",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
+  "plan_sha256": "462d52a189d0107ecad972dfbc4f92ddb40475f6898bdb18ba37c719bdec74b4",
+  "reviewed_at": "2026-07-12T09:23:13Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "07fc10b42fa0f8683630f249489368b5b072f8ff",
+    "process": "Independent reality, quality/security, and systems/dependency reviews followed by repeated executable-command, checksum, link, JSON, shell-syntax, tracker-path, and live-DAG parity checks."
+  },
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "R-RUN-1",
+      "status": "EXTERNAL_AUTHORITY",
+      "detail": "Later stages still require named operator authority, Docker, hosted CI, AWS credentials and infrastructure, protected evidence storage, and cleanup capacity; absence is an explicit stop condition."
+    },
+    {
+      "id": "R-RUN-2",
+      "status": "RUNTIME_PENDING",
+      "detail": "Planning approval is not AWS runtime approval. Only Plan 12 may return GO for one exact source SHA, image digest, and platform after live proof and cleanup."
+    }
+  ],
+  "resolved_findings": [
+    {
+      "id": "B-RUN-1",
+      "status": "RESOLVED",
+      "resolution": "The exact 20-node live DAG, direct prerequisites, critical path, conservative stage barriers, and serialized shared-surface ownership are machine-checked."
+    },
+    {
+      "id": "B-RUN-2",
+      "status": "RESOLVED",
+      "resolution": "The run sheet supersedes duplicate plan-local claim, worktree, branch, and close mechanics while retaining every implementation, test, evidence, staging, and commit checkbox."
+    },
+    {
+      "id": "B-RUN-3",
+      "status": "RESOLVED",
+      "resolution": "Plan 12 is excluded from feature-worktree integration and runs directly under the coordinator on release/0.7.1, with Task 1 owning claim, release commit, and candidate freeze ordering."
+    },
+    {
+      "id": "B-RUN-4",
+      "status": "RESOLVED",
+      "resolution": "Every plan is checksum-bound to its review sidecar; Plan 12 repeats that gate immediately before closeout so intentional downstream plan edits cannot consume stale approval."
+    },
+    {
+      "id": "B-RUN-5",
+      "status": "RESOLVED",
+      "resolution": "Worker and integrated evidence use closed schemas requiring zero exit, zero skips, full collected-test accounting, and a distinct post-rebase envelope bound to the rebased SHA."
+    },
+    {
+      "id": "B-RUN-6",
+      "status": "RESOLVED",
+      "resolution": "Fresh and interrupted work use exact-owner historical claim anchors, recover partial setup without abandoning WIP, heartbeat long leases, and close only after fast-forward integration and anchor revalidation."
+    },
+    {
+      "id": "B-RUN-7",
+      "status": "RESOLVED",
+      "resolution": "Plan 10 atomically claims before source qualification, records one idempotent qualified-baseline receipt, preserves the historical baseline through its own commits, and hard-stops post-integration lineage reconstruction without owner approval."
+    },
+    {
+      "id": "B-RUN-8",
+      "status": "RESOLVED",
+      "resolution": "Reopen handling derives transitive descendants and affected phases from the refreshed live graph, reopens closed descendants in reverse topological order, invalidates their evidence, and re-executes topologically."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "quality_security": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "systems_dependencies": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    }
+  },
+  "verification": [
+    "all 18 dated program plans exist in docs/superpowers/plans/aws with 18 matching review sidecars",
+    "every plan_file exists and all 18 plan_sha256 values match",
+    "all local run-sheet links resolve",
+    "all AWS review JSON parses",
+    "all Markdown code fences are balanced",
+    "all 30 dedented Bash fences pass bash -n",
+    "git diff --check passes",
+    "no pre-relocation AWS plan path remains in repository or live milestone data",
+    "live Filigree milestone contains exactly 20 expected steps and every direct dependency matches",
+    "live Plan 03B tracker scope owns Tasks 3-4 and the complete handoff",
+    "read-only descendant derivation produces a valid reverse-topological worklist and affected-phase set"
+  ],
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-12T08:52:19Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial orchestration reviews found duplicate claim/worktree/close mechanics, an invalid Plan 12 feature-worktree path, pre-qualification Plan 10 baseline recording, stale review/evidence risks, and incomplete descendant reopen handling."
+    }
+  ]
+}

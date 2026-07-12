@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT_AFTER_PLAN_06",
   "summary": "Plan 09 is implementation-ready after Plan 06 supplies the AWS SDK extra and its transitive gate baseline. The repaired plan now covers the real LiteLLM 1.85.0 Bedrock dependency and response shapes, bounded keyless configuration, lifecycle and limiter dispatch, data-only error/cost extraction, pipeline and composer redaction, plugin hash/catalog golden updates, signed-trust/Wardline closeout, and zero-skip ECS task-role acceptance owned by Plans 10/12.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-09-bedrock-provider.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-09-bedrock-provider.md",
   "reviewed_at": "2026-07-11T18:26:54Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -125,5 +125,6 @@
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found a false dependency claim, incomplete config/lifecycle/redaction coverage, unsafe dynamic property reads, a fake-only private-cost test, ambiguous cost precedence, missing plugin hash/golden/static/signed/Wardline closeout, and no ECS task-role Bedrock acceptance."
     }
-  ]
+  ],
+  "plan_sha256": "f74172533f92ddb72264abf54e6fbf63e1f3e02a9d2356e8e28eee375722395c"
 }

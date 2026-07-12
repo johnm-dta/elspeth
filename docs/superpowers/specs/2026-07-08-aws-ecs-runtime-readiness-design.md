@@ -1,7 +1,7 @@
 # AWS ECS Runtime Readiness Design
 
 Date: 2026-07-08
-Status: approved design; implementation governed by plans 01–13
+Status: approved design; implementation governed by plans 01–14 and 15A–15C
 Branch context: `release/0.7.1`
 
 ## Purpose
@@ -36,6 +36,12 @@ runtime integration only:
   with CloudWatch/X-Ray dashboards, alarms, and live Landscape correlation.
 - AWS prompt and content shielding: explicit Bedrock Guardrails transforms for
   prompt attacks and harmful content, independent of model invocation.
+- Universal web plugin governance: a core-only default with complete
+  CSV/JSON/text source/sink pairs, tutorial-required field mapper/web scrape/
+  LLM transforms, kind-qualified optional allowlisting, opaque operator
+  profiles, typed control preferences, request-scoped availability, and
+  enforcement from catalog through runtime/audit while CLI remains
+  unrestricted.
 - Documentation and tests for the above.
 
 ## Non-Goals
@@ -503,22 +509,25 @@ identifier settings, immutable numeric Guardrail versions, `outputScope=FULL`,
 strict response validation, bounded retries, and audit-first/payload-free
 telemetry. Config must not accept access keys, session tokens, profiles, role or
 endpoint overrides. Missing, duplicate, unknown, malformed, or contradictory
-assessment data fails closed. Intervention becomes explicit transform data for
-gate/quarantine routing; it is never silently treated as allow.
+assessment data fails closed. A positive installed-model `detected` fact blocks
+even when top-level action is `NONE`; intervention output objects are bounded,
+validated, and discarded. Detection/intervention becomes a sanitized transform
+error for normal gate/quarantine routing and is never silently treated as allow.
 
 Prompt shielding and content safety remain separate capabilities in composer
 assistance. Untrusted content flowing to an LLM may trigger a strong shield
 recommendation, but topology is never mutated without explicit user or policy
 authority. A shield must dominate the relevant untrusted-to-LLM graph path.
-The target LLM receives a request-scoped `available_security_controls`
-inventory derived from registered plugins, explicit deployment enable flags,
-validated configuration, current user/server secret-reference availability,
-and the last validated capability state. Only usable controls are included.
+The target LLM receives the universal Plan-15B request-scoped typed capability
+inventory derived from registered plugin code identities, the kind-qualified
+operator allowlist, per-alias credential-scope readiness, and the frozen
+request snapshot. There are no per-shield enable flags or second AWS-specific
+inventory. Only usable controls and safe opaque aliases are included.
 When one compatible shield is available the model names it; when several are
 available it uses the operator's closed preference order; when none are
 available it emits the high-risk reconsider advisory and invents no plugin.
-The inventory may expose canonical reference placeholders needed to author the
-selected config, but never resolved secrets/config values, disabled rows,
+The inventory may expose canonical aliases needed to author the selected
+config, but never resolved secrets/config values, disabled rows,
 Guardrail identifiers/versions or region values, AWS identity/permission data,
 or failure details. Availability errors fail closed to absent.
 Bedrock's listed harmful-content categories do not provide Azure's `self_harm`
@@ -605,8 +614,8 @@ Security and boundary checks:
 - preserve fail-closed behavior for unknown provider modes and stale schemas.
 
 Whole-program closeout is a required testing stage, not an optional follow-up.
-After implementation plans 01–11 and 13–15 have landed in one integrated tree, execute
-`docs/superpowers/plans/2026-07-08-aws-ecs-12-integration-closeout.md` in full.
+After implementation plans 01–11, 13–14, and 15A–15C have landed in one integrated tree, execute
+`docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md` in full.
 Plan 12 owns the exact 0.7.1 version boundary, tracker-completion verification,
 the unscoped pytest run, CI-aligned Ruff and strict-mypy checks, repository
 contract guards, Wardline scan, lean ECS Docker build/runtime verification,
@@ -617,7 +626,7 @@ observation, both first/upgrade rollback-mode evidence, durable sanitized
 evidence export, reviewed saved-plan Terraform apply/destroy bound to distinct
 remote state identities, an interruption-safe cleanup manifest, and verified
 teardown of both disposable environments and their temporary identities/tags.
-Scoped tests from plans 01–11 and 13–15 do not substitute for this gate. Any non-zero
+Scoped tests from plans 01–11, 13–14, and 15A–15C do not substitute for this gate. Any non-zero
 command or unmet prerequisite in Plan 12 blocks acceptance; fix the owning
 surface and restart the closeout sequence from its first step.
 

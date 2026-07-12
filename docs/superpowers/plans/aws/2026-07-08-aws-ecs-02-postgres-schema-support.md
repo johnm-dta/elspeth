@@ -8,7 +8,10 @@
 
 **Tech Stack:** Python 3.13, SQLAlchemy 2.0, `postgresql+psycopg` (psycopg v3), PostgreSQL 16, `testcontainers[postgres]`, pytest.
 
-**Depends on:** `2026-07-08-aws-ecs-01-deployment-contract.md` for the `aws-ecs` URL/settings contract. The implementation in this plan remains dialect-driven rather than `deployment_target`-gated.
+**Depends on:** none. Plans 01 and 02 are independent Wave-1 foundations and
+may execute in parallel. Plans 03A and 04 consume both after they are integrated;
+the implementation here remains dialect-driven rather than
+`deployment_target`-gated.
 
 **Required downstream handoffs:** This plan owns one pure PostgreSQL logical-target normalizer/check in `schema_probe.py`; Plans 03/04 consume it to hard-fail identical or unprovably-distinct session/Landscape targets before constructing engines or running probes. Plan 03 must surface `SchemaInitBusyError` and `SchemaLockCleanupError` separately; Plan 11 must preserve this plan's `PARTIAL`/`STALE` boundary; and Plan 12 owns the zero-skip Docker-backed PostgreSQL gate. Session and Landscape metadata both own incompatible `runs` tables, so same-database support means distinct, explicitly parseable PostgreSQL schemas/search paths, never the same or ambiguous logical schema.
 

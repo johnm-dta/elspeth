@@ -1,0 +1,115 @@
+{
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
+  "summary": "Plan 15B is implementation-ready after Plans 15A, 05, 08A, 09, 11, and 14. It now defines one code-identity-bound policy, per-principal alias availability, memory-only private lowering, typed trust/role coverage, cache isolation, complete web enforcement, epoch-23 audit evidence, tutorial coverage, and explicit CLI separation.",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15b-universal-web-plugin-policy.md",
+  "plan_sha256": "a91c8e4d2db3b6173c739ada064dc6b6ae043f8fb62edb4e8f28b2f02cf35f80",
+  "reviewed_at": "2026-07-12T07:33:37Z",
+  "review_basis": {
+    "branch": "release/0.7.1",
+    "head": "07fc10b42fa0f8683630f249489368b5b072f8ff",
+    "filigree_milestone": "elspeth-6343920a47",
+    "process": "Independent reality, architecture, quality/security, systems/dependency, and final re-review against live web, catalog, Landscape, telemetry, and Filigree contracts."
+  },
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "R15B-1",
+      "status": "OPERATOR_ACTION",
+      "detail": "Epoch 23 is a deliberate pre-1.0 one-way break for populated old Landscape databases; archive/export approval and drop/recreate remain database-operator actions."
+    },
+    {
+      "id": "R15B-2",
+      "status": "SECURITY_BOUNDARY",
+      "detail": "The approved required core includes web_scrape for the canonical tutorial; its existing SSRF, public-host, and operator-identity gates remain load-bearing and are not weakened by core membership."
+    }
+  ],
+  "resolved_findings": [
+    {
+      "id": "B15B-1",
+      "status": "RESOLVED",
+      "resolution": "Policy and snapshot hashes bind canonical plugin code identities and safe profile-generation state."
+    },
+    {
+      "id": "B15B-2",
+      "status": "RESOLVED",
+      "resolution": "Per-alias server/user credential availability drives principal-specific schemas, selection, and fresh execution checks without shadowing."
+    },
+    {
+      "id": "B15B-3",
+      "status": "RESOLVED",
+      "resolution": "Lowering produces separate executable and audit-safe configs; private bindings are forbidden from all persisted/exported/log/error/telemetry surfaces."
+    },
+    {
+      "id": "B15B-4",
+      "status": "RESOLVED",
+      "resolution": "Typed input/output control roles and a closed fail-safe trust-source model drive dominance and post-dominance coverage."
+    },
+    {
+      "id": "B15B-5",
+      "status": "RESOLVED",
+      "resolution": "Principal-dependent HTTP responses are private/no-store with auth variation, and frontend caches invalidate by principal, snapshot, and secret mutation."
+    },
+    {
+      "id": "B15B-6",
+      "status": "RESOLVED",
+      "resolution": "SQLite auto-stamping is reordered and PostgreSQL old-populated state is STALE; fresh epoch-23 initialization and DDL-denied runtime proof are owned."
+    },
+    {
+      "id": "B15B-7",
+      "status": "RESOLVED",
+      "resolution": "Structured Pydantic sanitization, safe PluginId parsing, valid SemVer/hash requirements, and marker-value leak tests close config errors."
+    },
+    {
+      "id": "B15B-8",
+      "status": "RESOLVED",
+      "resolution": "Full CLI catalog goldens and principal-specific policy-view goldens are separate."
+    },
+    {
+      "id": "B15B-9",
+      "status": "RESOLVED",
+      "resolution": "Tutorial readiness runs the same required-control coverage validator and never auto-inserts controls."
+    },
+    {
+      "id": "B15B-10",
+      "status": "RESOLVED",
+      "resolution": "Live DAG adds Plans 05, 11, and 14 before 15B; Plan 12 checks all 19 pre-closeout tracker steps."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "architecture": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "quality_security": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "systems_dependencies": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    },
+    "final_recheck": {
+      "status": "APPROVED_WITH_WARNINGS",
+      "blocking": 0
+    }
+  },
+  "verification": [
+    "live catalog, plugin protocol/default metadata, settings, Landscape begin-run/config export, schema epoch, and telemetry ordering contracts inspected",
+    "live Filigree DAG has 20 total steps and gates 15B on 15A/05/08A/09/11/14 with no cycle",
+    "Plan 12 executable inventory contains 19 pre-closeout IDs and tracker metadata now says all-19 pre-closeout",
+    "Markdown fences balanced and git diff --check clean",
+    "independent final re-review returned GO"
+  ],
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-12T06:50:00Z",
+      "verdict": "CHANGES_REQUESTED",
+      "summary": "Initial review found under-bound policy evidence, unusable alias exposure, private binding persistence, incomplete trust roles, cache leakage, one-backend schema handling, weak sanitization, missing dependency edges, and tutorial coverage mismatch."
+    }
+  ]
+}

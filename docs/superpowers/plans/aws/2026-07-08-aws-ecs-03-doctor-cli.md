@@ -13,7 +13,7 @@
 **Depends on:**
 
 - Tasks 1-2 / Filigree `elspeth-dffe064287`: Plans 01 and 02.
-- Task 3 / Filigree `elspeth-397ac915b8`: Plans 06, 07, 09, 14, and 15 must also be integrated so `aws_s3`, boto3, Jinja2-backed S3 key templates, `bedrock`, the operator-owned AWS OTLP posture, and both Bedrock Guardrail transforms can pass. The integrated tree must already include Plan 08's load-bearing web-authorship gate before the Plan 06/07/15 registrations, as required by the program DAG.
+- Tasks 3-4 / Filigree `elspeth-397ac915b8`: Plans 06, 07, 09, 14, and the complete 15A→15B→15C chain must also be integrated so `aws_s3`, boto3, Jinja2-backed S3 key templates, `bedrock`, the operator-owned AWS OTLP posture, the effective web plugin policy, and both Bedrock Guardrail transforms can pass. Task 4 is the full Plan 03 handoff for this integrated slice. The integrated tree must already include Plan 08's load-bearing web-authorship gate before Plan 06/07 registrations and Plan 15B before Plan 15C registration, as required by the program DAG.
 - Plan 12 owns the final integrated, zero-skip Docker evidence. Plan 03 records the exact command it must repeat.
 
 **Plan 02 interfaces consumed:** `SchemaState`, `DatabaseTargetConflictError`, `SchemaInitBusyError`, `SchemaLockCleanupError`, `postgres_engine_kwargs`, `require_distinct_postgres_targets`, `probe_session_schema`, `probe_landscape_schema`, `init_session_schema`, and `init_landscape_schema`. Do not add another URL/search-path parser.

@@ -9,7 +9,7 @@
 and hosted gates, then prove the design's live Aurora/EFS/ECS/ALB acceptance
 criteria before issuing runtime GO.
 
-**Architecture:** Plans 01–11 and 13–15 own implementation and scoped tests. This plan
+**Architecture:** Plans 01–11, 13–14, and 15A–15C own implementation and scoped tests. This plan
 starts only after all of them have landed, installs the exact locked
 environment, then runs the repository's whole-program test, static-analysis,
 contract, trust-boundary, lean-image, hosted-CI, and live-AWS gates in a fixed
@@ -20,7 +20,7 @@ final verdict always describes one unchanged commit and its deployed image.
 **Tech Stack:** uv, pytest, coverage.py, Ruff, strict mypy, elspeth-lints,
 Wardline, Docker, GitHub CLI.
 
-**Depends on:** every implementation task and commit in plans 01–11 and 13–15. In
+**Depends on:** every implementation task and commit in plans 01–11, 13–14, and 15A–15C. In
 particular, plan 02's `postgres` dependency and plan 06's `aws` dependency must
 already coexist in one regenerated `uv.lock`; plan 08's endpoint gate must
 precede the plan 06/07 web-reachable `aws_s3` registrations; plan 11's
@@ -72,7 +72,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 - Modify if still at 0.7.0: `pyproject.toml`
 - Modify if still at 0.7.0: `uv.lock`
 - Modify if 0.7.1 entry is absent: `CHANGELOG.md`
-- Verify: `docs/superpowers/plans/2026-07-08-aws-ecs-00-overview.md`
+- Verify: `docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md`
 
 - [ ] Confirm the closeout is running on the release integration branch and
   starts from a clean tree:
@@ -110,7 +110,8 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
   ```bash
   export INTEGRATION_OWNER="${INTEGRATION_OWNER:?set the named integration coordinator}"
-  filigree plan elspeth-6343920a47 --json | uv run --frozen python -c 'import json,sys; p=json.load(sys.stdin); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4","elspeth-f5d5dddddf","elspeth-7d1f35e3d8"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; missing=required-done; assert not missing, f"implementation steps not done: {sorted(missing)}"; assert any(s["issue_id"] == "elspeth-05396fed38" for s in steps), "Plan 12 tracker step missing"'
+  filigree plan elspeth-6343920a47 --json | uv run --frozen python -c 'import json,sys; p=json.load(sys.stdin); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4","elspeth-f5d5dddddf","elspeth-130dc48252","elspeth-0674a06468","elspeth-7d1f35e3d8"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; missing=required-done; assert not missing, f"implementation steps not done: {sorted(missing)}"; assert any(s["issue_id"] == "elspeth-05396fed38" for s in steps), "Plan 12 tracker step missing"'
+  filigree show elspeth-7d1f35e3d8 --json | jq -e '(.blocked_by | sort) as $deps | ($deps | index("elspeth-0674a06468")) != null and ($deps | index("elspeth-7fe6aa531f")) != null' >/dev/null
   PLAN12_JSON="$(filigree show elspeth-05396fed38 --json)"
   PLAN12_STATUS="$(jq -r .status <<<"$PLAN12_JSON")"
   PLAN12_ASSIGNEE="$(jq -r '.assignee // ""' <<<"$PLAN12_JSON")"
@@ -122,7 +123,9 @@ Task 1 starts and records the matrix in the protected gate ledger.
   fi
   ```
 
-  **Expected result:** all 17 implementation steps are done and Plan 12 is
+  **Expected result:** all 19 pre-closeout tracker steps (18 application
+  slices plus the verification-baseline task) are done, Plan 15C still
+  depends directly on Plan 15B and Plan 06, and Plan 12 is
   held in `in_progress` by exactly the integration coordinator. A missing
   dependency stops before any release-candidate commit. This is an execution
   instruction only; plan-review agents must leave the issue pending and
@@ -130,7 +133,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
 - [ ] Own the release version boundary. Before the version commit, add a
   `CHANGELOG.md` 0.7.1 section with the actual candidate date, the AWS ECS
-  runtime-readiness deliverables from plans 01–11 and 13–15, the schema/drop-recreate and
+  runtime-readiness deliverables from plans 01–11, 13–14, and 15A–15C, the schema/drop-recreate and
   one-task/downtime constraints, and the operator runbook link. Do not copy the
   implementation-plan review history into public release notes. Then accept
   only an unbumped 0.7.0 tree or
@@ -199,7 +202,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 - [ ] The uv environment uses Python 3.13.
 - [ ] `uv lock --check` and frozen all-extras sync pass.
 - [ ] The candidate SHA is recorded.
-- [ ] All implementation slices in plans 01–11 and 13–15 are done in Filigree and
+- [ ] All implementation slices in plans 01–11, 13–14, and 15A–15C are done in Filigree and
   the Plan 12 closeout step is atomically held by the integration coordinator.
 
 ---
@@ -362,7 +365,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
 - Verify: repository root (`.`), including the S3 source/sink, doctor,
   readiness, deployment-contract, Bedrock-provider, and web validation
-  boundaries introduced by plans 01–11 and 13–15.
+  boundaries introduced by plans 01–11, 13–14, and 15A–15C.
 - Reference: `AGENTS.md` (Wardline project gate)
 - No file changes are expected.
 
@@ -952,7 +955,10 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   it; the release operator countersigns it. Bind the candidate SHA, immutable
   image digest, exact candidate/doctor task-definition ARNs, package version,
   both schema epochs, structural and semantics-only changes, reset posture,
-  and rollback decision. The upgrade scenario must additionally bind the
+  and rollback decision. Require Landscape epoch 23, the
+  `run_web_plugin_policy` table, and the approved archive/export plus
+  drop/recreate decision for any non-empty pre-23 database; rolling candidate
+  state back to epoch-22 code is not permitted. The upgrade scenario must additionally bind the
   qualified rollback-baseline version/SHA/image/task-definition and state
   `rollback_permitted: yes` with evidence before the rollback rehearsal. The
   first-deploy scenario records previous compatibility as not applicable and
@@ -978,6 +984,27 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   hashes, and audit assertions as evidence; both tests delete every
   UUID-scoped object in `finally`. Missing bucket, credentials, permissions,
   cleanup, or any skip is BLOCKED/NO-GO, not an optional smoke.
+
+- [ ] Prove the reusable Bedrock Guardrail lane with Plan 15C's exact marker
+  contract before candidate-task adaptation. Supply only the approved opaque
+  profile aliases and operator-owned fixture references through the protected
+  environment, then run:
+
+  ```bash
+  export ELSPETH_RUN_LIVE_BEDROCK_GUARDRAILS=1
+  LIVE_GUARDRAIL_OUTPUT="$(uv run --extra aws pytest \
+    tests/integration/plugins/transforms/aws/test_bedrock_guardrails_live.py \
+    -m live_aws -q -rs 2>&1)"
+  printf '%s' "$LIVE_GUARDRAIL_OUTPUT" | grep -Eq '[0-9]+ passed'
+  ! printf '%s' "$LIVE_GUARDRAIL_OUTPUT" | grep -Eqi 'skipped|deselected'
+  unset LIVE_GUARDRAIL_OUTPUT
+  ```
+
+  The live test itself must fail, not skip, when the env gate is set but an
+  approved alias/fixture/policy-version input is missing. Retain only its
+  bounded sanitized receipt/hash. Any skip, deselection, raw binding/text, or
+  policy-version mismatch is BLOCKED/NO-GO. This controller proof does not
+  replace the per-candidate `verify-bedrock-guardrails` ECS-Exec proof below.
 
 - [ ] Also prove the runtime credential path from **each healthy candidate ECS
   task**. Resolve its exact task ARN and use ECS Exec to run
@@ -1297,12 +1324,19 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   with bounded sanitized token/cache/cost provenance evidence and zero skips.
 - [ ] Bedrock prompt shielding and content safety both execute independently
   through `ApplyGuardrail` inside each candidate task, with exact safe/blocked
-  outcomes, audit-first evidence, immutable versions, redaction, and zero skips.
+  outcomes, `guard_content`, detect-only-positive blocking, audit-first
+  evidence, immutable versions, redaction, and zero skips.
 - [ ] In each candidate task, the target LLM's request context lists exactly
-  the enabled/configured prompt and content controls, marks the operator-
-  preferred compatible shield, exposes only approved reference placeholders,
-  selects no disabled/unavailable implementation, and leaks no resolved
-  secret/config/Guardrail/AWS identity or failure detail.
+  the Plan-15B-authorized and locally available prompt/content controls, marks
+  the operator-preferred compatible implementation and opaque profile alias,
+  selects no disabled/unavailable implementation, and leaks no secret name,
+  resolved config, Guardrail binding, environment name, AWS identity, or
+  failure detail.
+- [ ] The two acceptance Guardrails are run-scoped Terraform resources tagged
+  with the acceptance run ID; evidence records immutable version and normalized
+  configuration hashes, and teardown destroys both resources plus verifies no
+  matching run tag remains. A shared/pre-existing Guardrail cannot satisfy this
+  gate.
 - [ ] AWS operator telemetry delivers one web metric and the exact pipeline
   lifecycle trace to CloudWatch/X-Ray, correlates terminal status back to
   Landscape, passes forbidden-dimension/content checks, alarms on loss, and

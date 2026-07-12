@@ -2,7 +2,7 @@
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "summary": "Plan 05 is executable after repair: readiness now has deterministic eight-check output, real wall-clock budgets, cancellation-safe single-flight caching, bounded per-label worker admission, isolated and timed connection-bound PostgreSQL probes, safe same-descriptor filesystem probes, durable orphan reconciliation, and mechanical ALB plus zero-skip PostgreSQL acceptance gates.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-05-readiness-endpoint.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-05-readiness-endpoint.md",
   "reviewed_at": "2026-07-11T07:56:19Z",
   "review_basis": {
     "branch": "release/0.7.1",
@@ -126,5 +126,6 @@
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found unsafe pathname probes, second-checkout DB probes, incomplete auth fields, synthetic timing, unbounded executor accumulation, cancellation-owned cache work, event-loop path I/O, incomplete lifespan degradation, ineffective PostgreSQL fault injection, and missing downstream acceptance wiring."
     }
-  ]
+  ],
+  "plan_sha256": "b404959f5d83cf3ed08f227186ff7d46523aeee541491c0378d7d3a9440671e5"
 }

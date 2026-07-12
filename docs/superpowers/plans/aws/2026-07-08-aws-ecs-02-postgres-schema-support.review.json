@@ -1,7 +1,7 @@
 {
   "verdict": "APPROVED",
   "summary": "Plan 02 is executable after repair: zero blocking issues and zero unresolved warnings across reality, architecture, quality/security, and systems review.",
-  "plan_file": "docs/superpowers/plans/2026-07-08-aws-ecs-02-postgres-schema-support.md",
+  "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-02-postgres-schema-support.md",
   "reviewed_at": "2026-07-10T15:00:07Z",
   "blocking_issues": [],
   "warnings": [],
@@ -33,5 +33,6 @@
     "live SQLAlchemy PostgreSQL DDL compilation confirmed the BOOLEAN DEFAULT 0 defect",
     "testcontainers 4.14.2 driver=psycopg API verified",
     "four-lens post-repair review reached GO with no remaining blockers"
-  ]
+  ],
+  "plan_sha256": "6f88ef87a1f93dc2f8704989d41a231b093fc33ded5af999dc53f64d5cb14124"
 }

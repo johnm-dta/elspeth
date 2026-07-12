@@ -116,6 +116,13 @@
   padding: var(--space-xs) var(--space-lg) 0;
 }
 
+/* Keep the completed evidence stack on one shared horizontal grid. Run Results
+   already uses --space-lg as its inline gutter; the stepper's content and the
+   Pipeline Ready card align to that same edge below. */
+.chat-panel--completed > .guided-workflow {
+  padding-inline: var(--space-lg);
+}
+
 /* ── THE WORKSPACE (the one guided layout; grew up inside the tutorial) ───────
    Freeform-congruent conversation column (internal scroll region over a docked
    composer) on the LEFT; a SideRail-width artifact rail flush RIGHT. Rendered
@@ -2006,7 +2013,20 @@
    and a useful scrollable YAML viewport. */
 .chat-panel--completed > .guided-completion {
   min-height: 18rem;
+  margin-top: var(--space-xs);
+  margin-inline: var(--space-lg);
   overflow: hidden;
+}
+
+/* Match chat.css's compact Run Results gutter at the same breakpoint. */
+@media (max-width: 760px) {
+  .chat-panel--completed > .guided-workflow {
+    padding-inline: var(--space-sm);
+  }
+
+  .chat-panel--completed > .guided-completion {
+    margin-inline: var(--space-sm);
+  }
 }
 
 .chat-panel--completed

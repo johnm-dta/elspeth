@@ -1,6 +1,71 @@
 import { existsSync, readFileSync } from "node:fs";
 
 describe("guided completion surface", () => {
+  it("aligns the completed stepper, Pipeline Ready, and Run Results widths", () => {
+    const guidedCss = readFileSync(
+      "src/components/chat/guided/guided.css",
+      "utf8",
+    );
+    const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
+    const stepperRule = guidedCss.match(
+      /\.chat-panel--completed\s*>\s*\.guided-workflow\s*\{(?<body>[^}]*)\}/s,
+    );
+    const completionRule = guidedCss.match(
+      /\.chat-panel--completed\s*>\s*\.guided-completion\s*\{(?<body>[^}]*)\}/s,
+    );
+    const resultsRule = chatCss.match(
+      /\.inline-run-results\s*\{(?<body>[^}]*)\}/s,
+    );
+
+    expect(stepperRule?.groups?.body).toContain(
+      "padding-inline: var(--space-lg)",
+    );
+    expect(completionRule?.groups?.body).toContain(
+      "margin-inline: var(--space-lg)",
+    );
+    expect(resultsRule?.groups?.body).toContain(
+      "margin: 0 var(--space-lg) var(--space-sm)",
+    );
+  });
+
+  it("uses the same small gap around Pipeline Ready", () => {
+    const guidedCss = readFileSync(
+      "src/components/chat/guided/guided.css",
+      "utf8",
+    );
+    const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
+    const completionRule = guidedCss.match(
+      /\.chat-panel--completed\s*>\s*\.guided-completion\s*\{(?<body>[^}]*)\}/s,
+    );
+    const resultsRule = chatCss.match(
+      /\.chat-panel--completed\s*>\s*\.inline-run-results:not\(\.inline-run-results--collapsed\)\s*\{(?<body>[^}]*)\}/s,
+    );
+
+    expect(completionRule?.groups?.body).toContain(
+      "margin-top: var(--space-xs)",
+    );
+    expect(resultsRule?.groups?.body).toContain(
+      "margin-top: var(--space-xs)",
+    );
+  });
+
+  it("keeps the three completed surfaces aligned on narrow viewports", () => {
+    const guidedCss = readFileSync(
+      "src/components/chat/guided/guided.css",
+      "utf8",
+    );
+
+    expect(guidedCss).toContain(`@media (max-width: 760px) {
+  .chat-panel--completed > .guided-workflow {
+    padding-inline: var(--space-sm);
+  }
+
+  .chat-panel--completed > .guided-completion {
+    margin-inline: var(--space-sm);
+  }
+}`);
+  });
+
   it("lets expanded Run Results fill downward while collapsed results stay compact", () => {
     const css = readFileSync("src/components/chat/chat.css", "utf8");
     const rule = css.match(

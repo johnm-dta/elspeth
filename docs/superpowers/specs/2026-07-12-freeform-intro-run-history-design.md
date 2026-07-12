@@ -27,17 +27,20 @@ template selection, or other interaction:
     files, data stores, or other configured destinations; records requiring
     attention can follow a separate route.
 - **Wiring the flow**: “Wiring is the set of connections between these
-  components. A simple pipeline runs from source to transforms to sink. More
-  involved pipelines can use flow operators:”
-  - **Gate** directs each record according to a stated condition.
-  - **Fork** copies a record into parallel, independently tracked paths.
-  - **Coalesce** waits for related fork paths and combines their results.
-  - **Aggregate** collects a group of records and processes them together, for
-    example to produce totals, statistics, or a report.
-  - **Queue** coordinates several upstream paths feeding one next step while
-    keeping their records separate.
-  - **Expand** turns one record containing several items into separately
-    tracked records.
+  components. A simple pipeline runs from source to transforms to sink. For a
+  more involved flow, think of each record as a case moving through a
+  controlled workplace:”
+  - **Gate** is a sorting desk. It sends each case along the appropriate route
+    according to a stated condition.
+  - **Fork** sends controlled copies of one case to several specialist teams.
+    ELSPETH tracks each parallel path independently.
+  - **Coalesce** waits for the required specialist responses, then combines
+    their findings into one case that can continue.
+  - **Aggregate** brings a group of cases together for batch work, such as
+    producing totals, statistics, or a report.
+  - **Queue** is a shared inbox. It accepts cases from several upstream teams
+    and feeds one next step while keeping every case separate.
+  - **Expand** opens a bundled case into several independently tracked cases.
 - Closing: “Describe the outcome you need in ordinary language. ELSPETH will
   propose the components and their wiring; review the graph and details before
   you run it.”

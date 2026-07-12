@@ -1016,13 +1016,14 @@ describe("per-user state resets on auth identity change (Fix C)", () => {
   });
 });
 
-// ── requestValidate: cache-aware manual validate entry point ──────────────────
+// ── requestValidate: forced manual validate entry point ───────────────────────
 //
-// Discrimination tests: requestValidate must respect the same guard conditions
-// as the auto-validate subscriber — cache hit, isExecuting, progress.status.
-// These tests also verify that requestValidate does NOT export or mutate the
-// module-level state directly; it is a controlled entry point only.
-describe("requestValidate — cache-aware manual validate entry point", () => {
+// Discrimination tests: requestValidate bypasses the automatic same-version
+// cache while preserving the auto-validate subscriber's execution guards
+// (isExecuting, progress.status). These tests also verify that requestValidate
+// does NOT export or mutate the module-level state directly; it is a controlled
+// entry point only.
+describe("requestValidate — forced manual validate entry point", () => {
   beforeEach(() => {
     _resetSubscriptionsForTesting();
     useAuthStore.setState({ token: "tok", user: { user_id: "user-a" } as never });
@@ -1066,7 +1067,7 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     expect(validate).not.toHaveBeenCalled();
   });
 
-  it("is a no-op at an already-validated version (cache hit)", async () => {
+  it("revalidates an already-validated version when explicitly requested", async () => {
     // Seed the cache by triggering an auto-validate for version 1.
     const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
@@ -1079,15 +1080,13 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     );
     expect(validate).toHaveBeenCalledTimes(1);
 
-    // Manual trigger at the same (already-validated) version — must be a no-op.
+    // An explicit user action is not an automatic cache probe: the visible
+    // Validate pipeline control must perform a fresh validation even when
+    // auto-validation has already populated this version's cache entry.
     requestValidate("sess-1", 1);
 
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    // Still exactly one call — requestValidate short-circuited on cache hit.
-    expect(validate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
   });
 
   it("enqueues validate when version is unvalidated", async () => {

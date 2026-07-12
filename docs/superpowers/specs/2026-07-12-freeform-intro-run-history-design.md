@@ -1,4 +1,4 @@
-yes# Freeform Introduction and Run History Design
+# Freeform Introduction and Run History Design
 
 **Date:** 2026-07-12
 **Status:** Approved

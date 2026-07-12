@@ -51,4 +51,11 @@ describe("FreeformIntroduction", () => {
 
     expect(dismiss).toHaveBeenCalledOnce();
   });
+
+  it("disables the action and reports progress while a preference write is active", () => {
+    usePreferencesStore.setState({ writing: true });
+    render(<FreeformIntroduction />);
+
+    expect(screen.getByRole("button", { name: "Hiding…" })).toBeDisabled();
+  });
 });

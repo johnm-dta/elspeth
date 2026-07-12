@@ -109,6 +109,7 @@ from .._helpers import (
     emit_step_advanced,
     emit_turn_answered,
     emit_turn_emitted,
+    generate_public_yaml,
     get_current_user,
     handle_step_1_source,
     handle_step_2_sink,
@@ -120,6 +121,23 @@ from .._helpers import (
     step_advance,
     sys,
 )
+
+_COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY = "guided_completed_terminal_before_user_exit"
+_MISSING_COMPLETED_TERMINAL_MARKER = object()
+
+
+def _composition_content_hash(state: Any) -> str:
+    """Hash user-authored pipeline content, excluding persistence version and guided metadata."""
+    state_d = state.to_dict()
+    return stable_hash(
+        {
+            "sources": state_d["sources"],
+            "nodes": state_d["nodes"],
+            "edges": state_d["edges"],
+            "outputs": state_d["outputs"],
+            "metadata": state_d["metadata"],
+        }
+    )
 
 
 def _resolve_shield_available(request: Request, user_id: str) -> bool:
@@ -905,20 +923,66 @@ async def post_guided_reenter(
                 status_code=409,
                 detail="Guided session cannot be re-entered because no current turn record exists.",
             )
-        reopened_record = _replace(current_record, response_hash=None, summary=None)
-        reopened_history = tuple(reopened_record if r is current_record else r for r in guided.history)
-        new_guided = _replace(guided, history=reopened_history, terminal=None)
-        new_state = _replace(state, guided_session=new_guided)
-        turn = _build_get_guided_turn(new_state, new_guided, catalog=catalog)
-        if turn is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Guided session cannot be re-entered because the current turn cannot be rebuilt.",
-            )
-
         existing_meta: dict[str, Any] = {}
         if state_record.composer_meta is not None:
             existing_meta = dict(deep_thaw(state_record.composer_meta))
+        completed_terminal_raw = existing_meta.get(
+            _COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY,
+            _MISSING_COMPLETED_TERMINAL_MARKER,
+        )
+
+        restored_terminal: TerminalState | None = None
+        if completed_terminal_raw is not _MISSING_COMPLETED_TERMINAL_MARKER:
+            try:
+                if not isinstance(completed_terminal_raw, Mapping):
+                    raise InvariantError("completed terminal re-entry marker must be a mapping")
+                if set(completed_terminal_raw) != {"composition_hash"}:
+                    raise InvariantError("completed terminal re-entry marker has an invalid shape")
+                composition_hash = completed_terminal_raw["composition_hash"]
+                if type(composition_hash) is not str:
+                    raise InvariantError("completed terminal re-entry marker composition_hash must be a string")
+
+                if composition_hash == _composition_content_hash(state):
+                    validation = state.validate()
+                    if not validation.is_valid:
+                        raise InvariantError("unchanged completed pipeline failed validation during guided re-entry")
+                    restored_terminal = TerminalState(
+                        kind=TerminalKind.COMPLETED,
+                        reason=None,
+                        pipeline_yaml=generate_public_yaml(state),
+                    )
+            except InvariantError as exc:
+                slog.error(
+                    "guided.invariant_violated",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="guided_reenter_completed_terminal_marker",
+                    frames=_safe_frame_strings(exc),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Server invariant violated. See application audit log for diagnostic detail.",
+                ) from exc
+
+            existing_meta.pop(_COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY)
+
+        if restored_terminal is not None:
+            new_guided = _replace(guided, terminal=restored_terminal)
+            new_state = _replace(state, guided_session=new_guided)
+            turn = None
+        else:
+            reopened_record = _replace(current_record, response_hash=None, summary=None)
+            reopened_history = tuple(reopened_record if r is current_record else r for r in guided.history)
+            new_guided = _replace(guided, history=reopened_history, terminal=None)
+            new_state = _replace(state, guided_session=new_guided)
+            turn = _build_get_guided_turn(new_state, new_guided, catalog=catalog)
+            if turn is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session cannot be re-entered because the current turn cannot be rebuilt.",
+                )
+
         new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
         state_d = new_state.to_dict()
         persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
@@ -939,6 +1003,15 @@ async def post_guided_reenter(
         )
 
         shield_available = _resolve_shield_available(request, user.user_id)
+        terminal_response = (
+            TerminalStateResponse(
+                kind=restored_terminal.kind.value,
+                reason=None,
+                pipeline_yaml=restored_terminal.pipeline_yaml,
+            )
+            if restored_terminal is not None
+            else None
+        )
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=new_guided.step.value,
@@ -953,7 +1026,7 @@ async def post_guided_reenter(
                     )
                     for r in new_guided.history
                 ],
-                terminal=None,
+                terminal=terminal_response,
                 chat_history=[
                     ChatTurnResponse(
                         role=t.role.value,
@@ -970,7 +1043,7 @@ async def post_guided_reenter(
                 profile=_workflow_profile_response(new_guided),
             ),
             next_turn=_turn_payload_response(turn, shield_available=shield_available),
-            terminal=None,
+            terminal=terminal_response,
             composition_state=_state_response(state_record_out),
         )
 
@@ -1329,7 +1402,13 @@ async def post_guided_respond(
                 existing_meta_exit: dict[str, Any] = {}
                 if state_record is not None and state_record.composer_meta is not None:
                     existing_meta_exit = dict(deep_thaw(state_record.composer_meta))
-                new_composer_meta = {**existing_meta_exit, "guided_session": new_guided.to_dict()}
+                new_composer_meta = {
+                    **existing_meta_exit,
+                    "guided_session": new_guided.to_dict(),
+                    _COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY: {
+                        "composition_hash": _composition_content_hash(state),
+                    },
+                }
 
                 state_d = new_state.to_dict()
                 persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)

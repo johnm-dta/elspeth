@@ -592,6 +592,22 @@ def _state_response(
     )
 
 
+def merge_composer_meta_updates(
+    existing_meta: Mapping[str, Any] | None,
+    updates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge route-owned updates without dropping opaque lifecycle metadata.
+
+    ``composer_meta`` is a shared persistence envelope.  Version-changing
+    freeform writes must carry forward keys owned by guided mode and other
+    subsystems rather than rebuilding the envelope from only the keys they
+    understand.
+    """
+    merged = dict(deep_thaw(existing_meta)) if existing_meta is not None else {}
+    merged.update(updates)
+    return merged
+
+
 def _recovery_partial_state_response(state: CompositionStateRecord) -> dict[str, Any]:
     """Serialize the persisted recovery state, including its server identity."""
 
@@ -4528,6 +4544,7 @@ __all__ = [
     "mark_solver_exhausted",
     "maybe_auto_title_session",
     "maybe_resolve_step_1_source_chat",
+    "merge_composer_meta_updates",
     "merge_implicit_decisions_meta",
     "metrics",
     "record_session_completed",

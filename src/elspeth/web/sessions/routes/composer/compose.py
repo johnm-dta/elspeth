@@ -54,9 +54,9 @@ from .._helpers import (
     client_cancelled_progress_event,
     contextlib,
     convergence_progress_event,
-    deep_thaw,
     get_current_user,
     get_rate_limiter,
+    merge_composer_meta_updates,
     slog,
 )
 
@@ -402,9 +402,13 @@ async def recompose(
                     transition_consumed=True,
                 )
 
-            _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+            _post_compose_updates: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
             if _post_compose_guided is not None:
-                _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+                _post_compose_updates["guided_session"] = _post_compose_guided.to_dict()
+            _post_compose_meta = merge_composer_meta_updates(
+                state_record.composer_meta if state_record is not None else None,
+                _post_compose_updates,
+            )
 
             # Save state if version changed.
             # Path 2 (post-compose runtime preflight): mirror of the
@@ -494,10 +498,6 @@ async def recompose(
                 # Version unchanged but transition_consumed must be flipped.
                 # Persist the updated guided_session in a new state row so
                 # subsequent turns pick up transition_consumed=True.
-                _existing_meta: dict[str, Any] = {}
-                if state_record is not None and state_record.composer_meta is not None:
-                    _existing_meta = dict(deep_thaw(state_record.composer_meta))
-                _transition_meta = {**_existing_meta, **_post_compose_meta}
                 _transition_state = result.state
                 _transition_state_d = _transition_state.to_dict()
                 _transition_state_data = CompositionStateData(
@@ -508,7 +508,7 @@ async def recompose(
                     metadata_=_transition_state_d["metadata"],
                     is_valid=False,
                     validation_errors=None,
-                    composer_meta=_transition_meta,
+                    composer_meta=_post_compose_meta,
                 )
                 _transition_record = await service.save_composition_state(
                     session.id,

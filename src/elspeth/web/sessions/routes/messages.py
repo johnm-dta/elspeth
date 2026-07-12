@@ -64,10 +64,10 @@ from ._helpers import (
     client_cancelled_progress_event,
     contextlib,
     convergence_progress_event,
-    deep_thaw,
     get_current_user,
     get_rate_limiter,
     maybe_auto_title_session,
+    merge_composer_meta_updates,
     slog,
 )
 
@@ -607,9 +607,13 @@ def register_message_routes(router: APIRouter) -> None:
                 # first-class column) so any save must propagate it forward — failing
                 # to include it would silently drop the guided session from the DB on
                 # every freeform compose turn that mutates state.
-                _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+                _post_compose_updates: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
                 if _post_compose_guided is not None:
-                    _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+                    _post_compose_updates["guided_session"] = _post_compose_guided.to_dict()
+                _post_compose_meta = merge_composer_meta_updates(
+                    state_record.composer_meta if state_record is not None else None,
+                    _post_compose_updates,
+                )
 
                 state_response: CompositionStateResponse | None = None
                 post_compose_state_id: UUID | None = compose_base_state_id
@@ -699,10 +703,6 @@ def register_message_routes(router: APIRouter) -> None:
                     # Version unchanged but transition_consumed must be flipped.
                     # Persist the updated guided_session in a new state row so
                     # subsequent turns pick up transition_consumed=True.
-                    _existing_meta: dict[str, Any] = {}
-                    if state_record is not None and state_record.composer_meta is not None:
-                        _existing_meta = dict(deep_thaw(state_record.composer_meta))
-                    _transition_meta = {**_existing_meta, **_post_compose_meta}
                     _transition_state = result.state
                     _transition_state_d = _transition_state.to_dict()
                     _transition_state_data = CompositionStateData(
@@ -713,7 +713,7 @@ def register_message_routes(router: APIRouter) -> None:
                         metadata_=_transition_state_d["metadata"],
                         is_valid=False,
                         validation_errors=None,
-                        composer_meta=_transition_meta,
+                        composer_meta=_post_compose_meta,
                     )
                     _transition_record = await service.save_composition_state(
                         session.id,

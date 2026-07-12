@@ -9659,6 +9659,53 @@ def test_send_message_post_compose_state_advance_persists_post_compose_provenanc
     assert _read_persisted_provenance(service, session_id) == "post_compose"
 
 
+def test_send_message_state_advance_preserves_existing_composer_meta(tmp_path: Path) -> None:
+    """Version-changing freeform messages retain opaque guided lifecycle metadata."""
+    guided = GuidedSession.initial()
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="post-compose"),
+        version=2,
+        guided_session=guided,
+    )
+    mock_composer = _make_composer_mock(response_text="Updated.", state=advanced_state)
+    marker = {"composition_hash": "seed-hash"}
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    asyncio.run(
+        service.save_composition_state(
+            uuid.UUID(session_id),
+            CompositionStateData(
+                sources={},
+                nodes=[],
+                edges=[],
+                outputs=[],
+                metadata_={"name": "before", "description": ""},
+                is_valid=False,
+                validation_errors=None,
+                composer_meta={
+                    "guided_session": guided.to_dict(),
+                    "guided_completed_terminal_before_user_exit": marker,
+                },
+            ),
+            provenance="session_seed",
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Update it"})
+
+    assert response.status_code == 200
+    current = asyncio.run(service.get_current_state(uuid.UUID(session_id)))
+    assert current is not None
+    assert current.composer_meta["guided_completed_terminal_before_user_exit"] == marker
+
+
 def test_recompose_post_compose_state_advance_persists_post_compose_provenance(tmp_path: Path) -> None:
     """The recompose mirror path uses the same post-compose provenance."""
     advanced_state = CompositionState(
@@ -9693,6 +9740,61 @@ def test_recompose_post_compose_state_advance_persists_post_compose_provenance(t
 
     assert response.status_code == 200
     assert _read_persisted_provenance(service, session_id) == "post_compose"
+
+
+def test_recompose_state_advance_preserves_existing_composer_meta(tmp_path: Path) -> None:
+    """Version-changing recompose retains opaque guided lifecycle metadata."""
+    guided = GuidedSession.initial()
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="post-compose"),
+        version=2,
+        guided_session=guided,
+    )
+    mock_composer = _make_composer_mock(response_text="Updated.", state=advanced_state)
+    marker = {"composition_hash": "seed-hash"}
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    asyncio.run(
+        service.save_composition_state(
+            uuid.UUID(session_id),
+            CompositionStateData(
+                sources={},
+                nodes=[],
+                edges=[],
+                outputs=[],
+                metadata_={"name": "before", "description": ""},
+                is_valid=False,
+                validation_errors=None,
+                composer_meta={
+                    "guided_session": guided.to_dict(),
+                    "guided_completed_terminal_before_user_exit": marker,
+                },
+            ),
+            provenance="session_seed",
+        )
+    )
+    asyncio.run(
+        service.add_message(
+            uuid.UUID(session_id),
+            "user",
+            "Update it",
+            writer_principal="route_user_message",
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session_id}/recompose")
+
+    assert response.status_code == 200
+    current = asyncio.run(service.get_current_state(uuid.UUID(session_id)))
+    assert current is not None
+    assert current.composer_meta["guided_completed_terminal_before_user_exit"] == marker
 
 
 def test_composition_state_provenance_python_and_sql_enums_agree() -> None:

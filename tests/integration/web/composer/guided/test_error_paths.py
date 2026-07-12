@@ -22,6 +22,8 @@ Per spec §5.3, §9.4:
 
 from __future__ import annotations
 
+import pytest
+
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,19 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
 def _reenter_raw(client: TestClient, session_id: str) -> object:
     """POST /guided/reenter and return the raw response (any status)."""
     return client.post(f"/api/sessions/{session_id}/guided/reenter")
+
+
+def _get_current_composer_meta(client: TestClient, session_id: str) -> dict:
+    """Return the current persisted composer metadata as a mutable dict."""
+    import asyncio
+    from uuid import UUID
+
+    from elspeth.contracts.freeze import deep_thaw
+
+    service = client.app.state.session_service
+    state_record = asyncio.run(service.get_current_state(UUID(session_id)))
+    assert state_record is not None
+    return dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
 
 
 def _seed_first_turn(client: TestClient, session_id: str) -> dict:
@@ -150,6 +165,16 @@ class TestExitToFreeform:
         guided = resp.json()["guided_session"]
         assert guided["terminal"] is not None
         assert guided["terminal"]["kind"] == "exited_to_freeform"
+
+    def test_mid_guide_exit_does_not_create_completed_terminal_marker(self, composer_test_client: TestClient) -> None:
+        """Only exiting an already-completed guide needs completion restoration."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+
+        meta = _get_current_composer_meta(composer_test_client, session_id)
+        assert "guided_completed_terminal_before_user_exit" not in meta
 
 
 class TestReenterGuided:
@@ -343,10 +368,19 @@ class TestExitFromCompletedTerminal:
         from elspeth.contracts.freeze import deep_thaw
         from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
         from elspeth.web.composer.guided.state_machine import (
+            ChainProposal,
             GuidedSession,
+            SinkOutputResolved,
+            SinkResolved,
+            SourceResolved,
             TerminalKind,
             TerminalState,
             TurnRecord,
+        )
+        from elspeth.web.composer.guided.steps import (
+            handle_step_1_source,
+            handle_step_2_sink,
+            handle_step_3_chain_accept,
         )
         from elspeth.web.sessions.converters import state_from_record
         from elspeth.web.sessions.protocol import CompositionStateData
@@ -363,15 +397,65 @@ class TestExitFromCompletedTerminal:
             state = state_from_record(state_record)
             existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
 
-        # Build a GuidedSession resting at STEP_3_TRANSFORMS with COMPLETED
+        # Build a real, valid pipeline resting at STEP_4_WIRE with COMPLETED
         # terminal carrying a non-trivial pipeline_yaml.  The handler must
         # NOT propagate ``pipeline_yaml`` to the new EXITED_TO_FREEFORM
         # terminal (the TerminalState invariant restricts pipeline_yaml to
         # kind=COMPLETED); the test asserts that elision explicitly.
         guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
-        record = TurnRecord(
+        catalog = client.app.state.catalog_service
+        step_1 = handle_step_1_source(
+            state=state,
+            session=guided,
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+        )
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=("price",),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "passthrough",
+                    "options": {"schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
+                    "rationale": "identity transform",
+                },
+            ),
+            why="source rows already match the sink schema",
+        )
+        step_3_session = replace(
+            step_2.session,
             step=GuidedStep.STEP_3_TRANSFORMS,
-            turn_type=TurnType.PROPOSE_CHAIN,
+            step_3_proposal=proposal,
+        )
+        step_3 = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_3_session,
+            proposal=proposal,
+            catalog=catalog,
+        )
+        assert step_3.tool_result.success is True
+        guided = step_3.session
+        record = TurnRecord(
+            step=GuidedStep.STEP_4_WIRE,
+            turn_type=TurnType.CONFIRM_WIRING,
             payload_hash="seed-payload-hash",
             response_hash="seed-response-hash",
             emitter="server",
@@ -383,11 +467,11 @@ class TestExitFromCompletedTerminal:
         )
         guided = replace(
             guided,
-            step=GuidedStep.STEP_3_TRANSFORMS,
+            step=GuidedStep.STEP_4_WIRE,
             history=(*guided.history, record),
             terminal=completed_terminal,
         )
-        state = replace(state, guided_session=guided)
+        state = replace(step_3.state, guided_session=guided)
 
         new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
         state_d = state.to_dict()
@@ -469,6 +553,136 @@ class TestExitFromCompletedTerminal:
         assert composition_after["edges"] == composition_before["edges"]
         assert composition_after["outputs"] == composition_before["outputs"]
 
+    def test_reenter_after_completed_exit_restores_completion(self, composer_test_client: TestClient) -> None:
+        """A freeform round-trip must not reopen the consumed final decision."""
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+        marker = _get_current_composer_meta(composer_test_client, session_id)["guided_completed_terminal_before_user_exit"]
+        assert set(marker) == {"composition_hash"}
+        resp = _reenter_raw(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        assert body["terminal"] is not None
+        assert body["terminal"]["kind"] == "completed"
+        assert body["terminal"]["pipeline_yaml"] is not None
+        assert body["guided_session"]["terminal"] == body["terminal"]
+        assert body["next_turn"] is None
+
+        current_step_records = [record for record in body["guided_session"]["history"] if record["step"] == body["guided_session"]["step"]]
+        assert current_step_records[-1]["response_hash"] == "seed-response-hash"
+
+        persisted = _get_guided(composer_test_client, session_id)
+        assert persisted["terminal"]["kind"] == "completed"
+        assert persisted["next_turn"] is None
+        assert "guided_completed_terminal_before_user_exit" not in _get_current_composer_meta(composer_test_client, session_id)
+
+    def test_reenter_after_freeform_pipeline_change_requires_reconfirmation(self, composer_test_client: TestClient) -> None:
+        """A content change invalidates the old completion checkpoint and YAML."""
+        import asyncio
+        from uuid import UUID
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+
+        service = composer_test_client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+        assert state_record is not None
+        state = state_from_record(state_record)
+        state_d = state.to_dict()
+        changed_metadata = dict(state_d["metadata"])
+        changed_metadata["name"] = "Changed in freeform"
+        asyncio.run(
+            service.save_composition_state(
+                session_uuid,
+                CompositionStateData(
+                    sources=state_d["sources"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=changed_metadata,
+                    is_valid=False,
+                    validation_errors=None,
+                    composer_meta=dict(deep_thaw(state_record.composer_meta)),
+                ),
+                provenance="post_compose",
+            )
+        )
+
+        resp = _reenter_raw(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        assert body["terminal"] is None
+        assert body["next_turn"]["type"] == "confirm_wiring"
+        current_step_records = [record for record in body["guided_session"]["history"] if record["step"] == body["guided_session"]["step"]]
+        assert current_step_records[-1]["response_hash"] is None
+        assert "guided_completed_terminal_before_user_exit" not in _get_current_composer_meta(composer_test_client, session_id)
+
+    @pytest.mark.parametrize(
+        "corrupt_marker",
+        [
+            None,
+            {"composition_hash": 42},
+        ],
+    )
+    def test_reenter_rejects_corrupt_completed_terminal_marker_without_mutation(
+        self,
+        composer_test_client: TestClient,
+        corrupt_marker: object,
+    ) -> None:
+        """A corrupt Tier-1 marker must fail closed and remain available for diagnosis."""
+        import asyncio
+        from uuid import UUID
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+
+        service = composer_test_client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+        assert state_record is not None
+        state = state_from_record(state_record)
+        state_d = state.to_dict()
+        corrupt_meta = dict(deep_thaw(state_record.composer_meta))
+        corrupt_meta["guided_completed_terminal_before_user_exit"] = corrupt_marker
+        asyncio.run(
+            service.save_composition_state(
+                session_uuid,
+                CompositionStateData(
+                    sources=state_d["sources"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=state_d["metadata"],
+                    is_valid=False,
+                    validation_errors=None,
+                    composer_meta=corrupt_meta,
+                ),
+                provenance="session_seed",
+            )
+        )
+        before = _get_current_composer_meta(composer_test_client, session_id)
+
+        resp = _reenter_raw(composer_test_client, session_id)
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
+        assert _get_current_composer_meta(composer_test_client, session_id) == before
+
     def test_non_exit_payload_from_completed_still_returns_409(self, composer_test_client: TestClient) -> None:
         """Sending any non-exit payload (chosen, edited_values, ...) against a
         kind=COMPLETED terminal must still return 409.  The exemption is
@@ -544,11 +758,11 @@ class TestExitFromCompletedTerminal:
                     tool_names.append(name)
                     # For dropped_to_freeform, also assert the directive's
                     # prev_step captures the step at which the wizard had
-                    # completed (the seeded STEP_3_TRANSFORMS) and the reason
+                    # completed (the seeded STEP_4_WIRE) and the reason
                     # matches USER_PRESSED_EXIT.
                     if name == "guided_dropped_to_freeform":
                         args = json.loads(invocation.get("arguments_canonical", "{}"))
-                        assert args["prev_step"] == "step_3_transforms"
+                        assert args["prev_step"] == "step_4_wire"
                         assert args["drop_reason"] == "user_pressed_exit"
 
         assert "guided_dropped_to_freeform" in tool_names, f"expected guided_dropped_to_freeform to be emitted; got: {tool_names}"

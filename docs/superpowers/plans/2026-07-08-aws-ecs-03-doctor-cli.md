@@ -13,7 +13,7 @@
 **Depends on:**
 
 - Tasks 1-2 / Filigree `elspeth-dffe064287`: Plans 01 and 02.
-- Task 3 / Filigree `elspeth-397ac915b8`: Plans 06, 07, and 09 must also be integrated so `aws_s3`, `boto3`, Jinja2-backed S3 key templates, and `bedrock` can pass. The integrated tree must already include Plan 08's load-bearing web-authorship gate before the Plan 06/07 registrations, as required by the program DAG.
+- Task 3 / Filigree `elspeth-397ac915b8`: Plans 06, 07, 09, 14, and 15 must also be integrated so `aws_s3`, boto3, Jinja2-backed S3 key templates, `bedrock`, the operator-owned AWS OTLP posture, and both Bedrock Guardrail transforms can pass. The integrated tree must already include Plan 08's load-bearing web-authorship gate before the Plan 06/07/15 registrations, as required by the program DAG.
 - Plan 12 owns the final integrated, zero-skip Docker evidence. Plan 03 records the exact command it must repeat.
 
 **Plan 02 interfaces consumed:** `SchemaState`, `DatabaseTargetConflictError`, `SchemaInitBusyError`, `SchemaLockCleanupError`, `postgres_engine_kwargs`, `require_distinct_postgres_targets`, `probe_session_schema`, `probe_landscape_schema`, `init_session_schema`, and `init_landscape_schema`. Do not add another URL/search-path parser.
@@ -65,6 +65,8 @@ Use raw `settings.payload_store_path`. Derive the blob directory with `allowed_s
 
 - `aws_s3_plugin`: call `get_shared_plugin_manager()` inside its own `try`, require `aws_s3` in both source and sink registrations, and catch sanitized `Exception`.
 - `bedrock_provider`: lazily import `_PROVIDERS` and require `bedrock`; this is an explicit narrow private-registry read until the provider registry publishes a public capability accessor. Catch sanitized `Exception`, not only `ImportError`.
+- `aws_operator_telemetry`: require the AWS ECS effective telemetry policy to resolve to one enabled generic `otlp` exporter at the fixed task-local endpoint, empty headers, explicit bounded resource identity, and `lifecycle` or `rows` granularity. Never print the endpoint or effective config.
+- `bedrock_guardrail_plugins`: require both `aws_bedrock_prompt_shield` and `aws_bedrock_content_safety` plus the provider-neutral prompt-shield/content-safety capability mapping. This is registration/config-shape proof only; Plan 12 owns the live task-role call.
 - `psycopg_dependency`, `boto3_dependency`, `ijson_dependency`, and
   `jinja2_dependency`: independently call `importlib.import_module` and
   independently catch sanitized `Exception`. The latter three prove the final

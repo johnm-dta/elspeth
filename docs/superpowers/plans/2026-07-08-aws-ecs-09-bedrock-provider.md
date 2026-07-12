@@ -29,6 +29,14 @@ two small additive fixes to shared code used by all three providers:
 `transform.py`'s rate-limiter dispatch and `clients/llm.py`'s error classifier
 (Azure/OpenRouter behavior unchanged).
 
+**Guardrails are explicitly out of this provider slice.** Mapping a successful
+LiteLLM response's `content_filter` finish reason is defensive provider error
+handling; it does not configure or prove prompt-attack or harmful-content
+screening. Plan 15 owns model-independent, field-level
+`aws_bedrock_prompt_shield` and `aws_bedrock_content_safety` transforms using
+Bedrock `ApplyGuardrail`, with independent audit, routing, IAM, and live
+acceptance. Neither plan may claim the other control by implication.
+
 **Global Constraints** (runtime-readiness spec, Bedrock LLM Readiness):
 - "The `bedrock` provider is implemented through LiteLLM rather than a bespoke direct AWS SDK transport."
 - "The provider must satisfy the existing `LLMProvider` protocol, preserve typed error classification, and keep raw provider responses inside the provider boundary."

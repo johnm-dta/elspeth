@@ -1,13 +1,13 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 4 final repair review",
-  "date": "2026-07-10",
-  "reviewed_at": "2026-07-10T12:27:22Z",
-  "object": "docs/superpowers/plans/2026-07-08-aws-ecs-{00..13}*.md and runtime-readiness design @ release/0.7.1 HEAD 9f425de3daa82890892a538ad37ed6cc1687095e",
+  "review": "AWS ECS runtime-readiness plan set — round 5 telemetry and Guardrails expansion",
+  "date": "2026-07-12",
+  "reviewed_at": "2026-07-12T06:03:00Z",
+  "object": "docs/superpowers/plans/2026-07-08-aws-ecs-{00..15}*.md and runtime-readiness design @ release/0.7.1",
   "process": "Independent reality, architecture, quality, and systems passes. Each blocker was repaired and re-reviewed against current source, command surfaces, live Filigree state, and cross-plan failure paths.",
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO to execute the implementation DAG. No plan blocker remains. Runtime GO is not granted by this review and requires one unchanged 0.7.1 candidate to pass Plan 12 Tasks 1-9, including local, hosted, live rollback, evidence, and teardown gates.",
+  "verdict_summary": "GO to execute the dependency DAG, including new Plans 14 and 15 before Plan 10. No plan-design blocker remains. Runtime GO still requires one unchanged 0.7.1 candidate to pass Plan 12, including CloudWatch/X-Ray telemetry, Bedrock Guardrails, rollback, evidence, and teardown gates.",
   "reviewer_verdicts": {
     "reality": "APPROVED",
     "architecture": "APPROVED",
@@ -28,11 +28,13 @@
     }
   ],
   "repairs_verified": [
-    "Plan 00 and design retargeted to release/0.7.1 with a 15-step live Filigree DAG.",
+    "Plan 00 and design retargeted to release/0.7.1 with a 17-step live Filigree DAG before Plan 12.",
     "Plan 01 target validation, redaction, environment provenance, exact checks, project-environment commands, static gates, and Wardline handoff repaired.",
     "All executable scoped pytest commands in Plans 02-11 use uv run.",
     "Plan 10 waits for every preceding implementation slice and records a clean pre-Plan-10 rollback-baseline source.",
     "Plan 13 independently owns exact Cognito authorization origin, explicit client_id access-token mode, provider applicability, and callback-state regression coverage.",
+    "Plan 14 owns the previously missing AWS operational-telemetry deployment: generic OTLP under a mandatory AWS web overlay, web OTLP metrics, CloudWatch Agent, alarms, and Landscape-correlated acceptance.",
+    "Plan 15 owns explicit prompt-attack and harmful-content Guardrail transforms plus an enabled/preferred control inventory for the target LLM; Plan 09 no longer implies shielding through provider refusal handling.",
     "Plan 12 builds and binds immutable candidate and rollback-baseline images, bootstraps the baseline before four-phase Cognito evidence, rehearses first and upgrade rollback modes, exports durable evidence, and aggregates every cleanup failure before final verdict."
   ],
   "verification": [
@@ -40,7 +42,7 @@
     "balanced Markdown code fences",
     "bash -n over Plan 12 bash blocks",
     "Ruff check and format-check over the Plan 01 implementation snippet",
-    "JSON parse of all three review artifacts",
+    "JSON parse of all AWS ECS review artifacts",
     "live Filigree full-plan and issue dependency inspection"
   ],
   "reviewed_files": [
@@ -58,6 +60,8 @@
     "docs/superpowers/plans/2026-07-08-aws-ecs-11-landscape-write-gate.md",
     "docs/superpowers/plans/2026-07-08-aws-ecs-12-integration-closeout.md",
     "docs/superpowers/plans/2026-07-08-aws-ecs-13-cognito-authorization-origin.md",
+    "docs/superpowers/plans/2026-07-08-aws-ecs-14-cloudwatch-operator-telemetry.md",
+    "docs/superpowers/plans/2026-07-08-aws-ecs-15-bedrock-guardrail-shields.md",
     "docs/superpowers/specs/2026-07-08-aws-ecs-runtime-readiness-design.md"
   ],
   "review_history": [
@@ -74,6 +78,12 @@
       "date": "2026-07-10",
       "verdict": "CHANGES_REQUESTED",
       "summary": "The first release/0.7.1 pass found stale branch/tracker ownership, Plan 01 executability, unowned closeout/runbook work, Cognito cross-origin and access-token gaps, rollback-baseline provenance, and failure-path cleanup gaps; all were repaired and independently re-reviewed."
+    },
+    {
+      "round": "5",
+      "date": "2026-07-12",
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "summary": "The telemetry and safety review confirmed Landscape/audit and generic OTLP already exist, but AWS deployment telemetry and AWS-native prompt/content shields were unowned. Plans 14/15, cross-plan acceptance, and live tracker dependencies now own those gaps."
     }
   ]
 }

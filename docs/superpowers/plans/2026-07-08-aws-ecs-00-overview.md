@@ -2,7 +2,7 @@
 
 > **For agentic workers:** This is the index, not a plan. Execute the numbered
 > subplans with superpowers:subagent-driven-development (recommended) or
-> superpowers:executing-plans. Plans 01–11 and 13 define scoped implementation
+> superpowers:executing-plans. Plans 01–11 and 13–15 define scoped implementation
 > verification and carry
 > their own commits, but dependency-gated tasks are not independently
 > executable. Plan 12 owns acceptance of the fully integrated program.
@@ -28,17 +28,19 @@ extras `postgres` and `aws`.
 |---|------|----------|------------|
 | 01 | `…-01-deployment-contract.md` | `deployment_target` setting; pure aws-ecs contract validator; placeholder predicates extracted from existing validators | — |
 | 02 | `…-02-postgres-schema-support.md` | `postgres` extra; schema-shape probes on the owning modules; `schema_probe.py` with `pg_advisory_lock`-serialized init; pool kwargs passthrough | — |
-| 03 | `…-03-doctor-cli.md` | `elspeth doctor aws-ecs [--init-schema] --json`; non-persisting by default (filesystem probes are ephemeral and never mkdir in either mode); never opens `auth.db`; sanitized error classes | Tasks 1–2: 01, 02 · **Task 3 (integration proof): also 06, 07, 09** |
+| 03 | `…-03-doctor-cli.md` | `elspeth doctor aws-ecs [--init-schema] --json`; non-persisting by default (filesystem probes are ephemeral and never mkdir in either mode); never opens `auth.db`; sanitized error classes | Tasks 1–2: 01, 02 · **Task 3 (integration proof): also 06, 07, 09, 14, 15** |
 | 04 | `…-04-validate-only-startup.md` | Pre-auth fail-closed target/schema validation in aws-ecs mode (incl. orphan-reconciliation `create_tables`); 10 s connect/45 s per-probe budgets; startup requires pre-provisioned data/payload/blob directories and never creates them | 01, 02 |
 | 05 | `…-05-readiness-endpoint.md` | `GET /api/ready` with bounded per-label admission (2 s/check, 5 s route ceiling, cancellation-safe 2 s cache, redacted); shallow `/api/health`; mechanical ALB-path proof | 04 (and transitively 01, 02) |
 | 06 | `…-06-s3-source.md` | `aws_s3` source; `max_object_bytes` (256 MiB default) enforced pre-read; `aws` extra; `aws_s3_common.build_s3_client` | tracker/integration: 02 and 08A (lockfile + complete pre-registration web gate) |
 | 07 | `…-07-s3-sink.md` | bounded `aws_s3` sink; Jinja keys; first-create `IfNoneMatch` plus cumulative `IfMatch`; audit-safe lifecycle; offline botocore and real-S3 proof | build: 06 · **registration: 08 core must already be committed** |
 | 08 | `…-08-s3-endpoint-gate.md` | Web-authorship rejection of `aws_s3` `endpoint_url` (design review's Critical): `provider_config_policy` + `validate_pipeline` source/output adjudication + every composer mutation path (08A), then guided-source prompt parity (08B) | gate baseline: none, executable now · 08A: gate baseline · 08B: 06 + 08A |
 | 09 | `…-09-bedrock-provider.md` | LiteLLM-backed `bedrock` pipeline provider in `_PROVIDERS`; composer Bedrock-response parsing tests; opt-in local smoke plus Plan-10/12 in-task task-role acceptance | 06 (AWS SDK support; transitively the shared gate baseline) |
-| 10 | `…-10-packaging-docker.md` | Binds a fully integrated pre-Plan-10 rollback-baseline SHA; validated platform-bound lean image; force-new zero-overlap first/upgrade/recovery runbook with task-definition/EFS/IAM/health/Exec and schema authority; sanitized API/non-root-EFS/local-auth/S3-task-role/Bedrock/OIDC acceptance harnesses; orphan-safe cleanup | all implementation slices in 01–09, 11, and 13, including both 03/08 split slices |
+| 10 | `…-10-packaging-docker.md` | Binds a fully integrated pre-Plan-10 rollback-baseline SHA; validated platform-bound lean image; force-new zero-overlap first/upgrade/recovery runbook with task-definition/EFS/IAM/health/Exec and schema authority; sanitized API/non-root-EFS/local-auth/S3-task-role/Bedrock/Guardrails/CloudWatch-telemetry/OIDC acceptance harnesses; orphan-safe cleanup | all implementation slices in 01–09, 11, and 13–15, including both 03/08 split slices |
 | 11 | `…-11-landscape-write-gate.md` | Fail-closed `open_landscape_db(settings)` writer policy; migrates the per-run, tutorial-projection, four auth-audit methods, and all 39 current service test seams; import-aware AST seal covers direct/aliased/qualified constructors and `in_memory`; DDL-denied PostgreSQL request-writer proof | 01, 02, 04 |
-| 12 | `…-12-integration-closeout.md` | Owned final gate: atomic tracker ownership and exact 0.7.1 version, lockfile/dependency reconciliation, full pytest/static/contracts/Wardline, PR checks plus exact-SHA RC-push CI/CodeQL/allowlist gates, run-scoped platform-bound candidate + qualified rollback-baseline images, reviewed saved-plan Terraform apply/destroy with durable interruption-safe cleanup state, baseline-first schema initialization, live Aurora/EFS/ECS/ALB task-role/non-root deployment and rollback acceptance, sanitized evidence, and tag/inventory-verified teardown; any failure hard-stops source/runtime-contract GO, which never authorizes a rebuilt or other-platform artifact | **All implementation plans 01–11 and 13** |
+| 12 | `…-12-integration-closeout.md` | Owned final gate: exact-SHA local/hosted gates, platform-bound images, reviewed Terraform apply/destroy, live Aurora/EFS/ECS/ALB, task-role S3/Bedrock/Guardrails, Landscape-correlated CloudWatch/X-Ray telemetry, rollback, sanitized evidence, and verified teardown | **All implementation plans 01–11 and 13–15** |
 | 13 | `…-13-cognito-authorization-origin.md` | Authorization code + S256 PKCE for the browser public client; exact operator-declared HTTPS authorization/token origin; explicit Cognito `client_id` access-token validation; one-use expiring callback transaction | 01 · shared signed-tier/Wardline verification baseline |
+| 14 | `…-14-cloudwatch-operator-telemetry.md` | Mandatory AWS web telemetry overlay over generic OTLP; delivery/resource/status hardening; web OTLP metrics; CloudWatch Agent, dashboards/alarms, and Landscape-correlated acceptance | 13 · shared signed-tier/Wardline verification baseline |
+| 15 | `…-15-bedrock-guardrail-shields.md` | Explicit model-independent Bedrock prompt/content shields; audited task-role `ApplyGuardrail`; provider-neutral enabled/preferred control inventory for the target LLM; strict fail-closed acceptance | 06 · 08A · shared signed-tier/Wardline verification baseline |
 
 ## Filigree execution graph
 
@@ -67,6 +69,8 @@ by this planning repair.
 | 11 | `elspeth-25286192ee` |
 | 12 | `elspeth-05396fed38` |
 | 13 | `elspeth-5e729216f4` |
+| 14 | `elspeth-f5d5dddddf` |
+| 15 | `elspeth-7d1f35e3d8` |
 
 Plans 03 and 08 are split only at their real dependency boundaries. The shared
 gate-baseline prerequisite is separately visible because it is operator/tooling
@@ -101,14 +105,18 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   05's wrapper instructions assume 04's `create_tables` kwarg is already
   present at that site. Plan 09 waits for 06 because LiteLLM's real Bedrock
   transport requires the `aws` extra even though its unit tests mock the call.
-- **Wave 3:** 03 Task 3 (integration proof — needs 06, 07, 09 all
-  registered), 11 (needs 01, 02, 04), and 13 (needs 01) may proceed as their
+  Plan 15 also starts after 06, complete 08A, and the shared baseline;
+  `ApplyGuardrail` is model-independent, so it may run beside 09.
+- **Wave 3:** Plan 14 starts after 13 and the shared baseline to serialize
+  their shared web settings/app/runbook surfaces.
+  Then 03 Task 3 (integration proof — needs 06, 07, 09, 14, and 15 all
+  registered), 11 (needs 01, 02, 04), and 13 (needs 01) proceed as their
   dependencies allow. Plan 10 starts last, only after every implementation
-  slice in 01–09, 11, and 13 is done; the Filigree edges enforce this. Its
+  slice in 01–09, 11, and 13–15 is done; the Filigree edges enforce this. Its
   Task 0 records that clean integrated pre-Plan-10 SHA as the only eligible
   Scenario B rollback-baseline source before packaging/runbook/harness edits.
 - **Wave 4 — owned closeout, never parallel with implementation:** 12 starts
-  only after every task and commit from 01–11 and 13 is present in one integrated
+  only after every task and commit from 01–11 and 13–15 is present in one integrated
   `release/0.7.1` tree. A failure in 12 reopens the owning implementation
   surface; after repair, restart 12's gate sequence from the beginning.
 
@@ -129,6 +137,10 @@ carries the exact web-authorable exfiltration/SSRF surface the design
 review rated Critical. Do not deploy the web app from such a tree. Likewise, do not call the tree aws-ecs-safe
 until plan 11 has landed: without it, pipeline runs, tutorial projections,
 and login events can still emit schema DDL from request paths.
+Likewise, Plan 15 registration may not precede 08A's complete authoring gate,
+and the AWS deployment may not call telemetry complete until Plan 14's
+operator-owned overlay prevents uploaded pipelines from disabling or
+redirecting the task-local OTLP path.
 
 ## Cross-plan follow-ups (owed, tracked here so they don't vanish)
 
@@ -320,6 +332,18 @@ and atomic Filigree handoff. Plans 10/12 and the specification now require a
 public client with no secret, code flow only, and live PKCE exchange. Execution
 remains blocked on Plan 01 and `elspeth-8166b310e7`; review did not claim or
 transition Plan 13.
+
+**Telemetry and Guardrails expansion review (2026-07-12 — APPROVED after
+repairs, dependency-controlled):** three independent telemetry, security/code-
+reality, and program-integration passes confirmed that Landscape is already the
+authoritative audit store and telemetry is not Azure-only (`otlp`,
+`azure_monitor`, `datadog`, and `console` exist). They also confirmed the AWS
+plans had no ELSPETH-to-CloudWatch deployment/acceptance path, while prompt and
+content shields were Azure-only and Plan 09 did not configure Guardrails.
+Plan 14 now owns the operator-controlled generic-OTLP/CloudWatch Agent path and
+Plan 15 owns separate model-independent Bedrock prompt/content transforms.
+Plans 03B/10/12 and the live Filigree DAG depend on both. Review did not claim
+or transition either new step.
 
 **Dedicated Plan-09 review (2026-07-12 — APPROVED after repairs, not
 startable yet):** three independent code-grounded passes plus installed

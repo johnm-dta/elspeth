@@ -9,7 +9,7 @@
 and hosted gates, then prove the design's live Aurora/EFS/ECS/ALB acceptance
 criteria before issuing runtime GO.
 
-**Architecture:** Plans 01–11 and 13 own implementation and scoped tests. This plan
+**Architecture:** Plans 01–11 and 13–15 own implementation and scoped tests. This plan
 starts only after all of them have landed, installs the exact locked
 environment, then runs the repository's whole-program test, static-analysis,
 contract, trust-boundary, lean-image, hosted-CI, and live-AWS gates in a fixed
@@ -20,7 +20,7 @@ final verdict always describes one unchanged commit and its deployed image.
 **Tech Stack:** uv, pytest, coverage.py, Ruff, strict mypy, elspeth-lints,
 Wardline, Docker, GitHub CLI.
 
-**Depends on:** every implementation task and commit in plans 01–11 and 13. In
+**Depends on:** every implementation task and commit in plans 01–11 and 13–15. In
 particular, plan 02's `postgres` dependency and plan 06's `aws` dependency must
 already coexist in one regenerated `uv.lock`; plan 08's endpoint gate must
 precede the plan 06/07 web-reachable `aws_s3` registrations; plan 11's
@@ -110,7 +110,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
   ```bash
   export INTEGRATION_OWNER="${INTEGRATION_OWNER:?set the named integration coordinator}"
-  filigree plan elspeth-6343920a47 --json | uv run --frozen python -c 'import json,sys; p=json.load(sys.stdin); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; missing=required-done; assert not missing, f"implementation steps not done: {sorted(missing)}"; assert any(s["issue_id"] == "elspeth-05396fed38" for s in steps), "Plan 12 tracker step missing"'
+  filigree plan elspeth-6343920a47 --json | uv run --frozen python -c 'import json,sys; p=json.load(sys.stdin); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4","elspeth-f5d5dddddf","elspeth-7d1f35e3d8"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; missing=required-done; assert not missing, f"implementation steps not done: {sorted(missing)}"; assert any(s["issue_id"] == "elspeth-05396fed38" for s in steps), "Plan 12 tracker step missing"'
   PLAN12_JSON="$(filigree show elspeth-05396fed38 --json)"
   PLAN12_STATUS="$(jq -r .status <<<"$PLAN12_JSON")"
   PLAN12_ASSIGNEE="$(jq -r '.assignee // ""' <<<"$PLAN12_JSON")"
@@ -122,7 +122,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
   fi
   ```
 
-  **Expected result:** all 15 implementation steps are done and Plan 12 is
+  **Expected result:** all 17 implementation steps are done and Plan 12 is
   held in `in_progress` by exactly the integration coordinator. A missing
   dependency stops before any release-candidate commit. This is an execution
   instruction only; plan-review agents must leave the issue pending and
@@ -130,7 +130,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
 - [ ] Own the release version boundary. Before the version commit, add a
   `CHANGELOG.md` 0.7.1 section with the actual candidate date, the AWS ECS
-  runtime-readiness deliverables from plans 01–11 and 13, the schema/drop-recreate and
+  runtime-readiness deliverables from plans 01–11 and 13–15, the schema/drop-recreate and
   one-task/downtime constraints, and the operator runbook link. Do not copy the
   implementation-plan review history into public release notes. Then accept
   only an unbumped 0.7.0 tree or
@@ -199,7 +199,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 - [ ] The uv environment uses Python 3.13.
 - [ ] `uv lock --check` and frozen all-extras sync pass.
 - [ ] The candidate SHA is recorded.
-- [ ] All 15 implementation slices in plans 01–11 and 13 are done in Filigree and
+- [ ] All implementation slices in plans 01–11 and 13–15 are done in Filigree and
   the Plan 12 closeout step is atomically held by the integration coordinator.
 
 ---
@@ -362,7 +362,7 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
 - Verify: repository root (`.`), including the S3 source/sink, doctor,
   readiness, deployment-contract, Bedrock-provider, and web validation
-  boundaries introduced by plans 01–11 and 13.
+  boundaries introduced by plans 01–11 and 13–15.
 - Reference: `AGENTS.md` (Wardline project gate)
 - No file changes are expected.
 
@@ -1000,7 +1000,10 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   ```bash
   run_candidate_role_check() {
       local task_arn="$1" check="$2" stream="" receipt=""
-      test "$check" = "verify-s3" || test "$check" = "verify-bedrock"
+      case "$check" in
+        verify-s3|verify-bedrock|verify-bedrock-guardrails|verify-operator-telemetry) ;;
+        *) return 64 ;;
+      esac
       stream="$(aws_capture ecs execute-command --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" --interactive --command "python -m elspeth.web.aws_ecs_acceptance $check")"
       receipt="$(printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID")"
       unset stream
@@ -1013,6 +1016,8 @@ AWS stderr. The same rule applies through Task 8 cleanup.
       require_exec_agent_running "$task_arn"
       run_candidate_role_check "$task_arn" verify-s3
       run_candidate_role_check "$task_arn" verify-bedrock
+      run_candidate_role_check "$task_arn" verify-bedrock-guardrails
+      run_candidate_role_check "$task_arn" verify-operator-telemetry
   }
   ```
 
@@ -1031,6 +1036,14 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   model/region, task-role permission, default-chain credentials, metadata, or
   any failure is BLOCKED/NO-GO; there is no live-test skip in closeout. Retain
   the sanitized receipt with the scenario evidence.
+
+  The Guardrails receipt additionally requires safe and intervened decisions
+  for both explicit control families, immutable versions, and audit-first
+  Landscape records. The operator-telemetry receipt requires a web metric plus
+  `RunStarted`/`RunFinished` trace correlated to the same Landscape run and a
+  negative collector-outage proof. Neither receipt may contain raw fixture,
+  provider body, metric/trace service response, Guardrail messaging, ARN,
+  account/request ID, URL, credential, or exception text.
 
   Invoke `run_candidate_role_checks TASK_ARN` for every distinct candidate
   task that contributes
@@ -1282,6 +1295,18 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   source/sink behavior passes from every candidate task through its task role.
 - [ ] Bedrock completes inside each candidate ECS task through its task role,
   with bounded sanitized token/cache/cost provenance evidence and zero skips.
+- [ ] Bedrock prompt shielding and content safety both execute independently
+  through `ApplyGuardrail` inside each candidate task, with exact safe/blocked
+  outcomes, audit-first evidence, immutable versions, redaction, and zero skips.
+- [ ] In each candidate task, the target LLM's request context lists exactly
+  the enabled/configured prompt and content controls, marks the operator-
+  preferred compatible shield, exposes only approved reference placeholders,
+  selects no disabled/unavailable implementation, and leaks no resolved
+  secret/config/Guardrail/AWS identity or failure detail.
+- [ ] AWS operator telemetry delivers one web metric and the exact pipeline
+  lifecycle trace to CloudWatch/X-Ray, correlates terminal status back to
+  Landscape, passes forbidden-dimension/content checks, alarms on loss, and
+  proves telemetry outage does not erase or replace the audit record.
 - [ ] First-deploy drain/scale-zero/first-recovery and rollback-baseline
   upgrade rollback/redeploy are both rehearsed safely, each followed by 20
   consecutive passing observation samples.
@@ -1656,7 +1681,9 @@ and gate ledger at the owner-approved durable control location.
   `ACCEPTANCE_RUN_ID` and explicit service inventories for surfaces it may not
   cover reliably: ECS services/tasks/task definitions, ALB/listener rules/
   target groups, Aurora, EFS/access points, Secrets Manager deletion state,
-  CloudWatch log groups, EventBridge rules/targets, and the Cognito identity.
+  CloudWatch log groups/metric namespaces/dashboards/alarms, X-Ray/Transaction
+  Search acceptance artifacts, EventBridge rules/targets, the two disposable
+  Bedrock Guardrail versions when the inventory owns them, and the Cognito identity.
   Require zero live resources except for AWS's asynchronous ECS
   task-definition deletion lifecycle: require no `ACTIVE` run-scoped revision;
   for each revision, receipts must prove deregistration through `INACTIVE`, a

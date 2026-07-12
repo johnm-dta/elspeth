@@ -14,7 +14,7 @@ from the runbooks index and Docker guide.
 
 **Tech Stack:** uv, Docker multi-stage build, Markdown, AWS CLI v2, jq, curl.
 
-**Depends on:** every implementation slice in Plans 01–09, 11, and 13,
+**Depends on:** every implementation slice in Plans 01–09, 11, and 13–15,
 including both split slices of Plans 03 and 08. This broad dependency is
 intentional: Task 0 must bind a mechanically complete pre-Plan-10 rollback
 baseline before this plan edits packaging, docs, or harnesses. In particular,
@@ -22,8 +22,10 @@ Plan 02 provides the `postgres` extra and its lock slice, Plan 06 creates the
 initial `aws` extra, and Plan 07 owns the final Jinja2-extended source+sink
 `aws` extra and regenerated lock. Plan 03 provides the doctor, Plan 09
 provides Bedrock behavior, Plan 11 closes request-path schema mutation, and
-Plan 13 makes real Cognito hosted login safe and executable. Plan 10 consumes
-those results; it never text-merges or independently reconstructs `uv.lock`.
+Plan 13 makes real Cognito hosted login safe and executable, Plan 14 provides
+operator-owned CloudWatch telemetry over task-local OTLP, and Plan 15 provides
+explicit Bedrock prompt/content shields. Plan 10 consumes those results; it
+never text-merges or independently reconstructs `uv.lock`.
 
 **Deviations:** the brief's `web` extra is `webui` in `pyproject.toml:152`; used throughout. The shared GHCR/ACR image's default (`--extra all`, `Dockerfile:52,60`) stays unchanged — Azure Container Apps' Ansible deploy pulls that image (`docs/runbooks/ansible-ubuntu-deployment.md:2271`) and needs its Azure plugin pack. Production extras become an opt-in `INSTALL_EXTRAS` build arg for a lean ECS image instead, matching the spec's `webui,llm,aws,postgres` example.
 
@@ -43,12 +45,12 @@ those results; it never text-merges or independently reconstructs `uv.lock`.
 **Files:** no changes; this captures the fully integrated tree before Plan 10
 edits it.
 
-- [ ] Start only after the Filigree DAG shows Plans 01–09, 11, and 13
+- [ ] Start only after the Filigree DAG shows Plans 01–09, 11, and 13–15
   (including both split slices of Plans 03 and 08) done. Record
   `ROLLBACK_BASELINE_SHA=$(git rev-parse HEAD)` and require a clean worktree.
   The dependency graph enforces this state; a hand-selected older 0.7.0 image
-  is invalid because it lacks Plan 13's Cognito origin, access-token, and
-  one-use-state security contract.
+  is invalid because it lacks Plan 13's Cognito contract, Plan 14's mandatory
+  AWS operator telemetry posture, and Plan 15's Guardrail transforms.
 - [ ] Run the exact unfiltered auth regressions against this SHA:
   `uv run pytest tests/unit/web/auth/ tests/unit/web/test_config.py tests/unit/web/test_app.py -v`,
   `npm --prefix src/elspeth/web/frontend test -- src/components/auth/LoginPage.test.tsx`,
@@ -202,6 +204,20 @@ temporary acceptance artifact.
      without the verifier.
   4. **ECS Probe Wiring** — condensed 4-row table (container `healthCheck`→`/api/health`, liveness only; ALB target group→`/api/ready`; `elspeth doctor aws-ecs`→one-shot pre-traffic `run-task`; `elspeth health`→not wired to any probe), plus one line declaring this runbook the canonical operator entry point and cross-linking the fuller write-up plan 05 creates at `docs/operator/aws-ecs-health-and-readiness.md` — same four facts, kept in sync manually; don't let the two drift. Give the exact task-definition JSON command, using the runtime image's installed Python rather than an absent `curl`/`wget`: `["CMD","python","-c","import http.client,sys; c=http.client.HTTPConnection('127.0.0.1',8451,timeout=5); c.request('GET','/api/health'); r=c.getresponse(); sys.exit(0 if r.status == 200 else 1)"]`. The contract test parses this as JSON. It bypasses proxy settings, does not follow redirects, and requires exactly HTTP 200. Include the startup-window sizing obligation (round-3; authoritative wording in spec §Operational Budgets): the validate-only gate runs before uvicorn binds the socket, so the port is **closed** (connection-refused, not 503) for up to the two-cold-cluster worst case — set **both** the container `healthCheck.startPeriod` **and** the ECS service `healthCheckGracePeriodSeconds` to that worst case plus margin (at least 150s; the ~90s figure excludes probe time). With the default (zero) grace period, ALB kills a cold-starting task mid-validation into a restart loop that never converges.
   5. **Bedrock ECS shape** — task-role IAM for `bedrock:InvokeModel`, `region_name`, `bedrock/anthropic...` model id, no embedded AWS keys (references the principle stated in item 1).
+  5a. **Bedrock Guardrails shape** — two immutable numeric Guardrail versions,
+     resource-scoped `bedrock:ApplyGuardrail` (and only if used by preflight,
+     `bedrock:GetGuardrail`), explicit `aws_bedrock_prompt_shield` and
+     `aws_bedrock_content_safety` placement, no `DRAFT`, no static credentials,
+     no provider-refusal-as-shield claim, and the documented Bedrock/Azure
+     category gap.
+  5b. **CloudWatch operator telemetry shape** — the Plan 14 AWS web overlay,
+     fixed task-local OTLP endpoint, lifecycle/rows-only pipeline events,
+     web OTLP metrics, digest-pinned CloudWatch Agent sidecar with no published
+     port, bounded queue/memory, task-role-only CloudWatch/X-Ray delivery,
+     resource/cardinality allowlists, dashboard/alarms, retention, and explicit
+     Landscape-first authority. The sidecar is non-essential after startup but
+     must be healthy before the app starts; later signal loss blocks acceptance
+     and alerts without invalidating an already committed audit record.
   Add the sibling S3 task-role contract here as well: grant only the required
   object actions (`s3:GetObject` for source reads and `s3:PutObject` for sink
   writes) on approved bucket/prefix ARNs; never grant a wildcard bucket or
@@ -310,7 +326,8 @@ temporary acceptance artifact.
 
 **Interface:** `python -m elspeth.web.aws_ecs_acceptance` with subcommands
 `capture`, `verify-api`, `verify-payloads`, `verify-local-auth`, `verify-s3`,
-`verify-bedrock`, `extract-exec-receipt`, `sanitize-evidence`,
+`verify-bedrock`, `verify-bedrock-guardrails`, `verify-operator-telemetry`,
+`extract-exec-receipt`, `sanitize-evidence`,
 `control-manifest`, `gate-ledger`, `receipt-store`, `approval-verify`,
 `scenario-load`, `orphan-sweep`, and `cleanup-evidence-finalize`.
 This is
@@ -341,6 +358,13 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   a static check/class message; no raw provider text reaches JSON/stderr.
   `verify-s3` tests pin default-chain-only source/sink construction, bounded
   object/hash/collision checks, `finally` cleanup, and static redacted failures.
+  `verify-bedrock-guardrails` pins safe/intervened decisions for both explicit
+  controls, numeric versions, default-chain-only calls, audit-first records,
+  payload-free receipts, and the candidate composer's target-LLM context exposes
+  exactly the enabled/preferred security-control inventory with approved
+  reference placeholders only. `verify-operator-telemetry` pins one web metric and
+  one pipeline lifecycle trace, bounded CloudWatch/X-Ray polling, exact run
+  correlation back to Landscape, forbidden-content scans, and static failures.
   `sanitize-evidence` tests feed credential, URL, provider-response, log, and
   task-definition sentinels and prove that only the closed evidence schema is
   emitted. Run
@@ -450,6 +474,21 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   before it reaches ECS Exec; sentinel tests at the file-descriptor boundary
   must prove provider text, request IDs, ARNs, credentials, and model IDs never
   escape on success or failure.
+- [ ] Implement `verify-bedrock-guardrails` inside the web task. Require the two
+  approved guardrail identifiers and immutable numeric versions only through
+  injected environment, call the shipped prompt/content transforms with safe
+  and approved attack/content sentinel inputs, and require the exact safe versus
+  intervened control/category decisions. Prove each external call is present in
+  Landscape before its payload-free operator telemetry; emit only hashes,
+  lengths, closed control/category/action/confidence/usage facts, and timestamps.
+- [ ] Implement `verify-operator-telemetry`. Emit a uniquely hashed web metric,
+  run one lifecycle-only pipeline, then use bounded AWS API polling to locate
+  the metric and `RunStarted`/`RunFinished` trace for the exact run correlation.
+  Query Landscape for the same run and require the terminal status agrees.
+  Scan the sanitized signal projection for prompt/content/credential sentinels,
+  and add a disposable negative lane proving a collector outage leaves the
+  already committed Landscape record intact while export health degrades.
+  Raw CloudWatch/X-Ray responses are never printed or persisted.
 - [ ] Give `verify-s3` and `verify-bedrock` one shared ECS-Exec transport
   contract. Their only process output is exactly one bounded
   `ELSPETH_ACCEPTANCE_RECEIPT_V1:<base64url-json>` sentinel whose decoded JSON

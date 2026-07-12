@@ -31,6 +31,11 @@ runtime integration only:
 - Bedrock readiness for LLM usage: verification of the existing LiteLLM
   surfaces for the web composer, plus a new LiteLLM-backed `bedrock`
   provider for pipeline LLM transforms.
+- AWS operator telemetry: mandatory deployment-owned OTLP routing for pipeline
+  lifecycle/row signals and web metrics through a task-local CloudWatch Agent,
+  with CloudWatch/X-Ray dashboards, alarms, and live Landscape correlation.
+- AWS prompt and content shielding: explicit Bedrock Guardrails transforms for
+  prompt attacks and harmful content, independent of model invocation.
 - Documentation and tests for the above.
 
 ## Non-Goals
@@ -449,6 +454,77 @@ availability from a partial list of environment variables. Unit tests for the
 pipeline `bedrock` provider cover model/config validation and safe error
 handling without requiring AWS access.
 
+## AWS Operational Telemetry
+
+Landscape remains the complete, durable audit and lineage source of truth.
+Operational telemetry is ephemeral, best effort, and must never authorize a
+run, repair missing audit evidence, or become replay evidence. At every shared
+path the Landscape write occurs before telemetry; if audit persistence fails,
+no telemetry is emitted for that event.
+
+ELSPETH already provides a generic OTLP exporter and OpenTelemetry web metrics.
+The AWS deployment uses those vendor-neutral surfaces rather than adding a
+direct CloudWatch SDK exporter. In `aws-ecs` web mode an operator-owned overlay
+replaces uploaded pipeline telemetry routing with one enabled OTLP exporter at
+the fixed task-local receiver, empty headers, explicit bounded resource
+identity, and `lifecycle` or `rows` granularity. `full` is forbidden in this
+profile because it can include LLM/HTTP request or response content. CLI/batch
+behavior remains configurable and vendor-neutral.
+
+The task definition runs a digest-pinned CloudWatch Agent sidecar with no
+published port. It receives OTLP metrics and traces, authenticates to AWS only
+through the task role, and exports to approved CloudWatch/X-Ray destinations
+with bounded memory/queue/retry behavior. Web metrics use an OTLP metric reader
+in addition to the existing authenticated Prometheus reader; the collector does
+not scrape `/metrics` with a bearer secret.
+
+Resource attributes and metric dimensions are closed and bounded. Service,
+version, environment, release, and task-definition identity are permitted.
+User/session/run/row/token IDs, prompts, content, URLs, exception strings, raw
+AWS identifiers, credentials, account numbers, and request IDs are forbidden
+as metric dimensions. Run correlation may remain a trace attribute for the
+alert-to-Landscape workflow. Delivery accounting distinguishes buffered,
+delivered, failed, and dropped events; sidecar/exporter failure and stale signal
+age are alarmable.
+
+## Bedrock Guardrail Shields
+
+Bedrock provider support does not imply shielding. Provider refusal/error
+mapping is not evidence that a Guardrail ran. Add two explicit transforms over
+the model-independent Bedrock Runtime `ApplyGuardrail` operation:
+
+- `aws_bedrock_prompt_shield` requires the `PROMPT_ATTACK` assessment family
+  and supports explicit user-prompt/document field analysis.
+- `aws_bedrock_content_safety` requires `HATE`, `INSULTS`, `SEXUAL`,
+  `VIOLENCE`, and `MISCONDUCT` assessments for INPUT or OUTPUT content.
+
+Both use the default AWS credential chain/task role, bounded region and
+identifier settings, immutable numeric Guardrail versions, `outputScope=FULL`,
+strict response validation, bounded retries, and audit-first/payload-free
+telemetry. Config must not accept access keys, session tokens, profiles, role or
+endpoint overrides. Missing, duplicate, unknown, malformed, or contradictory
+assessment data fails closed. Intervention becomes explicit transform data for
+gate/quarantine routing; it is never silently treated as allow.
+
+Prompt shielding and content safety remain separate capabilities in composer
+assistance. Untrusted content flowing to an LLM may trigger a strong shield
+recommendation, but topology is never mutated without explicit user or policy
+authority. A shield must dominate the relevant untrusted-to-LLM graph path.
+The target LLM receives a request-scoped `available_security_controls`
+inventory derived from registered plugins, explicit deployment enable flags,
+validated configuration, current user/server secret-reference availability,
+and the last validated capability state. Only usable controls are included.
+When one compatible shield is available the model names it; when several are
+available it uses the operator's closed preference order; when none are
+available it emits the high-risk reconsider advisory and invents no plugin.
+The inventory may expose canonical reference placeholders needed to author the
+selected config, but never resolved secrets/config values, disabled rows,
+Guardrail identifiers/versions or region values, AWS identity/permission data,
+or failure details. Availability errors fail closed to absent.
+Bedrock's listed harmful-content categories do not provide Azure's `self_harm`
+category, so equivalent coverage requires an explicit operator decision or an
+additional approved control.
+
 ## Packaging
 
 Add production extras so the runtime image can avoid `--extra all`:
@@ -529,7 +605,7 @@ Security and boundary checks:
 - preserve fail-closed behavior for unknown provider modes and stale schemas.
 
 Whole-program closeout is a required testing stage, not an optional follow-up.
-After implementation plans 01–11 and 13 have landed in one integrated tree, execute
+After implementation plans 01–11 and 13–15 have landed in one integrated tree, execute
 `docs/superpowers/plans/2026-07-08-aws-ecs-12-integration-closeout.md` in full.
 Plan 12 owns the exact 0.7.1 version boundary, tracker-completion verification,
 the unscoped pytest run, CI-aligned Ruff and strict-mypy checks, repository
@@ -541,7 +617,7 @@ observation, both first/upgrade rollback-mode evidence, durable sanitized
 evidence export, reviewed saved-plan Terraform apply/destroy bound to distinct
 remote state identities, an interruption-safe cleanup manifest, and verified
 teardown of both disposable environments and their temporary identities/tags.
-Scoped tests from plans 01–11 and 13 do not substitute for this gate. Any non-zero
+Scoped tests from plans 01–11 and 13–15 do not substitute for this gate. Any non-zero
 command or unmet prerequisite in Plan 12 blocks acceptance; fix the owning
 surface and restart the closeout sequence from its first step.
 
@@ -591,6 +667,23 @@ surface and restart the closeout sequence from its first step.
   test completes one `bedrock/anthropic...` request.
 - Pipeline LLM transforms gain a LiteLLM-backed `bedrock` provider registered
   in `_PROVIDERS`, satisfying the existing `LLMProvider` protocol.
+- AWS ECS web execution cannot disable or redirect the operator telemetry
+  overlay; one web metric and one pipeline lifecycle trace arrive through the
+  task-local CloudWatch Agent and correlate to the exact terminal Landscape
+  run without forbidden content or high-cardinality dimensions.
+- A disposable collector-outage lane proves the already committed Landscape
+  record remains authoritative while exporter health degrades and alerts.
+- `aws_bedrock_prompt_shield` and `aws_bedrock_content_safety` are registered,
+  separately discoverable, explicitly placeable, and use immutable Guardrail
+  versions through the task role with no credential/endpoint fields.
+- Composer exposes exactly the enabled and configured shield/content controls
+  to the target LLM, selects only an advertised implementation using operator
+  preference, supplies only approved reference placeholders, and neither leaks
+  availability/configuration data nor invents a disabled provider.
+- Live candidate-task acceptance proves safe and intervened prompt-attack and
+  harmful-content decisions, strict malformed/missing-policy failure, audit
+  before telemetry, payload-free evidence, and zero skips. A Bedrock model
+  refusal does not satisfy this criterion.
 - Two concurrent `elspeth doctor aws-ecs --init-schema` runs against the same
   database serialize through the advisory lock without corrupting schema.
 - Production image installation no longer depends on `--extra all`.

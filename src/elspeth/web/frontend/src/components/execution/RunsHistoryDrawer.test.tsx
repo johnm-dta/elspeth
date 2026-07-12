@@ -107,6 +107,49 @@ describe("RunsHistoryDrawer", () => {
     expect(screen.getByText(/r2/)).toBeInTheDocument();
   });
 
+  it("labels runs by stable ordinal and local start time, newest first", () => {
+    const firstId = "c5f713ed-3bef-40d1-adda-7669d573efad";
+    const secondId = "ec7f8f38-df73-4f55-ba8a-75c5c138733e";
+    const firstStartedAt = "2026-07-12T01:15:00Z";
+    const secondStartedAt = "2026-07-12T02:45:00Z";
+    useExecutionStore.setState({
+      runs: [
+        {
+          id: firstId,
+          status: "completed",
+          started_at: firstStartedAt,
+        } as never,
+        {
+          id: secondId,
+          status: "completed",
+          started_at: secondStartedAt,
+        } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    expect(
+      screen.getByRole("heading", { name: "Run history · 2" }),
+    ).toBeVisible();
+    const items = screen.getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent(
+      `Run 2 · ${formatter.format(new Date(secondStartedAt))}`,
+    );
+    expect(items[0]).toHaveTextContent(secondId);
+    expect(items[1]).toHaveTextContent(
+      `Run 1 · ${formatter.format(new Date(firstStartedAt))}`,
+    );
+    expect(items[1]).toHaveTextContent(firstId);
+  });
+
   // elspeth-e1c5ad0b53: run status renders through ui/StatusBadge so the
   // completed_with_failures / empty distinction carries the ⚠ / ∅ glyphs
   // rather than colour alone, and underscores read as spaces.

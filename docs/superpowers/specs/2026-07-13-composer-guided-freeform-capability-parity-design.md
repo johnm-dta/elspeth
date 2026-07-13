@@ -3,7 +3,7 @@
 **Status:** Proposed for written-spec review
 **Date:** 2026-07-13
 **Priority:** High
-**Scope:** Composer authoring architecture, freeform and guided skill packs, guided session migration, validation feedback, and cross-surface evaluation
+**Scope:** Composer authoring architecture, freeform and guided skill packs, guided session replacement, validation feedback, and cross-surface evaluation
 
 ## Summary
 
@@ -194,9 +194,9 @@ between hashing and commit.
 
 `ProposalProvenance` records the planner configuration, actual per-call skill
 hash, proposal schema version, model/provider identifiers already permitted by
-the existing audit contract, optional `supersedes_payload_hash`, and optional
-version-7 migration lineage. It contains no topology fields and therefore does
-not become another pipeline representation.
+the existing audit contract, and optional `supersedes_payload_hash`. It contains
+no topology fields and therefore does not become another pipeline
+representation.
 
 The payload represents all currently web-authorable structure:
 
@@ -240,15 +240,15 @@ uses a transform-only intermediate representation.
 All topology-producing configurations call one public `plan_pipeline()`
 entrypoint. Freeform, guided-full, guided-staged, and tutorial supply prompt and
 interaction context to that function; they do not own separate planning loops.
-Architecture tests forbid active imports/calls of `solve_chain` outside the
-version-7 compatibility adapter once migration completes.
+Architecture tests forbid active imports/calls of `solve_chain` after the
+canonical planner replaces it.
 
 Existing incremental freeform mutation tools remain available for edits. They
 do not become a second new-pipeline planning implementation.
 
 ### 3.4 Guided stage responsibilities
 
-Version-8 guided checkpoint state must represent plural interaction facts. It
+The replacement guided checkpoint state must represent plural interaction facts. It
 replaces singular `step_1_result`, source intent/chosen-plugin staging, and
 single-item sink staging with:
 
@@ -256,9 +256,28 @@ single-item sink staging with:
 - a stable-id sequence/mapping of reviewed `SinkOutputResolved` facts;
 - pending source/output intents keyed by stable item id;
 - an optional active `{kind, id}` edit target.
+- ordered deferred stage intents containing the original request summary, the
+  catalog-resolved plugin kind/name when one was named, the stage that received
+  it, and the stage that can act on it.
 
 These are reviewed dialogue facts, not a partial topology IR. The canonical
 pipeline exists only when `plan_pipeline()` produces a complete proposal.
+
+An available plugin requested at the wrong stage is a timing mismatch, not an
+unsupported capability. The server resolves its kind from the catalog plus the
+operator's intent (source, transform, or sink); if a name is registered in more
+than one kind and the intent does not disambiguate it, the solver asks rather
+than guessing. When the resolved kind's responsible stage is still ahead, the stage
+solver must emit an explicit deferral such as "That LLM belongs in the
+transformation stage; finish the source choice first" and persist the intent
+for the target stage. It must not configure the plugin in the wrong component,
+discard the request, claim guided cannot express it, or silently advance the
+wizard. When the target stage begins, its planner context includes the deferred
+intent and marks it consumed only after the resulting proposal or reviewed fact
+covers it. If the responsible stage has already been reviewed, the solver must
+offer or enter the existing stable-id back/edit flow for that stage rather than
+creating a deferral that can never be consumed. An unavailable plugin remains a
+distinct catalog/availability error.
 
 #### Source stage
 
@@ -269,11 +288,19 @@ options and source-level failure policy allowed by the canonical schema.
 The source stage does not permanently assign final connection labels. The full
 planner owns topology wiring after it knows the complete request.
 
+Requests for transforms, gates, aggregations, or sinks during this stage are
+deferred to their catalog-appropriate later stage while source review continues.
+
 #### Output stage
 
 Resolve a set of distinctly named outputs. Remove the `sink_name="main"`
 collision and hard-coded `on_write_failure="discard"`. Preserve per-output
 required fields, options, and policies.
+
+Requests for source plugins are directed back to source review; requests for
+transforms/topology are deferred to the transformation stage. A named plugin's
+kind is resolved from catalog evidence, not a hard-coded vocabulary in the
+prompt.
 
 #### Transformation and topology stage
 
@@ -281,6 +308,10 @@ Replace `propose_chain` with `propose_pipeline`. The stage may author every node
 type and routing construct in the canonical contract. It receives the complete
 source and output sets plus the original operator intent, not only a reduced
 source/sink contract.
+
+This stage consumes any deferred transformation/topology intent. A request to
+add or change sources/outputs rewinds the corresponding reviewed facts rather
+than smuggling those plugins into node configuration.
 
 #### Wire-review stage
 
@@ -475,99 +506,43 @@ authoring metadata, before `create_transform()`. Add a regression proving that:
 
 This is a P0 prerequisite for meaningful live parity evaluation.
 
-## 6. Persistence, audit, and migration
+## 6. Persistence, audit, and pre-release replacement
 
-### 6.1 Versioning
+### 6.1 One current schema
 
-Bump `GUIDED_SESSION_SCHEMA_VERSION` from 7 to 8. Version 8 replaces persisted
-`step_3_proposal: ChainProposal | None` with
-`pipeline_proposal: PipelineProposal | None`.
+ELSPETH is pre-1.0. The repository's existing session policy is deliberately
+forward-only: incompatible session state is deleted and recreated rather than
+migrated, dual-read, or retained behind compatibility flags.
 
-Do not bump `SESSION_SCHEMA_EPOCH` solely for this JSON-envelope change. That
-epoch would require destructive SQLite recreation and would not protect
-PostgreSQL. Instead, add an explicit version dispatcher at the composition-state
-restore boundary:
+This feature therefore lands as one coherent schema boundary:
 
-- version 8 receives strict native decoding;
-- version 7 receives strict legacy decoding followed by state-aware migration;
-- version 6 and earlier remain rejected because their nested shape is not
-  compatible with the current checkpoint;
-- unknown future versions fail closed.
+- bump `GUIDED_SESSION_SCHEMA_VERSION` from 7 to 8;
+- bump `SESSION_SCHEMA_EPOCH` from 27 to 28 in lockstep, even though the guided
+  shape lives inside JSON, so every stale session store fails at startup rather
+  than lazily in one guided route;
+- extend the epoch history and the staging session-DB recreation runbook with
+  the capability-parity reason and exact operator steps;
+- keep a single strict `GuidedSession.from_dict()` decoder for version 8;
+- reject every non-8 guided payload and every stale session database with the
+  repository's existing actionable delete-and-recreate error;
+- remove `ChainProposal`, `ProposeChainPayload`, `PROPOSE_CHAIN`, the linear
+  materializer, and their active frontend/rendering paths in the same feature;
+- add `PROPOSE_PIPELINE` as the only proposal turn and stable component ids as
+  the only edit targets.
 
-Keep Tier-1 strictness inside each supported decoder. Do not default missing
-fields and do not rewrite persisted rows while reading them.
-
-Version-7 decoding is permanent, not a temporary migration window. Historical
-composition versions preserve their original `composer_meta`; revert and fork
-can make those bytes current again years later. A historical version-7 row
-stays version 7. Its next guided mutation may write a version-8 checkpoint with
-migration provenance.
-
-### 6.2 Version-7 migration
-
-Use a state-aware `restore_guided_session(raw, composition_state)` adapter rather
-than weakening `GuidedSession.from_dict()`. Migration depends on session
-position:
-
-- **Step 1, Step 2, or Step 3 without a proposal:** preserve profile, history,
-  chat history, terminal state, and counters. Map the version-7 source result to
-  the version-8 reviewed-source mapping under stable id `source`; map every
-  `SinkResolved.outputs` entry to the reviewed-output collection using its
-  existing name/stable identity; map singular pending intent/chosen-plugin
-  fields to the corresponding active item. Set the new proposal to `None`.
-- **Step 3 with a pending `ChainProposal`:** require the legacy preconditions of
-  exactly one source and at least one output. Translate once using the historical
-  source -> `chain_in`, `guided_xform_N`, `chain_N`, final -> `main` rules while
-  preserving current composition metadata. Mark provenance
-  `legacy_linear_v7`. If the snapshot violates legacy preconditions, return a
-  named recovery conflict rather than fabricating a proposal.
-- **Pending legacy step edit:** convert `step_3_edit_index` to stable component
-  id `guided_xform_N`; new version-8 edits use stable `{kind, id}` targets.
-- **Step 4 or completed:** treat the paired `CompositionState` as the
-  authoritative graph and leave the executable proposal absent. Runtime-normalized
-  state may contain resolved path/custody metadata that cannot safely round-trip
-  through the authoring boundary. The UI may render a distinct non-executable
-  state snapshot; it must not fabricate `set_pipeline` arguments from state.
-- **Exited sessions:** preserve the terminal fact. No proposal is required
-  unless the stored graph is being shown.
-
-Preserve the original version-7 serialized proposal in immutable audit/history
-records. Migration changes resumable checkpoint state; it does not rewrite
-historical events. Record `from_schema_version=7`, the legacy proposal hash, and
-the derivation mode as migration lineage.
-
-### 6.3 Turn and frontend compatibility
-
-Keep `TurnType.PROPOSE_CHAIN` and its renderer permanently for historical
-evidence. Add `PROPOSE_PIPELINE` as the version-8 active turn; do not rename the
-old enum value in place.
-
-For a pending version-7 proposal, GET appends and audits a new
-`propose_pipeline` turn that explicitly supersedes the old payload hash. It does
-not rewrite the old `TurnRecord`, request/response hashes, or content-addressed
-payload. Preserve a legacy POST acceptance path for a stale browser that submits
-its already-rendered `propose_chain` without first performing GET. That path
-uses the deterministic version-7 adapter and then writes version-8 state.
-
-The restore boundary returns a version-tagged wrapper containing the strict
-version-8 session view plus a typed `LegacyV7Context` while a legacy proposal or
-edit remains pending. Route dispatch handles a stale legacy response before
-discarding that context, preserving the old `why`, rationale, steps, and edit
-index. The new proposal provenance carries `supersedes_payload_hash`, and a
-`guided_turn_superseded` audit event links the immutable old and new payload
-hashes with reason `schema_v7_to_v8`.
+There is no version-7 restore adapter, dual protocol, legacy write mode, staged
+enablement flag, or downgrade path. Pre-release sessions and their resumable
+history are disposable across this boundary. Durable audit or landscape data
+outside the session store is not rewritten to impersonate the new schema; it
+remains historical evidence and is not resumable by the new guided runtime.
 
 The proposal review UI renders a graph diff and node/output summaries from the
 canonical proposal. Reuse the existing full-DAG graph and wire-stage components
-instead of creating another linear step widget. The frontend closed union keeps
-both turn types. `propose_pipeline` responses echo `draft_hash` and use stable
-component edit targets rather than array indices.
+instead of creating another linear step widget. `propose_pipeline` responses
+echo `draft_hash` and use stable component edit targets rather than array
+indices.
 
-Deploy server support for both protocols before deploying the new frontend.
-New fields are optional at the global request boundary and required when
-handling `propose_pipeline`, so old and new clients can coexist during rollout.
-
-### 6.4 Audit requirements
+### 6.2 Audit requirements
 
 The accepted proposal commits through the same audited canonical `set_pipeline`
 dispatch as freeform, not an unaudited direct state constructor. Audit records
@@ -581,8 +556,7 @@ include:
 - reviewed anchor hash and stable edit target;
 - planner surface (`freeform`, `guided_full`, `guided_staged`, or
   `tutorial_profile`);
-- repair count and the existing allowlisted/redacted terminal validation shape;
-- migration provenance when applicable.
+- repair count and the existing allowlisted/redacted terminal validation shape.
 
 Proposal persistence has two explicit representations:
 
@@ -633,35 +607,40 @@ materialized blob. Rejection leaves it under the existing session-blob
 retention/cleanup policy rather than performing an unaudited destructive
 cleanup. Canonical `set_pipeline` redaction does not
 automatically protect the separate guided payload-store copy, so tests must
-exercise that projection directly for accepted, rejected, failed, and migrated
-proposals.
+exercise that projection directly for accepted, rejected, and failed proposals.
 
 The event set includes the redacted canonical `set_pipeline` invocation,
 `guided_turn_answered`, `guided_step_advanced`, committed composition version,
-and the hashes and migration lineage above.
+and the hashes above.
 
-### 6.5 Rollout and rollback
+Stage deferral emits `guided_intent_deferred` with only allowlisted structural
+fields: receiving stage, target stage, stable intent id, optional catalog plugin
+kind/name, and a hash of the separately redacted intent summary. Consumption
+emits `guided_intent_consumed` with the stable intent id and proposal/reviewed-
+fact hash that satisfied it. Raw user prose is not copied into these synthetic
+audit events.
 
-Use expand/contract deployment:
+### 6.3 Delivery and fix-forward
 
-1. Deploy permanent dual version-7/version-8 decoding, both turn types, the
-   legacy acceptance adapter, new audit fields, and a disabled version-8 writer.
-2. Deploy the frontend that understands both protocols.
-3. Enable version-8 writes and `propose_pipeline` for new and resumed work.
-4. Later disable legacy authoring while retaining version-7 decode and history
-   rendering permanently.
+The implementation is delivered as a feature, not as two selectable composer
+architectures. The release sequence is:
 
-The restored-session wrapper retains `source_schema_version`, and persistence
-requires an explicit `target_schema_version`. While version-8 writing is
-disabled, unrelated mutations of a restored version-7 session serialize back
-to version 7. Enabling `propose_pipeline` selects version 8 deliberately. This
-prevents phase 1 from writing version-8 checkpoints merely because an in-memory
-migration occurred.
+1. implement the canonical contract, planner, guided state, frontend, skill
+   packs, and tests in one integrated branch;
+2. pass deterministic parity, property, persistence, and frontend acceptance
+   before deployment;
+3. stop the staging service, delete/recreate the pre-release session store using
+   the existing runbook, deploy the integrated build, and verify the schema
+   sentinel before admitting test users;
+4. execute all three live authoring proofs and inspect errors, audit closure,
+   output artifacts, and logs;
+5. fix any defect in the canonical implementation and redeploy the corrected
+   build. Do not reactivate the removed linear-chain pathway or preserve a
+   second implementation as an escape hatch.
 
-Rollback means disabling the new planner while retaining the version-8 reader
-and tolerant API. Downgrading to the current version-7-only binary after any
-version-8 write is unsafe. A rollback release must include the version-8 decoder
-and accept the new protocol fields. Database deletion is not a rollback.
+Deployment is blocked until the whole feature is coherent. A partially landed
+slice may exist during development, but no feature flag exposes the old and new
+authoring architectures as supported runtime choices.
 
 ## 7. Validation and error handling
 
@@ -697,7 +676,7 @@ profile as independent axes:
 | Configuration | Interaction | Planner prompt | Profile | Invocation proof |
 | --- | --- | --- | --- | --- |
 | `freeform_big_bang` | Freeform | Freeform full | Ordinary | Normal composer request |
-| `guided_full` | Guided planner harness | Guided full | Ordinary | Direct shared-planner eval seam |
+| `guided_full` | Server-hosted guided request | Guided full | Ordinary | Authenticated deployed guided-full entrypoint |
 | `guided_staged` | Guided stage protocol | Shared core + current stage | Ordinary | `/guided/start` through wire-ready |
 | `tutorial_profile` | Guided stage protocol | Same staged planner | Tutorial | Schema/hash identity plus fixed tutorial journey |
 
@@ -767,6 +746,14 @@ Tests must assert:
 - the topology stage exposes the complete discovery set;
 - adding a canonical node/structural field causes a failing parity-coverage
   test until shared assistance covers it.
+- each staged solver recognizes an available plugin requested before its
+  responsible stage, emits a target-stage deferral, preserves the intent across
+  restart, and consumes it without an operator restating it; a request whose
+  responsible stage has passed uses stable-id back/edit instead of an orphaned
+  deferral;
+- unavailable-plugin errors remain distinct from wrong-stage deferrals, and a
+  deferral never counts as a repair, rejection, capability disclaimer, or
+  automatic stage advance.
 
 Add mutation controls that deliberately remove `fork_to`, queue support,
 coalesce `merge`, or a second source from one guided schema and prove the parity
@@ -776,7 +763,7 @@ Remove tests that treat `chain_in`/`main` as universal guided wiring or prompt
 line count as a capability acceptance criterion. Retain linear topology as one
 fixture, not the definition of guided mode.
 
-### 8.3 Repair and persistence contracts
+### 8.3 Repair and current-schema persistence contracts
 
 Add two deterministic repair cases:
 
@@ -787,20 +774,17 @@ Add two deterministic repair cases:
    budget without simplifying topology, importing hidden YAML, applying a
    recipe-only substitute, or switching to freeform.
 
-Version-7 migration/resume cases must normalize to the same graph signature as
-newly authored canonical proposals.
-
 Security regressions inspect private checkpoints, redacted audit projections,
-failed/rejected proposals, and migrated version-7 records and prove that none
+and failed/rejected proposals and prove that none
 contains credential literals, resolved secrets, or raw inline-blob content.
 
 The persistence regression corpus includes strict version-8 round-trip,
-unknown-version rejection, version-7 restore at every wizard step, pending
-proposal and pending edit, Step 4, completed and exited sessions, process
-restart, stale-client legacy acceptance, revert to version-7 history followed
-by continued editing, fork from both versions, hash-conflict rejection, exact
-historical payload-hash preservation, and behavior rollback with persisted
-version-8 rows.
+non-8 rejection, pending proposal and pending stable-id edit, every stage,
+completed and exited sessions, process restart, current-schema revert/fork,
+hash-conflict rejection, exact payload-hash preservation, and an epoch-mismatch
+startup test whose error directs the operator to delete and recreate the stale
+pre-release session store. Tests must also prove no version-7 decoder or
+`PROPOSE_CHAIN` request path remains reachable.
 
 ### 8.4 Harness surface dimension
 
@@ -812,8 +796,10 @@ surface = freeform | guided_full | guided_staged | tutorial_profile
 
 `guided_staged` and `tutorial_profile` scenarios must call `/guided/start` and
 drive the real stage protocol. Posting only to the general message endpoint
-does not exercise those configurations. `guided_full` uses the explicitly
-defined direct `plan_pipeline()` eval seam.
+does not exercise those configurations. `guided_full` uses the authenticated
+server-hosted entrypoint that performs request parsing, prompt/tool/catalog
+assembly, planning, proposal validation, audited commit, and execution; tests
+must not substitute a direct planner call.
 
 Score normalized topology and field contracts, not exact model prose, tool-call
 sequence, or generated connection names. A freeform handoff, canned recipe, or
@@ -853,6 +839,13 @@ The request must say, in plain English:
 
 It may name the required plugins, but it must not name composer tools,
 prescribe call order, provide tool argument JSON, or import hand-authored YAML.
+The committed request fixture is the exact authority for all three live proofs
+and has SHA-256
+`37562b0fcfad56182dd33b3b72457681959ffa71f159beabcd387170187987d2`.
+Each surface submits those bytes as its first operator intent. Guided review
+responses may confirm proposed facts but may not add configuration/topology
+detail; the fixed early-stage wait probe is a redundant reminder that adds no
+new requirement. Record the complete operator transcript hash.
 
 The accepted topology is:
 
@@ -881,6 +874,8 @@ Acceptance requires:
 - one success JSON sink and one failure JSON sink;
 - every relevant LLM, coalesce, and cleanup error path reaches the failure sink;
 - exactly ten successful output rows and zero failure rows;
+- the success artifact parses as one JSON array root of length ten and the
+  distinct failure artifact parses as one empty JSON array root;
 - exactly these eight semantic fields:
   `color_name`, `hex`, `blue_amount`, `blue_confidence`, `blue_reason`,
   `red_amount`, `red_confidence`, `red_reason`;
@@ -908,6 +903,11 @@ authoritative for twenty logical assessments and ten coalesces; provider retry
 attempts are reported separately and do not count as additional logical
 assessments.
 
+Each of the twenty runtime branch assessments must also bind to a successful
+audited provider completion with non-empty provider/model identifiers, separate
+from composer-planner calls and provider retry attempts. Fake, mock, test, or
+replay providers and cache/replay hits do not satisfy the primary live proof.
+
 For the primary derivation score, allow no ordinary-language correction after
 the initial request. Permit one automatic validation repair. An
 operator-corrected run may remain diagnostic evidence but does not pass intent
@@ -929,8 +929,8 @@ Run three distinct proofs:
 
 1. `freeform_big_bang`: live composer API/browser journey from the plain-English
    request through execution and artifact verification.
-2. `guided_full`: live direct `plan_pipeline()` eval seam using the full guided
-   prompt, followed by the shared candidate/commit/run path.
+2. `guided_full`: live authenticated server-hosted entrypoint using the full
+   guided prompt and the shared candidate/commit/run path.
 3. `guided_staged`: Playwright journey through `/guided/start`, every stage,
    wire review, execution, and artifact download.
 
@@ -1007,8 +1007,8 @@ English. Recipes remain optional accelerators after parity exists.
 - Full canonical proposals are larger than transform-step lists and require
   deliberate prompt caching and bounded schema delivery.
 - Guided stage rewind semantics must handle source/output changes cleanly.
-- Version-7 session migration requires permanent dual-version decoding and
-  careful rollout.
+- Existing pre-release composer sessions are intentionally discarded at the
+  schema boundary, following the repository's documented session policy.
 
 ### Neutral
 
@@ -1031,7 +1031,9 @@ The design is implemented only when all of the following are true:
 4. Full and staged skill packs include the shared capability core and identical
    plugin/structural assistance.
 5. Tutorial profile uses the guided-staged planner without reducing its schema.
-6. Version-7 sessions resume or migrate without audit-history rewriting.
+6. The schema epoch is bumped and stale pre-release sessions fail at startup
+   with the documented delete-and-recreate instruction; only the replacement
+   guided session/protocol is supported.
 7. The secret-reference construction-probe regression is fixed.
 8. Deterministic fixtures and property-generated valid DAGs pass on all three
    arbitrary authoring configurations; tutorial profile passes planner/schema
@@ -1042,9 +1044,13 @@ The design is implemented only when all of the following are true:
     should be able to author.
 11. Invalid planner candidates never become the current `CompositionState`, and
     accepted proposal arguments reach the audited commit seam unchanged.
-12. Checkpoint/audit/hash tests prove permanent version-7 readability,
-    version-8 rollback readability, proposal immutability, and absence of
-    credential literals, resolved secrets, or raw inline content.
+12. Current-schema checkpoint/audit/hash tests prove proposal immutability and
+    absence of credential literals, resolved secrets, or raw inline content;
+    architecture tests prove the linear-chain proposal and executor are gone.
+13. Guided staged interaction defers available plugin requests made before
+    their resolved-kind stage with an explicit "wait until the appropriate
+    stage" response, preserves and consumes them there, uses stable-id back/edit
+    for an already reviewed stage, and never misreports a plugin as unsupported.
 
 ## 13. Implementation decomposition
 
@@ -1054,23 +1060,27 @@ rather than one monolithic change:
 
 1. Fix the secret-reference construction probe and lock the existing canonical
    authoring schema with structural compatibility tests.
-2. Extract the shared planner and canonical proposal envelope without changing
-   guided persistence.
-3. Add permanent version-7/version-8 restore, protocol, concurrency, audit, and
-   frontend compatibility.
-4. Switch guided-full, guided-staged, and tutorial-profile planning to the
+2. Extract the shared planner and canonical proposal envelope and wire the
+   production freeform entrypoint to it.
+3. Replace the guided session/protocol/front-end model in one schema-epoch
+   boundary, including persisted cross-stage intent deferrals; delete the
+   transform-only proposal and materializer.
+4. Wire guided-full, guided-staged, and tutorial-profile planning to the
    canonical proposal and commit path.
 5. Replace duplicated prompt rules with the shared capability core and typed
-   plugin assistance.
+   plugin assistance; make every staged solver use catalog-backed wrong-stage
+   deferral instead of misuse or capability disclaimers.
 6. Land the three-configuration deterministic/property parity corpus plus the
-   tutorial profile identity guard before enabling version-8 authoring by
-   default.
-7. Enable the new path, update user documentation, and run the live colour
-   acceptance on all required surfaces.
+   tutorial profile identity guard and stage-deferral regressions.
+7. Update the staging recreation runbook and user documentation, recreate
+   pre-release state, deploy the integrated feature, and run the live colour
+   acceptance on all required surfaces; fix forward until every criterion
+   passes.
 
-Each slice must leave the repository valid and rollback-readable. No individual
-slice may close the capability-parity work before the full acceptance criteria
-pass.
+Each slice must leave the repository valid for continued development. No
+individual slice may close the capability-parity work before the full
+acceptance criteria pass, and no slice may add a compatibility implementation
+that preserves the removed linear-chain authoring model.
 
 ## 14. References
 

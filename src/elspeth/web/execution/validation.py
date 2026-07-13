@@ -79,6 +79,7 @@ from elspeth.web.execution.preflight import (
 )
 from elspeth.web.execution.protocol import ValidationSettings, YamlGenerator
 from elspeth.web.execution.schemas import (
+    CHECK_AWS_S3_ENDPOINT_URL_POLICY,
     CHECK_BATCH_TRANSFORM_OPTIONS,
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
@@ -114,6 +115,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_execution,
 )
 from elspeth.web.provider_config_policy import (
+    web_aws_s3_endpoint_url_policy_error,
     web_llm_base_url_policy_error,
     web_llm_retry_budget_policy_error,
     web_rag_provider_config_policy_error,
@@ -131,6 +133,7 @@ _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
 _CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
 _CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
 _CHECK_LLM_BASE_URL_POLICY = CHECK_LLM_BASE_URL_POLICY
+_CHECK_AWS_S3_ENDPOINT_URL_POLICY = CHECK_AWS_S3_ENDPOINT_URL_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -1622,6 +1625,87 @@ def validate_pipeline(
             name=_CHECK_LLM_BASE_URL_POLICY,
             passed=True,
             detail="No web-authored OpenRouter base_url override",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    for source_name, source in state.sources.items():
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(source.plugin, source.options)
+        if endpoint_policy_error is None:
+            continue
+        source_component = "source" if source_name == "source" else f"source:{source_name}"
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                passed=False,
+                detail=f"Source '{source_name}' sets aws_s3 endpoint_url in a web-authored pipeline",
+                affected_nodes=(source_component,),
+                outcome_code=None,
+            )
+        )
+        _append_skipped_checks(checks, _CHECK_AWS_S3_ENDPOINT_URL_POLICY)
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=[
+                ValidationError(
+                    component_id=source_component,
+                    component_type="source",
+                    message=endpoint_policy_error,
+                    suggestion="Remove endpoint_url and use operator-controlled AWS configuration.",
+                    error_code="aws_s3_endpoint_url_not_allowed",
+                )
+            ],
+            readiness=_blocked_readiness(
+                code=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                detail=f"source {source_component} sets aws_s3 endpoint_url in a web-authored pipeline",
+                component_id=source_component,
+                component_type="source",
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+
+    for output in state.outputs:
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(output.plugin, output.options)
+        if endpoint_policy_error is None:
+            continue
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                passed=False,
+                detail=f"Sink '{output.name}' sets aws_s3 endpoint_url in a web-authored pipeline",
+                affected_nodes=(output.name,),
+                outcome_code=None,
+            )
+        )
+        _append_skipped_checks(checks, _CHECK_AWS_S3_ENDPOINT_URL_POLICY)
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=[
+                ValidationError(
+                    component_id=output.name,
+                    component_type="sink",
+                    message=endpoint_policy_error,
+                    suggestion="Remove endpoint_url and use operator-controlled AWS configuration.",
+                    error_code="aws_s3_endpoint_url_not_allowed",
+                )
+            ],
+            readiness=_blocked_readiness(
+                code=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                detail=f"sink {output.name} sets aws_s3 endpoint_url in a web-authored pipeline",
+                component_id=output.name,
+                component_type="sink",
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+            passed=True,
+            detail="No web-authored aws_s3 endpoint_url override",
             affected_nodes=(),
             outcome_code=None,
         )

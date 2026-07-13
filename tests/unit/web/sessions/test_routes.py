@@ -50,7 +50,7 @@ from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep,
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult, ComposerService
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
-from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
+from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec, ValidationSummary
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import (
     RunAccounting,
@@ -66,6 +66,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult as ValidationResultModel,
 )
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult, StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
@@ -5038,6 +5039,101 @@ class TestRevertEndpoint:
 
 class TestYamlEndpoint:
     """Tests for GET /api/sessions/{id}/state/yaml."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_component", ["source", "sink"])
+    async def test_post_state_yaml_persists_aws_s3_endpoint_url_as_invalid(
+        self,
+        tmp_path: Path,
+        invalid_component: str,
+    ) -> None:
+        endpoint_sentinel = "https://yaml-canary.attacker.invalid/private"
+        source_options = {"endpoint_url": endpoint_sentinel} if invalid_component == "source" else {}
+        sink_options = {"endpoint_url": endpoint_sentinel} if invalid_component == "sink" else {}
+        yaml_text = yaml.safe_dump(
+            {
+                "sources": {
+                    "source": {
+                        "plugin": "aws_s3" if invalid_component == "source" else "csv",
+                        "on_success": "main",
+                        "options": source_options,
+                        "on_validation_failure": "discard",
+                    }
+                },
+                "sinks": {
+                    "main": {
+                        "plugin": "aws_s3" if invalid_component == "sink" else "json",
+                        "options": sink_options,
+                        "on_write_failure": "discard",
+                    }
+                },
+            }
+        )
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        session = await service.create_session("alice", "AWS S3 policy import", "local")
+
+        response = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["is_valid"] is False
+        assert body["validation_errors"] == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(body["validation_errors"])
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.is_valid is False
+        assert list(record.validation_errors or ()) == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(record.validation_errors)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_component", ["source", "sink"])
+    async def test_e2e_seed_persists_aws_s3_endpoint_url_as_invalid(
+        self,
+        tmp_path: Path,
+        invalid_component: str,
+    ) -> None:
+        endpoint_sentinel = "https://seed-canary.attacker.invalid/private"
+        source = SourceSpec(
+            plugin="aws_s3" if invalid_component == "source" else "csv",
+            on_success="main",
+            options={"endpoint_url": endpoint_sentinel} if invalid_component == "source" else {},
+            on_validation_failure="discard",
+        )
+        output = OutputSpec(
+            name="main",
+            plugin="aws_s3" if invalid_component == "sink" else "json",
+            options={"endpoint_url": endpoint_sentinel} if invalid_component == "sink" else {},
+            on_write_failure="discard",
+        )
+        seeded_state = CompositionState(
+            source=source,
+            nodes=(),
+            edges=(),
+            outputs=(output,),
+            metadata=PipelineMetadata(name="AWS S3 policy seed"),
+            version=1,
+        )
+        app, service = _make_app(tmp_path)
+        app.state.settings = app.state.settings.model_copy(update={"e2e_state_seed_enabled": True})
+        client = TestClient(app)
+        session = await service.create_session("alice", "AWS S3 policy seed", "local")
+
+        response = client.post(
+            f"/api/sessions/{session.id}/state/e2e-seed",
+            json={"state": seeded_state.to_dict()},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["is_valid"] is False
+        assert body["validation_errors"] == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(body["validation_errors"])
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.is_valid is False
+        assert list(record.validation_errors or ()) == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(record.validation_errors)
 
     @pytest.mark.asyncio
     async def test_post_state_yaml_imports_exported_runtime_yaml(self, tmp_path) -> None:

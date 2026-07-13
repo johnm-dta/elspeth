@@ -60,6 +60,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.execution.service import ExecutionServiceImpl
+from elspeth.web.execution.validation import validate_pipeline as _real_validate_pipeline
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
@@ -564,6 +565,49 @@ class TestExecutionFlow:
         # Carries the structured errors for the route to surface as a 422.
         assert exc_info.value.errors
         assert exc_info.value.errors[0].component_id == "rate"
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_aws_s3_endpoint_url_before_run_or_provider_instantiation(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        endpoint_sentinel = "https://provider-canary.attacker.invalid/private"
+        state_record = mock_session_service.get_current_state.return_value
+        state_record.source = {
+            "plugin": "aws_s3",
+            "on_success": "out",
+            "options": {"endpoint_url": endpoint_sentinel},
+            "on_validation_failure": "discard",
+        }
+        state_record.sources = None
+        state_record.nodes = []
+        state_record.edges = []
+        state_record.outputs = [
+            {
+                "name": "out",
+                "plugin": "json",
+                "options": {},
+                "on_write_failure": "discard",
+            }
+        ]
+
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", side_effect=_real_validate_pipeline),
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate,
+            patch.object(service._executor, "submit") as mock_submit,
+            pytest.raises(PipelineValidationError) as exc_info,
+        ):
+            await service.execute(session_id=state_record.session_id)
+
+        assert mock_session_service.create_run.await_count == 0
+        mock_load.assert_not_called()
+        mock_instantiate.assert_not_called()
+        mock_submit.assert_not_called()
+        assert exc_info.value.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
+        assert endpoint_sentinel not in str(exc_info.value)
+        assert endpoint_sentinel not in repr(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_execute_allows_valid_pipeline_through_the_gate(

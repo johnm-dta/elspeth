@@ -19,6 +19,7 @@ import pytest
 import yaml
 from pydantic import BaseModel, SecretBytes
 from pydantic import ValidationError as PydanticValidationError
+from structlog.testing import capture_logs
 
 from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
@@ -48,12 +49,13 @@ from elspeth.web.execution.validation import (
     validate_pipeline,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 
 
-def _make_source(options: dict[str, Any] | None = None) -> SourceSpec:
+def _make_source(options: dict[str, Any] | None = None, plugin: str = "csv") -> SourceSpec:
     """Build a SourceSpec with sensible defaults for validation tests."""
     return SourceSpec(
-        plugin="csv",
+        plugin=plugin,
         on_success="transform_in",
         options=options or {},
         on_validation_failure="discard",
@@ -98,6 +100,7 @@ _MAKE_STATE_DEFAULT_SOURCE = object()
 
 def _make_state(
     source_options: dict[str, Any] | None | object = _MAKE_STATE_DEFAULT_SOURCE,
+    source_plugin: str = "csv",
     nodes: tuple[NodeSpec, ...] | None = None,
     outputs: tuple[OutputSpec, ...] | None = None,
 ) -> CompositionState:
@@ -110,11 +113,11 @@ def _make_state(
     test the empty-source path; pass a dict to customise source options.
     """
     if source_options is _MAKE_STATE_DEFAULT_SOURCE:
-        source = _make_source({})
+        source = _make_source({}, plugin=source_plugin)
     elif source_options is None:
         source = None
     else:
-        source = _make_source(cast(dict[str, Any], source_options))
+        source = _make_source(cast(dict[str, Any], source_options), plugin=source_plugin)
     return CompositionState(
         source=source,
         nodes=nodes or (),
@@ -720,7 +723,12 @@ class TestValidatePipelineWebFetchNetworkPolicy:
 
         assert result.is_valid is False
         assert _check(result, "web_scrape_network_policy").passed is False
-        for later_check in ("managed_identity_policy", "llm_retry_budget_policy", "llm_base_url_policy"):
+        for later_check in (
+            "managed_identity_policy",
+            "llm_retry_budget_policy",
+            "llm_base_url_policy",
+            "aws_s3_endpoint_url_policy",
+        ):
             check = _check(result, later_check)
             assert check.passed is False, f"{later_check} must not pass after an earlier gate failed"
             assert check.outcome_code == CHECK_OUTCOME_SKIPPED_AFTER_FAILURE
@@ -864,6 +872,129 @@ class TestValidatePipelineLlmBaseUrlPolicy:
 
         assert _check(result, "llm_base_url_policy").passed is True
         mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+
+class TestValidatePipelineAwsS3EndpointUrlPolicy:
+    """Web-authored AWS S3 sources and sinks may not override endpoint_url."""
+
+    _ENDPOINT_SENTINEL = "https://credential-canary.attacker.invalid/private"
+
+    def test_aws_s3_source_endpoint_url_is_blocked_before_settings_or_plugins(self) -> None:
+        state = _make_state(
+            source_plugin="aws_s3",
+            source_options={"endpoint_url": self._ENDPOINT_SENTINEL},
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate,
+        ):
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "aws_s3_endpoint_url_policy").passed is False
+        assert result.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
+        assert result.errors[0].component_id == "source"
+        assert result.errors[0].component_type == "source"
+        assert result.readiness.execution_ready is False
+        assert result.readiness.blockers[0].code == "aws_s3_endpoint_url_policy"
+        assert result.readiness.blockers[0].component_id == "source"
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+        mock_load.assert_not_called()
+        mock_instantiate.assert_not_called()
+
+    def test_aws_s3_sink_endpoint_url_is_blocked_before_settings_or_plugins(self) -> None:
+        state = _make_state(
+            outputs=(
+                _make_output(
+                    name="archive",
+                    plugin="aws_s3",
+                    options={"endpoint_url": self._ENDPOINT_SENTINEL},
+                ),
+            ),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate,
+        ):
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "aws_s3_endpoint_url_policy").passed is False
+        assert result.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
+        assert result.errors[0].component_id == "archive"
+        assert result.errors[0].component_type == "sink"
+        assert result.readiness.execution_ready is False
+        assert result.readiness.blockers[0].code == "aws_s3_endpoint_url_policy"
+        assert result.readiness.blockers[0].component_id == "archive"
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+        mock_load.assert_not_called()
+        mock_instantiate.assert_not_called()
+
+    @pytest.mark.parametrize("component", ["source", "sink"])
+    @pytest.mark.parametrize("endpoint_options", [{}, {"endpoint_url": None}])
+    def test_aws_s3_omitted_or_null_endpoint_url_passes_policy(
+        self,
+        component: str,
+        endpoint_options: dict[str, object],
+    ) -> None:
+        source_plugin = "aws_s3" if component == "source" else "csv"
+        source_options = endpoint_options if component == "source" else {}
+        output_plugin = "aws_s3" if component == "sink" else "csv"
+        output_options = endpoint_options if component == "sink" else {}
+        state = _make_state(
+            source_plugin=source_plugin,
+            source_options=source_options,
+            outputs=(_make_output(name="results", plugin=output_plugin, options=output_options),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate,
+        ):
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "aws_s3_endpoint_url_policy").passed is True
+        assert all(error.error_code != "aws_s3_endpoint_url_not_allowed" for error in result.errors)
+        mock_load.assert_called_once()
+        mock_instantiate.assert_not_called()
+
+    def test_aws_s3_endpoint_url_is_redacted_from_all_validation_surfaces(self) -> None:
+        state = _make_state(
+            source_plugin="aws_s3",
+            source_options={"endpoint_url": self._ENDPOINT_SENTINEL},
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+
+        with capture_logs() as logs:
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.errors[0].message == AWS_S3_ENDPOINT_URL_POLICY_ERROR
+        serialized_surfaces = (
+            result.model_dump_json(),
+            repr(result.checks),
+            repr(result.errors),
+            repr(result.readiness),
+            str(result),
+            repr(result),
+            repr(logs),
+        )
+        assert all(self._ENDPOINT_SENTINEL not in surface for surface in serialized_surfaces)
 
 
 class TestValidatePipelineBatchTransformOptions:
@@ -2017,13 +2148,14 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 16
+        assert len(result.checks) == 17
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "web_scrape_network_policy").passed is True
         assert _check(result, "llm_retry_budget_policy").passed is True
         assert _check(result, "llm_base_url_policy").passed is True
+        assert _check(result, "aws_s3_endpoint_url_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True
@@ -3657,6 +3789,7 @@ sinks:
         # after blob_inline_refs (their declared #8/#9 home), not before web_scrape.
         assert emitted.index("managed_identity_policy") > emitted.index("blob_inline_refs")
         assert emitted.index("llm_retry_budget_policy") > emitted.index("managed_identity_policy")
+        assert emitted.index("aws_s3_endpoint_url_policy") == emitted.index("llm_base_url_policy") + 1
         assert emitted.index("web_scrape_network_policy") < emitted.index("managed_identity_policy")
 
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")

@@ -41,6 +41,7 @@ ValidationCheckName = Literal[
     "managed_identity_policy",
     "llm_retry_budget_policy",
     "llm_base_url_policy",
+    "aws_s3_endpoint_url_policy",
     "settings_load",
     "plugin_instantiation",
     "value_source_compliance",
@@ -63,6 +64,7 @@ CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
 CHECK_MANAGED_IDENTITY_POLICY: Final[ValidationCheckName] = "managed_identity_policy"
 CHECK_LLM_RETRY_BUDGET_POLICY: Final[ValidationCheckName] = "llm_retry_budget_policy"
 CHECK_LLM_BASE_URL_POLICY: Final[ValidationCheckName] = "llm_base_url_policy"
+CHECK_AWS_S3_ENDPOINT_URL_POLICY: Final[ValidationCheckName] = "aws_s3_endpoint_url_policy"
 CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
 RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
 CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
@@ -84,6 +86,7 @@ VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_LLM_BASE_URL_POLICY,
+    CHECK_AWS_S3_ENDPOINT_URL_POLICY,
     CHECK_SETTINGS,
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,
     CHECK_VALUE_SOURCE_COMPLIANCE,

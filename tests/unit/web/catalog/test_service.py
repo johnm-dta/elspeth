@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSecretRequirement, PluginSummary
@@ -79,6 +85,26 @@ class TestListTransforms:
     def test_returns_non_empty_list(self, catalog: CatalogServiceImpl) -> None:
         transforms = catalog.list_transforms()
         assert len(transforms) > 0
+
+    def test_policy_metadata_is_closed_and_kind_qualified(self, catalog: CatalogServiceImpl) -> None:
+        transforms = {item.name: item for item in catalog.list_transforms()}
+
+        assert transforms["llm"].web_config_authority is WebConfigAuthority.OPERATOR_PROFILED
+        assert transforms["llm"].policy_capabilities == (CapabilityDeclaration(PluginCapability.LLM),)
+        assert transforms["azure_prompt_shield"].policy_capabilities == (
+            CapabilityDeclaration(
+                PluginCapability.PROMPT_SHIELD,
+                ControlRole.INPUT,
+                blocks_positive_detection=True,
+            ),
+        )
+        assert transforms["azure_content_safety"].policy_capabilities == (
+            CapabilityDeclaration(
+                PluginCapability.CONTENT_SAFETY,
+                ControlRole.OUTPUT,
+                blocks_positive_detection=True,
+            ),
+        )
 
     def test_passthrough_present(self, catalog: CatalogServiceImpl) -> None:
         transforms = catalog.list_transforms()

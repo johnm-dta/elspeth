@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from enum import StrEnum
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 
 if TYPE_CHECKING:
+    from elspeth.web.catalog.schemas import PluginSchemaInfo
     from elspeth.web.config import WebSettings
+    from elspeth.web.plugin_policy.models import PluginId, WebPluginPolicy
 
 CredentialScope = Literal["server", "user"]
 _ALIAS = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\Z")
@@ -136,3 +142,269 @@ class RuntimeWebPluginConfig:
             ),
             tutorial_llm_profile=settings.tutorial_llm_profile,
         )
+
+
+class ProfileUnavailableReason(StrEnum):
+    CREDENTIAL_MISSING = "credential_unavailable"
+    LOCAL_REQUIREMENT_MISSING = "local_requirement_unavailable"
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ProfileAvailability:
+    alias: str
+    credential_scope: CredentialScope | None
+    usable: bool
+    reason: ProfileUnavailableReason | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRequirementResult:
+    available: bool
+    reason: ProfileUnavailableReason | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LoweredPluginConfig:
+    executable_options: Mapping[str, object] = field(repr=False)
+    audit_safe_options: Mapping[str, object]
+
+
+class ProfileCredentialInventory(Protocol):
+    def has_server_ref(self, name: str) -> bool: ...
+
+    def has_user_ref(self, principal: str, name: str) -> bool: ...
+
+
+class OperatorProfileResolver(Protocol):
+    def public_schema(self, full_schema: PluginSchemaInfo, available_aliases: tuple[str, ...]) -> PluginSchemaInfo: ...
+
+    def lower_options(self, alias: str, safe_options: dict[str, object]) -> LoweredPluginConfig: ...
+
+    def profile_availability(
+        self,
+        principal: str,
+        inventory: ProfileCredentialInventory,
+    ) -> tuple[ProfileAvailability, ...]: ...
+
+    def check_local_requirements(self, alias: str) -> LocalRequirementResult: ...
+
+
+_LLM_PRIVATE_OPTIONS = frozenset(
+    {
+        "provider",
+        "model",
+        "api_key",
+        "api_key_secret",
+        "base_url",
+        "endpoint",
+        "deployment_name",
+        "region_name",
+        "api_version",
+        "credential_ref",
+        "credential_scope",
+        "tracing",
+        "timeout_seconds",
+        "max_tokens",
+        "pool_size",
+        "min_dispatch_delay_ms",
+        "max_dispatch_delay_ms",
+        "backoff_multiplier",
+        "recovery_step_ms",
+        "max_capacity_retry_seconds",
+        "prompt_template_source",
+        "lookup_source",
+        "system_prompt_source",
+        "resolved_prompt_template_hash",
+    }
+)
+
+
+class _LLMProfileResolver:
+    def __init__(self, profiles: tuple[tuple[str, RuntimeWebLLMProfile], ...]) -> None:
+        self._profiles = dict(profiles)
+
+    def public_schema(self, full_schema: PluginSchemaInfo, available_aliases: tuple[str, ...]) -> PluginSchemaInfo:
+        from elspeth.web.catalog.schemas import PluginSchemaInfo
+
+        safe_properties: dict[str, Any] = {}
+        definitions = full_schema.json_schema.get("$defs", {})
+        if isinstance(definitions, dict):
+            from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+            provider_definition_names = {config_cls.__name__ for config_cls in LLMTransform.discriminated_variants()[1].values()}
+            for definition_name in provider_definition_names:
+                definition = definitions.get(definition_name)
+                if not isinstance(definition, dict):
+                    continue
+                properties = definition.get("properties", {})
+                if not isinstance(properties, dict):
+                    continue
+                for name, property_schema in properties.items():
+                    if name not in _LLM_PRIVATE_OPTIONS and isinstance(property_schema, dict):
+                        safe_properties.setdefault(name, deepcopy(property_schema))
+        safe_properties = {
+            "profile": {
+                "type": "string",
+                "enum": list(available_aliases),
+                "description": "Operator-approved LLM profile alias",
+            },
+            **safe_properties,
+        }
+        public_json_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": safe_properties,
+            "required": ["profile", "prompt_template", "schema"],
+            "additionalProperties": False,
+        }
+        referenced_definitions: dict[str, Any] = {}
+        pending = _schema_refs(public_json_schema)
+        while pending:
+            definition_name = pending.pop()
+            if definition_name in referenced_definitions:
+                continue
+            definition = definitions.get(definition_name) if isinstance(definitions, dict) else None
+            if isinstance(definition, dict):
+                referenced_definitions[definition_name] = deepcopy(definition)
+                pending.update(_schema_refs(definition))
+        if referenced_definitions:
+            public_json_schema["$defs"] = referenced_definitions
+        fields = [
+            {
+                "name": name,
+                "type": "string" if name == "profile" else str(schema.get("type", "object")),
+                "required": name in public_json_schema["required"],
+                "description": schema.get("description"),
+                **({"choices": list(available_aliases)} if name == "profile" else {}),
+            }
+            for name, schema in safe_properties.items()
+        ]
+        return PluginSchemaInfo(
+            name=full_schema.name,
+            plugin_type=full_schema.plugin_type,
+            description=full_schema.description,
+            json_schema=public_json_schema,
+            knob_schema={"fields": fields},
+            composer_hints=full_schema.composer_hints,
+            secret_requirements=(),
+            web_config_authority=full_schema.web_config_authority,
+            policy_capabilities=full_schema.policy_capabilities,
+        )
+
+    def lower_options(self, alias: str, safe_options: dict[str, object]) -> LoweredPluginConfig:
+        if set(safe_options) & _LLM_PRIVATE_OPTIONS:
+            raise ValueError("private_profile_option")
+        try:
+            profile = self._profiles[alias]
+        except KeyError:
+            raise ValueError("profile_unavailable") from None
+        executable = dict(safe_options)
+        executable["provider"] = profile.provider
+        executable["model"] = profile.model
+        executable.update(profile.provider_options)
+        if profile.credential_ref is not None:
+            executable["api_key"] = {"secret_ref": profile.credential_ref}
+        audit_safe = {"profile": alias, **safe_options}
+        return LoweredPluginConfig(
+            executable_options=MappingProxyType(executable),
+            audit_safe_options=MappingProxyType(audit_safe),
+        )
+
+    def profile_availability(
+        self,
+        principal: str,
+        inventory: ProfileCredentialInventory,
+    ) -> tuple[ProfileAvailability, ...]:
+        result: list[ProfileAvailability] = []
+        for alias, profile in sorted(self._profiles.items()):
+            if profile.credential_scope is None:
+                result.append(ProfileAvailability(alias=alias, credential_scope=None, usable=True))
+                continue
+            assert profile.credential_ref is not None
+            usable = (
+                inventory.has_server_ref(profile.credential_ref)
+                if profile.credential_scope == "server"
+                else inventory.has_user_ref(principal, profile.credential_ref)
+            )
+            result.append(
+                ProfileAvailability(
+                    alias=alias,
+                    credential_scope=profile.credential_scope,
+                    usable=usable,
+                    reason=None if usable else ProfileUnavailableReason.CREDENTIAL_MISSING,
+                )
+            )
+        return tuple(result)
+
+    def check_local_requirements(self, alias: str) -> LocalRequirementResult:
+        return LocalRequirementResult(available=alias in self._profiles)
+
+
+def _schema_refs(value: object) -> set[str]:
+    refs: set[str] = set()
+    if isinstance(value, dict):
+        ref = value.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            refs.add(ref.removeprefix("#/$defs/"))
+        for nested in value.values():
+            refs.update(_schema_refs(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            refs.update(_schema_refs(nested))
+    return refs
+
+
+class OperatorProfileRegistry:
+    """Resolver registry bound to one frozen process policy/config."""
+
+    def __init__(self, *, policy: WebPluginPolicy, settings: RuntimeWebPluginConfig) -> None:
+        from elspeth.web.plugin_policy.models import PluginId
+
+        self._policy = policy
+        self._resolvers: dict[PluginId, OperatorProfileResolver] = {
+            PluginId("transform", "llm"): _LLMProfileResolver(settings.llm_profiles)
+        }
+
+    def public_schema(
+        self,
+        plugin_id: PluginId,
+        full_schema: PluginSchemaInfo,
+        *,
+        available_aliases: tuple[str, ...],
+    ) -> PluginSchemaInfo:
+        resolver = self._resolvers.get(plugin_id)
+        if resolver is None:
+            return full_schema
+        return resolver.public_schema(full_schema, available_aliases)
+
+    def lower_options(
+        self,
+        plugin_id: PluginId,
+        *,
+        alias: str,
+        safe_options: dict[str, object],
+    ) -> LoweredPluginConfig:
+        try:
+            resolver = self._resolvers[plugin_id]
+        except KeyError:
+            raise ValueError("plugin_has_no_operator_profile") from None
+        return resolver.lower_options(alias, safe_options)
+
+    def profile_availability(
+        self,
+        plugin_id: PluginId,
+        *,
+        principal: str,
+        inventory: ProfileCredentialInventory,
+    ) -> tuple[ProfileAvailability, ...]:
+        try:
+            resolver = self._resolvers[plugin_id]
+        except KeyError:
+            return ()
+        return resolver.profile_availability(principal, inventory)
+
+    def check_local_requirements(self, plugin_id: PluginId, alias: str) -> LocalRequirementResult:
+        try:
+            resolver = self._resolvers[plugin_id]
+        except KeyError:
+            return LocalRequirementResult(available=False, reason=ProfileUnavailableReason.LOCAL_REQUIREMENT_MISSING)
+        return resolver.check_local_requirements(alias)

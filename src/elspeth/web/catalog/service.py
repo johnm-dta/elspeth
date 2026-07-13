@@ -298,6 +298,8 @@ class CatalogServiceImpl:
             knob_schema=cast(dict[str, Any], knob_schema),
             composer_hints=self._discovery_composer_hints(plugin_cls),
             secret_requirements=self._secret_requirements(plugin_cls, schema=json_schema),
+            web_config_authority=plugin_cls.web_config_authority,
+            policy_capabilities=tuple(sorted(plugin_cls.policy_capabilities)),
         )
 
     def _discovery_composer_hints(self, plugin_cls: PluginClass) -> tuple[str, ...]:
@@ -403,6 +405,8 @@ class CatalogServiceImpl:
             usage_when_not_to_use=usage_when_not_to_use,
             example_use=example_use,
             capability_tags=capability_tags,
+            web_config_authority=plugin_cls.web_config_authority,
+            policy_capabilities=tuple(sorted(plugin_cls.policy_capabilities)),
             audit_characteristics=audit_characteristics,
             composer_hints=self._discovery_composer_hints(plugin_cls),
             secret_requirements=self._secret_requirements(

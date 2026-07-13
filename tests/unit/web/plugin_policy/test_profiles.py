@@ -5,8 +5,12 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import ValidationError
 
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.config import WebSettings
-from elspeth.web.plugin_policy.profiles import RuntimeWebPluginConfig
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.models import PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 
 
 def _settings(**overrides: object) -> WebSettings:
@@ -90,3 +94,79 @@ def test_runtime_conversion_consumes_every_universal_setting_field() -> None:
     runtime_fields = set(RuntimeWebPluginConfig.__dataclass_fields__)
 
     assert settings_fields == runtime_fields
+
+
+def _profile_registry() -> OperatorProfileRegistry:
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            llm_profiles={
+                "tutorial": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5-mini",
+                    "credential_scope": "server",
+                    "credential_ref": "OPENROUTER_API_KEY",
+                },
+                "bedrock-task-role": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                    "region_name": "ap-southeast-2",
+                },
+            }
+        )
+    )
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    return OperatorProfileRegistry(policy=policy, settings=runtime)
+
+
+def test_public_llm_schema_exposes_alias_not_private_provider_binding() -> None:
+    full = create_catalog_service().get_schema("transform", "llm")
+    public = _profile_registry().public_schema(
+        PluginId("transform", "llm"),
+        full,
+        available_aliases=("tutorial",),
+    )
+    rendered = public.model_dump_json()
+
+    assert '"profile"' in rendered
+    assert '"tutorial"' in rendered
+    for private_name in ("api_key", "base_url", "endpoint", "deployment_name", "region_name", '"provider"', '"model"'):
+        assert private_name not in rendered
+
+
+def test_profile_lowering_splits_executable_and_audit_safe_options() -> None:
+    lowered = _profile_registry().lower_options(
+        PluginId("transform", "llm"),
+        alias="tutorial",
+        safe_options={"prompt_template": "Summarise {{ row }}", "response_field": "summary"},
+    )
+
+    assert lowered.executable_options["provider"] == "openrouter"
+    assert lowered.executable_options["model"] == "openai/gpt-5-mini"
+    assert lowered.executable_options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+    assert lowered.audit_safe_options == {
+        "profile": "tutorial",
+        "prompt_template": "Summarise {{ row }}",
+        "response_field": "summary",
+    }
+    assert "OPENROUTER_API_KEY" not in repr(lowered)
+
+
+def test_bedrock_profile_lowering_is_keyless() -> None:
+    lowered = _profile_registry().lower_options(
+        PluginId("transform", "llm"),
+        alias="bedrock-task-role",
+        safe_options={"prompt_template": "{{ row }}"},
+    )
+
+    assert lowered.executable_options["provider"] == "bedrock"
+    assert lowered.executable_options["region_name"] == "ap-southeast-2"
+    assert "api_key" not in lowered.executable_options
+
+
+def test_profile_lowering_rejects_raw_provider_options() -> None:
+    with pytest.raises(ValueError, match="private_profile_option"):
+        _profile_registry().lower_options(
+            PluginId("transform", "llm"),
+            alias="tutorial",
+            safe_options={"provider": "bedrock", "prompt_template": "{{ row }}"},
+        )

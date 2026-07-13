@@ -1019,6 +1019,12 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         registry=get_shared_plugin_manager(),
         settings=app.state.runtime_web_plugin_config,
     )
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+
+    app.state.operator_profile_registry = OperatorProfileRegistry(
+        policy=app.state.web_plugin_policy,
+        settings=app.state.runtime_web_plugin_config,
+    )
     app.include_router(
         catalog_router,
         prefix="/api/catalog",

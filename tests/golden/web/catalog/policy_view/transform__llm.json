@@ -1,0 +1,332 @@
+{
+  "composer_hints": [
+    "Call list_models before pinning 'model:' \u2014 deployments don't all ship the same providers.",
+    "Interpolate every row field your prompt needs with `{{ row.<field> }}`. A template naming no varying field sends identical input to every row and identical output; to score, classify, or summarize content, inject the content field (e.g. `{{ row.content }}`), not an identifier.",
+    "Never ask the model to judge a page or record from its URL or identifier alone \u2014 with no content interpolated it fabricates a plausible answer instead of reading anything. When the judgement needs fetched text, interpolate the fetch/scrape field into the prompt_template.",
+    "Identical answers across rows are only wrong when the inputs genuinely differ. A discriminating prompt injects the per-row data; do not pad prompts for artificial variety. The defect to avoid is one that CANNOT discriminate because it never interpolated the per-row field.",
+    "If you create a prompt template from the user's goal, data, or prose instead of copying it verbatim, stage an llm_prompt_template review for the authored prompt text.",
+    "When you author LLM judgment semantics \u2014 a scoring scale, rubric, category meaning, threshold, signal weighting, cutoff, comparison set, or subjective criterion definition \u2014 stage a vague_term review on the LLM node before set_pipeline.",
+    "Measurable adjectives are not exempt: if the user gives the metric/cutoff, use it; if you choose a cutoff such as 'over 6 ft' or a ranking rule such as 'top quartile', review that authored threshold semantics.",
+    "Prompt-template review is not enough for authored judgment semantics: put both interpretation_requirements in the LLM node options before set_pipeline \u2014 one vague_term for the rubric/definition/threshold/category semantics and one llm_prompt_template for the raw prompt.",
+    "Use a stable user_term preserving the user's criterion phrase, not the whole task phrase; for an adjective embedded in prose, use the adjective or noun phrase that names the criterion.",
+    "llm_draft must equal the semantics you wrote; only an llm_prompt_template review is incomplete.",
+    "When repairing or upserting an LLM node, repeat the review preflight; carry forward existing pending LLM interpretation requirements and add missing vague_term or prompt shield requirements before stopping.",
+    "Do not stop by saying the rubric is part of the reviewed prompt. If you wrote the scale, label meanings, thresholds, cutoff, comparison rule, tie break, or signals, add the separate vague_term requirement and request its review.",
+    "If the prompt asks the model to return a score, rating, rank, class, or pass/fail result, that output shape is authored judgement semantics when you chose the scale, class meaning, threshold, or ranking rule.",
+    "Objective extraction such as identifying primary colours used does not by itself need a vague_term review unless you add subjective scoring, ranking, thresholds, or category semantics.",
+    "For how <adjective> phrasing, use the adjective itself as user_term unless the user supplied a more specific criterion phrase; do not use the whole how-phrase.",
+    "Token-usage and model-ID fields are appended automatically as <response_field>_usage / _model \u2014 don't hand-add them.",
+    "If downstream cleanup, sink, mapper, or transform needs the LLM response, guarantee the response_field by name in the LLM node schema. If downstream also needs source or scrape fields that pass through the LLM, also guarantee pass-through fields such as URL or identifier fields.",
+    "Single-query LLM output is written to response_field. Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them; preserve response_field through cleanup instead of invented prompt-internal keys.",
+    "The LLM transform preserves upstream row fields while adding response_field; it does not remove raw scrape fields. If a web_scrape-to-LLM workflow must save results without raw HTML or fingerprints, put a field_mapper cleanup node between the LLM and the sink.",
+    "Prompt-injection shielding is reviewed for EVERY LLM node, not only when untrusted web content is upstream: an unshielded LLM is always surfaced as an advisory (never blocking).",
+    "Recommend an available authorized prompt-injection shield before the LLM; use azure_prompt_shield only when discovery lists it.",
+    "Use the deployment's equivalent when available; recommendation is not permission to add a node, so do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
+    "Stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation whenever no authorized shield is upstream (State B/C). Skip it only when an authorized shield is already wired upstream (State A).",
+    "Pick the state-appropriate draft: State B (an authorized shield is available in this deployment) recommends wiring it in; State C (no shield available) is the high-risk reconsider advisory. Default to the State-C draft when availability is unknown.",
+    "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and prompt_injection_shield_recommendation requirements on the same LLM node.",
+    "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
+    "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
+    "This is prompt-injection defense; do not substitute azure_content_safety. Use azure_content_safety only for harmful-content moderation or safety classification.",
+    "Concurrency is pool_size (1 = sequential, no pooling). Tune dispatch pacing with min_dispatch_delay_ms / max_dispatch_delay_ms and bound capacity retries with max_capacity_retry_seconds; there is no max_concurrency or per_minute_rate_limit field."
+  ],
+  "description": "Unified LLM transform with provider dispatch and strategy selection.\n\nRegistered as plugin name=\"llm\". Uses BatchTransformMixin for concurrent\nrow processing with FIFO output ordering and backpressure.\n\nProvider dispatch:\n    \"azure\"      \u2192 AzureOpenAIConfig + AzureLLMProvider\n    \"openrouter\" \u2192 OpenRouterConfig  + OpenRouterLLMProvider\n    \"bedrock\"    \u2192 BedrockConfig     + BedrockLLMProvider\n\nStrategy selection:\n    queries is not None \u2192 MultiQueryStrategy\n    queries is None     \u2192 SingleQueryStrategy",
+  "json_schema": {
+    "$defs": {
+      "FieldDefinition": {
+        "description": "Definition of a single field in a schema.\n\nAttributes:\n    name: Field name (must be valid Python identifier)\n    field_type: One of: str, int, float, bool, any\n    required: If False, field may be absent from the row\n    nullable: If True, field value may be None when present. Used by\n        coalesce merge logic to track whether a branch can produce None\n        values for this field (affecting collision policy semantics).",
+        "properties": {
+          "field_type": {
+            "enum": [
+              "str",
+              "int",
+              "float",
+              "bool",
+              "any"
+            ],
+            "title": "Field Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nullable": {
+            "default": false,
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "field_type"
+        ],
+        "title": "FieldDefinition",
+        "type": "object"
+      },
+      "SchemaConfig": {
+        "description": "Configuration for a plugin's data schema.\n\nA schema can be either observed (accept anything, infer types from data)\nor explicit (validate against specified fields).\n\nSchema Contracts (for DAG validation):\n    - guaranteed_fields: Fields the producer GUARANTEES will exist AND are\n      part of the stable API contract. Downstream can safely depend on these.\n    - required_fields: Fields the consumer REQUIRES in input.\n    - audit_fields: Fields that exist in output but are NOT part of the\n      stability contract. These are for audit trail reconstruction and may\n      change between versions. DAG validation does NOT enforce these.\n\nFor explicit schemas (mode='fixed' or 'flexible'), the declared fields are\nimplicitly guaranteed. Use guaranteed_fields/required_fields to express\ncontracts for observed schemas that still have known field requirements.\n\nExample YAML for an observed schema with explicit contracts:\n    schema:\n      mode: observed\n      guaranteed_fields: [customer_id, timestamp]  # Producer guarantees these\n\n    schema:\n      mode: observed\n      required_fields: [customer_id, amount]  # Consumer requires these\n\n    schema:\n      mode: observed\n      guaranteed_fields: [response, response_usage]  # Stable API\n      audit_fields: [response_template_hash]  # May change between versions\n\nAttributes:\n    mode: \"fixed\" (exact fields), \"flexible\" (at least these), or \"observed\" (infer from data)\n    fields: List of FieldDefinitions, or None if observed\n    is_observed: True if schema types are inferred from data\n    guaranteed_fields: Field names the producer guarantees (for observed schemas)\n    required_fields: Field names the consumer requires (for observed schemas)\n    audit_fields: Field names that exist but are not part of stability contract",
+        "properties": {
+          "audit_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Audit Fields"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/FieldDefinition"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          },
+          "guaranteed_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Guaranteed Fields"
+          },
+          "mode": {
+            "enum": [
+              "fixed",
+              "flexible",
+              "observed"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "required_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Fields"
+          }
+        },
+        "required": [
+          "mode",
+          "fields"
+        ],
+        "title": "SchemaConfig",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "lookup": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Lookup data loaded from YAML file",
+        "title": "Lookup"
+      },
+      "profile": {
+        "description": "Operator-approved LLM profile alias",
+        "enum": [
+          "tutorial"
+        ],
+        "type": "string"
+      },
+      "prompt_template": {
+        "description": "Jinja2 prompt template",
+        "title": "Prompt Template",
+        "type": "string"
+      },
+      "queries": {
+        "anyOf": [
+          {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Multi-query specs (None = single-query mode)",
+        "title": "Queries"
+      },
+      "required_input_fields": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "title": "Required Input Fields"
+      },
+      "response_field": {
+        "default": "llm_response",
+        "description": "Field name for LLM response in output",
+        "title": "Response Field",
+        "type": "string"
+      },
+      "schema": {
+        "$ref": "#/$defs/SchemaConfig",
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "title": "Schema"
+      },
+      "system_prompt": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Optional system prompt",
+        "title": "System Prompt"
+      },
+      "temperature": {
+        "default": 0.0,
+        "description": "Sampling temperature",
+        "maximum": 2.0,
+        "minimum": 0.0,
+        "title": "Temperature",
+        "type": "number"
+      }
+    },
+    "required": [
+      "profile",
+      "prompt_template",
+      "schema"
+    ],
+    "type": "object"
+  },
+  "knob_schema": {
+    "fields": [
+      {
+        "choices": [
+          "tutorial"
+        ],
+        "description": "Operator-approved LLM profile alias",
+        "name": "profile",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "name": "schema",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "name": "required_input_fields",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "description": "Multi-query specs (None = single-query mode)",
+        "name": "queries",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "description": "Jinja2 prompt template",
+        "name": "prompt_template",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "description": "Optional system prompt",
+        "name": "system_prompt",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "description": "Sampling temperature",
+        "name": "temperature",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "description": "Field name for LLM response in output",
+        "name": "response_field",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "description": "Lookup data loaded from YAML file",
+        "name": "lookup",
+        "required": false,
+        "type": "object"
+      }
+    ]
+  },
+  "name": "llm",
+  "plugin_type": "transform",
+  "policy_capabilities": [
+    {
+      "blocks_positive_detection": false,
+      "capability": "llm",
+      "control_role": null
+    }
+  ],
+  "secret_requirements": [],
+  "web_config_authority": "operator_profiled"
+}

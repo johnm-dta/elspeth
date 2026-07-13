@@ -18,6 +18,12 @@ from pydantic import BaseModel, Field
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -122,9 +128,19 @@ class AzureContentSafety(BaseAzureSafetyTransform):
     """
 
     name = "azure_content_safety"
+    web_config_authority = WebConfigAuthority.USER_CONFIGURABLE_WITH_POLICY
+    policy_capabilities = frozenset(
+        {
+            CapabilityDeclaration(
+                PluginCapability.CONTENT_SAFETY,
+                ControlRole.OUTPUT,
+                blocks_positive_detection=True,
+            )
+        }
+    )
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:275a42d602a3ffe0"
+    source_file_hash: str | None = "sha256:5ff60945bf07a9b1"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
 

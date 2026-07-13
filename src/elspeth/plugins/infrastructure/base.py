@@ -45,6 +45,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 
 if TYPE_CHECKING:
@@ -188,6 +189,8 @@ class BaseTransform(ABC):
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
@@ -957,6 +960,8 @@ class BaseSink(ABC):
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
@@ -1358,6 +1363,8 @@ class BaseSource(ABC):
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags

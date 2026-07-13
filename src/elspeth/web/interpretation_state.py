@@ -19,6 +19,8 @@ from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.plugin_capabilities import ControlRole, PluginCapability
+from elspeth.plugins.infrastructure.manager import PluginNotFoundError, get_shared_plugin_manager
 from elspeth.web.composer.state import CompositionState, NodeSpec, SourceSpec
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
@@ -59,7 +61,6 @@ _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS: Final[frozenset[str]] = frozenset({"
 # sitting between an untrusted producer and a downstream LLM consumer.
 # Content-moderation (azure_content_safety) is deliberately NOT in this set:
 # content moderation and prompt-injection shielding are different controls.
-_AUTHORIZED_PROMPT_SHIELD_PLUGINS: Final[frozenset[str]] = frozenset({"azure_prompt_shield"})
 _NON_PRODUCED_ROUTE_TARGETS: Final[frozenset[str]] = frozenset({"discard", "fork"})
 
 AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
@@ -378,13 +379,29 @@ def _stream_reaches_untrusted(stream: str | None, graph: _OutputStreamGraph, vis
     return any(_producer_reaches_untrusted(producer, graph, visited) for producer in producers)
 
 
+def _is_effective_prompt_shield(node: NodeSpec) -> bool:
+    """Credit only a registered transform's typed, blocking INPUT control."""
+    if node.plugin is None:
+        return False
+    try:
+        plugin_cls = get_shared_plugin_manager().get_transform_by_name(node.plugin)
+    except PluginNotFoundError:
+        return False
+    return any(
+        declaration.capability is PluginCapability.PROMPT_SHIELD
+        and declaration.control_role is ControlRole.INPUT
+        and declaration.blocks_positive_detection
+        for declaration in plugin_cls.policy_capabilities
+    )
+
+
 def _producer_reaches_untrusted(producer: NodeSpec, graph: _OutputStreamGraph, visited: frozenset[str]) -> bool:
     if producer.id in visited:
         return False
     # Path-LOCAL visited (passed by value), keyed on stable node id: a diamond
     # that reconverges on a shared upstream must not truncate a sibling path.
     visited = visited | {producer.id}
-    if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+    if _is_effective_prompt_shield(producer):
         return False
     if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
         return True
@@ -425,7 +442,7 @@ def _producer_proves_shield(producer: NodeSpec, graph: _OutputStreamGraph, visit
     if producer.id in visited:
         return False  # cycle without a shield → not proven
     visited = visited | {producer.id}
-    if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+    if _is_effective_prompt_shield(producer):
         return True
     if producer.node_type == "queue":
         predecessors = graph.queue_predecessors.get(producer.id, ())
@@ -1244,7 +1261,7 @@ def _prompt_shield_producer_paths(producer: NodeSpec, graph: _OutputStreamGraph,
     if producer.id in visited:
         return [(head,)]  # cycle — stop, still record this producer
     visited = visited | {producer.id}
-    if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS or producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+    if _is_effective_prompt_shield(producer) or producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
         return [(head,)]  # adjudication boundary reached
     if producer.node_type == "queue":
         predecessors = graph.queue_predecessors.get(producer.id, ())

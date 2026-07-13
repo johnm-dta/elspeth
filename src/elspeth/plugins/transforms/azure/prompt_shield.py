@@ -18,6 +18,12 @@ from pydantic import Field
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -96,9 +102,19 @@ class AzurePromptShield(BaseAzureSafetyTransform):
     """
 
     name = "azure_prompt_shield"
+    web_config_authority = WebConfigAuthority.USER_CONFIGURABLE_WITH_POLICY
+    policy_capabilities = frozenset(
+        {
+            CapabilityDeclaration(
+                PluginCapability.PROMPT_SHIELD,
+                ControlRole.INPUT,
+                blocks_positive_detection=True,
+            )
+        }
+    )
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a5fbb2d19dca4d39"
+    source_file_hash: str | None = "sha256:91d27d2d3ccc1569"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
 

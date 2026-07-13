@@ -20,6 +20,7 @@ from elspeth.contracts.enums import (
     Determinism,
 )
 from elspeth.contracts.header_modes import HeaderMode
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
 from elspeth.contracts.schema import SchemaConfig
 
 if TYPE_CHECKING:
@@ -87,6 +88,8 @@ class _PluginReferenceContent(Protocol):
     usage_when_not_to_use: str | None
     example_use: str | None
     capability_tags: tuple[str, ...]
+    web_config_authority: WebConfigAuthority
+    policy_capabilities: frozenset[CapabilityDeclaration]
     audit_characteristics: DeclaredAuditCharacteristics
     discovery_secret_requirements: Mapping[str, tuple[str, ...]]
 

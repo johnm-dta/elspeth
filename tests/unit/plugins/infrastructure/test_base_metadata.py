@@ -9,6 +9,7 @@ plugin for the catalog's reference surface.
 
 from __future__ import annotations
 
+from elspeth.contracts.plugin_capabilities import WebConfigAuthority
 from elspeth.plugins.infrastructure.base import BaseSink, BaseSource, BaseTransform
 
 
@@ -50,3 +51,10 @@ def test_audit_characteristics_is_a_frozenset() -> None:
     assert isinstance(BaseSource.audit_characteristics, frozenset)
     assert isinstance(BaseTransform.audit_characteristics, frozenset)
     assert isinstance(BaseSink.audit_characteristics, frozenset)
+
+
+def test_policy_metadata_defaults_are_typed_and_immutable() -> None:
+    for base in (BaseSource, BaseTransform, BaseSink):
+        assert base.web_config_authority is WebConfigAuthority.USER_CONFIGURABLE
+        assert base.policy_capabilities == frozenset()
+        assert isinstance(base.policy_capabilities, frozenset)

@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from elspeth.contracts.enums import DerivedAuditCharacteristics
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
 
 PluginKind = Literal["source", "transform", "sink"]
 
@@ -75,6 +76,8 @@ class PluginSummary(_StrictResponse):
     usage_when_not_to_use: str | None = None
     example_use: str | None = None
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: tuple[CapabilityDeclaration, ...] = ()
     audit_characteristics: DerivedAuditCharacteristics = ()
 
     # JIT-hints Phase 1: discovery-time composer hints. Populated from
@@ -113,3 +116,5 @@ class PluginSchemaInfo(_StrictResponse):
     # Mirrors PluginSummary.secret_requirements on the full-schema surface so
     # get_plugin_schema and get_plugin_assistance can enforce the same gate.
     secret_requirements: tuple[PluginSecretRequirement, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: tuple[CapabilityDeclaration, ...] = ()

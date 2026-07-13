@@ -881,6 +881,7 @@ aws = [
     { name = "boto3" },
     { name = "botocore" },
     { name = "ijson" },
+    { name = "jinja2" },
 ]
 azure = [
     { name = "azure-identity" },
@@ -997,6 +998,7 @@ requires-dist = [
     { name = "ijson", marker = "extra == 'all'", specifier = ">=3.3,<4" },
     { name = "ijson", marker = "extra == 'aws'", specifier = ">=3.3,<4" },
     { name = "jinja2", marker = "extra == 'all'", specifier = ">=3.1,<4" },
+    { name = "jinja2", marker = "extra == 'aws'", specifier = ">=3.1,<4" },
     { name = "jinja2", marker = "extra == 'azure'", specifier = ">=3.1,<4" },
     { name = "jinja2", marker = "extra == 'llm'", specifier = ">=3.1,<4" },
     { name = "jsonschema", specifier = ">=4.26,<5" },

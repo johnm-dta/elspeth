@@ -18,7 +18,8 @@ Thread Safety:
     TelemetryManager uses a background export thread for async export.
     - handle_event() is called from the pipeline thread (non-blocking)
     - _export_loop() runs in the background export thread
-    - _events_dropped is protected by _dropped_lock (accessed from both threads)
+    - _events_dropped and _queue_drops are protected by _dropped_lock
+      (accessed from both threads)
     - All other metrics are only modified by the export thread
     - health_metrics reads are approximately consistent
 """
@@ -54,6 +55,7 @@ class HealthMetrics(TypedDict):
     events_failed: int
     events_emitted: int
     events_dropped: int
+    queue_drops: int
     exporter_failures: dict[str, int]
     consecutive_total_failures: int
     queue_depth: int
@@ -136,6 +138,7 @@ class TelemetryManager:
         self._events_failed = 0
         self._pending_deferred_events = 0
         self._events_dropped = 0
+        self._queue_drops = 0
         self._exporter_failures: defaultdict[str, int] = defaultdict(int)
         self._last_logged_drop_count: int = 0
 
@@ -389,6 +392,7 @@ class TelemetryManager:
             logger.warning("Export thread not ready, dropping event")
             with self._dropped_lock:
                 self._events_dropped += 1
+                self._queue_drops += 1
             return
 
         if not self._export_thread.is_alive():
@@ -411,6 +415,7 @@ class TelemetryManager:
                 logger.error("BLOCK mode put() timed out - export thread may be stuck")
                 with self._dropped_lock:
                     self._events_dropped += 1
+                    self._queue_drops += 1
 
     def _drop_oldest_and_enqueue_newest(self, event: TelemetryEvent) -> None:
         """DROP mode overflow strategy: evict oldest queued event, keep newest.
@@ -435,10 +440,12 @@ class TelemetryManager:
                         # Log and drop the incoming event — never propagate to callers.
                         logger.warning("Could not restore shutdown sentinel during DROP overflow; close() will retry independently")
                         self._events_dropped += 1
+                        self._queue_drops += 1
                         self._log_drops_if_needed()
                         return
                 elif had_evicted:
                     self._events_dropped += 1
+                    self._queue_drops += 1
                     self._log_drops_if_needed()
 
                 try:
@@ -447,6 +454,7 @@ class TelemetryManager:
                     # Race: queue refilled before we could enqueue the newest.
                     # Count the incoming event as dropped.
                     self._events_dropped += 1
+                    self._queue_drops += 1
                     self._log_drops_if_needed()
                     return
             finally:
@@ -484,6 +492,7 @@ class TelemetryManager:
 
                     if displaced is not None:
                         self._events_dropped += 1
+                        self._queue_drops += 1
                         self._log_drops_if_needed()
         finally:
             # Keep unfinished-task accounting balanced for any displaced items.
@@ -513,6 +522,7 @@ class TelemetryManager:
         Returns a snapshot of telemetry health:
         - events_emitted: Successfully delivered to at least one exporter
         - events_dropped: Failed to deliver (queue full or all exporters failed)
+        - queue_drops: Enqueue/backpressure losses only; excludes exporter failures
         - exporter_failures: Per-exporter failure counts
         - consecutive_total_failures: Current streak of total failures
         - queue_depth: Current number of events in queue
@@ -520,21 +530,24 @@ class TelemetryManager:
         - circuit_breakers: Per-exporter circuit breaker state and metrics
 
         Thread Safety:
-            Reads are approximately consistent. _events_dropped uses lock
-            for consistency with concurrent writes. Other metrics may be
-            slightly stale but this is acceptable for operational monitoring.
+            Reads are approximately consistent. _events_dropped and
+            _queue_drops use a lock for consistency with concurrent writes.
+            Other metrics may be slightly stale but this is acceptable for
+            operational monitoring.
 
         Returns:
             Typed health metrics snapshot.
         """
         with self._dropped_lock:
             events_dropped = self._events_dropped
+            queue_drops = self._queue_drops
         return {
             "events_attempted": self._events_attempted,
             "events_delivered": self._events_delivered,
             "events_failed": self._events_failed,
             "events_emitted": self._events_emitted,
             "events_dropped": events_dropped,
+            "queue_drops": queue_drops,
             "exporter_failures": dict(self._exporter_failures),
             "consecutive_total_failures": self._consecutive_total_failures,
             "queue_depth": self._queue.qsize(),

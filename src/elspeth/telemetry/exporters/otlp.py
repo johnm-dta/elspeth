@@ -18,7 +18,7 @@ import structlog
 from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
-from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_task_revision, is_release_identity
+from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_resource_label, is_aws_task_revision, is_release_identity
 from elspeth.telemetry.serialization import (
     SyntheticReadableSpan,
     derive_trace_id,
@@ -223,6 +223,10 @@ class OTLPExporter:
         aws_identity_configured = cloud_provider == "aws" or any(
             value is not None for value in (aws_ecs_cluster_name, aws_ecs_service_name, aws_ecs_task_family, aws_ecs_task_revision)
         )
+        if aws_identity_configured:
+            for field, value in (("service_name", service_name), ("deployment_environment", deployment_environment)):
+                if value is not None and not is_aws_resource_label(value):
+                    raise _configuration_error(field, "must be a bounded AWS-safe resource label, not an ARN or account identity")
         if service_version is not None and aws_identity_configured and not is_release_identity(service_version):
             raise _configuration_error("service_version", "must be a bounded AWS release identity, not an ARN or account identity")
         for field, value in (

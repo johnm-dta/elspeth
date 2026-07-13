@@ -313,6 +313,77 @@ class TestOperatorTelemetrySettings:
         assert settings.operator_pipeline_telemetry_granularity == "lifecycle"
 
     @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("operator_telemetry_service_name", "arn:aws:ecs:ap-southeast-2:123456789012:service/elspeth-web"),
+            ("operator_telemetry_service_name", "123456789012"),
+            ("operator_telemetry_service_name", "elspeth-123456789012-web"),
+            ("operator_telemetry_environment", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/production"),
+            ("operator_telemetry_environment", "123456789012"),
+            ("operator_telemetry_environment", "prod-123456789012-blue"),
+        ],
+    )
+    def test_aws_mode_rejects_arn_and_account_resource_labels(self, field: str, raw_value: str) -> None:
+        overrides = {
+            "operator_telemetry": "aws-otlp",
+            "operator_telemetry_environment": "production",
+            field: raw_value,
+        }
+        with pytest.raises(ValidationError, match=field) as caught:
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **overrides,  # type: ignore[arg-type]
+            )
+
+        assert raw_value not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("operator_telemetry_service_name", "elspeth-web"),
+            ("operator_telemetry_service_name", "orders.api_v2"),
+            pytest.param("operator_telemetry_service_name", "s" * 128, id="service-128-char-boundary"),
+            ("operator_telemetry_environment", "production"),
+            ("operator_telemetry_environment", "prod-blue"),
+            pytest.param("operator_telemetry_environment", "e" * 128, id="environment-128-char-boundary"),
+        ],
+    )
+    def test_aws_mode_accepts_safe_resource_labels(self, field: str, value: str) -> None:
+        overrides = {
+            "operator_telemetry": "aws-otlp",
+            "operator_telemetry_environment": "production",
+            field: value,
+        }
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+            **overrides,  # type: ignore[arg-type]
+        )
+
+        assert getattr(settings, field) == value
+
+    def test_local_mode_preserves_generic_operator_resource_labels(self) -> None:
+        settings = WebSettings(
+            operator_telemetry_service_name="team/service:blue",
+            operator_telemetry_environment="staging/eu:1",
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.operator_telemetry_service_name == "team/service:blue"
+        assert settings.operator_telemetry_environment == "staging/eu:1"
+
+    @pytest.mark.parametrize(
         ("overrides", "field"),
         [
             ({"operator_telemetry": "prometheus", "operator_telemetry_environment": "production"}, "operator_telemetry"),

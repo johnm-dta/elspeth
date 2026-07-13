@@ -317,6 +317,76 @@ class TestOTLPExporterConfiguration:
     @pytest.mark.parametrize(
         ("field", "raw_value"),
         [
+            ("service_name", "arn:aws:ecs:ap-southeast-2:123456789012:service/elspeth-web"),
+            ("service_name", "123456789012"),
+            ("service_name", "elspeth-123456789012-web"),
+            ("deployment_environment", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/production"),
+            ("deployment_environment", "123456789012"),
+            ("deployment_environment", "prod-123456789012-blue"),
+        ],
+    )
+    def test_aws_profile_rejects_arn_and_account_resource_labels(self, field: str, raw_value: str) -> None:
+        exporter = OTLPExporter()
+        config = {
+            "endpoint": "http://127.0.0.1:4317",
+            "service_name": "elspeth-web",
+            "deployment_environment": "production",
+            "cloud_provider": "aws",
+            field: raw_value,
+        }
+
+        with pytest.raises(TelemetryExporterError, match=field) as caught:
+            exporter.configure(config)
+
+        assert raw_value not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("service_name", "elspeth-web"),
+            ("service_name", "orders.api_v2"),
+            pytest.param("service_name", "s" * 128, id="service-128-char-boundary"),
+            ("deployment_environment", "production"),
+            ("deployment_environment", "prod-blue"),
+            pytest.param("deployment_environment", "e" * 128, id="environment-128-char-boundary"),
+        ],
+    )
+    def test_aws_profile_accepts_safe_resource_labels(self, field: str, value: str) -> None:
+        exporter = OTLPExporter()
+        config = {
+            "endpoint": "http://127.0.0.1:4317",
+            "service_name": "elspeth-web",
+            "deployment_environment": "production",
+            "cloud_provider": "aws",
+            field: value,
+        }
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure(config)
+
+        attribute_name = "service.name" if field == "service_name" else "deployment.environment"
+        assert exporter.resource.attributes[attribute_name] == value
+
+    def test_non_aws_profile_preserves_generic_resource_labels(self) -> None:
+        exporter = OTLPExporter()
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure(
+                {
+                    "endpoint": "http://127.0.0.1:4317",
+                    "service_name": "team/service:blue",
+                    "deployment_environment": "staging/eu:1",
+                }
+            )
+
+        assert exporter.resource.attributes["service.name"] == "team/service:blue"
+        assert exporter.resource.attributes["deployment.environment"] == "staging/eu:1"
+
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
             ("service_version", "arn:aws:ecr:ap-southeast-2:123456789012:repository/elspeth"),
             ("aws_ecs_cluster_name", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/elspeth-production"),
             ("aws_ecs_service_name", "elspeth-123456789012-service"),

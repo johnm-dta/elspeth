@@ -27,6 +27,7 @@ from opentelemetry.sdk.resources import Resource
 from elspeth import __version__
 from elspeth.core.config import ElspethSettings, ExporterSettings, TelemetrySettings
 from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS
+from elspeth.telemetry.resource_identity import is_aws_resource_label
 from elspeth.web.config import WebSettings
 
 AWS_OTLP_ENDPOINT = "http://127.0.0.1:4317"
@@ -252,6 +253,12 @@ _runtime_lock = threading.Lock()
 
 
 def _required_aws_resource_identity(settings: WebSettings) -> dict[str, str]:
+    for field_name, value in (
+        ("operator_telemetry_service_name", settings.operator_telemetry_service_name),
+        ("operator_telemetry_environment", settings.operator_telemetry_environment),
+    ):
+        if value is not None and not is_aws_resource_label(value):
+            raise ValueError(f"{field_name} must be a bounded AWS-safe resource label without ARN or account identity")
     configured = {
         "service.version": settings.operator_telemetry_release,
         "aws.ecs.cluster.name": settings.operator_telemetry_ecs_cluster,
@@ -287,7 +294,7 @@ def _wire_health_instruments(provider: _Provider, health: _ExportHealth) -> None
     meter.create_observable_gauge(
         "operator.telemetry.queue_drops",
         callbacks=[lambda _options: [Observation(health.queue_drops)]],
-        description="Cumulative task-local metric queue drops.",
+        description="Cumulative pipeline telemetry enqueue and backpressure losses.",
     )
     meter.create_observable_gauge(
         "operator.telemetry.collector_unavailable",
@@ -297,7 +304,7 @@ def _wire_health_instruments(provider: _Provider, health: _ExportHealth) -> None
 
 
 def record_operator_pipeline_queue_drops(count: int) -> None:
-    """Add one completed pipeline manager's real drop count to operator health."""
+    """Add one completed pipeline manager's queue-only losses to operator health."""
 
     if type(count) is not int or count < 0:
         raise ValueError("operator pipeline queue drop count must be a non-negative integer")

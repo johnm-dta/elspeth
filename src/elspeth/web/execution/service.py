@@ -1795,7 +1795,7 @@ class ExecutionServiceImpl:
                 if self._settings.deployment_target == "aws-ecs":
                     from elspeth.web.operator_telemetry import record_operator_pipeline_queue_drops
 
-                    record_operator_pipeline_queue_drops(telemetry_manager.health_metrics["events_dropped"])
+                    record_operator_pipeline_queue_drops(telemetry_manager.health_metrics["queue_drops"])
             self._broadcaster.cleanup_run(run_id)
         return None
 

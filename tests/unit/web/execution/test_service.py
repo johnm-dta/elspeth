@@ -1331,7 +1331,7 @@ telemetry:
         # This integration test exercises Landscape persistence and ordering;
         # transport delivery itself is covered by test_operator_telemetry.py.
         telemetry_manager = MagicMock()
-        telemetry_manager.health_metrics = {"events_dropped": 3}
+        telemetry_manager.health_metrics = {"events_dropped": 3, "queue_drops": 1}
         with (
             patch("elspeth.telemetry.create_telemetry_manager", return_value=telemetry_manager),
             patch("elspeth.web.operator_telemetry.record_operator_pipeline_queue_drops") as record_queue_drops,
@@ -1339,7 +1339,7 @@ telemetry:
             service._run_pipeline(run_id, pipeline_yaml, threading.Event())
 
         telemetry_manager.close.assert_called_once_with()
-        record_queue_drops.assert_called_once_with(3)
+        record_queue_drops.assert_called_once_with(1)
 
         db = LandscapeDB.from_url(mock_settings.landscape_url, create_tables=False)
         try:

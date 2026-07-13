@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationInfo, 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
-from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_task_revision, is_release_identity
+from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_resource_label, is_aws_task_revision, is_release_identity
 from elspeth.web.auth.urls import (
     validate_oidc_browser_endpoints,
     validate_oidc_browser_origins,
@@ -580,6 +580,18 @@ class WebSettings(BaseModel):
         if not value.strip() or value != value.strip() or len(value) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError(f"{field_name} must be a non-blank bounded string without control characters")
         return value
+
+    @model_validator(mode="after")
+    def _validate_aws_operator_resource_labels(self) -> WebSettings:
+        if self.operator_telemetry != "aws-otlp" and self.deployment_target != "aws-ecs":
+            return self
+        for field_name, value in (
+            ("operator_telemetry_service_name", self.operator_telemetry_service_name),
+            ("operator_telemetry_environment", self.operator_telemetry_environment),
+        ):
+            if value is not None and not is_aws_resource_label(value):
+                raise ValueError(f"{field_name} must be a bounded AWS-safe resource label without ARN or account identity")
+        return self
 
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> WebSettings:

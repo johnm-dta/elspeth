@@ -167,6 +167,7 @@ class TestInitialization:
             assert metrics["events_failed"] == 0
             assert metrics["events_emitted"] == 0
             assert metrics["events_dropped"] == 0
+            assert metrics["queue_drops"] == 0
             assert metrics["consecutive_total_failures"] == 0
         finally:
             manager.close()
@@ -433,7 +434,7 @@ class TestDropBackpressure:
                     object.__setattr__(manager, "_dispatch_to_exporters", original_dispatch)
                 manager.close()
 
-    def test_drop_mode_increments_events_dropped(self) -> None:
+    def test_drop_mode_increments_overall_and_queue_only_drops(self) -> None:
         with patch("elspeth.telemetry.manager.INTERNAL_DEFAULTS", _small_queue_defaults()):
             config = MockTelemetryConfig(backpressure_mode=BackpressureMode.DROP)
             exporter = TelemetryTestExporter()
@@ -456,8 +457,10 @@ class TestDropBackpressure:
                 manager.handle_event(_lifecycle_event())
 
                 initial_dropped = manager.health_metrics["events_dropped"]
+                initial_queue_drops = manager.health_metrics["queue_drops"]
                 manager.handle_event(_lifecycle_event())
                 assert manager.health_metrics["events_dropped"] > initial_dropped
+                assert manager.health_metrics["queue_drops"] > initial_queue_drops
             finally:
                 if "blocker" in locals() and not blocker.is_set():
                     blocker.set()
@@ -494,6 +497,7 @@ class TestDropBackpressure:
                 self._queue = q
                 self._dropped_lock = threading.Lock()
                 self._events_dropped = 0
+                self._queue_drops = 0
                 self._last_logged_drop_count = 0
 
             def _log_drops_if_needed(self) -> None:
@@ -570,6 +574,7 @@ class TestDropBackpressure:
                 self._queue = q
                 self._dropped_lock = threading.Lock()
                 self._events_dropped = 0
+                self._queue_drops = 0
                 self._last_logged_drop_count = 0
 
             def _log_drops_if_needed(self) -> None:
@@ -586,6 +591,7 @@ class TestDropBackpressure:
         assert queued is None
         q.task_done()
         assert dummy._events_dropped == 2
+        assert dummy._queue_drops == 2
 
     def test_drop_mode_degrades_gracefully_when_sentinel_requeue_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Sentinel requeue failure degrades to dropped event, never raises."""
@@ -599,6 +605,7 @@ class TestDropBackpressure:
                 self._queue = q
                 self._dropped_lock = threading.Lock()
                 self._events_dropped = 0
+                self._queue_drops = 0
                 self._last_logged_drop_count = 0
 
             def _log_drops_if_needed(self) -> None:
@@ -623,6 +630,7 @@ class TestDropBackpressure:
 
         # Event counted as dropped (not silently swallowed)
         assert dummy._events_dropped == 1
+        assert dummy._queue_drops == 1
 
 
 # =============================================================================
@@ -818,6 +826,7 @@ class TestTotalExporterFailure:
             manager.handle_event(_lifecycle_event())
             _wait_for_processing(manager)
             assert manager.health_metrics["events_dropped"] == 1
+            assert manager.health_metrics["queue_drops"] == 0
             assert manager.health_metrics["events_emitted"] == 0
         finally:
             manager.close()
@@ -948,6 +957,7 @@ class TestHealthMetrics:
                 "events_failed",
                 "events_emitted",
                 "events_dropped",
+                "queue_drops",
                 "exporter_failures",
                 "consecutive_total_failures",
                 "queue_depth",

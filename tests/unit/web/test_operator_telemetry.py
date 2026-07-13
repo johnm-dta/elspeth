@@ -280,7 +280,36 @@ def test_process_bootstrap_aws_adds_one_fixed_otlp_reader_and_safe_resource() ->
     }
 
 
-def test_pipeline_manager_drop_facts_are_observed_by_operator_queue_drop_gauge() -> None:
+@pytest.mark.parametrize(
+    ("field", "raw_value"),
+    [
+        ("operator_telemetry_service_name", "arn:aws:ecs:ap-southeast-2:123456789012:service/elspeth-web"),
+        ("operator_telemetry_service_name", "123456789012"),
+        ("operator_telemetry_service_name", "elspeth-123456789012-web"),
+        ("operator_telemetry_environment", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/production"),
+        ("operator_telemetry_environment", "123456789012"),
+        ("operator_telemetry_environment", "prod-123456789012-blue"),
+    ],
+)
+def test_aws_bootstrap_defensively_rejects_unvalidated_resource_labels(field: str, raw_value: str) -> None:
+    settings = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
+    ).model_copy(update={field: raw_value})
+
+    with pytest.raises(ValueError, match=field) as caught:
+        bootstrap_operator_telemetry(settings, factories=_factories({}))
+
+    assert raw_value not in str(caught.value)
+
+
+def test_pipeline_exporter_failures_are_excluded_from_operator_queue_drop_gauge() -> None:
     record: dict[str, object] = {}
     settings = _web_settings(
         deployment_target="aws-ecs",
@@ -309,12 +338,37 @@ def test_pipeline_manager_drop_facts_are_observed_by_operator_queue_drop_gauge()
         )
         manager.flush()
         assert manager.health_metrics["events_dropped"] == 1
+        assert manager.health_metrics["queue_drops"] == 0
 
-        record_operator_pipeline_queue_drops(manager.health_metrics["events_dropped"])
+        record_operator_pipeline_queue_drops(manager.health_metrics["queue_drops"])
 
-        assert gauge_callback(None)[0].value == 1
+        assert gauge_callback(None)[0].value == 0
     finally:
         manager.close()
+
+
+def test_pipeline_queue_drop_fact_is_observed_by_operator_queue_drop_gauge() -> None:
+    record: dict[str, object] = {}
+    runtime = bootstrap_operator_telemetry(
+        _web_settings(
+            deployment_target="aws-ecs",
+            operator_telemetry="aws-otlp",
+            operator_telemetry_environment="production",
+            operator_telemetry_release="git-deadbeef",
+            operator_telemetry_ecs_cluster="elspeth-production",
+            operator_telemetry_ecs_service="elspeth-web",
+            operator_telemetry_task_definition_family="elspeth-web-task",
+            operator_telemetry_task_definition_revision="42",
+        ),
+        factories=_factories(record),
+    )
+    provider = runtime.provider
+    assert isinstance(provider, _FakeProvider)
+    gauge_callback = provider.gauges["operator.telemetry.queue_drops"][0]
+
+    record_operator_pipeline_queue_drops(1)
+
+    assert gauge_callback(None)[0].value == 1
 
 
 @pytest.mark.asyncio

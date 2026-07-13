@@ -36,10 +36,14 @@ exporter, empty headers, and best-effort failure policy.
 Store these two files in the deployment repository under a versioned
 `telemetry/elspeth.cloudwatch-agent.v1/` directory. Compute both digests with
 `sha256sum "$AGENT_CONFIG_JSON" "$AGENT_OTEL_YAML"`, record them in the
-reviewed task-definition manifest, and have the sidecar entrypoint verify the
-files before starting. A mismatch is a deployment failure. The task definition
-must refer to that exact manifest version; mutable “latest” configuration is
-not accepted.
+reviewed task-definition manifest, and render each non-secret file as
+single-line base64 plus its lowercase SHA-256 into the sidecar environment.
+Base64 is transport encoding, not a credential or secrecy mechanism. The
+sidecar entrypoint decodes both files into its task-local writable directory,
+verifies both hashes before use, then runs the agent's required `fetch-config`
+followed by `append-config` sequence. A mismatch or either control-script
+failure stops the sidecar. The task definition must refer to that exact
+manifest version; mutable “latest” configuration is not accepted.
 
 CloudWatch Agent JSON (`elspeth.cloudwatch-agent.v1.json`):
 
@@ -112,7 +116,10 @@ into an unreviewed retention surface.
 
 Resolve an approved CloudWatch Agent repository and its 64-lowercase-hex
 digest into `CLOUDWATCH_AGENT_IMAGE_SHA256`. The rendered image reference must
-contain the digest and no tag:
+contain the digest and no tag. The approved ECS runtime variant must include
+the AWS control script plus `/bin/sh`, `base64`, `sha256sum`, `grep`, and
+`sleep`; those are part of the reviewed image contract and are exercised by
+the entrypoint below:
 
 ```json
 {
@@ -122,8 +129,16 @@ contain the digest and no tag:
       "image": "${CLOUDWATCH_AGENT_IMAGE_REPOSITORY}@sha256:${CLOUDWATCH_AGENT_IMAGE_SHA256}",
       "essential": false,
       "memoryReservation": 192,
+      "entryPoint": ["/bin/sh", "-ceu"],
+      "command": ["CONFIG_DIR=/tmp/elspeth-cloudwatch-agent; CTL=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl; mkdir -p \"$CONFIG_DIR\"; printf '%s' \"$ELSPETH_CW_AGENT_CONFIG_JSON_B64\" | base64 -d > \"/tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.json\"; printf '%s' \"$ELSPETH_CW_AGENT_OTEL_YAML_B64\" | base64 -d > \"/tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.otel.yaml\"; printf '%s\\n' \"$ELSPETH_CW_AGENT_CONFIG_JSON_SHA256  /tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.json\" | sha256sum -c -; printf '%s\\n' \"$ELSPETH_CW_AGENT_OTEL_YAML_SHA256  /tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.otel.yaml\" | sha256sum -c -; \"$CTL\" -a fetch-config -m auto -c \"file:/tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.json\" -s; \"$CTL\" -a append-config -m auto -c \"file:/tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.otel.yaml\" -s; while \"$CTL\" -a status -m auto | grep -q '\"status\": \"running\"'; do sleep 30; done; exit 1"],
+      "environment": [
+        {"name": "ELSPETH_CW_AGENT_CONFIG_JSON_B64", "value": "${CLOUDWATCH_AGENT_CONFIG_JSON_B64}"},
+        {"name": "ELSPETH_CW_AGENT_CONFIG_JSON_SHA256", "value": "${CLOUDWATCH_AGENT_CONFIG_JSON_SHA256}"},
+        {"name": "ELSPETH_CW_AGENT_OTEL_YAML_B64", "value": "${CLOUDWATCH_AGENT_OTEL_YAML_B64}"},
+        {"name": "ELSPETH_CW_AGENT_OTEL_YAML_SHA256", "value": "${CLOUDWATCH_AGENT_OTEL_YAML_SHA256}"}
+      ],
       "healthCheck": {
-        "command": ["CMD-SHELL", "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -m ecs -a status >/dev/null"],
+        "command": ["CMD-SHELL", "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status -m auto | grep -q '\"status\": \"running\"'"],
         "interval": 10,
         "timeout": 5,
         "retries": 6,

@@ -1133,6 +1133,38 @@ class TestFlush:
         finally:
             manager.close()
 
+    def test_flush_counts_deferred_event_delivered_when_any_exporter_succeeds(self) -> None:
+        failed_sdk = MagicMock()
+        failed_sdk.export.return_value = SpanExportResult.FAILURE
+        successful_sdk = MagicMock()
+        successful_sdk.export.return_value = SpanExportResult.SUCCESS
+        failed_exporter = OTLPExporter()
+        successful_exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            side_effect=[failed_sdk, successful_sdk],
+        ):
+            failed_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+            successful_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[failed_exporter, successful_exporter])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            assert manager._pending_deferred_events == 1
+
+            manager.flush()
+
+            metrics = manager.health_metrics
+            assert metrics["events_delivered"] == 1
+            assert metrics["events_emitted"] == 1
+            assert metrics["events_failed"] == 0
+            assert metrics["events_dropped"] == 0
+            assert manager._pending_deferred_events == 0
+            failed_sdk.export.assert_called_once()
+            successful_sdk.export.assert_called_once()
+        finally:
+            manager.close()
+
 
 # =============================================================================
 # Close

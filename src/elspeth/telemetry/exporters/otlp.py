@@ -18,6 +18,7 @@ import structlog
 from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
+from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_task_revision, is_release_identity
 from elspeth.telemetry.serialization import (
     SyntheticReadableSpan,
     derive_trace_id,
@@ -218,6 +219,21 @@ class OTLPExporter:
         aws_ecs_service_name = _validate_resource_identity("aws_ecs_service_name", config.get("aws_ecs_service_name"), required=False)
         aws_ecs_task_family = _validate_resource_identity("aws_ecs_task_family", config.get("aws_ecs_task_family"), required=False)
         aws_ecs_task_revision = _validate_resource_identity("aws_ecs_task_revision", config.get("aws_ecs_task_revision"), required=False)
+
+        aws_identity_configured = cloud_provider == "aws" or any(
+            value is not None for value in (aws_ecs_cluster_name, aws_ecs_service_name, aws_ecs_task_family, aws_ecs_task_revision)
+        )
+        if service_version is not None and aws_identity_configured and not is_release_identity(service_version):
+            raise _configuration_error("service_version", "must be a bounded AWS release identity, not an ARN or account identity")
+        for field, value in (
+            ("aws_ecs_cluster_name", aws_ecs_cluster_name),
+            ("aws_ecs_service_name", aws_ecs_service_name),
+            ("aws_ecs_task_family", aws_ecs_task_family),
+        ):
+            if value is not None and not is_aws_ecs_name(value):
+                raise _configuration_error(field, "must be a name-only bounded AWS deployment identity")
+        if aws_ecs_task_revision is not None and not is_aws_task_revision(aws_ecs_task_revision):
+            raise _configuration_error("aws_ecs_task_revision", "must be a positive bounded task-definition revision")
 
         from opentelemetry.sdk.resources import Resource
 

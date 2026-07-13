@@ -1792,6 +1792,10 @@ class ExecutionServiceImpl:
                 rate_limit_registry.close()
             if telemetry_manager is not None:
                 telemetry_manager.close()
+                if self._settings.deployment_target == "aws-ecs":
+                    from elspeth.web.operator_telemetry import record_operator_pipeline_queue_drops
+
+                    record_operator_pipeline_queue_drops(telemetry_manager.health_metrics["events_dropped"])
             self._broadcaster.cleanup_run(run_id)
         return None
 

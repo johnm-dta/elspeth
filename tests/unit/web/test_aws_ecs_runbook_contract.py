@@ -46,6 +46,48 @@ def test_runbook_pins_task_local_nonessential_healthy_sidecar() -> None:
     assert "127.0.0.1:4317" in _text()
 
 
+def test_runbook_wires_versioned_config_into_executable_sidecar_startup() -> None:
+    task = next(document for document in _json_documents() if isinstance(document, dict) and "containerDefinitions" in document)
+    sidecar = next(container for container in task["containerDefinitions"] if container["name"] == "cloudwatch-agent")
+
+    assert sidecar["entryPoint"] == ["/bin/sh", "-ceu"]
+    environment = {entry["name"]: entry["value"] for entry in sidecar["environment"]}
+    assert environment == {
+        "ELSPETH_CW_AGENT_CONFIG_JSON_B64": "${CLOUDWATCH_AGENT_CONFIG_JSON_B64}",
+        "ELSPETH_CW_AGENT_CONFIG_JSON_SHA256": "${CLOUDWATCH_AGENT_CONFIG_JSON_SHA256}",
+        "ELSPETH_CW_AGENT_OTEL_YAML_B64": "${CLOUDWATCH_AGENT_OTEL_YAML_B64}",
+        "ELSPETH_CW_AGENT_OTEL_YAML_SHA256": "${CLOUDWATCH_AGENT_OTEL_YAML_SHA256}",
+    }
+    assert len(sidecar["command"]) == 1
+    script = sidecar["command"][0]
+    json_path = "/tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.json"
+    otel_path = "/tmp/elspeth-cloudwatch-agent/elspeth.cloudwatch-agent.v1.otel.yaml"
+    assert f'base64 -d > "{json_path}"' in script
+    assert f'base64 -d > "{otel_path}"' in script
+    json_verify = f'"$ELSPETH_CW_AGENT_CONFIG_JSON_SHA256  {json_path}" | sha256sum -c -'
+    otel_verify = f'"$ELSPETH_CW_AGENT_OTEL_YAML_SHA256  {otel_path}" | sha256sum -c -'
+    fetch = f'-a fetch-config -m auto -c "file:{json_path}" -s'
+    append = f'-a append-config -m auto -c "file:{otel_path}" -s'
+    assert json_verify in script
+    assert otel_verify in script
+    assert fetch in script
+    assert append in script
+    assert script.index(json_verify) < script.index(fetch)
+    assert script.index(otel_verify) < script.index(append)
+    assert script.index(fetch) < script.index(append)
+
+
+def test_runbook_uses_supported_auto_mode_for_running_agent_health() -> None:
+    task = next(document for document in _json_documents() if isinstance(document, dict) and "containerDefinitions" in document)
+    sidecar = next(container for container in task["containerDefinitions"] if container["name"] == "cloudwatch-agent")
+
+    assert sidecar["healthCheck"]["command"] == [
+        "CMD-SHELL",
+        '/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status -m auto | grep -q \'"status": "running"\'',
+    ]
+    assert "-m ecs" not in json.dumps(sidecar)
+
+
 def test_runbook_has_versioned_hashed_bounded_agent_config() -> None:
     text = _text()
     for required in (

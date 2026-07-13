@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from opentelemetry.sdk.metrics.export import MetricExportResult
 
+from elspeth.contracts.events import RunStarted
 from elspeth.core.config import TelemetrySettings
+from elspeth.telemetry.manager import TelemetryManager
 from elspeth.web.config import WebSettings
 from elspeth.web.operator_telemetry import (
     AWS_OTLP_ENDPOINT,
@@ -16,8 +19,10 @@ from elspeth.web.operator_telemetry import (
     OperatorTelemetryFactories,
     apply_operator_pipeline_telemetry,
     bootstrap_operator_telemetry,
+    record_operator_pipeline_queue_drops,
     reset_operator_telemetry_for_tests,
 )
+from tests.fixtures.telemetry import FailingExporter, MockTelemetryConfig
 
 
 def _web_settings(**overrides: object) -> WebSettings:
@@ -175,6 +180,14 @@ class _FakeProvider:
     force_flush_calls: list[float] = field(default_factory=list)
     shutdown_calls: list[float] = field(default_factory=list)
     force_flush_error: BaseException | None = None
+    gauges: dict[str, list[Any]] = field(default_factory=dict)
+
+    def get_meter(self, _name: str, _version: str) -> _FakeProvider:
+        return self
+
+    def create_observable_gauge(self, name: str, *, callbacks: list[Any], **_kwargs: object) -> object:
+        self.gauges[name] = callbacks
+        return object()
 
     def force_flush(self, timeout_millis: float = 10_000) -> bool:
         self.force_flush_calls.append(timeout_millis)
@@ -265,6 +278,43 @@ def test_process_bootstrap_aws_adds_one_fixed_otlp_reader_and_safe_resource() ->
         "aws.ecs.task.family": "elspeth-web-task",
         "aws.ecs.task.revision": "42",
     }
+
+
+def test_pipeline_manager_drop_facts_are_observed_by_operator_queue_drop_gauge() -> None:
+    record: dict[str, object] = {}
+    settings = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
+    )
+    runtime = bootstrap_operator_telemetry(settings, factories=_factories(record))
+    provider = runtime.provider
+    assert isinstance(provider, _FakeProvider)
+    gauge_callback = provider.gauges["operator.telemetry.queue_drops"][0]
+    assert gauge_callback(None)[0].value == 0
+    manager = TelemetryManager(MockTelemetryConfig(), exporters=[FailingExporter()])
+    try:
+        manager.handle_event(
+            RunStarted(
+                timestamp=datetime(2026, 7, 14, tzinfo=UTC),
+                run_id="run-dropped",
+                config_hash="config-hash",
+                source_plugin="text",
+            )
+        )
+        manager.flush()
+        assert manager.health_metrics["events_dropped"] == 1
+
+        record_operator_pipeline_queue_drops(manager.health_metrics["events_dropped"])
+
+        assert gauge_callback(None)[0].value == 1
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio

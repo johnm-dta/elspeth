@@ -314,6 +314,34 @@ class TestOTLPExporterConfiguration:
             "aws.ecs.task.revision": "42",
         }
 
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("service_version", "arn:aws:ecr:ap-southeast-2:123456789012:repository/elspeth"),
+            ("aws_ecs_cluster_name", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/elspeth-production"),
+            ("aws_ecs_service_name", "elspeth-123456789012-service"),
+            ("aws_ecs_task_family", "task-definition/elspeth-web"),
+            ("aws_ecs_task_revision", "123456789012"),
+        ],
+    )
+    def test_aws_resource_identity_rejects_arns_accounts_and_non_names(self, field: str, raw_value: str) -> None:
+        exporter = OTLPExporter()
+        config = {
+            "endpoint": "http://127.0.0.1:4317",
+            "service_version": "git-deadbeef",
+            "cloud_provider": "aws",
+            "aws_ecs_cluster_name": "elspeth-production",
+            "aws_ecs_service_name": "elspeth-web",
+            "aws_ecs_task_family": "elspeth-web-task",
+            "aws_ecs_task_revision": "42",
+            field: raw_value,
+        }
+
+        with pytest.raises(TelemetryExporterError, match=field) as caught:
+            exporter.configure(config)
+
+        assert raw_value not in str(caught.value)
+
 
 class TestOTLPExporterBuffering:
     """Tests for event buffering and batch export."""

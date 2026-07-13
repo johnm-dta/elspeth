@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationInfo, 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
+from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_task_revision, is_release_identity
 from elspeth.web.auth.urls import (
     validate_oidc_browser_endpoints,
     validate_oidc_browser_origins,
@@ -551,7 +552,16 @@ class WebSettings(BaseModel):
             return None
         field_name = info.field_name
         assert field_name is not None
-        return cls._validate_operator_resource_identity(field_name, value)
+        value = cls._validate_operator_resource_identity(field_name, value)
+        if field_name == "operator_telemetry_release":
+            valid = is_release_identity(value)
+        elif field_name == "operator_telemetry_task_definition_revision":
+            valid = is_aws_task_revision(value)
+        else:
+            valid = is_aws_ecs_name(value)
+        if not valid:
+            raise ValueError(f"{field_name} must be a bounded AWS deployment identity without ARN or account identity")
+        return value
 
     @field_validator("operator_telemetry_export_interval_seconds", mode="before")
     @classmethod

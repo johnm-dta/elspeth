@@ -99,9 +99,10 @@ def _production_factories() -> OperatorTelemetryFactories:
 class _ExportHealth:
     attempted: int = 0
     failures: int = 0
-    queue_drops: int = 0
     consecutive_failures: int = 0
     last_success_monotonic: float | None = None
+    _queue_drops: int = 0
+    _queue_drops_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def success(self) -> None:
         self.attempted += 1
@@ -112,6 +113,15 @@ class _ExportHealth:
         self.attempted += 1
         self.failures += 1
         self.consecutive_failures += 1
+
+    @property
+    def queue_drops(self) -> int:
+        with self._queue_drops_lock:
+            return self._queue_drops
+
+    def record_queue_drops(self, count: int) -> None:
+        with self._queue_drops_lock:
+            self._queue_drops += count
 
 
 def _safe_point_attributes(attributes: Mapping[str, object] | None) -> Mapping[str, object] | None:
@@ -286,6 +296,18 @@ def _wire_health_instruments(provider: _Provider, health: _ExportHealth) -> None
     )
 
 
+def record_operator_pipeline_queue_drops(count: int) -> None:
+    """Add one completed pipeline manager's real drop count to operator health."""
+
+    if type(count) is not int or count < 0:
+        raise ValueError("operator pipeline queue drop count must be a non-negative integer")
+    with _runtime_lock:
+        runtime = _runtime
+    if runtime is None or runtime.mode != "aws-otlp" or count == 0:
+        return
+    runtime.health.record_queue_drops(count)
+
+
 def bootstrap_operator_telemetry(
     settings: WebSettings,
     *,
@@ -388,5 +410,6 @@ __all__ = [
     "OperatorTelemetryRuntime",
     "apply_operator_pipeline_telemetry",
     "bootstrap_operator_telemetry",
+    "record_operator_pipeline_queue_drops",
     "reset_operator_telemetry_for_tests",
 ]

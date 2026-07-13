@@ -377,6 +377,43 @@ class TestOperatorTelemetrySettings:
         assert "p" * 129 not in str(caught.value)
 
     @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("operator_telemetry_release", "arn:aws:ecr:ap-southeast-2:123456789012:repository/elspeth"),
+            ("operator_telemetry_ecs_cluster", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/elspeth-production"),
+            ("operator_telemetry_ecs_service", "elspeth-123456789012-service"),
+            ("operator_telemetry_task_definition_family", "task-definition/elspeth-web"),
+            ("operator_telemetry_task_definition_revision", "123456789012"),
+        ],
+    )
+    def test_aws_deployment_identity_rejects_arns_accounts_and_non_names(self, field: str, raw_value: str) -> None:
+        with pytest.raises(ValidationError, match=field) as caught:
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **{field: raw_value},
+            )
+
+        assert raw_value not in str(caught.value)
+
+    def test_aws_release_accepts_valid_digest_with_numeric_run(self) -> None:
+        digest = "sha256:" + "a" + "123456789012" + ("b" * 51)
+
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+            operator_telemetry_release=digest,
+        )
+
+        assert settings.operator_telemetry_release == digest
+
+    @pytest.mark.parametrize(
         "field",
         [
             "operator_telemetry_endpoint",

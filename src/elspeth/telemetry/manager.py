@@ -550,6 +550,20 @@ class TelemetryManager:
             },
         }
 
+    def _reconcile_deferred_delivery(self, *, delivered: int, failed: int, dropped: int) -> None:
+        """Resolve shared pending events once after all exporters report deltas."""
+
+        delivered = min(delivered, self._pending_deferred_events)
+        unresolved = self._pending_deferred_events - delivered
+        failed = min(failed, unresolved)
+        dropped = min(dropped, unresolved)
+        self._events_delivered += delivered
+        self._events_emitted += delivered
+        self._events_failed += failed
+        with self._dropped_lock:
+            self._events_dropped += dropped
+        self._pending_deferred_events -= delivered + max(failed, dropped)
+
     def flush(self) -> None:
         """Wait for queue to drain, then flush exporters.
 
@@ -574,24 +588,17 @@ class TelemetryManager:
             finally:
                 self._stored_exception = None  # Clear to allow recovery
 
+        delivered_on_flush = 0
+        failed_on_flush = 0
+        dropped_on_flush = 0
         for exporter in self._exporters:
             try:
                 before = _exporter_delivery_metrics(exporter)
                 result = exporter.flush()
                 after = _exporter_delivery_metrics(exporter)
-                delivered_delta = _metric_delta(before, after, "delivered")
-                failed_delta = _metric_delta(before, after, "failed")
-                if delivered_delta:
-                    delivered = min(delivered_delta, self._pending_deferred_events)
-                    self._events_delivered += delivered
-                    self._events_emitted += delivered
-                    self._pending_deferred_events -= delivered
-                if failed_delta:
-                    failed = min(failed_delta, self._pending_deferred_events)
-                    self._events_failed += failed
-                    with self._dropped_lock:
-                        self._events_dropped += failed
-                    self._pending_deferred_events -= failed
+                delivered_on_flush = max(delivered_on_flush, _metric_delta(before, after, "delivered"))
+                failed_on_flush = max(failed_on_flush, _metric_delta(before, after, "failed"))
+                dropped_on_flush = max(dropped_on_flush, _metric_delta(before, after, "dropped"))
                 if result is False:
                     breaker = self._circuit_breakers[id(exporter)]
                     breaker.record_failure()
@@ -609,6 +616,8 @@ class TelemetryManager:
                     exporter=exporter.name,
                     error_type=type(e).__name__,
                 )
+
+        self._reconcile_deferred_delivery(delivered=delivered_on_flush, failed=failed_on_flush, dropped=dropped_on_flush)
 
     def close(self) -> None:
         """Shutdown export thread and close exporters.
@@ -693,16 +702,7 @@ class TelemetryManager:
                     error_type=type(e).__name__,
                 )
 
-        delivered = min(delivered_on_close, self._pending_deferred_events)
-        unresolved = self._pending_deferred_events - delivered
-        failed = min(failed_on_close, unresolved)
-        dropped = min(dropped_on_close, unresolved)
-        self._events_delivered += delivered
-        self._events_emitted += delivered
-        self._events_failed += failed
-        with self._dropped_lock:
-            self._events_dropped += dropped
-        self._pending_deferred_events -= delivered + max(failed, dropped)
+        self._reconcile_deferred_delivery(delivered=delivered_on_close, failed=failed_on_close, dropped=dropped_on_close)
 
 
 def _exporter_delivery_metrics(exporter: ExporterProtocol) -> dict[str, int | None] | None:

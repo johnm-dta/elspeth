@@ -866,7 +866,7 @@ class TestSchemaCompatibilityGuards:
         import sqlalchemy
 
         instance = _make_instance(f"sqlite:///{tmp_path / 'safe_descriptor_shape.db'}")
-        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"
+        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"  # secret-scan: allow-this-line -- fake redaction-test sentinels
 
         inspector = _InspectorFake(
             table_names=["runs"],
@@ -1394,7 +1394,7 @@ class TestJournalPathGuards:
         assert "auth_events" in tables
         assert epoch == SQLITE_SCHEMA_EPOCH
 
-    def test_from_url_create_tables_false_allows_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
+    def test_from_url_create_tables_false_rejects_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
         """Read-only opens tolerate the additive auth-events table absence."""
         db_path = tmp_path / "readonly_missing_auth_events_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
@@ -1404,8 +1404,8 @@ class TestJournalPathGuards:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
-        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
-        db.close()
+        with pytest.raises(SchemaCompatibilityError):
+            LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(engine).get_table_names())
@@ -1438,7 +1438,7 @@ class TestJournalPathGuards:
         assert "run_attributions" in tables
         assert epoch == SQLITE_SCHEMA_EPOCH
 
-    def test_from_url_create_tables_false_allows_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
+    def test_from_url_create_tables_false_rejects_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
         """Read-only opens tolerate the additive run-attributions table absence."""
         db_path = tmp_path / "readonly_missing_run_attributions_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
@@ -1448,8 +1448,8 @@ class TestJournalPathGuards:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
-        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
-        db.close()
+        with pytest.raises(SchemaCompatibilityError):
+            LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(engine).get_table_names())

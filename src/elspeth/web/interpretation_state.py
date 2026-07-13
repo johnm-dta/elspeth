@@ -466,10 +466,9 @@ def prompt_shield_state_for_node(
     - ``"C"`` — no upstream shield and no shield available (``shield_available is
       False``): high-risk "reconsider" advisory.
 
-    The caller resolves ``shield_available`` from deployment context (see
-    :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`);
-    the contract default when availability is undeterminable is ``False`` (State C,
-    fail-safe).
+    The caller resolves ``shield_available`` from the principal's frozen plugin
+    snapshot; the contract default when availability is undeterminable is
+    ``False`` (State C, fail-safe).
     """
 
     if node.plugin != "llm":
@@ -498,9 +497,8 @@ def refine_prompt_shield_warnings_for_availability(
     Args:
         warnings: Sequence of already-serialised warning dicts
             (``{"component": str, "message": str, "severity": str}``).
-        shield_available: ``True`` iff
-            :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`
-            returned ``True`` for this request.
+        shield_available: ``True`` iff the request snapshot selected a usable
+            prompt-shield implementation.
     """
     result: list[dict[str, Any]] = [dict(entry) for entry in warnings]
     if not shield_available:

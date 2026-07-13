@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from elspeth.contracts.enums import DerivedAuditCharacteristics
-from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, ControlMode, PluginCapability, WebConfigAuthority
 
 PluginKind = Literal["source", "transform", "sink"]
 
@@ -118,3 +118,27 @@ class PluginSchemaInfo(_StrictResponse):
     secret_requirements: tuple[PluginSecretRequirement, ...] = ()
     web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
     policy_capabilities: tuple[CapabilityDeclaration, ...] = ()
+
+
+class PluginPolicyCapabilityGroup(_StrictResponse):
+    capability: PluginCapability
+    available_plugin_ids: tuple[str, ...]
+
+
+class PluginPolicySelection(_StrictResponse):
+    capability: PluginCapability
+    plugin_id: str | None
+
+
+class PluginPolicyControlMode(_StrictResponse):
+    capability: PluginCapability
+    mode: ControlMode
+
+
+class PluginPolicyResponse(_StrictResponse):
+    snapshot_fingerprint: str
+    policy_hash: str
+    available_plugin_ids: tuple[str, ...]
+    capability_groups: tuple[PluginPolicyCapabilityGroup, ...]
+    selections: tuple[PluginPolicySelection, ...]
+    control_modes: tuple[PluginPolicyControlMode, ...]

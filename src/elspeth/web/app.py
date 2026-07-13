@@ -1025,11 +1025,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         policy=app.state.web_plugin_policy,
         settings=app.state.runtime_web_plugin_config,
     )
-    app.include_router(
-        catalog_router,
-        prefix="/api/catalog",
-        dependencies=[Depends(get_current_user)],
-    )
+    app.include_router(catalog_router, prefix="/api/catalog")
 
     # --- Auth provider setup ---
     auth_provider: AuthProvider
@@ -1126,8 +1122,22 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # --- Secret service ---
     user_secret_store = UserSecretStore(session_engine, settings.secret_key)
     server_secret_store = ServerSecretStore(settings.server_secret_allowlist)
+    app.state.user_secret_store = user_secret_store
+    app.state.server_secret_store = server_secret_store
     app.state.secret_service = WebSecretService(user_secret_store, server_secret_store)
     app.state.scoped_secret_resolver = ScopedSecretResolver(app.state.secret_service, settings.auth_provider)
+    from elspeth.web.plugin_policy.availability import RequestPluginSnapshotFactory
+
+    app.state.plugin_snapshot_factory = RequestPluginSnapshotFactory(
+        policy=app.state.web_plugin_policy,
+        catalog=app.state.catalog_service,
+        profiles=app.state.operator_profile_registry,
+        auth_provider=settings.auth_provider,
+        secret_service=app.state.secret_service,
+        server_store=server_secret_store,
+        user_store=user_secret_store,
+        generation_key=settings.secret_key.encode("utf-8"),
+    )
 
     # --- Composer service (singleton, not per-request) ---
     runtime_preflight_coordinator = RuntimePreflightCoordinator()

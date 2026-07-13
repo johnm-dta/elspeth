@@ -112,3 +112,38 @@ class PluginAvailabilitySnapshot:
     selected_profile_aliases: tuple[tuple[PluginId, str | None], ...]
     binding_generation_fingerprint: str
     snapshot_hash: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_hash: str,
+        principal_scope: str,
+        available: frozenset[PluginId],
+        unavailable: tuple[PluginAvailability, ...],
+        selected: tuple[tuple[PluginCapability, PluginId | None], ...],
+        usable_profile_aliases: tuple[tuple[PluginId, tuple[str, ...]], ...],
+        selected_profile_aliases: tuple[tuple[PluginId, str | None], ...],
+        binding_generation_fingerprint: str,
+    ) -> PluginAvailabilitySnapshot:
+        canonical = {
+            "policy_hash": policy_hash,
+            "principal_scope": principal_scope,
+            "available": sorted(map(str, available)),
+            "unavailable": [(str(item.plugin_id), item.reason.value) for item in sorted(unavailable)],
+            "selected": [(capability.value, None if plugin_id is None else str(plugin_id)) for capability, plugin_id in selected],
+            "usable_profile_aliases": [(str(plugin_id), list(aliases)) for plugin_id, aliases in usable_profile_aliases],
+            "selected_profile_aliases": [(str(plugin_id), alias) for plugin_id, alias in selected_profile_aliases],
+            "binding_generation_fingerprint": binding_generation_fingerprint,
+        }
+        return cls(
+            policy_hash=policy_hash,
+            principal_scope=principal_scope,
+            available=available,
+            unavailable=unavailable,
+            selected=selected,
+            usable_profile_aliases=usable_profile_aliases,
+            selected_profile_aliases=selected_profile_aliases,
+            binding_generation_fingerprint=binding_generation_fingerprint,
+            snapshot_hash=_canonical_hash(canonical),
+        )

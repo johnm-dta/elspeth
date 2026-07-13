@@ -4,13 +4,12 @@ import asyncio
 import json
 from typing import Literal
 
+from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.composer.guided.chat_solver import build_step_chat_context_block
 from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
 from elspeth.web.composer.protocol import ComposerService
-from elspeth.web.composer.tools._common import ToolContext
-from elspeth.web.composer.tools._shield_availability import azure_prompt_shield_available
 from elspeth.web.composer.tutorial_sample import (
     resolve_tutorial_sample_urls,
     tutorial_sample_base_url,
@@ -140,22 +139,14 @@ def _composition_content_hash(state: Any) -> str:
     )
 
 
-def _resolve_shield_available(request: Request, user_id: str) -> bool:
+def _resolve_shield_available(request: Request, user: UserIdentity) -> bool:
     """Resolve whether the authorized prompt-injection shield is available for this user.
 
-    Delegates to :func:`azure_prompt_shield_available` via the request's
-    configured ``scoped_secret_resolver``.  A configured ``None`` resolver still
-    returns ``False`` (State C); a missing app-state dependency is a wiring
-    error — see
-    :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`.
+    Uses the same principal snapshot as every other policy surface.  Missing
+    selection is the fail-safe State C result.
     """
-    return azure_prompt_shield_available(
-        ToolContext(
-            catalog=request.app.state.catalog_service,
-            secret_service=request.app.state.scoped_secret_resolver,
-            user_id=user_id,
-        )
-    )
+    snapshot = request.app.state.plugin_snapshot_factory(user)
+    return dict(snapshot.selected).get(PluginCapability.PROMPT_SHIELD) is not None
 
 
 def _guided_chat_wire_kind(status: ComposerChatTurnStatus) -> Literal["assistant", "synthetic_failure"]:
@@ -672,7 +663,7 @@ async def get_guided(
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.
             terminal = guided.terminal
-            shield_available = _resolve_shield_available(request, user.user_id)
+            shield_available = _resolve_shield_available(request, user)
             return GetGuidedResponse(
                 guided_session=GuidedSessionResponse(
                     step=guided.step.value,
@@ -1002,7 +993,7 @@ async def post_guided_reenter(
             provenance="convergence_persist",
         )
 
-        shield_available = _resolve_shield_available(request, user.user_id)
+        shield_available = _resolve_shield_available(request, user)
         terminal_response = (
             TerminalStateResponse(
                 kind=restored_terminal.kind.value,
@@ -1214,7 +1205,7 @@ async def post_guided_start(
             provenance="session_seed",
         )
 
-        shield_available = _resolve_shield_available(request, user.user_id)
+        shield_available = _resolve_shield_available(request, user)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=seeded_guided.step.value,
@@ -1904,7 +1895,7 @@ async def post_guided_respond(
             # Recorder persistence happens in the finally block below so
             # rejection paths drain identically to the success path.
 
-            shield_available = _resolve_shield_available(request, user.user_id)
+            shield_available = _resolve_shield_available(request, user)
             return GuidedRespondResponse(
                 guided_session=GuidedSessionResponse(
                     step=guided.step.value,
@@ -2181,7 +2172,7 @@ async def post_guided_chat(
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
     catalog: CatalogServiceProtocol = request.app.state.catalog_service
-    shield_available = _resolve_shield_available(request, user.user_id)
+    shield_available = _resolve_shield_available(request, user)
 
     # Tier-3 → Tier-2 coercion at the step_index boundary. A stale
     # client sending an unknown value gets a 400 with a clear message
@@ -3632,7 +3623,7 @@ async def post_guided_convert(
                         ) from exc
                 else:
                     turn = None
-                shield_available = _resolve_shield_available(request, user.user_id)
+                shield_available = _resolve_shield_available(request, user)
                 return GetGuidedResponse(
                     guided_session=GuidedSessionResponse(
                         step=guided.step.value,
@@ -3733,7 +3724,7 @@ async def post_guided_convert(
                 writer_principal="route_system_message",
             )
 
-        shield_available = _resolve_shield_available(request, user.user_id)
+        shield_available = _resolve_shield_available(request, user)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=seeded_guided.step.value,

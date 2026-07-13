@@ -150,6 +150,13 @@ def _settings(tmp_path: Path, database: _RuntimeDatabase) -> WebSettings:
         directory.chmod(0o700)
     settings = WebSettings(
         deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="test",
+        operator_telemetry_release="git-test",
+        operator_telemetry_ecs_cluster="elspeth-test",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="1",
         host="0.0.0.0",
         session_db_url=database.session_runtime_url,
         landscape_url=database.landscape_runtime_url,

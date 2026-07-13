@@ -162,6 +162,13 @@ def _settings(tmp_path: Path, *, session_url: str, landscape_url: str) -> WebSet
         directory.chmod(0o700)
     return WebSettings(
         deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="test",
+        operator_telemetry_release="git-test",
+        operator_telemetry_ecs_cluster="elspeth-test",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="1",
         host="0.0.0.0",
         data_dir=data_dir,
         payload_store_path=payload_dir,

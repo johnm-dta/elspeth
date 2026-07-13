@@ -126,7 +126,7 @@ def probe_current_schema(bind: Engine | Connection) -> bool:
     return True
 
 
-def _stamp_schema_sentinels(engine: Engine) -> None:
+def _stamp_schema_sentinels(bind: Engine | Connection) -> None:
     """Write SESSION_DB_APPLICATION_ID and SESSION_SCHEMA_EPOCH onto a
     freshly-created session DB.
 
@@ -135,12 +135,16 @@ def _stamp_schema_sentinels(engine: Engine) -> None:
     written once at create time. The startup validator reads them back
     on every subsequent open.
     """
-    if engine.dialect.name != "sqlite":
+    if bind.dialect.name != "sqlite":
         return
-    with engine.connect() as conn:
-        conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
-        conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
-        conn.commit()
+    if isinstance(bind, Connection):
+        bind.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
+        bind.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+    else:
+        with bind.connect() as conn:
+            conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
+            conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+            conn.commit()
 
 
 def _assert_schema_sentinels(bind: Engine | Connection) -> None:

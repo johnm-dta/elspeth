@@ -3014,6 +3014,66 @@ class TestComposerAvailabilityAndBadRequest:
         assert "leaked-detail" not in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_bedrock_bad_request_raises_redacted_service_error(self) -> None:
+        """Bedrock provider detail stays off every default/public surface."""
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+        from structlog.testing import capture_logs
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings(composer_model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        access_key = "AKIA" + ("Z" * 16)
+        sentinels = (
+            "BEDROCK-RAW-DETAIL-SENTINEL",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/example",
+            "123456789012",
+            "bedrock-request-7d3c2b1a",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/example/invoke",
+            access_key,
+        )
+        bad_request = LiteLLMBadRequestError(
+            message=" ".join(sentinels),
+            model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            llm_provider="bedrock",
+        )
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ),
+            capture_logs() as captured_logs,
+            pytest.raises(_BadRequestLLMError) as exc_info,
+        ):
+            await service.compose("Hello", [], state)
+
+        exc = exc_info.value
+        assert str(exc) == "LLM request rejected (BadRequestError)"
+        public_surfaces = [str(exc), repr(exc), repr(captured_logs)]
+        llm_calls = exc.__dict__["llm_calls"]
+        assert isinstance(llm_calls, tuple)
+        assert len(llm_calls) == 1
+        public_surfaces.extend(
+            [
+                llm_calls[0].error_class or "",
+                llm_calls[0].error_message or "",
+            ]
+        )
+        for sentinel in sentinels:
+            assert all(sentinel not in surface for surface in public_surfaces)
+
+        assert llm_calls[0].error_class == "BadRequestError"
+        assert llm_calls[0].error_message == "BadRequestError"
+        # Raw detail remains available only through the existing explicit
+        # operator-facing opt-in path; it is not part of default rendering.
+        assert exc.provider_detail is not None
+        assert all(sentinel in exc.provider_detail for sentinel in sentinels)
+
+    @pytest.mark.asyncio
     async def test_bad_request_llm_error_preserves_provider_detail(self) -> None:
         """``_BadRequestLLMError`` carries the underlying provider message.
 

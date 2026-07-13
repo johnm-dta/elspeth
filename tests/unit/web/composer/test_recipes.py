@@ -31,6 +31,8 @@ from elspeth.web.composer.recipes import (
     list_recipes,
     recipe_catalog_content_hash,
 )
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 # --------------------------------------------------------------------------
 # Registry surface
@@ -39,7 +41,8 @@ from elspeth.web.composer.recipes import (
 
 class TestRecipeRegistry:
     def test_registered_recipes(self) -> None:
-        names = {r["name"] for r in list_recipes()}
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        names = {r["name"] for r in list_recipes(snapshot)}
         assert names == {
             "classify-rows-llm-jsonl",
             "split-by-numeric-threshold",
@@ -56,12 +59,39 @@ class TestRecipeRegistry:
         assert get_recipe("nonexistent") is None
 
     def test_list_recipes_includes_slot_metadata(self) -> None:
-        for entry in list_recipes():
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        for entry in list_recipes(snapshot):
             assert "slots" in entry
             for _slot_name, slot_meta in entry["slots"].items():
                 assert "type" in slot_meta
                 assert "required" in slot_meta
                 assert "description" in slot_meta
+
+    def test_recipe_listing_excludes_dependencies_missing_from_snapshot(self) -> None:
+        catalog = create_catalog_service()
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="recipe-policy",
+            principal_scope="local:alice",
+            available=unrestricted.available - {PluginId("transform", "llm")},
+            unavailable=(),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="recipe-policy-generation",
+        )
+
+        names = {entry["name"] for entry in list_recipes(snapshot)}
+
+        assert "classify-rows-llm-jsonl" not in names
+        assert "web-scrape-llm-rate-jsonl" not in names
+        assert "split-by-numeric-threshold" in names
+        assert "fork-coalesce-truncate-jsonl" in names
+
+    def test_dynamic_source_recipe_declares_csv_or_json_alternative(self) -> None:
+        spec = get_recipe("web-scrape-llm-rate-jsonl")
+        assert spec is not None
+        assert spec.alternative_plugin_groups == (frozenset({PluginId("source", "csv"), PluginId("source", "json")}),)
 
 
 # --------------------------------------------------------------------------
@@ -953,16 +983,20 @@ class TestApplyRecipeEndToEnd:
             )
         return engine, session_id, blob_id, tmp_path
 
-    def _catalog(self):
+    def _policy_context(self):
         # Real PluginManager so set_pipeline's prevalidation sees authentic
         # schemas for csv/llm/type_coerce/json. Mocking the catalog would
         # mask the schema-validity contract under test here.
         from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.web.catalog.policy_view import PolicyCatalogView
         from elspeth.web.catalog.service import CatalogServiceImpl
+        from elspeth.web.plugin_policy import PluginAvailabilitySnapshot
 
         pm = PluginManager()
         pm.register_builtin_plugins()
-        return CatalogServiceImpl(pm)
+        catalog = CatalogServiceImpl(pm)
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        return PolicyCatalogView.for_trained_operator(catalog, snapshot), snapshot
 
     def test_classify_recipe_passes_set_pipeline_prevalidation_and_drives_proof_step(self, _seeded) -> None:
         """The classify recipe must:
@@ -993,6 +1027,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1011,7 +1046,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1068,6 +1104,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1079,7 +1116,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1129,6 +1167,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1143,7 +1182,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1235,6 +1275,7 @@ class TestApplyRecipeEndToEnd:
             version=4,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1246,7 +1287,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             populated,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1300,6 +1342,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1311,7 +1354,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1361,6 +1405,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1372,7 +1417,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )

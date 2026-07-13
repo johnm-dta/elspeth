@@ -29,7 +29,7 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
 from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError, InvariantError
@@ -47,6 +47,7 @@ from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
 from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 # Server-owned source-option keys that the LLM must NEVER author. Both are
 # stamped authoritatively at commit (``blob_ref`` by ``handle_step_1_source``,
@@ -1082,7 +1083,8 @@ async def maybe_resolve_step_2_sink_chat(
     seed: int | None,
     recorder: BufferingRecorder | None = None,
     state: CompositionState | None = None,
-    catalog: CatalogService | None = None,
+    catalog: PolicyCatalogView | None = None,
+    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     max_discovery_iters: int | None = None,
@@ -1135,7 +1137,7 @@ async def maybe_resolve_step_2_sink_chat(
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
-    discovery_enabled = catalog is not None and state is not None
+    discovery_enabled = catalog is not None and plugin_snapshot is not None and state is not None
     discovery_defs = get_discovery_tool_definitions(_STEP_2_SINK_DISCOVERY_TOOL_NAMES) if discovery_enabled else []
     allowed_discovery = _STEP_2_SINK_DISCOVERY_TOOL_NAMES if discovery_enabled else frozenset()
     tools = [_STEP_2_SINK_TOOL, *discovery_defs]
@@ -1217,7 +1219,7 @@ async def maybe_resolve_step_2_sink_chat(
 
             # Thread the assistant tool-call request once, then answer every
             # call id with its result, or the next round 400s.
-            assert state is not None and catalog is not None  # implied by discovery_enabled
+            assert state is not None and catalog is not None and plugin_snapshot is not None  # implied by discovery_enabled
             await emit_progress(
                 progress,
                 tool_batch_progress_event(tuple(tc.function.name for tc in discovery_calls if tc.function is not None)),
@@ -1229,6 +1231,7 @@ async def maybe_resolve_step_2_sink_chat(
                         tool_call=tool_call,
                         state=state,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         secret_service=secret_service,
                         user_id=user_id,
                         actor=actor,

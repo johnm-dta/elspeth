@@ -5,6 +5,7 @@ import json
 from typing import Literal
 
 from elspeth.contracts.plugin_capabilities import PluginCapability
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.chat_solver import build_step_chat_context_block
 from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
@@ -15,6 +16,7 @@ from elspeth.web.composer.tutorial_sample import (
     tutorial_sample_base_url,
 )
 from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult
 from elspeth.web.sessions.schemas import StartGuidedRequest, TutorialSampleResponse
 
@@ -27,7 +29,6 @@ from .._helpers import (
     BlobQuotaExceededError,
     BlobServiceProtocol,
     BufferingRecorder,
-    CatalogServiceProtocol,
     ChatRole,
     ChatTurn,
     ChatTurnResponse,
@@ -78,6 +79,7 @@ from .._helpers import (
     _persist_tool_invocations,
     _publish_progress,
     _replace,
+    _request_plugin_policy_context,
     _safe_frame_strings,
     _state_from_record,
     _state_response,
@@ -139,13 +141,12 @@ def _composition_content_hash(state: Any) -> str:
     )
 
 
-def _resolve_shield_available(request: Request, user: UserIdentity) -> bool:
+def _resolve_shield_available(snapshot: PluginAvailabilitySnapshot) -> bool:
     """Resolve whether the authorized prompt-injection shield is available for this user.
 
     Uses the same principal snapshot as every other policy surface.  Missing
     selection is the fail-safe State C result.
     """
-    snapshot = request.app.state.plugin_snapshot_factory(user)
     return dict(snapshot.selected).get(PluginCapability.PROMPT_SHIELD) is not None
 
 
@@ -499,7 +500,7 @@ async def get_guided(
     """
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
-    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
     recorder = BufferingRecorder()
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
@@ -663,7 +664,7 @@ async def get_guided(
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.
             terminal = guided.terminal
-            shield_available = _resolve_shield_available(request, user)
+            shield_available = _resolve_shield_available(plugin_snapshot)
             return GetGuidedResponse(
                 guided_session=GuidedSessionResponse(
                     step=guided.step.value,
@@ -708,7 +709,7 @@ async def get_guided(
                 )
                 if terminal is not None
                 else None,
-                composition_state=_state_response(state_record_out) if state_record_out is not None else None,
+                composition_state=_state_response(state_record_out, policy_catalog=catalog) if state_record_out is not None else None,
             )
         finally:
             # PR-review B3: drain the recorder unconditionally — success
@@ -874,7 +875,7 @@ async def post_guided_reenter(
     """
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
-    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
     async with compose_lock:
@@ -993,7 +994,7 @@ async def post_guided_reenter(
             provenance="convergence_persist",
         )
 
-        shield_available = _resolve_shield_available(request, user)
+        shield_available = _resolve_shield_available(plugin_snapshot)
         terminal_response = (
             TerminalStateResponse(
                 kind=restored_terminal.kind.value,
@@ -1035,7 +1036,7 @@ async def post_guided_reenter(
             ),
             next_turn=_turn_payload_response(turn, shield_available=shield_available),
             terminal=terminal_response,
-            composition_state=_state_response(state_record_out),
+            composition_state=_state_response(state_record_out, policy_catalog=catalog),
         )
 
 
@@ -1073,7 +1074,7 @@ async def post_guided_start(
     """
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
-    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
     # Tier-3 -> Tier-2 coercion at the profile-kind boundary. A stale client
     # sending an unknown discriminator gets a 400 with a generic message
@@ -1159,7 +1160,7 @@ async def post_guided_start(
                     )
                     if terminal is not None
                     else None,
-                    composition_state=_state_response(existing_record),
+                    composition_state=_state_response(existing_record, policy_catalog=catalog),
                 )
             raise HTTPException(
                 status_code=409,
@@ -1205,7 +1206,7 @@ async def post_guided_start(
             provenance="session_seed",
         )
 
-        shield_available = _resolve_shield_available(request, user)
+        shield_available = _resolve_shield_available(plugin_snapshot)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=seeded_guided.step.value,
@@ -1238,7 +1239,7 @@ async def post_guided_start(
             ),
             next_turn=_turn_payload_response(turn, shield_available=shield_available),
             terminal=None,
-            composition_state=_state_response(state_record_out),
+            composition_state=_state_response(state_record_out, policy_catalog=catalog),
         )
 
 
@@ -1276,7 +1277,7 @@ async def post_guided_respond(
     """
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
-    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
     recorder = BufferingRecorder()
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
@@ -1462,7 +1463,7 @@ async def post_guided_respond(
                     ),
                     next_turn=None,
                     terminal=new_terminal_response,
-                    composition_state=_state_response(state_record_out),
+                    composition_state=_state_response(state_record_out, policy_catalog=catalog),
                 )
 
             # Reject if session already terminal (any case not handled by
@@ -1741,6 +1742,7 @@ async def post_guided_respond(
                         current_turn_type=current_turn_type,
                         turn_response=turn_response,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         recorder=recorder,
                         user_id=user.user_id,
                         data_dir=data_dir,
@@ -1895,7 +1897,7 @@ async def post_guided_respond(
             # Recorder persistence happens in the finally block below so
             # rejection paths drain identically to the success path.
 
-            shield_available = _resolve_shield_available(request, user)
+            shield_available = _resolve_shield_available(plugin_snapshot)
             return GuidedRespondResponse(
                 guided_session=GuidedSessionResponse(
                     step=guided.step.value,
@@ -1940,7 +1942,7 @@ async def post_guided_respond(
                 )
                 if terminal is not None
                 else None,
-                composition_state=_state_response(state_record_out),
+                composition_state=_state_response(state_record_out, policy_catalog=catalog),
             )
         finally:
             # PR-review B3: drain the recorder unconditionally — success
@@ -2050,6 +2052,7 @@ async def _build_guided_chat_apply_response(
     session_id: UUID,
     state_record: CompositionStateRecord | None,
     shield_available: bool,
+    policy_catalog: PolicyCatalogView,
 ) -> tuple[GuidedChatResponse, CompositionStateRecord]:
     """Persist the in-place-applied state and build the chat-apply response.
 
@@ -2121,7 +2124,7 @@ async def _build_guided_chat_apply_response(
         ),
         next_turn=_turn_payload_response(next_turn, shield_available=shield_available),
         terminal=None,
-        composition_state=_state_response(state_record_out),
+        composition_state=_state_response(state_record_out, policy_catalog=policy_catalog),
     )
     return response, state_record_out
 
@@ -2171,8 +2174,8 @@ async def post_guided_chat(
     """
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
-    catalog: CatalogServiceProtocol = request.app.state.catalog_service
-    shield_available = _resolve_shield_available(request, user)
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
+    shield_available = _resolve_shield_available(plugin_snapshot)
 
     # Tier-3 → Tier-2 coercion at the step_index boundary. A stale
     # client sending an unknown value gets a 400 with a clear message
@@ -2344,6 +2347,7 @@ async def post_guided_chat(
                             session=guided,
                             resolved=uploaded_source,
                             catalog=catalog,
+                            plugin_snapshot=plugin_snapshot,
                             data_dir=uploaded_data_dir,
                             session_engine=request.app.state.session_engine,
                             session_id=str(session_id),
@@ -2470,6 +2474,7 @@ async def post_guided_chat(
                                 session_id=session_id,
                                 state_record=state_record,
                                 shield_available=shield_available,
+                                policy_catalog=catalog,
                             )
                             return response
 
@@ -2555,6 +2560,7 @@ async def post_guided_chat(
                         session=guided,
                         resolved=resolved,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         data_dir=data_dir,
                         session_engine=request.app.state.session_engine,
                         session_id=str(session_id),
@@ -2728,6 +2734,7 @@ async def post_guided_chat(
                         session_id=session_id,
                         state_record=state_record,
                         shield_available=shield_available,
+                        policy_catalog=catalog,
                     )
                     return response
 
@@ -2749,6 +2756,7 @@ async def post_guided_chat(
                         # list_sinks / get_plugin_schema before it resolves.
                         state=state,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         secret_service=request.app.state.scoped_secret_resolver,
                         max_discovery_iters=settings.composer_max_discovery_turns,
                         timeout_seconds=settings.composer_timeout_seconds,
@@ -2792,6 +2800,7 @@ async def post_guided_chat(
                         session=guided,
                         resolved=sink_resolution,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         data_dir=data_dir,
                     )
                     if not handler_result.tool_result.success:
@@ -2946,6 +2955,7 @@ async def post_guided_chat(
                         session_id=session_id,
                         state_record=state_record,
                         shield_available=shield_available,
+                        policy_catalog=catalog,
                     )
                     return response
 
@@ -3017,6 +3027,7 @@ async def post_guided_chat(
                             # transform plugins + schemas before re-proposing.
                             state=state,
                             catalog=catalog,
+                            plugin_snapshot=plugin_snapshot,
                             secret_service=request.app.state.scoped_secret_resolver,
                             user_id=user.user_id,
                             max_discovery_iters=settings.composer_max_discovery_turns,
@@ -3130,6 +3141,7 @@ async def post_guided_chat(
                             session_id=session_id,
                             state_record=state_record,
                             shield_available=shield_available,
+                            policy_catalog=catalog,
                         )
                         return response
 
@@ -3331,7 +3343,7 @@ async def post_guided_chat(
                 ),
                 next_turn=None,
                 terminal=None,
-                composition_state=_state_response(state_record_out),
+                composition_state=_state_response(state_record_out, policy_catalog=catalog),
             )
         except asyncio.CancelledError as exc:
             # Disconnect-initiated cancellation (the watcher on the
@@ -3576,7 +3588,7 @@ async def post_guided_convert(
     """
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
-    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
     async with compose_lock:
@@ -3623,7 +3635,7 @@ async def post_guided_convert(
                         ) from exc
                 else:
                     turn = None
-                shield_available = _resolve_shield_available(request, user)
+                shield_available = _resolve_shield_available(plugin_snapshot)
                 return GetGuidedResponse(
                     guided_session=GuidedSessionResponse(
                         step=guided.step.value,
@@ -3668,7 +3680,7 @@ async def post_guided_convert(
                     )
                     if terminal is not None
                     else None,
-                    composition_state=_state_response(state_record),
+                    composition_state=_state_response(state_record, policy_catalog=catalog),
                 )
 
         # Branches 1 & 3: seed a FRESH guided wizard.
@@ -3724,7 +3736,7 @@ async def post_guided_convert(
                 writer_principal="route_system_message",
             )
 
-        shield_available = _resolve_shield_available(request, user)
+        shield_available = _resolve_shield_available(plugin_snapshot)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=seeded_guided.step.value,
@@ -3736,5 +3748,5 @@ async def post_guided_convert(
             ),
             next_turn=_turn_payload_response(turn, shield_available=shield_available),
             terminal=None,
-            composition_state=_state_response(state_record_out) if state_record_out is not None else None,
+            composition_state=_state_response(state_record_out, policy_catalog=catalog) if state_record_out is not None else None,
         )

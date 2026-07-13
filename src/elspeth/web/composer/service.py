@@ -109,6 +109,7 @@ from elspeth.web.composer.protocol import (
     ToolArgumentError,
 )
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
+from elspeth.web.composer.recipes import RecipeValidationError, get_recipe, unavailable_recipe_plugin
 from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
 from elspeth.web.composer.state import CompositionState, NodeSpec, ValidationSummary
 from elspeth.web.composer.tools import (
@@ -2024,6 +2025,14 @@ class ComposerServiceImpl:
 
         match = match_freeform_recipe_intent(message)
         if match is None or match.inline_blob is None:
+            return None
+        recipe = get_recipe(match.recipe_name)
+        if recipe is None:
+            return None
+        try:
+            if unavailable_recipe_plugin(recipe, plugin_snapshot, raw_slots=match.slots) is not None:
+                return None
+        except RecipeValidationError:
             return None
 
         sessions_service = self._sessions_service

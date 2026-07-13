@@ -23,12 +23,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, finish_success
 from elspeth.web.composer.discovery_cache import serialize_tool_result
 from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import execute_tool
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _assistant_tool_calls_message(message: Any, tool_calls: Any) -> dict[str, Any]:
@@ -58,7 +59,8 @@ def _execute_discovery_call(
     *,
     tool_call: Any,
     state: CompositionState,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     secret_service: WebSecretResolver | None,
     user_id: str | None,
     actor: str,
@@ -92,7 +94,15 @@ def _execute_discovery_call(
     if not isinstance(parsed, Mapping):
         raise ChainSolverResponseShapeError(f"{name} arguments must decode to an object; got {type(parsed).__name__}")
     arguments = dict(parsed)
-    result = execute_tool(name, arguments, state, catalog, secret_service=secret_service, user_id=user_id)
+    result = execute_tool(
+        name,
+        arguments,
+        state,
+        catalog,
+        plugin_snapshot=plugin_snapshot,
+        secret_service=secret_service,
+        user_id=user_id,
+    )
     if recorder is not None:
         audit = begin_dispatch(tool_call.id, name, arguments, version_before=state.version, actor=actor)
         invocation = finish_success(audit, result_payload=result.to_dict(), version_after=state.version)

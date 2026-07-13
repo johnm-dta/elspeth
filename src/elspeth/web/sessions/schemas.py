@@ -231,6 +231,15 @@ class ProposalEventResponse(_StrictResponse):
     created_at: datetime
 
 
+class PluginPolicyFindingResponse(_StrictResponse):
+    """Sanitized current-policy finding for one persisted component."""
+
+    component_id: str
+    plugin_id: str
+    reason_code: str
+    snapshot_fingerprint: str
+
+
 class CompositionStateResponse(_StrictResponse):
     """Response for composition state endpoints."""
 
@@ -253,6 +262,7 @@ class CompositionStateResponse(_StrictResponse):
     # ``implicit_decisions``. ``None`` is honest for revert/fork paths and
     # for historical states written before this surface existed.
     composer_meta: CompositionObject | None = None
+    plugin_policy_findings: list[PluginPolicyFindingResponse] = pydantic.Field(default_factory=list)
 
 
 class ForkSessionRequest(_RequestModel):

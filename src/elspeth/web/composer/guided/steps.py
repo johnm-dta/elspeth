@@ -6,7 +6,7 @@ freeform tools.py handlers. Handlers do NOT decide what to commit —
 that's the route handler's job. They translate already-resolved data
 into ToolResult calls.
 
-Handlers thread CatalogService and data_dir from the route handler;
+Handlers thread a request policy catalog, snapshot, and data_dir from the route handler;
 they never touch HTTP, session storage, or audit emission directly.
 """
 
@@ -22,7 +22,7 @@ from typing import Any, cast
 from sqlalchemy import Engine
 
 from elspeth.contracts.trust_boundary import trust_boundary
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedStep
 from elspeth.web.composer.guided.state_machine import (
@@ -48,6 +48,7 @@ from elspeth.web.composer.tools import (
 )
 from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.paths import allowed_source_directories, resolve_data_path
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +132,8 @@ def handle_step_1_source(
     state: CompositionState,
     session: GuidedSession,
     resolved: SourceResolved,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     data_dir: str | None = None,
     session_engine: Engine | None = None,
     session_id: str | None = None,
@@ -198,7 +200,11 @@ def handle_step_1_source(
         "on_validation_failure": commit_resolved.on_validation_failure,
     }
 
-    tool_result = _execute_set_source(args, state, ToolContext(catalog=catalog, data_dir=data_dir))
+    tool_result = _execute_set_source(
+        args,
+        state,
+        ToolContext(catalog=catalog, plugin_snapshot=plugin_snapshot, data_dir=data_dir),
+    )
 
     if not tool_result.success:
         return StepHandlerResult(
@@ -339,7 +345,8 @@ def handle_step_2_sink(
     state: CompositionState,
     session: GuidedSession,
     resolved: SinkResolved,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     data_dir: str | None = None,
 ) -> StepHandlerResult:
     """Commit each resolved sink output via _execute_set_output.
@@ -378,7 +385,11 @@ def handle_step_2_sink(
             "options": _sink_options_with_step_2_schema_contract(output),
             "on_write_failure": "discard",
         }
-        tool_result = _execute_set_output(args, current_state, ToolContext(catalog=catalog, data_dir=data_dir))
+        tool_result = _execute_set_output(
+            args,
+            current_state,
+            ToolContext(catalog=catalog, plugin_snapshot=plugin_snapshot, data_dir=data_dir),
+        )
         if not tool_result.success:
             return StepHandlerResult(
                 state=entry_state,
@@ -491,7 +502,8 @@ def handle_step_3_chain_accept(
     state: CompositionState,
     session: GuidedSession,
     proposal: ChainProposal,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     data_dir: str | None = None,
     session_engine: Engine | None = None,
     session_id: str | None = None,
@@ -605,6 +617,7 @@ def handle_step_3_chain_accept(
         state,
         ToolContext(
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
             data_dir=data_dir,
             session_engine=session_engine,
             session_id=session_id,

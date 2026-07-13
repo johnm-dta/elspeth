@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
 from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.routes import create_blobs_router
@@ -29,6 +30,9 @@ from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -97,10 +101,49 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=b"\x00" * 32,
+        # The legacy guided happy-path fixtures intentionally exercise an
+        # identity transform.  Make that optional plugin explicitly part of
+        # this test operator's web policy; policy-rejection cases override the
+        # request snapshot with a restricted one.
+        plugin_allowlist=("transform:passthrough",),
+        llm_profiles={
+            "task-role": {
+                "provider": "bedrock",
+                "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            }
+        },
     )
     app.state.composer_service = None  # Not used in session router
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.catalog_service = create_catalog_service()
+    runtime_policy = RuntimeWebPluginConfig.from_settings(app.state.settings)
+    app.state.web_plugin_policy = compile_web_plugin_policy(
+        registry=get_shared_plugin_manager(),
+        settings=runtime_policy,
+    )
+    app.state.operator_profile_registry = OperatorProfileRegistry(
+        policy=app.state.web_plugin_policy,
+        settings=runtime_policy,
+    )
+
+    class _EmptyInventory:
+        def has_server_ref(self, name: str) -> bool:
+            return False
+
+        def has_user_ref(self, principal: str, name: str) -> bool:
+            return False
+
+        def has_ref(self, principal: str, name: str) -> bool:
+            return False
+
+    app.state.plugin_snapshot_factory = lambda user: build_plugin_snapshot(
+        policy=app.state.web_plugin_policy,
+        catalog=app.state.catalog_service,
+        profiles=app.state.operator_profile_registry,
+        principal_scope=f"local:{user.user_id}",
+        secret_inventory=_EmptyInventory(),
+        generation_key=b"guided-integration-policy-key",
+    )
 
     # Audit recorder for test inspection (Phase 3 Task 3.4 will wire this)
     app.state.composer_recorder = BufferingRecorder()

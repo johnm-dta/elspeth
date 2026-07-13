@@ -52,6 +52,7 @@ from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResu
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec, ValidationSummary
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.schemas import (
     RunAccounting,
     RunAccountingIntegrity,
@@ -66,6 +67,8 @@ from elspeth.web.execution.schemas import (
     ValidationResult as ValidationResultModel,
 )
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult, StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
@@ -534,6 +537,7 @@ def _make_app(
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
+    _install_restricted_plugin_policy(app)
 
     # Minimal stub for execution service — delete_session coordinates with
     # the per-session execution lock and then cleans it up after archiving.
@@ -543,6 +547,26 @@ def _make_app(
     app.include_router(router)
 
     return app, service
+
+
+def _install_restricted_plugin_policy(app: FastAPI, *hidden: PluginId) -> PluginAvailabilitySnapshot:
+    """Install one deterministic principal policy on a hand-rolled route app."""
+    catalog = create_catalog_service()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="session-route-policy",
+        principal_scope="local:alice",
+        available=unrestricted.available - set(hidden),
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="session-route-policy-generation",
+    )
+    app.state.catalog_service = catalog
+    app.state.operator_profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
+    return snapshot
 
 
 def test_get_composer_preferences_returns_defaults(test_client) -> None:
@@ -5039,6 +5063,110 @@ class TestRevertEndpoint:
 
 class TestYamlEndpoint:
     """Tests for GET /api/sessions/{id}/state/yaml."""
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_with_disabled_plugin_is_atomic(self, tmp_path: Path) -> None:
+        app, service = _make_app(tmp_path)
+        _install_restricted_plugin_policy(app, PluginId("sink", "database"))
+        client = TestClient(app)
+        session = await service.create_session("alice", "Policy atomicity", "local")
+        before = await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+            provenance="session_seed",
+        )
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      schema:
+        mode: observed
+    on_validation_failure: discard
+sinks:
+  main:
+    plugin: database
+    options: {}
+    on_write_failure: discard
+"""
+
+        response = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["error_code"] == "plugin_not_enabled"
+        after = await service.get_current_state(session.id)
+        assert after is not None
+        assert after.id == before.id
+        assert after.version == before.version
+
+    @pytest.mark.asyncio
+    async def test_saved_disabled_state_is_readable_and_exported_as_authored(self, tmp_path: Path) -> None:
+        app, service = _make_app(tmp_path)
+        snapshot = _install_restricted_plugin_policy(app, PluginId("transform", "llm"))
+        app.state.operator_profile_registry.lower_options.side_effect = AssertionError("export must not lower private bindings")
+        client = TestClient(app)
+        session = await service.create_session("alice", "Historical disabled plugin", "local")
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={
+                    "source": {
+                        "plugin": "csv",
+                        "on_success": "score",
+                        "options": {"schema": {"mode": "observed"}},
+                        "on_validation_failure": "discard",
+                    }
+                },
+                nodes=[
+                    {
+                        "id": "score",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "input": "source",
+                        "on_success": "main",
+                        "on_error": "discard",
+                        "options": {
+                            "profile": "task-role",
+                            "prompt_template": "Score {{ row }}",
+                            "schema": {"mode": "observed"},
+                        },
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "main",
+                        "plugin": "json",
+                        "options": {"path": "outputs/scored.jsonl"},
+                        "on_write_failure": "discard",
+                    }
+                ],
+                metadata_={"name": "Historical disabled plugin", "description": None},
+                is_valid=False,
+            ),
+            provenance="session_seed",
+        )
+
+        state_response = client.get(f"/api/sessions/{session.id}/state")
+        export_response = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert state_response.status_code == 200
+        body = state_response.json()
+        assert body["nodes"][0]["plugin"] == "llm"
+        assert body["plugin_policy_findings"] == [
+            {
+                "component_id": "score",
+                "plugin_id": "transform:llm",
+                "reason_code": "plugin_not_enabled",
+                "snapshot_fingerprint": snapshot.snapshot_hash,
+            }
+        ]
+        assert export_response.status_code == 200
+        exported_yaml = export_response.json()["yaml"]
+        assert "plugin: llm" in exported_yaml
+        assert "profile: task-role" in exported_yaml
+        assert "bedrock" not in exported_yaml
+        assert "credential" not in exported_yaml
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("invalid_component", ["source", "sink"])

@@ -20,7 +20,7 @@ from typing import Any
 import structlog
 
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.audit import emit_dropped_to_freeform
 from elspeth.web.composer.guided.chain_solver import ChainSolverResponseShapeError, solve_chain
@@ -34,6 +34,7 @@ from elspeth.web.composer.guided.state_machine import (
     mark_solver_exhausted,
 )
 from elspeth.web.composer.state import CompositionState
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 slog = structlog.get_logger()
 
@@ -84,7 +85,8 @@ async def solve_chain_with_auto_drop(
     temperature: float | None,
     seed: int | None,
     state: CompositionState | None = None,
-    catalog: CatalogService | None = None,
+    catalog: PolicyCatalogView | None = None,
+    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     secret_service: WebSecretResolver | None = None,
     max_discovery_iters: int | None = None,
     timeout_seconds: float | None = None,
@@ -175,6 +177,7 @@ async def solve_chain_with_auto_drop(
             seed=seed,
             state=state,
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
             secret_service=secret_service,
             user_id=user_id,
             max_discovery_iters=max_discovery_iters,

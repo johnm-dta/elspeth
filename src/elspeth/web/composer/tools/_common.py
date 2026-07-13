@@ -1254,7 +1254,13 @@ def _validate_plugin_name(
     name: str,
 ) -> PluginPolicyViolation | None:
     """Validate a new plugin selection against one request policy view."""
-    plugin_id = PluginId(plugin_type, name)
+    try:
+        plugin_id = PluginId(plugin_type, name)
+    except ValueError:
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.NOT_INSTALLED,
+            message=f"{plugin_type} plugin selection is unavailable ({PluginUnavailableReason.NOT_INSTALLED.value})",
+        )
     reason = context.catalog.unavailable_reason(plugin_id)
     if reason is not None:
         return PluginPolicyViolation(

@@ -30,7 +30,7 @@ import structlog
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import (
     AssistantScaffoldLeakError,
@@ -43,6 +43,7 @@ from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
 from elspeth.web.composer.state import CompositionState
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 slog = structlog.get_logger()
 
@@ -321,7 +322,8 @@ async def resolve_step_2_sink_chat_with_auto_drop(
     seed: int | None,
     recorder: BufferingRecorder | None = None,
     state: CompositionState | None = None,
-    catalog: CatalogService | None = None,
+    catalog: PolicyCatalogView | None = None,
+    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     secret_service: WebSecretResolver | None = None,
     max_discovery_iters: int | None = None,
     timeout_seconds: float | None = None,
@@ -361,6 +363,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             recorder=recorder,
             state=state,
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
             secret_service=secret_service,
             user_id=user_id,
             max_discovery_iters=max_discovery_iters,

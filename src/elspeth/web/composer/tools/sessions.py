@@ -24,6 +24,8 @@ from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
     apply_recipe,
+    get_recipe,
+    unavailable_recipe_plugin,
 )
 from elspeth.web.composer.redaction import (
     ApplyPipelineRecipeArgumentsModel,
@@ -791,6 +793,21 @@ def _execute_apply_pipeline_recipe(
             state,
             "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
         )
+
+    recipe = get_recipe(recipe_name)
+    if recipe is not None:
+        try:
+            unavailable = unavailable_recipe_plugin(recipe, context.plugin_snapshot, raw_slots=raw_slots)
+        except RecipeValidationError as exc:
+            return _failure_result(state, str(exc))
+        if unavailable is not None:
+            reason = context.catalog.unavailable_reason(unavailable)
+            error_code = "plugin_not_enabled" if reason is None else reason.value
+            return _failure_result(
+                state,
+                "This recipe is unavailable under the current plugin policy.",
+                error_code=error_code,
+            )
 
     try:
         pipeline_args = apply_recipe(recipe_name, dict(raw_slots))

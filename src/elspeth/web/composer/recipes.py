@@ -23,6 +23,7 @@ from uuid import UUID
 from elspeth.contracts.composer_slots import SlotSpec
 from elspeth.contracts.composer_slots import SlotType as SlotType
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,8 @@ class RecipeSpec:
     slots: Mapping[str, SlotSpec]
     build: Callable[[Mapping[str, Any]], Mapping[str, Any]]
     """Pure function: validated slots → set_pipeline-compatible args dict."""
+    required_plugins: frozenset[PluginId] = frozenset()
+    alternative_plugin_groups: tuple[frozenset[PluginId], ...] = ()
 
     def __post_init__(self) -> None:
         # ``frozen=True`` only blocks attribute reassignment; the underlying
@@ -840,6 +843,7 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE1_SLOTS,
         build=_build_classify_recipe,
+        required_plugins=frozenset({PluginId("source", "csv"), PluginId("transform", "llm"), PluginId("sink", "json")}),
     ),
     "split-by-numeric-threshold": RecipeSpec(
         name="split-by-numeric-threshold",
@@ -852,6 +856,7 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE2_SLOTS,
         build=_build_threshold_recipe,
+        required_plugins=frozenset({PluginId("source", "csv"), PluginId("transform", "type_coerce"), PluginId("sink", "json")}),
     ),
     "fork-coalesce-truncate-jsonl": RecipeSpec(
         name="fork-coalesce-truncate-jsonl",
@@ -868,6 +873,14 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE3_SLOTS,
         build=_build_fork_coalesce_truncate_recipe,
+        required_plugins=frozenset(
+            {
+                PluginId("source", "csv"),
+                PluginId("transform", "passthrough"),
+                PluginId("transform", "truncate"),
+                PluginId("sink", "json"),
+            }
+        ),
     ),
     "web-scrape-llm-rate-jsonl": RecipeSpec(
         name="web-scrape-llm-rate-jsonl",
@@ -883,12 +896,44 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE_WEB_SCRAPE_SLOTS,
         build=_build_web_scrape_recipe,
+        required_plugins=frozenset(
+            {
+                PluginId("transform", "web_scrape"),
+                PluginId("transform", "llm"),
+                PluginId("transform", "field_mapper"),
+                PluginId("sink", "json"),
+            }
+        ),
+        alternative_plugin_groups=(frozenset({PluginId("source", "csv"), PluginId("source", "json")}),),
     ),
 }
 
 
-def list_recipes() -> list[dict[str, Any]]:
-    """Return discovery metadata for every registered recipe."""
+def unavailable_recipe_plugin(
+    recipe: RecipeSpec,
+    snapshot: PluginAvailabilitySnapshot,
+    *,
+    raw_slots: Mapping[str, Any] | None = None,
+) -> PluginId | None:
+    """Return the first unavailable dependency, or ``None`` when usable."""
+    for plugin_id in sorted(recipe.required_plugins):
+        if plugin_id not in snapshot.available:
+            return plugin_id
+    if raw_slots is not None and isinstance(raw_slots.get("source_plugin"), str):
+        try:
+            selected_source = PluginId("source", raw_slots["source_plugin"])
+        except ValueError as exc:
+            raise RecipeValidationError("recipe source_plugin must be a registered source plugin id") from exc
+        if selected_source not in snapshot.available:
+            return selected_source
+    for alternatives in recipe.alternative_plugin_groups:
+        if alternatives.isdisjoint(snapshot.available):
+            return min(alternatives)
+    return None
+
+
+def list_recipes(snapshot: PluginAvailabilitySnapshot) -> list[dict[str, Any]]:
+    """Return discovery metadata for recipes usable in this snapshot."""
     return [
         {
             "name": spec.name,
@@ -904,6 +949,7 @@ def list_recipes() -> list[dict[str, Any]]:
             },
         }
         for spec in _RECIPES.values()
+        if unavailable_recipe_plugin(spec, snapshot) is None
     ]
 
 

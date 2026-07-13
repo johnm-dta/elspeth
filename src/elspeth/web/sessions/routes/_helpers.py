@@ -51,6 +51,7 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
 from elspeth.web.catalog.knob_schema import KnobField, KnobSchema
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer.audit import (
@@ -148,6 +149,7 @@ from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import (
@@ -201,6 +203,7 @@ from elspeth.web.sessions.schemas import (
     ListInterpretationEventsResponse,
     MessageWithStateResponse,
     OptOutSummaryResponse,
+    PluginPolicyFindingResponse,
     ProposalEventResponse,
     RejectProposalRequest,
     RevertStateRequest,
@@ -296,6 +299,16 @@ def _get_session_compose_lock_registry(request: Request) -> _SessionComposeLockR
 def _get_composer_progress_registry(request: Request) -> ComposerProgressRegistry:
     """Return the app-scoped composer progress registry."""
     return cast(ComposerProgressRegistry, request.app.state.composer_progress_registry)
+
+
+def _request_plugin_policy_context(
+    request: Request,
+    user: UserIdentity,
+) -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    """Build the one immutable plugin-policy context for this HTTP request."""
+    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    snapshot: PluginAvailabilitySnapshot = request.app.state.plugin_snapshot_factory(user)
+    return PolicyCatalogView(catalog, snapshot, request.app.state.operator_profile_registry), snapshot
 
 
 def _composer_progress_sink(
@@ -532,6 +545,8 @@ def _litellm_error_detail(
 def _state_response(
     state: CompositionStateRecord,
     live_validation: ValidationSummary | None = None,
+    *,
+    policy_catalog: PolicyCatalogView | None = None,
 ) -> CompositionStateResponse:
     """Convert a CompositionStateRecord to a CompositionStateResponse.
 
@@ -589,7 +604,45 @@ def _state_response(
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
         composer_meta=composer_meta_data,
+        plugin_policy_findings=_plugin_policy_findings(state, policy_catalog),
     )
+
+
+def _plugin_policy_findings(
+    state: CompositionStateRecord,
+    policy_catalog: PolicyCatalogView | None,
+) -> list[PluginPolicyFindingResponse]:
+    """Describe persisted components unavailable in the current snapshot."""
+    if policy_catalog is None:
+        return []
+    components: list[tuple[str, PluginId]] = []
+    for source_name, source in (state.sources or {}).items():
+        plugin_name = source.get("plugin")
+        if isinstance(plugin_name, str):
+            components.append((source_name, PluginId("source", plugin_name)))
+    for node in state.nodes or ():
+        plugin_name = node.get("plugin")
+        component_id = node.get("id")
+        if isinstance(plugin_name, str) and isinstance(component_id, str):
+            components.append((component_id, PluginId("transform", plugin_name)))
+    for output in state.outputs or ():
+        plugin_name = output.get("plugin")
+        component_id = output.get("name", output.get("sink_name"))
+        if isinstance(plugin_name, str) and isinstance(component_id, str):
+            components.append((component_id, PluginId("sink", plugin_name)))
+    findings: list[PluginPolicyFindingResponse] = []
+    for component_id, plugin_id in components:
+        reason = policy_catalog.unavailable_reason(plugin_id)
+        if reason is not None:
+            findings.append(
+                PluginPolicyFindingResponse(
+                    component_id=component_id,
+                    plugin_id=str(plugin_id),
+                    reason_code=reason.value,
+                    snapshot_fingerprint=policy_catalog.snapshot.snapshot_hash,
+                )
+            )
+    return findings
 
 
 def merge_composer_meta_updates(
@@ -2755,7 +2808,34 @@ def _reject_hidden_field_submissions(
 
     for opt_name, opt_value in submitted_options.items():
         if opt_name not in fields_by_name:
-            continue
+            # ``schema_config`` is the documented compatibility alias for the
+            # public ``schema`` field; the guided commit handler canonicalises
+            # it immediately after this visibility check.
+            if opt_name == "schema_config" and "schema" in fields_by_name:
+                continue
+            unexposed_predicate = {"field": "public_schema", "equals": "exposed"}
+            unexposed_actual_state = {"public_schema": "hidden"}
+            emit_hidden_field_rejected(
+                recorder,
+                session_id=session_id,
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                field=opt_name,
+                predicate=unexposed_predicate,
+                actual_state=unexposed_actual_state,
+                composition_version=composition_version,
+                actor=actor,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "hidden_field_submitted",
+                    "field": opt_name,
+                    "predicate": unexposed_predicate,
+                    "actual_state": unexposed_actual_state,
+                    "detail": f"Field {opt_name!r} is not exposed by the plugin's public configuration schema.",
+                },
+            )
         candidates = fields_by_name[opt_name]
         visible_candidates = [field for field in candidates if "visible_when" not in field]
         if visible_candidates:
@@ -2830,7 +2910,7 @@ def _reject_hidden_field_submissions(
 
 
 def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, value: Any) -> None:
-    if not any(field["kind"] == "blob-ref" for field in fields):
+    if not any(field.get("kind") == "blob-ref" for field in fields):
         return
     if value is None:
         return
@@ -2948,7 +3028,8 @@ async def _dispatch_guided_respond(
     current_step: GuidedStep,
     current_turn_type: TurnType,
     turn_response: Mapping[str, Any],
-    catalog: CatalogServiceProtocol,
+    catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     recorder: BufferingRecorder,
     user_id: str,
     data_dir: str | None,
@@ -3172,6 +3253,7 @@ async def _dispatch_guided_respond(
                 session=guided,
                 resolved=resolved,
                 catalog=catalog,
+                plugin_snapshot=plugin_snapshot,
                 data_dir=data_dir,
                 session_engine=session_engine,
                 session_id=session_id,
@@ -3289,6 +3371,7 @@ async def _dispatch_guided_respond(
                 session=guided,
                 resolved=resolved,
                 catalog=catalog,
+                plugin_snapshot=plugin_snapshot,
                 data_dir=data_dir,
                 session_engine=session_engine,
                 session_id=session_id,
@@ -3556,6 +3639,7 @@ async def _dispatch_guided_respond(
                 session=guided,
                 resolved=sink,
                 catalog=catalog,
+                plugin_snapshot=plugin_snapshot,
                 data_dir=data_dir,
             )
             if not sink_handler_result.tool_result.success:
@@ -3656,6 +3740,7 @@ async def _dispatch_guided_respond(
                     # the schema it tripped on instead of re-guessing blind.
                     state=state,
                     catalog=catalog,
+                    plugin_snapshot=plugin_snapshot,
                     secret_service=None,
                     max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
                     timeout_seconds=(settings.composer_timeout_seconds if settings is not None else None),
@@ -3748,6 +3833,7 @@ async def _dispatch_guided_respond(
                     session=guided,
                     proposal=guided.step_3_proposal,
                     catalog=catalog,
+                    plugin_snapshot=plugin_snapshot,
                     data_dir=data_dir,
                     session_engine=session_engine,
                     session_id=session_id,
@@ -3808,6 +3894,7 @@ async def _dispatch_guided_respond(
                         # + http.* nesting were the live failure).
                         state=state,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         secret_service=None,
                         max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
                         timeout_seconds=(settings.composer_timeout_seconds if settings is not None else None),
@@ -3822,6 +3909,7 @@ async def _dispatch_guided_respond(
                         session=guided,
                         proposal=repair_proposal,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         data_dir=data_dir,
                         session_engine=session_engine,
                         session_id=session_id,

@@ -265,7 +265,7 @@ export async function parseResponse<T>(
  * callable before login. Returns provider type and OIDC params.
  */
 export async function fetchAuthConfig(): Promise<AuthConfig> {
-  const response = await fetch("/api/auth/config");
+  const response = await fetch("/api/auth/config", { cache: "no-store" });
   return parseResponse<AuthConfig>(response);
 }
 

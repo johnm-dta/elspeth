@@ -92,6 +92,43 @@ def test_adversarial_endpoint_values_fail_closed(
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/.",
+        "/..",
+        "/%2e",
+        "/%2E",
+        "/.%2e",
+        "/%2e.",
+        "/%2e%2e",
+        "/%2E%2e",
+        "/oauth2/./authorize",
+        "/oauth2/%2E%2e/authorize",
+    ],
+)
+def test_endpoint_paths_reject_browser_normalized_dot_segments(path: str) -> None:
+    endpoint = f"https://issuer.example.com{path}"
+    with pytest.raises(ValueError, match="dot-segment") as raised:
+        validate_oidc_browser_endpoints(
+            endpoint,
+            "https://issuer.example.com/oauth2/token",
+            issuer="https://issuer.example.com/pool",
+        )
+    assert endpoint not in str(raised.value)
+
+
+def test_endpoint_paths_preserve_ordinary_non_root_segments() -> None:
+    assert validate_oidc_browser_endpoints(
+        "https://issuer.example.com/.well-known/authorize",
+        "https://issuer.example.com/oauth2/token.name",
+        issuer="https://issuer.example.com/pool",
+    ) == (
+        "https://issuer.example.com/.well-known/authorize",
+        "https://issuer.example.com/oauth2/token.name",
+    )
+
+
+@pytest.mark.parametrize(
     "origin",
     [
         "http://example.com",

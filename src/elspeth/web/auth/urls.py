@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from typing import NamedTuple
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, unquote_to_bytes, urlsplit
 
 from elspeth.core.security import SSRFBlockedError, validate_literal_ip_for_ssrf
 
@@ -48,6 +48,12 @@ def _validate_percent_encoding(value: str, *, field_name: str) -> None:
         index += 3
     if _ENCODED_URL_SEPARATOR.search(value):
         raise _static_error(field_name, "encoded-separator")
+
+
+def _validate_path_dot_segments(path: str, *, field_name: str) -> None:
+    for segment in path.split("/"):
+        if unquote_to_bytes(segment) in (b".", b".."):
+            raise _static_error(field_name, "dot-segment")
 
 
 def _canonical_host(parsed: SplitResult, *, field_name: str) -> str:
@@ -124,6 +130,7 @@ def _parse_browser_endpoint(raw_value: str, *, field_name: str) -> tuple[str, _O
     value, parsed, origin = _parse_https_url(raw_value, field_name=field_name)
     if not parsed.path or parsed.path == "/":
         raise _static_error(field_name, "non-root-path")
+    _validate_path_dot_segments(parsed.path, field_name=field_name)
     if parsed.query or parsed.fragment:
         raise _static_error(field_name, "no-query-or-fragment")
     return value, origin

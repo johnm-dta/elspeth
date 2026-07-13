@@ -965,6 +965,17 @@ class TestAuthConfigEndpoint:
             response = await client.get("/api/auth/config")
         assert response.status_code == 200
 
+    async def test_config_endpoint_is_not_cacheable(self) -> None:
+        provider = _FakeAuthProvider()
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+
+        async with _client_for(app) as client:
+            response = await client.get("/api/auth/config")
+
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Pragma"] == "no-cache"
+
 
 @pytest.mark.asyncio
 class TestTokenRefreshNonLocal:

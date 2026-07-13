@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { verifyEmail } from "./client";
+import { fetchAuthConfig, verifyEmail } from "./client";
 import { useAuthStore } from "@/stores/authStore";
 import { resetStore } from "@/test/store-helpers";
 
@@ -38,5 +38,27 @@ describe("api/client auth helpers", () => {
     expect(useAuthStore.getState().token).toBe("still-valid");
     expect(useAuthStore.getState().user).toEqual(user);
     expect(localStorage.getItem("auth_token")).toBe("still-valid");
+  });
+
+  it("bypasses browser caches when fetching auth authority metadata", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          provider: "oidc",
+          registration_mode: "closed",
+          oidc_issuer: "https://issuer.example.com/pool",
+          oidc_client_id: "public-client",
+          authorization_endpoint: "https://auth.example.com/oauth2/authorize",
+          token_endpoint: "https://auth.example.com/oauth2/token",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await fetchAuthConfig();
+
+    expect(globalThis.fetch).toHaveBeenCalledWith("/api/auth/config", {
+      cache: "no-store",
+    });
   });
 });

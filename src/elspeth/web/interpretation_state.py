@@ -20,8 +20,14 @@ from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_capabilities import ControlRole, PluginCapability
-from elspeth.plugins.infrastructure.manager import PluginNotFoundError, get_shared_plugin_manager
 from elspeth.web.composer.state import CompositionState, NodeSpec, SourceSpec
+from elspeth.web.plugin_policy.coverage import (
+    OutputStreamGraph as _OutputStreamGraph,
+)
+from elspeth.web.plugin_policy.coverage import (
+    build_output_stream_graph as _output_stream_graph,
+)
+from elspeth.web.plugin_policy.coverage import node_has_blocking_control
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 INTERPRETATION_REQUIREMENTS_KEY = "interpretation_requirements"
@@ -56,12 +62,6 @@ _RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerpr
 # prompt-injection-defence purposes. web_scrape returns whatever the fetched
 # page served, which is by definition untrusted.
 _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS: Final[frozenset[str]] = frozenset({"web_scrape"})
-
-# Transform plugins that constitute an authorized prompt-injection shield
-# sitting between an untrusted producer and a downstream LLM consumer.
-# Content-moderation (azure_content_safety) is deliberately NOT in this set:
-# content moderation and prompt-injection shielding are different controls.
-_NON_PRODUCED_ROUTE_TARGETS: Final[frozenset[str]] = frozenset({"discard", "fork"})
 
 AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
     {
@@ -303,57 +303,6 @@ def prompt_shield_recommendation_warning_pairs(
     return tuple(warnings)
 
 
-@dataclass(frozen=True, slots=True)
-class _OutputStreamGraph:
-    """Queue-aware producer graph for the prompt-injection-shield walkers.
-
-    ``producers_by_stream`` maps each output-stream name to the producers that
-    publish it (each declared queue is installed as the sole canonical producer
-    of its own stream). ``queue_predecessors`` maps a queue id to the distinct
-    producers that fan into it. Both are keyed on ``NodeSpec.id`` order so the
-    analysis is insertion-order invariant.
-    """
-
-    producers_by_stream: Mapping[str, tuple[NodeSpec, ...]]
-    queue_predecessors: Mapping[str, tuple[NodeSpec, ...]]
-
-
-def _output_stream_graph(nodes: Sequence[NodeSpec]) -> _OutputStreamGraph:
-    queue_ids = {node.id for node in nodes if node.node_type == "queue"}
-    ordinary: dict[str, dict[str, NodeSpec]] = {}
-    queue_predecessors: dict[str, dict[str, NodeSpec]] = {queue_id: {} for queue_id in queue_ids}
-
-    def register(stream: str | None, producer: NodeSpec) -> None:
-        if stream is None or stream == "" or stream in _NON_PRODUCED_ROUTE_TARGETS:
-            return
-        # A declared queue accepts many producers under its id: fan them into
-        # its predecessor set rather than overwriting a single-producer entry.
-        if stream in queue_ids and producer.id != stream:
-            queue_predecessors[stream].setdefault(producer.id, producer)
-            return
-        ordinary.setdefault(stream, {}).setdefault(producer.id, producer)
-
-    for node in nodes:
-        register(node.on_success, node)
-        register(node.on_error, node)
-        if node.routes is not None:
-            for route_target in node.routes.values():
-                register(route_target, node)
-        if node.fork_to is not None:
-            for fork_target in node.fork_to:
-                register(fork_target, node)
-
-    # Install each declared queue as the sole canonical producer of its stream.
-    for node in nodes:
-        if node.node_type == "queue":
-            ordinary[node.id] = {node.id: node}
-
-    return _OutputStreamGraph(
-        producers_by_stream={stream: tuple(entries[key] for key in sorted(entries)) for stream, entries in ordinary.items()},
-        queue_predecessors={queue_id: tuple(entries[key] for key in sorted(entries)) for queue_id, entries in queue_predecessors.items()},
-    )
-
-
 def _llm_consumes_untrusted_remote_content(
     node: NodeSpec,
     graph: _OutputStreamGraph,
@@ -381,18 +330,7 @@ def _stream_reaches_untrusted(stream: str | None, graph: _OutputStreamGraph, vis
 
 def _is_effective_prompt_shield(node: NodeSpec) -> bool:
     """Credit only a registered transform's typed, blocking INPUT control."""
-    if node.plugin is None:
-        return False
-    try:
-        plugin_cls = get_shared_plugin_manager().get_transform_by_name(node.plugin)
-    except PluginNotFoundError:
-        return False
-    return any(
-        declaration.capability is PluginCapability.PROMPT_SHIELD
-        and declaration.control_role is ControlRole.INPUT
-        and declaration.blocks_positive_detection
-        for declaration in plugin_cls.policy_capabilities
-    )
+    return node_has_blocking_control(node, PluginCapability.PROMPT_SHIELD, ControlRole.INPUT)
 
 
 def _producer_reaches_untrusted(producer: NodeSpec, graph: _OutputStreamGraph, visited: frozenset[str]) -> bool:

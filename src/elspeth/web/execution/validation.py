@@ -87,12 +87,16 @@ from elspeth.web.execution.schemas import (
     CHECK_LLM_BASE_URL_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_MANAGED_IDENTITY_POLICY,
+    CHECK_OPERATOR_PROFILE_OPTIONS,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
     CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
     CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
     CHECK_PATH_ALLOWLIST,
+    CHECK_PLUGIN_ENABLEMENT,
+    CHECK_REQUIRED_CONTROL_AVAILABILITY,
+    CHECK_REQUIRED_CONTROL_COVERAGE,
     CHECK_ROUTE_TARGETS,
     CHECK_SECRET_REFS,
     CHECK_SEMANTIC_CONTRACTS,
@@ -101,6 +105,7 @@ from elspeth.web.execution.schemas import (
     CHECK_WEB_SCRAPE_NETWORK_POLICY,
     VALIDATION_BLOCKING_CHECK_NAMES,
     ValidationCheck,
+    ValidationCheckName,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
@@ -114,6 +119,9 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import PolicyValidationStage, validate_plugin_policy
 from elspeth.web.provider_config_policy import (
     web_aws_s3_endpoint_url_policy_error,
     web_llm_base_url_policy_error,
@@ -123,6 +131,10 @@ from elspeth.web.provider_config_policy import (
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
+_CHECK_PLUGIN_ENABLEMENT = CHECK_PLUGIN_ENABLEMENT
+_CHECK_OPERATOR_PROFILE_OPTIONS = CHECK_OPERATOR_PROFILE_OPTIONS
+_CHECK_REQUIRED_CONTROL_AVAILABILITY = CHECK_REQUIRED_CONTROL_AVAILABILITY
+_CHECK_REQUIRED_CONTROL_COVERAGE = CHECK_REQUIRED_CONTROL_COVERAGE
 _CHECK_PATH_ALLOWLIST = CHECK_PATH_ALLOWLIST
 _CHECK_WEB_SCRAPE_NETWORK_POLICY = CHECK_WEB_SCRAPE_NETWORK_POLICY
 _CHECK_SECRET_REFS = CHECK_SECRET_REFS
@@ -202,6 +214,13 @@ _CHECK_IDENTITY_NODE_ADVISORY = CHECK_IDENTITY_NODE_ADVISORY
 # work). The position is asserted by tests/unit/web/execution/test_validation.py
 # to prevent silent reordering.
 _ALL_CHECKS = list(VALIDATION_BLOCKING_CHECK_NAMES)
+
+_PLUGIN_POLICY_CHECKS: tuple[tuple[PolicyValidationStage, ValidationCheckName], ...] = (
+    ("plugin_enablement", _CHECK_PLUGIN_ENABLEMENT),
+    ("operator_profile_options", _CHECK_OPERATOR_PROFILE_OPTIONS),
+    ("required_control_availability", _CHECK_REQUIRED_CONTROL_AVAILABILITY),
+    ("required_control_coverage", _CHECK_REQUIRED_CONTROL_COVERAGE),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,6 +804,8 @@ def validate_pipeline(
     blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
     allow_pending_interpretation_placeholders: bool = False,
     session_id: str | None = None,
+    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
+    profile_registry: OperatorProfileRegistry | None = None,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
 
@@ -824,6 +845,10 @@ def validate_pipeline(
         allow_pending_interpretation_placeholders: When true, composer
             authoring preflight masks unresolved ``{{interpretation:<term>}}``
             tokens before YAML generation. Runtime execution leaves this false.
+        plugin_snapshot: Frozen request policy/availability snapshot. Local
+            trained-operator callers may omit it; web callers must pass one.
+        profile_registry: Frozen operator-profile resolver registry. Required
+            when the snapshot exposes operator-profiled plugin aliases.
     """
     checks: list[ValidationCheck] = []
     errors: list[ValidationError] = []
@@ -869,6 +894,55 @@ def validate_pipeline(
                 detail="Pipeline is empty.",
             ),
         )
+
+    # Policy checks deliberately precede path, YAML, and runtime construction.
+    # The authored state remains audit-safe; only the in-memory copy returned
+    # by policy validation contains private operator-profile bindings.
+    if plugin_snapshot is None:
+        from elspeth.web.dependencies import create_catalog_service
+
+        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    policy_result = validate_plugin_policy(
+        state,
+        snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
+    )
+    for stage, check_name in _PLUGIN_POLICY_CHECKS:
+        stage_findings = policy_result.findings_for(stage)
+        checks.append(
+            ValidationCheck(
+                name=check_name,
+                passed=not stage_findings,
+                detail=(f"{len(stage_findings)} plugin policy finding(s)." if stage_findings else f"{check_name} passed."),
+                affected_nodes=tuple(dict.fromkeys(finding.component_id for finding in stage_findings if finding.component_id is not None)),
+                outcome_code=None,
+            )
+        )
+        if stage_findings:
+            first_finding = stage_findings[0]
+            errors = [
+                ValidationError(
+                    component_id=item.component_id,
+                    component_type=item.component_type,
+                    message=item.message,
+                    suggestion="Choose an available plugin or repair the required control path, then validate again.",
+                    error_code=item.error_code,
+                )
+                for item in stage_findings
+            ]
+            _append_skipped_checks(checks, check_name)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=errors,
+                readiness=_blocked_readiness(
+                    code=first_finding.error_code,
+                    detail=first_finding.message,
+                    component_id=first_finding.component_id,
+                    component_type=first_finding.component_type,
+                ),
+            )
+    state = policy_result.executable_state
 
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
     # Local filesystem keys in source/sink options must resolve under allowed

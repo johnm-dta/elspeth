@@ -35,6 +35,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.validation import (
     _ALL_CHECKS,
     _CHECK_GRAPH,
@@ -42,6 +43,7 @@ from elspeth.web.execution.validation import (
     _CHECK_VALUE_SOURCE_COMPLIANCE,
     validate_pipeline,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 
 class TestAllChecksOrdering:
@@ -310,7 +312,7 @@ class TestWalkerInValidatePipeline:
                 new=raise_value_source_error,
             ),
         ):
-            result = validate_pipeline(state, settings, yaml_gen)
+            result = validate_pipeline(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
 
         assert result.is_valid is False
         check_by_name = {c.name: c for c in result.checks}
@@ -342,7 +344,7 @@ class TestWalkerInValidatePipeline:
             patch("elspeth.web.execution.validation.build_runtime_graph", new=_build_runtime_graph),
             patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", new=_assemble_and_validate_pipeline_config),
         ):
-            result = validate_pipeline(state, settings, yaml_gen)
+            result = validate_pipeline(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
 
         assert result.is_valid is True
         check_by_name = {c.name: c for c in result.checks}
@@ -560,6 +562,20 @@ def _make_state() -> CompositionState:
         ),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+def _value_source_test_snapshot() -> PluginAvailabilitySnapshot:
+    base = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    return PluginAvailabilitySnapshot.create(
+        policy_hash="value-source-test",
+        principal_scope="local:value-source-test",
+        available=base.available | {PluginId("transform", "openrouter_llm")},
+        unavailable=(),
+        selected=base.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="value-source-test",
     )
 
 

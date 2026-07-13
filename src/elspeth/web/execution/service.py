@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -99,6 +99,8 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
 from elspeth.web.landscape_access import open_landscape_db
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
@@ -294,6 +296,8 @@ class ExecutionServiceImpl:
         telemetry: _SessionsTelemetry,
         blob_service: BlobServiceProtocol | None = None,
         secret_service: WebSecretResolver | None = None,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
+        operator_profile_registry: OperatorProfileRegistry | None = None,
     ) -> None:
         self._loop = loop
         self._broadcaster = broadcaster
@@ -303,6 +307,8 @@ class ExecutionServiceImpl:
         self._telemetry = telemetry
         self._blob_service = blob_service
         self._secret_service = secret_service
+        self._plugin_snapshot_factory = plugin_snapshot_factory
+        self._operator_profile_registry = operator_profile_registry
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
         # via create_run(), update_run_status(), get_active_run(), get_run().
         # R6 expanded params: landscape_run_id, pipeline_yaml, rows_processed,
@@ -667,6 +673,14 @@ class ExecutionServiceImpl:
         # runtime-only by design. Local import mirrors the /validate path (W18 load-order).
         from elspeth.web.execution.validation import validate_pipeline
 
+        if self._plugin_snapshot_factory is not None and user_id is None:
+            raise RuntimeError("Authenticated user_id is required for web plugin policy execution.")
+        if self._plugin_snapshot_factory is None:
+            plugin_snapshot = None
+        else:
+            assert user_id is not None
+            plugin_snapshot = self._plugin_snapshot_factory(user_id)
+
         preflight_result = validate_pipeline(
             composition_state,
             self._settings,
@@ -674,6 +688,8 @@ class ExecutionServiceImpl:
             secret_service=self._secret_service,
             user_id=user_id,
             session_id=str(session_id),
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=self._operator_profile_registry,
         )
         if not preflight_result.is_valid:
             raise PipelineValidationError(
@@ -941,6 +957,14 @@ class ExecutionServiceImpl:
 
         from elspeth.web.execution.validation import validate_pipeline
 
+        if self._plugin_snapshot_factory is not None and user_id is None:
+            raise RuntimeError("Authenticated user_id is required for web plugin policy validation.")
+        if self._plugin_snapshot_factory is None:
+            plugin_snapshot = None
+        else:
+            assert user_id is not None
+            plugin_snapshot = self._plugin_snapshot_factory(user_id)
+
         def _blob_get_metadata(blob_id: UUID) -> BlobRecord | None:
             if self._blob_service is None:
                 return None
@@ -964,6 +988,8 @@ class ExecutionServiceImpl:
                     user_id=user_id,
                     blob_get_metadata=_blob_get_metadata,
                     session_id=str(session_id) if session_id is not None else None,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=self._operator_profile_registry,
                 ),
             ),
         )

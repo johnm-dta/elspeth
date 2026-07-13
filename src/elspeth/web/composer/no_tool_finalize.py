@@ -50,6 +50,7 @@ from elspeth.web.composer.state_claim_grounding import (
     compose_grounded_message,
 )
 from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 if TYPE_CHECKING:
     from elspeth.web.composer.service import ComposerServiceImpl
@@ -70,6 +71,7 @@ async def finalize_no_tool_response(
     mutation_success_seen: bool = False,
     tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     llm_calls: tuple[ComposerLLMCall, ...] = (),
+    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
 ) -> ComposerResult:
     """Apply the deterministic final-gate check and build a ComposerResult.
 
@@ -205,6 +207,7 @@ async def finalize_no_tool_response(
             initial_version=initial_version,
             session_scope=session_scope,
             llm_calls=llm_calls,
+            plugin_snapshot=plugin_snapshot,
         )
 
     if runtime_result is not None and not runtime_result.is_valid and not _is_pending_interpretation_handoff(runtime_result):

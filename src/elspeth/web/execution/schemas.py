@@ -31,6 +31,10 @@ RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
 
 ValidationCheckName = Literal[
+    "plugin_enablement",
+    "operator_profile_options",
+    "required_control_availability",
+    "required_control_coverage",
     "path_allowlist",
     "web_scrape_network_policy",
     "secret_refs",
@@ -54,6 +58,10 @@ ValidationCheckName = Literal[
 ]
 VALIDATION_CHECK_NAME_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckName))
 
+CHECK_PLUGIN_ENABLEMENT: Final[ValidationCheckName] = "plugin_enablement"
+CHECK_OPERATOR_PROFILE_OPTIONS: Final[ValidationCheckName] = "operator_profile_options"
+CHECK_REQUIRED_CONTROL_AVAILABILITY: Final[ValidationCheckName] = "required_control_availability"
+CHECK_REQUIRED_CONTROL_COVERAGE: Final[ValidationCheckName] = "required_control_coverage"
 CHECK_PATH_ALLOWLIST: Final[ValidationCheckName] = "path_allowlist"
 CHECK_WEB_SCRAPE_NETWORK_POLICY: Final[ValidationCheckName] = "web_scrape_network_policy"
 CHECK_SECRET_REFS: Final[ValidationCheckName] = "secret_refs"
@@ -76,6 +84,10 @@ CHECK_STATE_EXISTS: Final[ValidationCheckName] = "state_exists"
 CHECK_ADVISOR_SIGNOFF: Final[ValidationCheckName] = "advisor_signoff"
 
 VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    CHECK_PLUGIN_ENABLEMENT,
+    CHECK_OPERATOR_PROFILE_OPTIONS,
+    CHECK_REQUIRED_CONTROL_AVAILABILITY,
+    CHECK_REQUIRED_CONTROL_COVERAGE,
     CHECK_PATH_ALLOWLIST,
     CHECK_WEB_SCRAPE_NETWORK_POLICY,
     CHECK_SECRET_REFS,

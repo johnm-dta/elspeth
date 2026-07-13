@@ -22,11 +22,12 @@ from pydantic import ValidationError as PydanticValidationError
 from structlog.testing import capture_logs
 
 from elspeth.contracts.data import CompatibilityResult
+from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
-from elspeth.plugins.infrastructure.manager import PluginNotFoundError
+from elspeth.plugins.infrastructure.manager import PluginNotFoundError, get_shared_plugin_manager
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
@@ -49,6 +50,15 @@ from elspeth.web.execution.validation import (
     validate_pipeline,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 
 
@@ -143,6 +153,139 @@ def _make_settings(data_dir: str = "/tmp/test_data") -> WebSettings:
 def _check(result, name: str):
     """Look up a validation check by name, not position."""
     return next(c for c in result.checks if c.name == name)
+
+
+def test_disabled_plugin_fails_before_constructor() -> None:
+    """Policy rejection is the first non-empty-state check and precedes runtime construction."""
+    from elspeth.web.dependencies import create_catalog_service
+
+    catalog = create_catalog_service()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    disabled = PluginId("sink", "database")
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="validation-policy",
+        principal_scope="local:alice",
+        available=unrestricted.available - {disabled},
+        unavailable=(PluginAvailability(disabled, PluginUnavailableReason.NOT_AUTHORIZED),),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="validation-policy-generation",
+    )
+    state = _make_state(outputs=(_make_output(plugin="database"),))
+
+    with patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as constructor:
+        result = validate_pipeline(
+            state,
+            _make_settings(),
+            _FakeYamlGenerator(),
+            plugin_snapshot=snapshot,
+            profile_registry=MagicMock(spec=OperatorProfileRegistry),
+        )
+
+    assert result.is_valid is False
+    assert result.checks[0].name == "plugin_enablement"
+    assert result.errors[0].error_code == "plugin_not_enabled"
+    constructor.assert_not_called()
+
+
+def test_required_prompt_shield_coverage_fails_before_constructor() -> None:
+    """A required control must dominate every LLM input before runtime setup."""
+    from elspeth.web.dependencies import create_catalog_service
+
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="required-control-policy",
+        principal_scope="local:alice",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        control_modes=((PluginCapability.PROMPT_SHIELD, ControlMode.REQUIRED),),
+        binding_generation_fingerprint="required-control-generation",
+    )
+    state = _make_state(
+        nodes=(_make_node(plugin="llm"),),
+        outputs=(_make_output(),),
+    )
+
+    with patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as constructor:
+        result = validate_pipeline(
+            state,
+            _make_settings(),
+            _FakeYamlGenerator(),
+            plugin_snapshot=snapshot,
+        )
+
+    assert result.is_valid is False
+    assert [check.name for check in result.checks[:4]] == [
+        "plugin_enablement",
+        "operator_profile_options",
+        "required_control_availability",
+        "required_control_coverage",
+    ]
+    assert result.errors[0].component_id == "test_node"
+    assert result.errors[0].error_code == "required_control_coverage"
+    constructor.assert_not_called()
+
+
+def test_operator_profile_lowering_preserves_authored_state() -> None:
+    """Public aliases lower only into the transient executable state."""
+    from elspeth.web.dependencies import create_catalog_service
+
+    settings = WebSettings.model_validate(
+        {
+            **_make_settings().model_dump(),
+            "llm_profiles": {
+                "tutorial": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5-mini",
+                    "credential_scope": "server",
+                    "credential_ref": "OPENROUTER_API_KEY",
+                }
+            },
+        }
+    )
+    runtime_config = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime_config)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime_config)
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    llm_id = PluginId("transform", "llm")
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash=policy.policy_hash,
+        principal_scope="local:alice",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=((llm_id, ("tutorial",)),),
+        selected_profile_aliases=((llm_id, "tutorial"),),
+        binding_generation_fingerprint="profile-lowering-generation",
+    )
+    state = _make_state(
+        nodes=(
+            _make_node(
+                plugin="llm",
+                options={
+                    "profile": "tutorial",
+                    "prompt_template": "{{ row }}",
+                    "schema": {"mode": "observed", "fields": None},
+                },
+            ),
+        ),
+        outputs=(_make_output(),),
+    )
+
+    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+
+    assert result.findings == ()
+    assert "profile" in state.nodes[0].options
+    assert "provider" not in state.nodes[0].options
+    executable_options = result.executable_state.nodes[0].options
+    assert "profile" not in executable_options
+    assert executable_options["provider"] == "openrouter"
+    assert executable_options["model"] == "openai/gpt-5-mini"
+    assert executable_options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
 
 
 @dataclass
@@ -2148,7 +2291,7 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 17
+        assert len(result.checks) == 21
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True

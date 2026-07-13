@@ -1126,7 +1126,15 @@ class ComposerServiceImpl:
         """Return the boot-time composer availability snapshot."""
         return self._availability
 
-    def _runtime_preflight(self, state: CompositionState, user_id: str | None, session_id: str | None) -> ValidationResult:
+    def _runtime_preflight(
+        self,
+        state: CompositionState,
+        user_id: str | None,
+        session_id: str | None,
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
+    ) -> ValidationResult:
+        if plugin_snapshot is None:
+            plugin_snapshot, _policy_catalog = self._plugin_policy_context(user_id)
         return validate_pipeline(
             state,
             self._settings,
@@ -1134,6 +1142,8 @@ class ComposerServiceImpl:
             secret_service=self._secret_service,
             user_id=user_id,
             session_id=session_id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=self._operator_profile_registry,
         )
 
     async def _missing_pending_interpretation_review_sites(
@@ -1513,11 +1523,15 @@ class ComposerServiceImpl:
         initial_version: int,
         session_scope: str,
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     ) -> ValidationResult:
+        settings_hash = runtime_preflight_settings_hash(self._settings)
+        if plugin_snapshot is not None:
+            settings_hash = f"{settings_hash}:{plugin_snapshot.snapshot_hash}"
         key = RuntimePreflightKey(
             session_scope=session_scope,
             state_version=state.version,
-            settings_hash=runtime_preflight_settings_hash(self._settings),
+            settings_hash=settings_hash,
         )
         # A cache miss is the normal, expected state on the first preflight for
         # this key — absence is not a missing-key bug, so membership-test then
@@ -1534,8 +1548,9 @@ class ComposerServiceImpl:
             )
 
         async def worker() -> ValidationResult:
+            args = (state, user_id, session_id) if plugin_snapshot is None else (state, user_id, session_id, plugin_snapshot)
             return await asyncio.wait_for(
-                run_sync_in_worker(self._runtime_preflight, state, user_id, session_id),
+                run_sync_in_worker(self._runtime_preflight, *args),
                 timeout=self._runtime_preflight_timeout_seconds,
             )
 
@@ -1689,6 +1704,7 @@ class ComposerServiceImpl:
         session_scope: str,
         recorder: BufferingRecorder,
         repair_turns_used: int,
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     ) -> bool:
         """Pre-finalize runtime-preflight gate (Fix 2).
 
@@ -1737,6 +1753,7 @@ class ComposerServiceImpl:
                 initial_version=initial_version,
                 session_scope=session_scope,
                 llm_calls=recorder.llm_calls,
+                plugin_snapshot=plugin_snapshot,
             )
 
         if runtime_result is None or runtime_result.is_valid or _is_pending_interpretation_handoff(runtime_result):
@@ -1765,6 +1782,7 @@ class ComposerServiceImpl:
         mutation_success_seen: bool = False,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     ) -> ComposerResult:
         """Apply the deterministic final-gate check and build a ComposerResult.
 
@@ -1786,6 +1804,7 @@ class ComposerServiceImpl:
             mutation_success_seen=mutation_success_seen,
             tool_invocations=tool_invocations,
             llm_calls=llm_calls,
+            plugin_snapshot=plugin_snapshot,
         )
 
     async def explain_run_diagnostics(self, snapshot: Mapping[str, object]) -> str:
@@ -2491,6 +2510,7 @@ class ComposerServiceImpl:
         composition_turns_used: int,
         discovery_turns_used: int,
         advisor_checkpoint_passes_used: int,
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     ) -> _ClassifyOutcome:
         """Phase P5 of the compose loop — anti-anchor + budget classify.
 
@@ -2585,6 +2605,7 @@ class ComposerServiceImpl:
                     initial_version=initial_version,
                     session_scope=session_scope,
                     llm_calls=recorder.llm_calls,
+                    plugin_snapshot=plugin_snapshot,
                 )
 
             if runtime_result is None or runtime_result.is_valid or _is_pending_interpretation_handoff(runtime_result):
@@ -2602,6 +2623,7 @@ class ComposerServiceImpl:
                     session_scope=session_scope,
                     message=message,
                     mutation_success_seen=mutation_success_seen,
+                    plugin_snapshot=plugin_snapshot,
                 )
                 handoff_result = (
                     _append_interpretation_review_handoff_message(result, dispatch.raw_assistant_content)
@@ -2693,6 +2715,7 @@ class ComposerServiceImpl:
                         session_scope=session_scope,
                         message=message,
                         mutation_success_seen=mutation_success_seen,
+                        plugin_snapshot=plugin_snapshot,
                     )
                     threaded = replace(
                         result,
@@ -2754,6 +2777,7 @@ class ComposerServiceImpl:
         persisted_assistant_message_id: str | None,
         persisted_tool_call_turn: bool,
         advisor_checkpoint_passes_used: int,
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     ) -> _TerminateOutcome:
         """Phase P2 of the compose loop — handle the no-tool-calls branch.
 
@@ -2870,6 +2894,7 @@ class ComposerServiceImpl:
             session_scope=session_scope,
             recorder=recorder,
             repair_turns_used=repair_turns_used,
+            plugin_snapshot=plugin_snapshot,
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
 
@@ -2941,6 +2966,7 @@ class ComposerServiceImpl:
             session_scope=session_scope,
             message=message,
             mutation_success_seen=mutation_success_seen,
+            plugin_snapshot=plugin_snapshot,
         )
         # Thread repair_turns_used through to the result so the route handler can
         # persist it onto the new ``composition_states.composer_meta`` row (and the
@@ -3074,6 +3100,7 @@ class ComposerServiceImpl:
         session_scope: str,
         message: str,
         mutation_success_seen: bool,
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     ) -> ComposerResult:
         """Auto-surface PT reviews, run the fail-closed orphan gate, finalize.
 
@@ -3122,6 +3149,7 @@ class ComposerServiceImpl:
             mutation_success_seen=mutation_success_seen,
             tool_invocations=recorder.invocations,
             llm_calls=recorder.llm_calls,
+            plugin_snapshot=plugin_snapshot,
         )
 
     async def _evaluate_terminal_no_tool_advisor_gate(
@@ -3415,6 +3443,7 @@ class ComposerServiceImpl:
                     persisted_assistant_message_id=persisted_assistant_message_id,
                     persisted_tool_call_turn=persisted_tool_call_turn,
                     advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
+                    plugin_snapshot=plugin_snapshot,
                 )
                 if terminate.action == "return":
                     # Offensive guard (explicit raise, not assert): ``python -O``
@@ -3573,6 +3602,7 @@ class ComposerServiceImpl:
                 composition_turns_used=composition_turns_used,
                 discovery_turns_used=discovery_turns_used,
                 advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
+                plugin_snapshot=plugin_snapshot,
             )
             composition_turns_used += classify.composition_turns_delta
             discovery_turns_used += classify.discovery_turns_delta

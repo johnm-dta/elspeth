@@ -106,6 +106,11 @@ def test_aws_pipeline_telemetry_is_replaced_by_operator_policy(authored: Telemet
         operator_telemetry="aws-otlp",
         operator_telemetry_service_name="elspeth-web-prod",
         operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
         operator_pipeline_telemetry_granularity="rows",
     )
 
@@ -121,9 +126,13 @@ def test_aws_pipeline_telemetry_is_replaced_by_operator_policy(authored: Telemet
         "endpoint": AWS_OTLP_ENDPOINT,
         "headers": {},
         "service_name": "elspeth-web-prod",
-        "service_version": pytest.importorskip("elspeth").__version__,
+        "service_version": "git-deadbeef",
         "deployment_environment": "production",
         "cloud_provider": "aws",
+        "aws_ecs_cluster_name": "elspeth-production",
+        "aws_ecs_service_name": "elspeth-web",
+        "aws_ecs_task_family": "elspeth-web-task",
+        "aws_ecs_task_revision": "42",
         "batch_size": 100,
     }
     rendered = repr(effective.telemetry.model_dump())
@@ -165,9 +174,12 @@ class _FakeProvider:
     views: tuple[object, ...]
     force_flush_calls: list[float] = field(default_factory=list)
     shutdown_calls: list[float] = field(default_factory=list)
+    force_flush_error: BaseException | None = None
 
     def force_flush(self, timeout_millis: float = 10_000) -> bool:
         self.force_flush_calls.append(timeout_millis)
+        if self.force_flush_error is not None:
+            raise self.force_flush_error
         return True
 
     def shutdown(self, timeout_millis: float = 30_000) -> None:
@@ -227,6 +239,11 @@ def test_process_bootstrap_aws_adds_one_fixed_otlp_reader_and_safe_resource() ->
         deployment_target="aws-ecs",
         operator_telemetry="aws-otlp",
         operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
         operator_telemetry_export_interval_seconds=17,
     )
 
@@ -240,9 +257,13 @@ def test_process_bootstrap_aws_adds_one_fixed_otlp_reader_and_safe_resource() ->
     assert runtime.readers[1].interval_ms == 17_000
     assert runtime.resource.attributes == {
         "service.name": "elspeth-web",
-        "service.version": pytest.importorskip("elspeth").__version__,
+        "service.version": "git-deadbeef",
         "deployment.environment": "production",
         "cloud.provider": "aws",
+        "aws.ecs.cluster.name": "elspeth-production",
+        "aws.ecs.service.name": "elspeth-web",
+        "aws.ecs.task.family": "elspeth-web-task",
+        "aws.ecs.task.revision": "42",
     }
 
 
@@ -253,6 +274,11 @@ async def test_shutdown_is_bounded_and_once_only() -> None:
         deployment_target="aws-ecs",
         operator_telemetry="aws-otlp",
         operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
     )
     runtime = bootstrap_operator_telemetry(settings, factories=_factories(record))
 
@@ -260,5 +286,30 @@ async def test_shutdown_is_bounded_and_once_only() -> None:
     await runtime.shutdown()
 
     provider = record["providers"][0]  # type: ignore[index]
+    assert provider.force_flush_calls == [5_000]
+    assert provider.shutdown_calls == [5_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flush_error", [TimeoutError(), ConnectionError("collector unavailable")])
+async def test_shutdown_is_still_attempted_once_after_handled_flush_failure(flush_error: BaseException) -> None:
+    record: dict[str, object] = {}
+    settings = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
+    )
+    runtime = bootstrap_operator_telemetry(settings, factories=_factories(record))
+    provider = record["providers"][0]  # type: ignore[index]
+    provider.force_flush_error = flush_error
+
+    await runtime.shutdown()
+    await runtime.shutdown()
+
     assert provider.force_flush_calls == [5_000]
     assert provider.shutdown_calls == [5_000]

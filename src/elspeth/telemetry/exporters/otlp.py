@@ -214,6 +214,10 @@ class OTLPExporter:
         service_version = _validate_resource_identity("service_version", config.get("service_version"), required=False)
         deployment_environment = _validate_resource_identity("deployment_environment", config.get("deployment_environment"), required=False)
         cloud_provider = _validate_resource_identity("cloud_provider", config.get("cloud_provider"), required=False)
+        aws_ecs_cluster_name = _validate_resource_identity("aws_ecs_cluster_name", config.get("aws_ecs_cluster_name"), required=False)
+        aws_ecs_service_name = _validate_resource_identity("aws_ecs_service_name", config.get("aws_ecs_service_name"), required=False)
+        aws_ecs_task_family = _validate_resource_identity("aws_ecs_task_family", config.get("aws_ecs_task_family"), required=False)
+        aws_ecs_task_revision = _validate_resource_identity("aws_ecs_task_revision", config.get("aws_ecs_task_revision"), required=False)
 
         from opentelemetry.sdk.resources import Resource
 
@@ -224,6 +228,14 @@ class OTLPExporter:
             resource_attributes["deployment.environment"] = deployment_environment
         if cloud_provider is not None:
             resource_attributes["cloud.provider"] = cloud_provider
+        if aws_ecs_cluster_name is not None:
+            resource_attributes["aws.ecs.cluster.name"] = aws_ecs_cluster_name
+        if aws_ecs_service_name is not None:
+            resource_attributes["aws.ecs.service.name"] = aws_ecs_service_name
+        if aws_ecs_task_family is not None:
+            resource_attributes["aws.ecs.task.family"] = aws_ecs_task_family
+        if aws_ecs_task_revision is not None:
+            resource_attributes["aws.ecs.task.revision"] = aws_ecs_task_revision
 
         self._endpoint = endpoint
         self._headers = headers
@@ -461,7 +473,7 @@ def _event_failed(event: TelemetryEvent) -> bool:
     from elspeth.contracts.events import ExternalCallCompleted, RunFinished
 
     if isinstance(event, RunFinished):
-        return event.status is not RunStatus.COMPLETED
+        return event.status not in {RunStatus.COMPLETED, RunStatus.EMPTY}
     if isinstance(event, ExternalCallCompleted):
         return event.status is not CallStatus.SUCCESS
     return False

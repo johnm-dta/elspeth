@@ -118,6 +118,11 @@ def test_check_names_are_exact_ordered_and_unique() -> None:
         "payload_store_path",
         "operator_telemetry",
         "operator_telemetry_environment",
+        "operator_telemetry_release",
+        "operator_telemetry_ecs_cluster",
+        "operator_telemetry_ecs_service",
+        "operator_telemetry_task_definition_family",
+        "operator_telemetry_task_definition_revision",
         "host",
         "secret_key",
         "shareable_link_signing_key",
@@ -133,6 +138,11 @@ def test_all_checks_pass_for_fully_valid_ecs_settings(tmp_path: Path) -> None:
                 "deployment_target": "aws-ecs",
                 "operator_telemetry": "aws-otlp",
                 "operator_telemetry_environment": "test",
+                "operator_telemetry_release": "git-deadbeef",
+                "operator_telemetry_ecs_cluster": "elspeth-test",
+                "operator_telemetry_ecs_service": "elspeth-web",
+                "operator_telemetry_task_definition_family": "elspeth-web-task",
+                "operator_telemetry_task_definition_revision": "42",
                 "host": "0.0.0.0",
                 "session_db_url": "postgresql://u:p@host/session",
                 "landscape_url": "postgresql://u:p@host/landscape",
@@ -146,3 +156,20 @@ def test_all_checks_pass_for_fully_valid_ecs_settings(tmp_path: Path) -> None:
 
     assert all(check.ok for check in checks)
     assert all(check.detail for check in checks)
+
+
+@pytest.mark.parametrize(
+    ("field", "env_var"),
+    [
+        ("operator_telemetry_release", "ELSPETH_WEB__OPERATOR_TELEMETRY_RELEASE"),
+        ("operator_telemetry_ecs_cluster", "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_CLUSTER"),
+        ("operator_telemetry_ecs_service", "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_SERVICE"),
+        ("operator_telemetry_task_definition_family", "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_FAMILY"),
+        ("operator_telemetry_task_definition_revision", "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION"),
+    ],
+)
+def test_aws_ecs_requires_bounded_operator_deployment_identity(field: str, env_var: str) -> None:
+    check = _checks()[field]
+
+    assert check.ok is False
+    assert env_var in check.detail

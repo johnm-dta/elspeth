@@ -1283,6 +1283,11 @@ sinks:
         mock_settings.deployment_target = "aws-ecs"
         mock_settings.operator_telemetry_service_name = "elspeth-web-test"
         mock_settings.operator_telemetry_environment = "test"
+        mock_settings.operator_telemetry_release = "git-test"
+        mock_settings.operator_telemetry_ecs_cluster = "elspeth-test"
+        mock_settings.operator_telemetry_ecs_service = "elspeth-web"
+        mock_settings.operator_telemetry_task_definition_family = "elspeth-web-task"
+        mock_settings.operator_telemetry_task_definition_revision = "1"
         mock_settings.operator_pipeline_telemetry_granularity = "lifecycle"
         mock_settings.landscape_url = f"sqlite:///{tmp_path / 'audit.db'}"
         mock_settings.payload_store_path = tmp_path / "payloads"
@@ -1349,8 +1354,12 @@ telemetry:
                     "deployment_environment": "test",
                     "endpoint": "http://127.0.0.1:4317",
                     "headers": {},
+                    "aws_ecs_cluster_name": "elspeth-test",
+                    "aws_ecs_service_name": "elspeth-web",
+                    "aws_ecs_task_family": "elspeth-web-task",
+                    "aws_ecs_task_revision": "1",
                     "service_name": "elspeth-web-test",
-                    "service_version": pytest.importorskip("elspeth").__version__,
+                    "service_version": "git-test",
                 },
             }
         ]

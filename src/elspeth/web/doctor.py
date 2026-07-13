@@ -156,6 +156,11 @@ def _aws_operator_telemetry_check() -> ContractCheck:
             "operator_telemetry",
             "operator_telemetry_service_name",
             "operator_telemetry_environment",
+            "operator_telemetry_release",
+            "operator_telemetry_ecs_cluster",
+            "operator_telemetry_ecs_service",
+            "operator_telemetry_task_definition_family",
+            "operator_telemetry_task_definition_revision",
             "operator_telemetry_export_interval_seconds",
             "operator_pipeline_telemetry_granularity",
         }

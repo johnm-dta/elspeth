@@ -174,11 +174,22 @@ telemetry:
         endpoint: http://127.0.0.1:4317
         headers: {}
         service_name: elspeth-web
-        service_version: "0.7.1"
+        service_version: "git-deadbeef"
         deployment_environment: production
         cloud_provider: aws
+        aws_ecs_cluster_name: elspeth-production
+        aws_ecs_service_name: elspeth-web
+        aws_ecs_task_family: elspeth-web-task
+        aws_ecs_task_revision: "42"
         batch_size: 100
 ```
+
+The web deployment contract requires these bounded identities explicitly.
+`service_version` is the operator-approved release SHA or image digest for the
+running deployment; the ECS values are cluster/service names and task
+definition family/revision, never task/account ARNs or per-task IDs. The same
+resource attributes are applied to web metrics and pipeline lifecycle spans so
+dashboard filters correspond to labels that are actually delivered.
 
 Landscape remains permanent, authoritative, and must-fire. Telemetry is
 ephemeral, operational, and best-effort; a collector receipt is never audit or

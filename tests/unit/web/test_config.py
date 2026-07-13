@@ -304,6 +304,11 @@ class TestOperatorTelemetrySettings:
         assert settings.operator_telemetry == "prometheus"
         assert settings.operator_telemetry_service_name == "elspeth-web"
         assert settings.operator_telemetry_environment is None
+        assert settings.operator_telemetry_release is None
+        assert settings.operator_telemetry_ecs_cluster is None
+        assert settings.operator_telemetry_ecs_service is None
+        assert settings.operator_telemetry_task_definition_family is None
+        assert settings.operator_telemetry_task_definition_revision is None
         assert settings.operator_telemetry_export_interval_seconds == 60
         assert settings.operator_pipeline_telemetry_granularity == "lifecycle"
 

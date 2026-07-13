@@ -668,11 +668,17 @@ class TelemetryManager:
 
         # 4. Close exporters. Successful infrastructure lifecycle is not
         # duplicated into logs; only telemetry-system failures below are logged.
+        delivered_on_close = 0
+        failed_on_close = 0
+        dropped_on_close = 0
         for exporter in self._exporters:
             try:
                 before = _exporter_delivery_metrics(exporter)
                 exporter.close()
                 after = _exporter_delivery_metrics(exporter)
+                delivered_on_close = max(delivered_on_close, _metric_delta(before, after, "delivered"))
+                failed_on_close = max(failed_on_close, _metric_delta(before, after, "failed"))
+                dropped_on_close = max(dropped_on_close, _metric_delta(before, after, "dropped"))
                 lifecycle_failures = _metric_delta(before, after, "lifecycle_failures")
                 if lifecycle_failures:
                     breaker = self._circuit_breakers[id(exporter)]
@@ -686,6 +692,17 @@ class TelemetryManager:
                     exporter=exporter.name,
                     error_type=type(e).__name__,
                 )
+
+        delivered = min(delivered_on_close, self._pending_deferred_events)
+        unresolved = self._pending_deferred_events - delivered
+        failed = min(failed_on_close, unresolved)
+        dropped = min(dropped_on_close, unresolved)
+        self._events_delivered += delivered
+        self._events_emitted += delivered
+        self._events_failed += failed
+        with self._dropped_lock:
+            self._events_dropped += dropped
+        self._pending_deferred_events -= delivered + max(failed, dropped)
 
 
 def _exporter_delivery_metrics(exporter: ExporterProtocol) -> dict[str, int | None] | None:

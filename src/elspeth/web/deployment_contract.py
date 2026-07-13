@@ -63,6 +63,12 @@ def _check_required_path(name: str, env_var: str, value: Path | None, *, explici
     return ContractCheck(name, True, f"{env_var} is set")
 
 
+def _check_required_operator_identity(name: str, env_var: str, value: str | None) -> ContractCheck:
+    if value is None:
+        return ContractCheck(name, False, f"{env_var} is required in aws-ecs deployment mode")
+    return ContractCheck(name, True, f"{env_var} is set")
+
+
 def validate_aws_ecs_settings(settings: WebSettings) -> list[ContractCheck]:
     """Run every strict AWS ECS contract check, including deployment target."""
     target_ok = settings.deployment_target == DEPLOYMENT_TARGET_AWS_ECS
@@ -103,6 +109,31 @@ def validate_aws_ecs_settings(settings: WebSettings) -> list[ContractCheck]:
                 if settings.operator_telemetry_environment is not None
                 else "ELSPETH_WEB__OPERATOR_TELEMETRY_ENVIRONMENT is required in aws-ecs deployment mode"
             ),
+        ),
+        _check_required_operator_identity(
+            "operator_telemetry_release",
+            "ELSPETH_WEB__OPERATOR_TELEMETRY_RELEASE",
+            settings.operator_telemetry_release,
+        ),
+        _check_required_operator_identity(
+            "operator_telemetry_ecs_cluster",
+            "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_CLUSTER",
+            settings.operator_telemetry_ecs_cluster,
+        ),
+        _check_required_operator_identity(
+            "operator_telemetry_ecs_service",
+            "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_SERVICE",
+            settings.operator_telemetry_ecs_service,
+        ),
+        _check_required_operator_identity(
+            "operator_telemetry_task_definition_family",
+            "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_FAMILY",
+            settings.operator_telemetry_task_definition_family,
+        ),
+        _check_required_operator_identity(
+            "operator_telemetry_task_definition_revision",
+            "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION",
+            settings.operator_telemetry_task_definition_revision,
         ),
     ]
     host_ok = settings.host == _CONTAINER_SERVING_HOST

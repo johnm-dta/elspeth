@@ -107,6 +107,11 @@ class WebSettings(BaseModel):
     operator_telemetry: Literal["prometheus", "aws-otlp"] = "prometheus"
     operator_telemetry_service_name: str = "elspeth-web"
     operator_telemetry_environment: str | None = None
+    operator_telemetry_release: str | None = None
+    operator_telemetry_ecs_cluster: str | None = None
+    operator_telemetry_ecs_service: str | None = None
+    operator_telemetry_task_definition_family: str | None = None
+    operator_telemetry_task_definition_revision: str | None = None
     operator_telemetry_export_interval_seconds: int = Field(default=60, strict=True, ge=1, le=3600)
     operator_pipeline_telemetry_granularity: Literal["lifecycle", "rows"] = "lifecycle"
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
@@ -532,6 +537,21 @@ class WebSettings(BaseModel):
         if value is None:
             return None
         return cls._validate_operator_resource_identity("operator_telemetry_environment", value)
+
+    @field_validator(
+        "operator_telemetry_release",
+        "operator_telemetry_ecs_cluster",
+        "operator_telemetry_ecs_service",
+        "operator_telemetry_task_definition_family",
+        "operator_telemetry_task_definition_revision",
+    )
+    @classmethod
+    def _validate_operator_deployment_identity(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        field_name = info.field_name
+        assert field_name is not None
+        return cls._validate_operator_resource_identity(field_name, value)
 
     @field_validator("operator_telemetry_export_interval_seconds", mode="before")
     @classmethod

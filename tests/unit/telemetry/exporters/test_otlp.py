@@ -296,6 +296,10 @@ class TestOTLPExporterConfiguration:
                     "service_version": "0.7.1",
                     "deployment_environment": "production",
                     "cloud_provider": "aws",
+                    "aws_ecs_cluster_name": "elspeth-production",
+                    "aws_ecs_service_name": "elspeth-web",
+                    "aws_ecs_task_family": "elspeth-web-task",
+                    "aws_ecs_task_revision": "42",
                 }
             )
 
@@ -304,6 +308,10 @@ class TestOTLPExporterConfiguration:
             "service.version": "0.7.1",
             "deployment.environment": "production",
             "cloud.provider": "aws",
+            "aws.ecs.cluster.name": "elspeth-production",
+            "aws.ecs.service.name": "elspeth-web",
+            "aws.ecs.task.family": "elspeth-web-task",
+            "aws.ecs.task.revision": "42",
         }
 
 
@@ -538,6 +546,10 @@ class TestOTLPExporterSpanConversion:
                     "service_version": "0.7.1",
                     "deployment_environment": "production",
                     "cloud_provider": "aws",
+                    "aws_ecs_cluster_name": "elspeth-production",
+                    "aws_ecs_service_name": "elspeth-web",
+                    "aws_ecs_task_family": "elspeth-web-task",
+                    "aws_ecs_task_revision": "42",
                 }
             )
 
@@ -548,6 +560,10 @@ class TestOTLPExporterSpanConversion:
             "service.version": "0.7.1",
             "deployment.environment": "production",
             "cloud.provider": "aws",
+            "aws.ecs.cluster.name": "elspeth-production",
+            "aws.ecs.service.name": "elspeth-web",
+            "aws.ecs.task.family": "elspeth-web-task",
+            "aws.ecs.task.revision": "42",
         }
 
     @pytest.mark.parametrize(
@@ -588,6 +604,22 @@ class TestOTLPExporterSpanConversion:
                 run_id="run-ok",
                 status=RunStatus.COMPLETED,
                 row_count=1,
+                duration_ms=5.0,
+            )
+        )
+
+        span = sdk.export.call_args[0][0][0]
+        assert span.status.status_code.name == "OK"
+        assert span.status.description is None
+
+    def test_empty_run_sets_ok_status(self) -> None:
+        exporter, sdk = self._create_configured_exporter()
+        exporter.export(
+            RunFinished(
+                timestamp=datetime.now(UTC),
+                run_id="run-empty",
+                status=RunStatus.EMPTY,
+                row_count=0,
                 duration_ms=5.0,
             )
         )

@@ -550,7 +550,8 @@ granularity is accepted. The CloudWatch Agent sidecar—not ELSPETH—uses the E
 task role/default credential chain to deliver metrics and traces.
 
 The authenticated Prometheus endpoint remains available. CloudWatch metric
-dimensions are restricted to bounded deployment identity and closed
+dimensions are restricted to bounded operator-controlled release, ECS
+cluster/service, task-definition family/revision, and closed
 operational enums; user, session, run, row, token, content, URL, exception,
 request, account, and task identities are excluded.
 

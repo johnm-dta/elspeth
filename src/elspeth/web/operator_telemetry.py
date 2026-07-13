@@ -221,6 +221,11 @@ class OperatorTelemetryRuntime:
                 )
                 if not flushed:
                     _log.warning("operator_otlp_force_flush_incomplete", destination="task-local")
+            except TimeoutError:
+                _log.warning("operator_otlp_force_flush_timeout", destination="task-local")
+            except TELEMETRY_TRANSPORT_ERRORS:
+                _log.warning("operator_otlp_force_flush_unavailable", destination="task-local")
+            try:
                 await asyncio.wait_for(
                     asyncio.to_thread(self.provider.shutdown, timeout_millis=_EXPORT_TIMEOUT_MILLIS),
                     timeout=_SHUTDOWN_WALL_TIMEOUT_SECONDS,
@@ -234,6 +239,19 @@ class OperatorTelemetryRuntime:
 
 _runtime: OperatorTelemetryRuntime | None = None
 _runtime_lock = threading.Lock()
+
+
+def _required_aws_resource_identity(settings: WebSettings) -> dict[str, str]:
+    configured = {
+        "service.version": settings.operator_telemetry_release,
+        "aws.ecs.cluster.name": settings.operator_telemetry_ecs_cluster,
+        "aws.ecs.service.name": settings.operator_telemetry_ecs_service,
+        "aws.ecs.task.family": settings.operator_telemetry_task_definition_family,
+        "aws.ecs.task.revision": settings.operator_telemetry_task_definition_revision,
+    }
+    if any(value is None for value in configured.values()):
+        raise ValueError("validated AWS ECS operator telemetry identity is incomplete")
+    return {key: cast(str, value) for key, value in configured.items()}
 
 
 def _wire_health_instruments(provider: _Provider, health: _ExportHealth) -> None:
@@ -289,6 +307,7 @@ def bootstrap_operator_telemetry(
             resource_attributes["deployment.environment"] = settings.operator_telemetry_environment
         if settings.operator_telemetry == "aws-otlp":
             resource_attributes["cloud.provider"] = "aws"
+            resource_attributes.update(_required_aws_resource_identity(settings))
         # Explicit Resource avoids the SDK's process/environment detectors,
         # which add deployment-varying attributes outside this closed AWS
         # identity contract.
@@ -326,6 +345,7 @@ def apply_operator_pipeline_telemetry(settings: ElspethSettings, web_settings: W
 
     if web_settings.deployment_target != "aws-ecs":
         return settings
+    identity = _required_aws_resource_identity(web_settings)
     effective = TelemetrySettings(
         enabled=True,
         granularity=web_settings.operator_pipeline_telemetry_granularity,
@@ -338,9 +358,13 @@ def apply_operator_pipeline_telemetry(settings: ElspethSettings, web_settings: W
                     "endpoint": AWS_OTLP_ENDPOINT,
                     "headers": {},
                     "service_name": web_settings.operator_telemetry_service_name,
-                    "service_version": __version__,
+                    "service_version": identity["service.version"],
                     "deployment_environment": web_settings.operator_telemetry_environment,
                     "cloud_provider": "aws",
+                    "aws_ecs_cluster_name": identity["aws.ecs.cluster.name"],
+                    "aws_ecs_service_name": identity["aws.ecs.service.name"],
+                    "aws_ecs_task_family": identity["aws.ecs.task.family"],
+                    "aws_ecs_task_revision": identity["aws.ecs.task.revision"],
                     "batch_size": 100,
                 },
             )

@@ -7,9 +7,10 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from types import MappingProxyType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.contracts.config.defaults import INTERNAL_DEFAULTS
 from elspeth.contracts.enums import (
@@ -29,6 +30,7 @@ from elspeth.contracts.events import (
     RunStarted,
 )
 from elspeth.telemetry.errors import TelemetryExporterError
+from elspeth.telemetry.exporters.otlp import OTLPExporter
 from elspeth.telemetry.manager import TelemetryManager
 from tests.fixtures.telemetry import (
     FailingExporter,
@@ -1189,6 +1191,75 @@ class TestClose:
         manager.close()
         # All events should have been processed before thread exited
         assert len(exporter.events) == 5
+
+    @pytest.mark.parametrize(
+        ("result", "expected_delivered", "expected_failed", "expected_dropped"),
+        [
+            (SpanExportResult.SUCCESS, 1, 0, 0),
+            (SpanExportResult.FAILURE, 0, 1, 1),
+        ],
+    )
+    def test_close_reconciles_otlp_partial_batch_once(
+        self,
+        result: SpanExportResult,
+        expected_delivered: int,
+        expected_failed: int,
+        expected_dropped: int,
+    ) -> None:
+        sdk_exporter = MagicMock()
+        sdk_exporter.export.return_value = result
+        exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            return_value=sdk_exporter,
+        ):
+            exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[exporter])
+        manager.handle_event(_lifecycle_event())
+        _wait_for_processing(manager)
+        assert manager.health_metrics["events_delivered"] == 0
+        assert manager._pending_deferred_events == 1
+
+        manager.close()
+        manager.close()
+
+        metrics = manager.health_metrics
+        assert metrics["events_attempted"] == 1
+        assert metrics["events_delivered"] == expected_delivered
+        assert metrics["events_emitted"] == expected_delivered
+        assert metrics["events_failed"] == expected_failed
+        assert metrics["events_dropped"] == expected_dropped
+        assert manager._pending_deferred_events == 0
+        sdk_exporter.export.assert_called_once()
+
+    def test_close_counts_deferred_event_delivered_when_any_exporter_succeeds(self) -> None:
+        failed_sdk = MagicMock()
+        failed_sdk.export.return_value = SpanExportResult.FAILURE
+        successful_sdk = MagicMock()
+        successful_sdk.export.return_value = SpanExportResult.SUCCESS
+        failed_exporter = OTLPExporter()
+        successful_exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            side_effect=[failed_sdk, successful_sdk],
+        ):
+            failed_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+            successful_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[failed_exporter, successful_exporter])
+        manager.handle_event(_lifecycle_event())
+        _wait_for_processing(manager)
+        assert manager._pending_deferred_events == 1
+
+        manager.close()
+
+        metrics = manager.health_metrics
+        assert metrics["events_delivered"] == 1
+        assert metrics["events_emitted"] == 1
+        assert metrics["events_failed"] == 0
+        assert metrics["events_dropped"] == 0
+        assert manager._pending_deferred_events == 0
+        failed_sdk.export.assert_called_once()
+        successful_sdk.export.assert_called_once()
 
 
 # =============================================================================

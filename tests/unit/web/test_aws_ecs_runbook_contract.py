@@ -33,6 +33,16 @@ def test_runbook_pins_task_local_nonessential_healthy_sidecar() -> None:
     assert re.search(r"@sha256:\$\{CLOUDWATCH_AGENT_IMAGE_SHA256\}$", sidecar["image"])
     assert "portMappings" not in sidecar
     assert app["dependsOn"] == [{"containerName": "cloudwatch-agent", "condition": "HEALTHY"}]
+    environment = {entry["name"]: entry["value"] for entry in app["environment"]}
+    assert environment == {
+        "ELSPETH_WEB__OPERATOR_TELEMETRY": "aws-otlp",
+        "ELSPETH_WEB__OPERATOR_TELEMETRY_ENVIRONMENT": "production",
+        "ELSPETH_WEB__OPERATOR_TELEMETRY_RELEASE": "${ELSPETH_RELEASE_SHA_OR_DIGEST}",
+        "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_CLUSTER": "${ECS_CLUSTER_NAME}",
+        "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_SERVICE": "${ECS_SERVICE_NAME}",
+        "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_FAMILY": "${ECS_TASK_DEFINITION_FAMILY}",
+        "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION": "${ECS_TASK_DEFINITION_REVISION}",
+    }
     assert "127.0.0.1:4317" in _text()
 
 
@@ -40,28 +50,68 @@ def test_runbook_has_versioned_hashed_bounded_agent_config() -> None:
     text = _text()
     for required in (
         "elspeth.cloudwatch-agent.v1",
-        "memory_limiter",
-        "batch",
-        "awscloudwatch",
-        "awsxray",
+        "memory_limiter/elspeth",
+        "batch/elspeth",
+        "awsemf/elspeth",
+        "awsxray/elspeth",
         "sha256sum",
         "ELSPETH/Operator",
     ):
         assert required in text
     otel = _yaml_documents()[0]
-    assert set(otel["exporters"]) == {"awscloudwatch", "awsxray"}
+    assert set(otel["receivers"]) == {"otlp/elspeth"}
+    assert otel["receivers"]["otlp/elspeth"] == {"protocols": {"grpc": {"endpoint": "127.0.0.1:4317"}}}
+    assert set(otel["processors"]) == {"memory_limiter/elspeth", "batch/elspeth"}
+    assert set(otel["exporters"]) == {"awsemf/elspeth", "awsxray/elspeth"}
+    assert otel["exporters"]["awsemf/elspeth"] == {
+        "namespace": "ELSPETH/Operator",
+        "log_group_name": "/elspeth/operator/metrics",
+        "log_stream_name": "telemetry",
+        "dimension_rollup_option": "NoDimensionRollup",
+        "retain_initial_value_of_delta_metric": True,
+        "resource_to_telemetry_conversion": {"enabled": True},
+    }
+    assert otel["exporters"]["awsxray/elspeth"] == {}
+    assert otel["service"]["pipelines"] == {
+        "metrics/elspeth": {
+            "receivers": ["otlp/elspeth"],
+            "processors": ["memory_limiter/elspeth", "batch/elspeth"],
+            "exporters": ["awsemf/elspeth"],
+        },
+        "traces/elspeth": {
+            "receivers": ["otlp/elspeth"],
+            "processors": ["memory_limiter/elspeth", "batch/elspeth"],
+            "exporters": ["awsxray/elspeth"],
+        },
+    }
+    rendered = json.dumps(otel)
+    assert '"awscloudwatch"' not in rendered
+    assert '"debug' not in rendered
+    assert '"file' not in rendered
+    assert "role_arn" not in rendered
+    assert "endpoint_override" not in rendered
 
 
 def test_runbook_separates_task_role_and_execution_role_without_credentials() -> None:
     text = _text()
-    for action in (
-        "cloudwatch:PutMetricData",
+    policy = next(
+        document
+        for document in _json_documents()
+        if isinstance(document, dict) and document.get("Version") == "2012-10-17" and "Statement" in document
+    )
+    actions = {
+        action
+        for statement in policy["Statement"]
+        for action in ([statement["Action"]] if isinstance(statement["Action"], str) else statement["Action"])
+    }
+    assert {
         "xray:PutTraceSegments",
         "xray:PutTelemetryRecords",
+        "logs:DescribeLogStreams",
         "logs:CreateLogStream",
         "logs:PutLogEvents",
-    ):
-        assert action in text
+    } <= actions
+    assert "cloudwatch:PutMetricData" not in actions
     assert "Execution role" in text
     assert "Task role" in text
     assert "Do not add keys, profiles, credential headers, role overrides" in text
@@ -97,12 +147,26 @@ def test_runbook_documents_dashboard_alarms_cardinality_cost_and_audit_authority
         "service.name",
         "deployment.environment",
         "service.version",
-        "task.definition.family",
-        "task.definition.revision",
+        "cloud.provider",
+        "aws.ecs.cluster.name",
+        "aws.ecs.service.name",
+        "aws.ecs.task.family",
+        "aws.ecs.task.revision",
+        "cap_type",
+        "completion_path",
+        "completion_verb",
+        "component_type",
+        "failure_class",
+        "from_mode",
+        "kind",
         "reason",
         "operation",
+        "probe_status",
+        "result",
+        "source",
         "status",
         "outcome",
+        "to_mode",
     }
     forbidden_dimensions = {
         "user_id",

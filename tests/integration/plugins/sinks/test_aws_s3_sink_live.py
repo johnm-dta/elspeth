@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -46,10 +47,13 @@ def test_real_s3_default_chain_conditional_write_and_stale_etag_non_clobber(form
     fresh = inject_write_failure(AWSS3Sink(config))
     try:
         first = primary.write([{"id": 1, "name": "Ada"}], _Context())
-        assert first.artifact.content_hash
+        first_remote = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        assert first.artifact.content_hash == hashlib.sha256(first_remote).hexdigest()
         with pytest.raises(S3ConditionalWriteRejectedError):
             fresh.write([{"id": 9, "name": "collision"}], _Context())
         second = primary.write([{"id": 2, "name": "Grace"}], _Context())
+        second_remote = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        assert second.artifact.content_hash == hashlib.sha256(second_remote).hexdigest()
         assert second.artifact.content_hash != first.artifact.content_hash
         external = b"external-writer-sentinel"
         client.put_object(Bucket=bucket, Key=key, Body=external)

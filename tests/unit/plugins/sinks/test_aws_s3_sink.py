@@ -224,10 +224,48 @@ class TestSerialization:
         probe.close()
         exact = _serialize([{"id": 1, "name": "Ada"}], format=format, max_object_bytes=size)
         exact.close()
+        above = _serialize([{"id": 1, "name": "Ada"}], format=format, max_object_bytes=size + 1)
+        above.close()
         with pytest.raises(S3ObjectSizeLimitError) as captured:
             _serialize([{"id": 1, "name": "Ada"}], format=format, max_object_bytes=size - 1)
         assert captured.value.observed_bytes > captured.value.limit_bytes
         assert "Ada" not in str(captured.value)
+
+    @pytest.mark.parametrize(("value_size", "accepted"), [(91, True), (92, True), (93, False)])
+    def test_json_record_limit_max_minus_one_max_and_max_plus_one(self, value_size: int, accepted: bool) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import S3RecordSizeLimitError
+
+        row = {"v": "x" * value_size}  # compact JSON record length is value_size + 8
+        if accepted:
+            serialized = _serialize([row], format="json", fieldnames=["v"], max_record_chars=100)
+            serialized.close()
+        else:
+            with pytest.raises(S3RecordSizeLimitError):
+                _serialize([row], format="json", fieldnames=["v"], max_record_chars=100)
+
+    @pytest.mark.parametrize(("value_size", "accepted"), [(97, True), (98, True), (99, False)])
+    def test_csv_record_limit_max_minus_one_max_and_max_plus_one(self, value_size: int, accepted: bool) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import S3RecordSizeLimitError
+
+        row = {"v": "x" * value_size}  # one value plus CRLF is value_size + 2
+        if accepted:
+            serialized = _serialize(
+                [row],
+                format="csv",
+                fieldnames=["v"],
+                max_record_chars=100,
+                include_header=False,
+            )
+            serialized.close()
+        else:
+            with pytest.raises(S3RecordSizeLimitError):
+                _serialize(
+                    [row],
+                    format="csv",
+                    fieldnames=["v"],
+                    max_record_chars=100,
+                    include_header=False,
+                )
 
     @pytest.mark.parametrize("format", ["json", "jsonl"])
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), object()])
@@ -499,6 +537,28 @@ class TestAWSS3SinkRuntime:
         assert sink._buffered_rows == []
         assert len(client.requests) == 1
         assert context.calls[0]["error"] == {"type": "_ProviderFailure"}
+
+    def test_client_creation_failure_redacts_endpoint_and_provider_details(self, caplog: pytest.LogCaptureFixture) -> None:
+        from unittest.mock import patch
+
+        from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
+        from tests.fixtures.base_classes import inject_write_failure
+
+        endpoint = "https://endpoint-sentinel.invalid"
+        sink = inject_write_failure(AWSS3Sink(_base_config(endpoint_url=endpoint)))
+        context = _SinkContext()
+        with (
+            patch(
+                "elspeth.plugins.sinks.aws_s3_sink.build_s3_client",
+                side_effect=_ProviderFailure("credential body endpoint provider sentinel"),
+            ),
+            pytest.raises(Exception, match="outcome is unknown") as captured,
+        ):
+            sink.write([{"id": 1, "name": "row sentinel"}], context)
+        rendered = " ".join((str(captured.value), repr(captured.value), caplog.text, repr(context.calls)))
+        assert "sentinel" not in rendered
+        assert endpoint not in rendered
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
 
     @pytest.mark.parametrize("status", ["success", "failure"])
     def test_audit_failure_is_static_poison_and_never_commits_buffer(self, status: str) -> None:

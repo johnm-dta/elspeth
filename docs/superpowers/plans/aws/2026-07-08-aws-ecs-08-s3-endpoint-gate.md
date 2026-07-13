@@ -104,20 +104,20 @@ The live review found three real baseline failures: signed binding drift; `_reje
   ```
 
   The conservative seed is deliberate. Elspeth's decorator covers both raising validators and `non_raising=True` predicates, so mapping every decorated result to `ASSURED` would create known false positives and over-trust return values. `elspeth-lints` owns decorator-contract honesty; Wardline conservatively anchors the external-origin flow.
-- [ ] Add `config/wardline/verify_elspeth_pack_contract.py` as a focused external-tool contract verifier, not a pytest module. Ordinary project CI intentionally does not install Wardline, so this verifier must stay outside `tests/` and the default pytest collection. The verifier imports the pack with Wardline's own pinned interpreter and asserts that lowercase `grammar` is a `TrustGrammar` with exactly one boundary and no rules; assert exact canonical name, module prefix, `group == 1`, `level_args == ()`, `builtin is False`, and `FunctionTaint` seed states `body_taint is TaintState.EXTERNAL_RAW` and `return_taint is TaintState.EXTERNAL_RAW`. Resolve the installed `wardline` executable, derive its interpreter from the executable's shebang, reject a missing or non-executable interpreter, and never hardcode a user-specific tool path. Run the verifier directly and require exit 0:
+- [ ] Add `config/wardline/verify_elspeth_pack_contract.py` as a focused external-tool contract verifier, not a pytest module. Ordinary project CI intentionally does not install Wardline, so this verifier must stay outside `tests/` and the default pytest collection. The verifier imports the pack with Wardline's own pinned interpreter using the canonical `importlib.import_module("config.wardline.elspeth_pack")` path and asserts that lowercase `grammar` is a `TrustGrammar` with exactly one boundary and no rules; assert exact canonical name, module prefix, `group == 1`, `level_args == ()`, `builtin is False`, and `FunctionTaint` seed states `body_taint is TaintState.EXTERNAL_RAW` and `return_taint is TaintState.EXTERNAL_RAW`. Resolve the installed `wardline` executable, derive its interpreter from the executable's shebang, reject a missing or non-executable interpreter, and never hardcode a user-specific tool path. Run the verifier directly from the repository root with that root on `PYTHONPATH`, and require exit 0:
 
   ```bash
   WARDLINE_BIN="$(command -v wardline)"
   WARDLINE_PYTHON="$(sed -n '1s/^#!//p' "$WARDLINE_BIN")"
   test -n "$WARDLINE_PYTHON" && test -x "$WARDLINE_PYTHON"
-  "$WARDLINE_PYTHON" config/wardline/verify_elspeth_pack_contract.py
+  PYTHONPATH="$PWD" "$WARDLINE_PYTHON" config/wardline/verify_elspeth_pack_contract.py
   ```
 
 - [ ] Require the exact installed Wardline 1.3.1 loader/schema contract, then run the authoritative full-root gate and immediately validate the same agent-summary output:
 
   ```bash
   test "$(wardline --version)" = "wardline, version 1.3.1"
-  wardline scan . \
+  PYTHONPATH="$PWD" wardline scan . \
     --trust-pack config.wardline.elspeth_pack \
     --allow-custom-packs \
     --fail-on ERROR \
@@ -346,7 +346,7 @@ The central validation check remains authoritative. These tool checks are defens
   PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier --root src/elspeth
   git diff --check
   test "$(wardline --version)" = "wardline, version 1.3.1"
-  wardline scan . --trust-pack config.wardline.elspeth_pack --allow-custom-packs --fail-on ERROR --fail-on-unanalyzed --format agent-summary --output /tmp/aws-wardline-agent-summary.json
+  PYTHONPATH="$PWD" wardline scan . --trust-pack config.wardline.elspeth_pack --allow-custom-packs --fail-on ERROR --fail-on-unanalyzed --format agent-summary --output /tmp/aws-wardline-agent-summary.json
   jq -e '
     .schema == "wardline-agent-summary-1" and
     .gate.verdict == "PASSED" and .gate.tripped == false and .gate.exit_class == 0 and
@@ -399,7 +399,7 @@ The central validation check remains authoritative. These tool checks are defens
   PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier --root src/elspeth
   git diff --check
   test "$(wardline --version)" = "wardline, version 1.3.1"
-  wardline scan . --trust-pack config.wardline.elspeth_pack --allow-custom-packs --fail-on ERROR --fail-on-unanalyzed --format agent-summary --output /tmp/aws-wardline-agent-summary.json
+  PYTHONPATH="$PWD" wardline scan . --trust-pack config.wardline.elspeth_pack --allow-custom-packs --fail-on ERROR --fail-on-unanalyzed --format agent-summary --output /tmp/aws-wardline-agent-summary.json
   jq -e '
     .schema == "wardline-agent-summary-1" and
     .gate.verdict == "PASSED" and .gate.tripped == false and .gate.exit_class == 0 and

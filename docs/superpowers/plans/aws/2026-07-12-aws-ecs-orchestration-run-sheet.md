@@ -15,9 +15,12 @@ final live GO/NO-GO acceptance, then fast-forward that exact tested SHA into
 **Architecture:** One named integration coordinator owns one ignored worktree
 at `/home/john/elspeth/.worktrees/aws-ecs-program`, branch
 `feat/aws-ecs-program`, the live Filigree DAG, serialized mutations, close
-anchors, and stage barriers. The main release checkout remains paused at its
-recorded starting SHA until final acceptance. Filigree readiness is necessary
-but not sufficient: a dependency is consumable only when its close commit is
+anchors, and stage barriers. The recorded program base remains immutable in
+program ancestry, while the main release checkout and `release/0.7.1` may
+advance independently for unrelated planning work through Stages 1–8. They are
+not program coordination surfaces until the explicit pre-candidate
+reconciliation in Stage 9. Filigree readiness is necessary but not sufficient:
+a dependency is consumable only when its close commit is
 an ancestor of the current program tip and its focused program-branch handoff
 gates are green.
 
@@ -69,10 +72,14 @@ successful Plan 12 closeout may issue AWS runtime GO.
 > branch. Close each slice truthfully at `feat/aws-ecs-program@<SHA>` after its
 > focused gates pass on the shared program branch. Preserve the 02→06→07
 > lockfile chain and every security/audit gate. Hold the complete unfiltered
-> suite until Plan 12 final washup. After Tasks 1–8 pass on one unchanged SHA,
-> fast-forward the paused `release/0.7.1` branch to that exact SHA before Task
-> 9 issues GO. Stop on any condition in section 11 rather than guessing or
-> weakening a gate.
+> suite until Plan 12 final washup. Ignore unrelated main-checkout and release
+> branch activity through Stages 1–8. Immediately before Plan 12 freezes its
+> candidate, reconcile the then-current `release/0.7.1` tip into the program
+> branch, rerun the affected-area checkpoint, and bind that consumed tip.
+> After Tasks 1–8 pass on one unchanged SHA, require the release tip still to
+> equal that reconciliation anchor and fast-forward it to the exact tested SHA
+> before Task 9 issues GO. Stop on any condition in section 11 rather than
+> guessing or weakening a gate.
 
 ## 2. Authority and non-negotiable rules
 
@@ -141,7 +148,7 @@ successful Plan 12 closeout may issue AWS runtime GO.
 
     ```bash
     test "$(wardline --version)" = "wardline, version 1.3.1"
-    wardline scan . \
+    PYTHONPATH="$PWD" wardline scan . \
       --trust-pack config.wardline.elspeth_pack \
       --allow-custom-packs \
       --fail-on ERROR \
@@ -178,61 +185,88 @@ successful Plan 12 closeout may issue AWS runtime GO.
     and baseline close, freeze all program-worktree code/config mutation.
     Preserve queued sibling work, commits, and checkpoints intact, but pause
     their integration and further mutation until the baseline closes.
+18. **Concurrent release planning is out of scope until Stage 9:** after the
+    program worktree exists, do not inspect, clean, reset, stash, commit, or
+    otherwise manage `/home/john/elspeth` or concurrent `release/0.7.1`
+    planning. Release movement or a dirty main checkout during Stages 1–8 is
+    not a stop condition. `PROGRAM_BASE_SHA` is the immutable ancestry marker
+    for the program branch. Stage 9 alone reconciles the then-current release
+    tip before candidate freeze; movement after that reconciliation
+    invalidates the candidate and restarts Plan 12 Task 1. Documentation-only
+    changes outside AWS program plans, reviews, designs, and specifications,
+    CI/security policy, generated contracts, runtime code, and tests are
+    non-substantive: absorb them at the Stage 9 merge and do not reopen slices.
+    Every non-documentation change is
+    substantive. Documentation that touches any of those named program
+    surfaces is also substantive and uses the normal impact/evidence
+    invalidation rules.
 
 ## 3. Coordinator bootstrap
 
-- [ ] **Step 1: Stabilize the planning commit and freeze the release start**
+- [ ] **Step 1: Stabilize the planning commit and record the program base**
 
   The relocation, this run sheet, tracker path updates, and dependency repairs
   must be committed and present on `release/0.7.1` before the autonomous run
-  starts. Record that tip as both `PLAN_SET_SHA` and `RELEASE_START_SHA`; it is
-  not the later Plan-10 rollback baseline. From this point until the final
-  fast-forward, the main release checkout and branch are paused and read-only.
+  starts. Record that tip as both the initial `PLAN_SET_SHA` and immutable
+  `PROGRAM_BASE_SHA`; it is not the later Plan-10 rollback baseline. Persist
+  both in the protected coordinator checkpoint. Subsequent reviewed planning
+  commits advance `PLAN_SET_SHA` on the program branch without changing
+  `PROGRAM_BASE_SHA`. After worktree creation, concurrent main-checkout and
+  release-branch planning is out of scope until Stage 9 reconciliation.
 
 - [ ] **Step 2: Establish the coordinator and the one program worktree**
 
   ```bash
   set -Eeuo pipefail
   umask 077
-  cd /home/john/elspeth
   export AWS_PAGER=""
   export AWS_ECS_COORDINATOR="${AWS_ECS_COORDINATOR:?set the named integration coordinator}"
-  test "$(git branch --show-current)" = "release/0.7.1"
-  test -z "$(git status --porcelain)"
-  git check-ignore -q .worktrees
-  export RELEASE_START_SHA="$(git rev-parse release/0.7.1)"
-  export PLAN_SET_SHA="$RELEASE_START_SHA"
   export PROGRAM_WORKTREE="/home/john/elspeth/.worktrees/aws-ecs-program"
   export PROGRAM_BRANCH="feat/aws-ecs-program"
 
   if test -d "$PROGRAM_WORKTREE"; then
-      test "$(git -C "$PROGRAM_WORKTREE" branch --show-current)" = "$PROGRAM_BRANCH"
-      git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$RELEASE_START_SHA" HEAD
-  elif git show-ref --verify --quiet "refs/heads/$PROGRAM_BRANCH"; then
-      git merge-base --is-ancestor "$RELEASE_START_SHA" "$PROGRAM_BRANCH"
+      cd "$PROGRAM_WORKTREE"
+      : "${PROGRAM_BASE_SHA:?restore the recorded immutable program base from the protected checkpoint}"
+      : "${PLAN_SET_SHA:?restore the latest reviewed planning commit from the protected checkpoint}"
+      test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
+      git merge-base --is-ancestor "$PROGRAM_BASE_SHA" HEAD
+      git merge-base --is-ancestor "$PLAN_SET_SHA" HEAD
+  elif git -C /home/john/elspeth show-ref --verify --quiet "refs/heads/$PROGRAM_BRANCH"; then
+      cd /home/john/elspeth
+      git check-ignore -q .worktrees
+      : "${PROGRAM_BASE_SHA:?restore the recorded immutable program base from the protected checkpoint}"
+      : "${PLAN_SET_SHA:?restore the latest reviewed planning commit from the protected checkpoint}"
+      git merge-base --is-ancestor "$PROGRAM_BASE_SHA" "$PROGRAM_BRANCH"
+      git merge-base --is-ancestor "$PLAN_SET_SHA" "$PROGRAM_BRANCH"
       git worktree add "$PROGRAM_WORKTREE" "$PROGRAM_BRANCH"
   else
-      git worktree add "$PROGRAM_WORKTREE" -b "$PROGRAM_BRANCH" "$RELEASE_START_SHA"
+      cd /home/john/elspeth
+      git check-ignore -q .worktrees
+      export PROGRAM_BASE_SHA="$(git rev-parse release/0.7.1)"
+      export PLAN_SET_SHA="$PROGRAM_BASE_SHA"
+      git worktree add "$PROGRAM_WORKTREE" -b "$PROGRAM_BRANCH" "$PROGRAM_BASE_SHA"
   fi
 
   test -z "$(git -C "$PROGRAM_WORKTREE" status --porcelain)"
-  test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
   cd "$PROGRAM_WORKTREE"
   export PROGRAM_TIP="$(git rev-parse HEAD)"
   ```
 
-  Expected: the main checkout remains clean at `RELEASE_START_SHA`; the
-  coordinator owns one clean program worktree descended from that SHA; and no
-  plan-specific AWS ECS worktree or integration branch is created.
+  Expected: the coordinator owns one clean program worktree descended from
+  immutable `PROGRAM_BASE_SHA`; the current reviewed `PLAN_SET_SHA` is in its
+  ancestry; no plan-specific AWS ECS worktree or integration branch is
+  created; and no assertion or mutation targets the concurrent main checkout
+  or current release tip after worktree creation.
 
   Every coordinator and worker command block runs in Bash with
   `set -Eeuo pipefail` and `umask 077`; AWS-capable blocks also export
   `AWS_PAGER=""`. Treat each complete numbered protocol (Section 5 dispatch,
-  Section 6 close, and Stage 8 Plan 10 setup) as one persistent Bash
+  Section 6 close, Stage 8 Plan 10 setup, and Stage 9 release reconciliation)
+  as one persistent Bash
   session; fenced blocks are readability breaks, not new shells. Exports do not
   cross agent boundaries. At session start, explicitly pass or redeclare
   `AWS_ECS_COORDINATOR`, `WORKER_ID`, `ISSUE_ID`, `PLAN_BASE`, `PLAN_FILE`,
-  `REVIEW_FILE`, `PLAN_SET_SHA`, `RELEASE_START_SHA`, `PROGRAM_WORKTREE`, and
+  `REVIEW_FILE`, `PLAN_SET_SHA`, `PROGRAM_BASE_SHA`, `PROGRAM_WORKTREE`, and
   `PROGRAM_BRANCH`. If a shell is interrupted, restart the protocol's documented
   exact-owner resume path and reconstruct values from Filigree/Git; never rely
   on a vanished environment variable.
@@ -485,9 +519,9 @@ release, and close instructions as stated in rule 13.
   ~~~bash
   cd "$PROGRAM_WORKTREE"
   test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
-  test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
   test -z "$(git status --porcelain -- docs/superpowers/plans/aws docs/superpowers/specs)"
   PROGRAM_TIP="$(git rev-parse HEAD)"
+  git merge-base --is-ancestor "$PROGRAM_BASE_SHA" "$PROGRAM_TIP"
   git merge-base --is-ancestor "$PLAN_SET_SHA" "$PROGRAM_TIP"
   PLAN_SHA256="$(sha256sum "$PLAN_FILE" | awk '{print $1}')"
   jq -e --arg sha "$PLAN_SHA256" \
@@ -589,7 +623,7 @@ release, and close instructions as stated in rule 13.
   ~~~bash
   cd "$PROGRAM_WORKTREE"
   test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
-  test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  git merge-base --is-ancestor "$PROGRAM_BASE_SHA" HEAD
   git merge-base --is-ancestor "$SLICE_BASE_SHA" HEAD
   if test "$FRESH_DISPATCH" = 1; then
       test -z "$(git status --porcelain)"
@@ -672,9 +706,9 @@ integrated result.
   ~~~bash
   cd "$PROGRAM_WORKTREE"
   test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
-  test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
   test -z "$(git status --porcelain)"
   PROGRAM_TIP="$(git rev-parse HEAD)"
+  git merge-base --is-ancestor "$PROGRAM_BASE_SHA" "$PROGRAM_TIP"
   git merge-base --is-ancestor "$IMPLEMENTATION_SHA" "$PROGRAM_TIP"
   filigree show "$ISSUE_ID" --json | jq -e \
     --arg worker "$WORKER_ID" \
@@ -754,7 +788,6 @@ integrated result.
      .close_commit == $anchor' <<<"$CLOSED_JSON" >/dev/null
   CLOSE_SHA="$(jq -r '.close_commit | split("@")[-1]' <<<"$CLOSED_JSON")"
   git merge-base --is-ancestor "$CLOSE_SHA" HEAD
-  test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
   filigree plan elspeth-6343920a47 --json --detail full \
     > /tmp/aws-ecs-plan.json
   ~~~
@@ -884,8 +917,8 @@ dependency, ancestry, plan-checksum, and ownership checks, but before any Plan
 ~~~bash
 cd "$PROGRAM_WORKTREE"
 test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
-test "$(git rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
 test -z "$(git status --porcelain)"
+git merge-base --is-ancestor "$PROGRAM_BASE_SHA" HEAD
 export ROLLBACK_BASELINE_SHA="$(git rev-parse HEAD)"
 : "${WORKER_ID:?set named Plan 10 owner}"
 PLAN10_JSON="$(filigree show elspeth-6285c29c07 --json)"
@@ -900,10 +933,11 @@ fi
 Execute Plan 10 Task 0's three exact source-qualification commands on that SHA.
 They are focused auth/frontend commands, not the held whole-repository suite.
 Capture all exit codes; require zero; require HEAD, the clean tree, and
-release/0.7.1 at RELEASE_START_SHA to remain unchanged. Only then add the
-existing sanitized elspeth.aws-ecs-rollback-baseline.v1 receipt, bound to
-ROLLBACK_BASELINE_SHA, and continue with Plan 10 Task 1 in the same program
-worktree. Do not create a Plan 10 branch or worktree.
+`PROGRAM_BASE_SHA` ancestry to remain unchanged. Do not inspect or bind the
+concurrent release tip here. Only then add the existing sanitized
+elspeth.aws-ecs-rollback-baseline.v1 receipt, bound to ROLLBACK_BASELINE_SHA,
+and continue with Plan 10 Task 1 in the same program worktree. Do not create a
+Plan 10 branch or worktree.
 
 The rollback baseline remains source-qualified only, not live production
 qualification. Plan 10's own reviewed commits do not invalidate its historical
@@ -914,12 +948,12 @@ re-execute Plan 10.
 
 If a prerequisite reopens after Plan 10 closes, stop for repository-owner
 approval of a replacement program lineage that omits the invalid Plan 10
-result. Never relabel a post-Plan-10 tip as a new pre-Plan-10 baseline. Keep the
-paused release branch unchanged, retire any Plan 12 candidate after required
-cleanup, preserve historical anchors, reconstruct from the last qualified
-baseline plus repaired prerequisite/descendant commits, rerun Task 0, and
-re-execute Plan 10. Rewriting the program branch requires explicit owner
-approval; without it, return NO-GO.
+result. Never relabel a post-Plan-10 tip as a new pre-Plan-10 baseline. Retire
+any Plan 12 candidate after required cleanup, preserve historical anchors,
+reconstruct from the last qualified baseline plus repaired
+prerequisite/descendant commits, rerun Task 0, and re-execute Plan 10. Do not
+touch concurrent release work during that reconstruction. Rewriting the
+program branch requires explicit owner approval; without it, return NO-GO.
 
 Exit: lean platform-bound image, executable runbook, acceptance tooling,
 IAM/EFS/health/Exec/CloudWatch/Guardrail/OIDC contracts, and all Plan-10 static
@@ -933,28 +967,132 @@ Plan 12 runs alone in the program worktree. No implementation, plan repair,
 lockfile change, unrelated commit, tracker mutation, or external mutation may
 run in parallel.
 
-Before Task 1 claims or resumes:
+Before release reconciliation:
 
 - verify all 19 prerequisite tracker steps are done;
 - verify every close anchor has the feat/aws-ecs-program@SHA form and its SHA is
   an ancestor of the current program tip;
-- verify release/0.7.1 still equals RELEASE_START_SHA;
 - verify the program worktree is clean and version boundaries match Plan 12;
-- bind the current reviewed Plan 12 checksum;
 - establish the named infrastructure, database, identity, release, evidence,
-  and cleanup operators; and
-- initialize the protected gate ledger/control manifest before external
-  mutation.
+  and cleanup operators.
+
+Then perform the one pre-candidate release reconciliation. This is the first
+time since worktree creation that concurrent `release/0.7.1` state becomes a
+program input:
+
+~~~bash
+cd "$PROGRAM_WORKTREE"
+test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    # Exact conflict-resume path after the merge command's documented exit 2.
+    export PRE_RECONCILIATION_PROGRAM_SHA="$(git rev-parse HEAD)"
+    export RECONCILED_RELEASE_SHA="$(git rev-parse MERGE_HEAD)"
+    test "$(git rev-parse ORIG_HEAD)" = "$PRE_RECONCILIATION_PROGRAM_SHA"
+else
+    test -z "$(git status --porcelain)"
+    export PRE_RECONCILIATION_PROGRAM_SHA="$(git rev-parse HEAD)"
+    export RECONCILED_RELEASE_SHA="$(git rev-parse release/0.7.1)"
+fi
+git merge-base --is-ancestor "$PROGRAM_BASE_SHA" "$PRE_RECONCILIATION_PROGRAM_SHA"
+export RELEASE_RECONCILIATION_BASE_SHA="$(git merge-base "$PRE_RECONCILIATION_PROGRAM_SHA" "$RECONCILED_RELEASE_SHA")"
+git log --oneline "$RELEASE_RECONCILIATION_BASE_SHA..$RECONCILED_RELEASE_SHA"
+git diff --name-status "$RELEASE_RECONCILIATION_BASE_SHA" "$RECONCILED_RELEASE_SHA"
+~~~
+
+Review and classify that exact release-only commit/path inventory before
+continuing. Documentation-only paths outside the named substantive surfaces
+are non-substantive. Any non-documentation path, or documentation touching an
+AWS program plan, review, design, or specification, CI/security policy,
+generated contract, runtime code, or test, is substantive and must enter the
+impact/evidence protocol below. If the substantive delta affects Plan 10
+itself or any prerequisite already consumed by closed Plan 10,
+do not merge through generic Section 10 recovery: use Stage 8's explicit
+post-Plan-10 owner-approved replacement-lineage protocol, rebuild/reclose the
+affected lineage through Plan 10, and restart Stage 9.
+
+~~~bash
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    test "$(git rev-parse MERGE_HEAD)" = "$RECONCILED_RELEASE_SHA"
+    test -z "$(git diff --name-only --diff-filter=U)"
+    test -z "$(git diff --name-only)"
+    test -z "$(git ls-files --others --exclude-standard)"
+    git diff --cached --check
+    git commit -m "chore: reconcile release planning before Plan 12"
+elif ! git merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" HEAD; then
+    if ! git merge --no-ff --no-commit "$RECONCILED_RELEASE_SHA"; then
+        git status --short
+        if git rev-parse -q --verify MERGE_HEAD >/dev/null &&
+           test -n "$(git diff --name-only --diff-filter=U)"; then
+            exit 2
+        fi
+        exit 1
+    fi
+    git diff --cached --check
+    git commit -m "chore: reconcile release planning before Plan 12"
+fi
+git merge-base --is-ancestor "$PRE_RECONCILIATION_PROGRAM_SHA" HEAD
+git merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" HEAD
+test -z "$(git status --porcelain)"
+export PROGRAM_TIP="$(git rev-parse HEAD)"
+~~~
+
+This reconciliation is a merge into the program branch, never a rebase or
+reset, so every historical slice close anchor remains in ancestry. The final
+release update is still a fast-forward and creates no new merge commit. Review
+the release-only delta before the merge. Only a conflict-class exit 2 leaves
+`MERGE_HEAD`; any other merge failure exits 1 and is not a conflict-resume
+case. After exit 2, the coordinator resolves only the exact unmerged paths
+semantically, stages every resolution, runs the affected checks, and reruns
+the entire Stage 9 reconciliation protocol. Its initial block reconstructs
+and validates the exact reviewed anchors from `HEAD`/`ORIG_HEAD` and
+`MERGE_HEAD`;
+never resample a moving release ref, choose one branch wholesale, or discard
+unrelated work. If the delta
+changes any completed slice's
+implementation, AWS program plan, review, design, or specification, CI gate,
+generated artifact, or security boundary not covered by the Stage 8 special
+case, apply Section 10
+evidence invalidation and re-execute the affected owners/descendants before
+Plan 12. Planning-only changes outside the AWS program still require the
+reconciliation affected-area checkpoint but do not reopen unrelated slices.
+Re-run the complete plan/review checksum inventory and every check derived
+from the reconciled delta. This is not Major Checkpoint 6: do not freeze a
+candidate until this reconciliation checkpoint passes and the program
+worktree is clean.
+
+After reconciliation and any required owner/descendant re-execution, refresh
+the authoritative prerequisite and ancestry proof on the final program tip:
+
+~~~bash
+filigree plan elspeth-6343920a47 --json --detail full > /tmp/aws-ecs-plan12-reconciled.json
+test "$(jq '[.phases[].steps[] | select(.issue_id != "elspeth-05396fed38")] | length' /tmp/aws-ecs-plan12-reconciled.json)" -eq 19
+jq -e 'all(.phases[].steps[]; .issue_id == "elspeth-05396fed38" or .status_category == "done")' /tmp/aws-ecs-plan12-reconciled.json >/dev/null
+while read -r anchor; do
+    [[ "$anchor" =~ ^feat/aws-ecs-program@[0-9a-f]{40}$ ]]
+    CLOSE_SHA="${anchor##*@}"
+    git merge-base --is-ancestor "$CLOSE_SHA" HEAD
+done < <(jq -r '.phases[].steps[] | select(.issue_id != "elspeth-05396fed38") | .close_commit' /tmp/aws-ecs-plan12-reconciled.json)
+export PROGRAM_TIP="$(git rev-parse HEAD)"
+~~~
 
 Because Plan 15C may intentionally edit Plan 12, verify its final reviewed text
 immediately before Task 1. A checksum mismatch stops closeout for re-review,
 sidecar update, and a reviewed planning commit on the program branch. Plan 12
 never consumes stale approval.
 
+Only now bind the final reviewed Plan 12 checksum and initialize its protected
+gate ledger under Task 1. Initialize the candidate-bound control manifest at
+Plan 12's documented point before the first external mutation, not before
+reconciliation or candidate freeze.
+
 Atomically start Wave 4 or validate its exact coordinator-owned resume using
 the current feat/aws-ecs-program@PROGRAM_TIP anchor. Then follow Plan 12 Task 1
 to prepare and freeze CANDIDATE_SHA. The gate ledger binds the program branch,
-RELEASE_START_SHA, and CANDIDATE_SHA.
+PROGRAM_BASE_SHA, RECONCILED_RELEASE_SHA, and CANDIDATE_SHA.
+
+Run Major Checkpoint 6 on that frozen `CANDIDATE_SHA` before Plan 12 Task 2.
+Any failure returns to the owning surface under Section 10, and any resulting
+change invalidates the candidate and restarts Plan 12 Task 1.
 
 Run Tasks 1–8 on that one unchanged candidate. This final washup explicitly
 includes the exact complete-suite command:
@@ -979,7 +1117,9 @@ After Tasks 1–8 pass and cleanup is complete, but before Task 9 issues GO:
 ~~~bash
 test "$(git -C "$PROGRAM_WORKTREE" rev-parse HEAD)" = "$CANDIDATE_SHA"
 test -z "$(git -C "$PROGRAM_WORKTREE" status --porcelain)"
-test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
+git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" "$CANDIDATE_SHA"
+test "$(git -C /home/john/elspeth branch --show-current)" = "release/0.7.1"
 test -z "$(git -C /home/john/elspeth status --porcelain)"
 git -C /home/john/elspeth merge --ff-only "$CANDIDATE_SHA"
 test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$CANDIDATE_SHA"
@@ -993,8 +1133,15 @@ audit may Task 9 issue GO, close Plan 12 with
 release/0.7.1@CANDIDATE_SHA, close Wave 4, and close milestone
 elspeth-6343920a47 at the same release anchor.
 
-A drifted release tip, non-fast-forward requirement, merge commit, dirty
-worktree, failed ancestry audit, missing cleanup, or changed candidate is
+A release tip that moves after reconciliation invalidates the candidate. If
+external mutation has begun or `CLEANUP_REQUIRED=1`, finish Plan 12 Task 8's
+evidence export and every independent cleanup attempt before changing program
+HEAD or starting another reconciliation; cleanup failure is NO-GO and forbids
+restart. Then preserve the concurrent work, merge the new tip into the program
+branch, repeat the reconciliation impact audit, restart Plan 12 Task 1, and
+rerun Major Checkpoint 6 on the newly frozen candidate before Task 2. A
+non-fast-forward final update, dirty final release-update
+surface, failed ancestry audit, missing cleanup, or changed candidate is
 NO-GO. Preserve the release branch at its last verified state and report the
 exact owner/remedy. Plan 12 GO remains limited to the exact tested source,
 digest, and platform; it is not durable signed multi-platform publication
@@ -1033,8 +1180,9 @@ At every stage barrier:
       units/files, either prohibited formal incomplete-analysis fact, missing
       metrics, or an active ERROR+ defect blocks stage exit.
 - [ ] `uv lock --check` passes; the current lock owner is correct.
-- [ ] `git diff --check` passes, the program worktree is clean, and the paused
-  release branch still equals `RELEASE_START_SHA`.
+- [ ] `git diff --check` passes, the program worktree is clean, and
+  `PROGRAM_BASE_SHA` remains in its ancestry. Do not inspect or gate on the
+  concurrent main checkout or release tip at Stages 1–8 barriers.
 - [ ] Live `filigree plan` and `filigree critical-path` were refreshed.
 - [ ] No successor was claimed before its program-branch dependency anchors
   and focused handoff evidence passed.
@@ -1244,8 +1392,7 @@ candidate invalidates the candidate and restarts Plan 12.
 Stop and surface the exact owner/remedy when any of these occurs:
 
 - plan/document/tracker dependency disagreement;
-- dirty program worktree, dirty paused release worktree, or release drift from
-  `RELEASE_START_SHA` before final fast-forward;
+- dirty program worktree at a required clean boundary;
 - dependency marked done but close SHA absent from the current
   `feat/aws-ecs-program` ancestry before final fast-forward, or absent from
   `release/0.7.1` ancestry after final fast-forward;
@@ -1266,6 +1413,8 @@ Stop and surface the exact owner/remedy when any of these occurs:
   request-path DDL without 11, or redirectable operator telemetry without 14;
 - Plan-10 rollback baseline recorded after Plan-10 edits;
 - Plan-12 local/remote/CI/task/image SHA mismatch; or
+- release movement after Stage 9 reconciliation without candidate
+  invalidation, re-reconciliation, and a Task 1 restart; or
 - incomplete external cleanup/evidence export.
 
 The orchestrator never guesses past a stop condition. It repairs the contract,

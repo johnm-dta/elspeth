@@ -65,13 +65,24 @@ Run the entire program in exactly one ignored git worktree:
 
 - path: `/home/john/elspeth/.worktrees/aws-ecs-program`;
 - branch: `feat/aws-ecs-program`;
-- base: the recorded initial tip of `release/0.7.1`.
+- base: the recorded initial tip of `release/0.7.1`, persisted as
+  `PROGRAM_BASE_SHA`.
 
-Before creating or resuming it, record `RELEASE_START_SHA` from
-`release/0.7.1`. Leave the main `/home/john/elspeth` checkout and the release
-branch paused and untouched for the whole implementation and acceptance run.
-Stop if `release/0.7.1` moves away from `RELEASE_START_SHA`; do not rebase the
-program branch onto the drifted release tip or conceal the drift.
+When creating the worktree, record `PROGRAM_BASE_SHA` from the then-current
+`release/0.7.1` tip and persist it in the protected coordinator checkpoint.
+On resume, reconstruct that recorded value rather than sampling the current
+release tip, and require it to remain an ancestor of the program branch. The
+main `/home/john/elspeth` checkout and `release/0.7.1` may advance independently
+for unrelated planning work during Stages 1–8; they are out of scope and their
+movement or dirty state is not a program blocker. Do not inspect, clean, reset,
+stash, commit, or otherwise manage that concurrent work, and do not rebase the
+program branch merely to chase it. Documentation-only changes outside AWS
+program plans, reviews, designs, and specifications, CI/security policy,
+generated contracts, runtime code, and tests are non-substantive and are
+simply absorbed at the Stage 9 reconciliation. Every non-documentation change
+is substantive. Documentation
+that touches any named program surface is also substantive and triggers impact
+analysis and evidence invalidation.
 
 Do not create plan-specific worktrees, plan-specific integration branches, or
 per-slice merge commits. Every slice commits directly to
@@ -85,12 +96,23 @@ serialized order.
 
 Never stash, reset, overwrite, stage, or commit unrelated user changes.
 
-After one unchanged candidate passes Plan 12 Tasks 1–8, require the release
-tip still to equal `RELEASE_START_SHA`, then fast-forward `release/0.7.1` to
-that exact candidate SHA. Do not create a merge commit. Verify release HEAD
-equals the tested candidate, both worktrees are clean, and every slice close
-SHA is a release ancestor before Task 9 may issue GO or close Plan 12, Wave 4,
-or the milestone.
+Immediately before Plan 12 freezes its candidate, reconcile the then-current
+`release/0.7.1` tip into `feat/aws-ecs-program` under coordinator ownership,
+preserving all slice close anchors in ancestry. Resolve conflicts on the
+program branch, rerun the complete affected-area checkpoint, and record the
+consumed tip as `RECONCILED_RELEASE_SHA`. Only then freeze `CANDIDATE_SHA`.
+After one unchanged candidate passes Plan 12 Tasks 1–8, require
+`release/0.7.1` still to equal `RECONCILED_RELEASE_SHA`, then fast-forward it
+to that exact candidate SHA. The final release update itself creates no merge
+commit. Verify release HEAD equals the tested candidate, the program worktree
+and final release-update surface are clean, and every slice close SHA is a
+release ancestor before Task 9 may issue GO or close Plan 12, Wave 4, or the
+milestone. If the release tip advances after reconciliation, invalidate the
+candidate. If external mutation has begun or `CLEANUP_REQUIRED=1`, complete
+Plan 12 Task 8 evidence export and every independent cleanup attempt before
+changing program HEAD or reconciling again; cleanup failure is NO-GO and
+forbids restart. Then preserve the concurrent release work, reconcile it, and
+restart Plan 12 Task 1.
 
 ## 3. Sprint verification and CI cadence override
 
@@ -347,15 +369,13 @@ Execute `elspeth-05396fed38`, Plan 12, alone.
 No implementation, plan repair, lockfile change, or unrelated commit may run
 in parallel.
 
-Before external mutation:
+Before release reconciliation:
 
 - verify all 19 prerequisite steps are complete;
-- verify every close anchor is in candidate ancestry;
+- verify every close anchor is in current program ancestry;
 - verify version and SHA boundaries;
-- bind the current reviewed Plan 12 checksum;
 - establish named infrastructure, database, identity, release, evidence, and
   cleanup operators;
-- initialize the protected gate ledger and control manifest; and
 - verify required AWS, Docker, Terraform, browser, CI, and evidence
   facilities.
 
@@ -364,9 +384,13 @@ live Aurora/EFS/ECS/ALB, task-role S3/Bedrock/Guardrails, Cognito/OIDC,
 Landscape-correlated CloudWatch/X-Ray, rollback, durable sanitized evidence,
 teardown, and final GO/NO-GO.
 
-Prepare the final affected-area matrix as Major Checkpoint 6, freeze the
-candidate, and run the complete unfiltered repository-wide suite plus every
-other Plan 12 Task 1–8 gate on that unchanged SHA.
+Run the reconciliation affected-area checkpoint before candidate freeze. Then
+bind the final reviewed Plan 12 checksum and initialize its protected gate
+ledger under Task 1. Initialize the candidate-bound control manifest only at
+Plan 12's documented point before the first external mutation. Use Task 1 to
+freeze the candidate, run Major Checkpoint 6 on that exact SHA before Task 2,
+and run the complete unfiltered repository-wide suite plus every other Plan 12
+Task 1–8 gate on that unchanged SHA.
 
 Only Plan 12 may declare runtime GO. GO is limited to the exact tested source
 SHA, image digest, and platform. Do not describe it as approval for rebuilt,
@@ -414,7 +438,7 @@ For each slice:
 6. Verify the sidecar checksum.
 7. Atomically start the exact Filigree issue.
 8. Verify the shared worktree is on `feat/aws-ecs-program`, clean at the slice
-   boundary, and still descended from `RELEASE_START_SHA`.
+   boundary, and still descended from `PROGRAM_BASE_SHA`.
 9. Establish a clean dependency environment.
 10. Run the narrow baseline.
 11. Implement with TDD.
@@ -447,9 +471,11 @@ lose the program.
 - Use Filigree comments as the authoritative resume cursor.
 - Maintain a mode-0600 checkpoint outside committed source, such as
   `/tmp/elspeth-aws-ecs-program-state.json`.
-- Record only the current stage, active issue IDs and assignees, integration
-  SHA, worktree/branch names, completed task identifiers, verification result
-  identifiers, blockers, and next action.
+- Record only the current stage, active issue IDs and assignees,
+  `PROGRAM_BASE_SHA`, current `PLAN_SET_SHA`, integration SHA,
+  `RECONCILED_RELEASE_SHA` once Stage 9 records it, worktree/branch names,
+  completed task identifiers, verification result identifiers, blockers, and
+  next action.
 - Never store credentials, URLs, ARNs, account IDs, provider responses,
   prompts, user data, or raw logs in the checkpoint.
 - Refresh state from Git and Filigree after interruptions.

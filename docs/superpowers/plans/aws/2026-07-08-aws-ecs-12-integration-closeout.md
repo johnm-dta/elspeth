@@ -37,18 +37,28 @@ Task 1 starts and records the matrix in the protected gate ledger.
 
 **Program branch contract:** Run Tasks 1–8 in the one shared
 `/home/john/elspeth/.worktrees/aws-ecs-program` worktree on
-`feat/aws-ecs-program`. The main checkout and `release/0.7.1` remain clean and
-paused at `RELEASE_START_SHA`. Use the program branch or a candidate-derived
-immutable exact-SHA temporary ref for hosted CI. After Tasks 1–8 pass on one
-unchanged candidate and cleanup completes, Task 9 fast-forwards the paused
-release branch to that exact SHA without a merge commit, verifies all slice
-anchors in release ancestry, and only then may issue GO and close Plan 12.
+`feat/aws-ecs-program`. The orchestration run sheet first merges the
+then-current `release/0.7.1` tip into the program branch and records it as
+`RECONCILED_RELEASE_SHA`; documentation-only release movement before that
+reconciliation is not a blocker. Use the program branch or a
+candidate-derived immutable exact-SHA temporary ref for hosted CI. From Task 1
+through Task 9, the release ref must remain at `RECONCILED_RELEASE_SHA`; later
+movement invalidates the candidate and restarts reconciliation plus Task 1.
+If external mutation has begun or `CLEANUP_REQUIRED=1`, Task 8 must first
+finish evidence export and every independent cleanup attempt before program
+HEAD changes or another reconciliation begins. Cleanup failure is NO-GO and
+forbids restart; evidence from the invalidated candidate must not be mixed
+into the next run.
+After Tasks 1–8 pass on one unchanged candidate and cleanup completes, Task 9
+fast-forwards the reconciled release branch to that exact SHA without creating
+a new merge commit, verifies all slice anchors in release ancestry, and only
+then may issue GO and close Plan 12.
 
 ## Hard-stop rules
 
 - Run Tasks 1–8 from the program worktree with `feat/aws-ecs-program` checked
-  out. Run only Task 9's final release-boundary commands from the paused main
-  checkout.
+  out. Run only Task 9's final release-boundary commands from the release
+  checkout after verifying its exact branch, anchor, and cleanliness.
 - Execute every Task 1–7 command block in a Bash shell already configured with
   `set -Eeuo pipefail` and `umask 077` (`AWS_PAGER=""` for AWS work). Task 8 is
   the deliberate exception: it keeps `pipefail` but collects failures instead
@@ -69,6 +79,12 @@ anchors in release ancestry, and only then may issue GO and close Plan 12.
   cleanup surface, aggregates failures, and returns NO-GO. Only after Task 8
   finishes may the owner repair and restart at Task 1. Results from different
   commits may never be combined into a go verdict.
+- Release movement after reconciliation invalidates the candidate. Before any
+  external mutation, return directly to the run sheet's reconciliation
+  protocol. After external mutation begins or while `CLEANUP_REQUIRED=1`, do
+  not change program HEAD or reconcile again until Task 8 has completed
+  evidence export and every independent cleanup attempt. Cleanup failure is
+  NO-GO and forbids restart.
 - Do not push or update `release/0.7.1` before Task 9's final fast-forward.
   Do not create a VCS release tag, promote the candidate image beyond the
   acceptance environment, or call the AWS ECS program complete until Task 9
@@ -93,13 +109,17 @@ anchors in release ancestry, and only then may issue GO and close Plan 12.
   test "$(git branch --show-current)" = "feat/aws-ecs-program"
   test -z "$(git status --porcelain)"
   git diff --check
-  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
-  test -z "$(git -C /home/john/elspeth status --porcelain)"
+  test -n "${RECONCILED_RELEASE_SHA:-}"
+  git merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" HEAD
+  test "$(git rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
   ```
 
-  **Expected result:** all three commands exit 0. If plan work is still
-  uncommitted, the integration owner is on another branch, or the paused
-  release tip has drifted, stop.
+  **Expected result:** every command exits 0. If plan work is still
+  uncommitted, the integration owner is on another branch, the reconciliation
+  anchor is absent from candidate ancestry, or the release ref moved after
+  reconciliation, invalidate the candidate and return to the run sheet's
+  reconciliation protocol before restarting Task 1. The main checkout's dirty
+  state is irrelevant until Task 9's final update surface.
 
 - [ ] Initialize the owner-approved protected evidence ledger outside the
   repository before the first gate. Its parent directory is mode 0700 on
@@ -219,8 +239,8 @@ anchors in release ancestry, and only then may issue GO and close Plan 12.
 
 **Definition of Done:**
 
-- [ ] `feat/aws-ecs-program` is clean and `release/0.7.1` still equals
-  `RELEASE_START_SHA`.
+- [ ] `feat/aws-ecs-program` is clean, contains `RECONCILED_RELEASE_SHA`, and
+  `release/0.7.1` still equals that reconciliation anchor.
 - [ ] Project and installed distribution versions are exactly 0.7.1.
 - [ ] `CHANGELOG.md` has a dated 0.7.1 release entry covering this program's
   public behavior and operational constraints.
@@ -504,7 +524,7 @@ anchors in release ancestry, and only then may issue GO and close Plan 12.
   export CANDIDATE_SHA="$(git rev-parse HEAD)"
   export PROGRAM_BRANCH="feat/aws-ecs-program"
   test "$(git branch --show-current)" = "$PROGRAM_BRANCH"
-  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  test "$(git rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
   REMOTE_PROGRAM_SHA="$(git ls-remote --heads origin "refs/heads/$PROGRAM_BRANCH" | awk '{print $1}')"
   if test -n "$REMOTE_PROGRAM_SHA"; then
       git merge-base --is-ancestor "$REMOTE_PROGRAM_SHA" "$CANDIDATE_SHA"
@@ -517,7 +537,7 @@ anchors in release ancestry, and only then may issue GO and close Plan 12.
       PR_NUMBER="${PR_URL##*/}"
   fi
   test "$(gh pr view "$PR_NUMBER" --json state,baseRefName,headRefName,headRefOid --jq '.state + ":" + .baseRefName + ":" + .headRefName + ":" + .headRefOid')" = "OPEN:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA"
-  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  test "$(git rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
   ~~~
 
   If the coordinator lacks feature-branch push authority, obtain the named
@@ -606,7 +626,7 @@ anchors in release ancestry, and only then may issue GO and close Plan 12.
 - [ ] A completed successful `ci.yaml` run exists for the exact candidate SHA.
 - [ ] The remote `feat/aws-ecs-program` branch and its unmerged review PR to
   `release/0.7.1` point at the candidate while the release branch remains at
-  `RELEASE_START_SHA`; the acceptance run was an exact-SHA `push` event on its
+  `RECONCILED_RELEASE_SHA`; the acceptance run was an exact-SHA `push` event on its
   immutable temporary `RC*` ref.
 - [ ] Its `CI Success` umbrella job concluded successfully.
 - [ ] The exact-SHA CI, CodeQL, and signed-allowlist run IDs/URLs are recorded,
@@ -1800,7 +1820,7 @@ and cleanup completed on time.
   recorded in Task 1.
 
 - [ ] Reconfirm the candidate and hosted-CI boundary, then perform the one
-  final fast-forward into the paused release branch. This is the only step
+  final fast-forward into the reconciled release branch. This is the only step
   authorized to update release/0.7.1.
 
   ~~~bash
@@ -1822,10 +1842,11 @@ and cleanup completed on time.
 
   test "$(git -C /home/john/elspeth branch --show-current)" = "release/0.7.1"
   test -z "$(git -C /home/john/elspeth status --porcelain)"
-  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$RELEASE_START_SHA"
-  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RELEASE_START_SHA"
+  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$RECONCILED_RELEASE_SHA"
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
+  git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" "$CANDIDATE_SHA"
   REMOTE_RELEASE_SHA="$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')"
-  test -z "$REMOTE_RELEASE_SHA" || test "$REMOTE_RELEASE_SHA" = "$RELEASE_START_SHA"
+  test -z "$REMOTE_RELEASE_SHA" || test "$REMOTE_RELEASE_SHA" = "$RECONCILED_RELEASE_SHA"
   git -C /home/john/elspeth merge --ff-only "$CANDIDATE_SHA"
   test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$CANDIDATE_SHA"
   test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$CANDIDATE_SHA"
@@ -1845,8 +1866,8 @@ and cleanup completed on time.
 
   **Expected result:** the program worktree and candidate are unchanged, the
   exact-SHA hosted run remains green, no temporary/ref/tag leak exists, the
-  local and remote release branch started at RELEASE_START_SHA and now equal
-  CANDIDATE_SHA by fast-forward, both worktrees are clean, and all 19
+  local and remote release branch started at RECONCILED_RELEASE_SHA and now
+  equal CANDIDATE_SHA by fast-forward, both worktrees are clean, and all 19
   prerequisite close SHAs are release ancestors. Any failure is NO-GO; do not
   create a merge commit, force-push, or issue a partial verdict.
 

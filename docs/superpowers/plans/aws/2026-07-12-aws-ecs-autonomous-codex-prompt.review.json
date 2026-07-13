@@ -2,14 +2,14 @@
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_ORCHESTRATE_AFTER_PLANNING_COMMIT",
   "runtime_verdict": "PENDING_PLAN_12",
-  "summary": "The autonomous prompt is coherent with the authoritative run sheet: one ignored feat/aws-ecs-program worktree, serialized mutations, truthful program-branch slice anchors, one frozen Plan 12 candidate, exact-SHA hosted CI, and one final fast-forward into release/0.7.1 before GO and lifecycle closure.",
+  "summary": "The autonomous prompt is coherent with the authoritative run sheet: one ignored feat/aws-ecs-program worktree rooted at immutable PROGRAM_BASE_SHA, serialized mutations, truthful program-branch slice anchors, and unrelated concurrent documentation ignored through Stages 1-8. Stage 9 reviews and merges release/0.7.1, records RECONCILED_RELEASE_SHA, completes its affected-area checkpoint, then freezes one Plan 12 candidate. Cleanup precedes any post-mutation rereconciliation, and Task 9 performs one final fast-forward from the unchanged reconciliation anchor before GO.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md",
-  "plan_sha256": "cd8a63cf02cca9aa2d71e61448634d8e1e405e33e805420246f109510cca9940",
-  "reviewed_at": "2026-07-12T11:58:37Z",
+  "plan_sha256": "40d103810fa11916dda54f665376774cc26a2c69efc333531b0c12942f33744f",
+  "reviewed_at": "2026-07-13T04:57:30Z",
   "review_basis": {
-    "branch": "release/0.7.1",
-    "head": "b50b5da62a2fee91128e9993df0828f50feaf8fc",
-    "process": "Independent xhigh orchestration review using plan-review, documentation-testing, security/release, worktree, and verification guidance. The full five-source result, AWS plan-folder orchestration references, live Filigree DAG, workflow triggers, shell fences, links, JSON, whitespace, stale terms, and source hashes were checked after repairs."
+    "branch": "feat/aws-ecs-program",
+    "head": "a579626e46c97973bc50b5dc9235032ad98199d9",
+    "process": "Independent orchestration-contract, mechanical, and Wardline reviews of the uncommitted planning repair in the isolated program worktree. Review covered immutable program ancestry, concurrent documentation classification, Stage 9 conflict resume, Plan 10 replacement lineage, Plan 12 cleanup ordering, candidate-bound Major Checkpoint 6, shell fences, links, stale terms, and source hashes."
   },
   "blocking_issues": [],
   "warnings": [
@@ -44,16 +44,21 @@
       "id": "B-PROMPT-4",
       "status": "RESOLVED",
       "resolution": "Plan 06 now starts from the current program tip containing Plans 02 and 08A; no per-slice rebase instruction remains."
+    },
+    {
+      "id": "B-PROMPT-5",
+      "status": "RESOLVED",
+      "resolution": "PROGRAM_BASE_SHA is now the immutable Stages 1-8 ancestry marker; unrelated documentation is ignored until Stage 9, which merges and records RECONCILED_RELEASE_SHA. Post-mutation release movement routes through Task 8 cleanup before rereconciliation, and Major Checkpoint 6 runs only after Task 1 freezes the candidate."
     }
   ],
   "verification": [
-    "all five source files have balanced Markdown fences",
-    "all 56 Bash or shell fences pass bash -n",
-    "all 25 existing local links resolve; three Plan 10 forward-link examples are intentionally created during implementation",
-    "git diff --check passes for tracked changes and the untracked prompt",
+    "all four amended orchestration documents have balanced Markdown fences",
+    "all 75 Bash or shell fences in those documents pass bash -n",
+    "all 24 local links in those documents resolve",
+    "git diff --check passes",
     "all AWS review JSON parses",
-    "live Filigree milestone has exactly 20 expected steps with exact direct dependencies and the documented nine-node critical path",
-    "ci.yaml, codeql.yaml, and enforce-allowlist-judge-gates.yaml accept the immutable RC* push ref used by Plan 12",
-    "targeted stale orchestration-term searches found no executable per-slice worktree, branch, rebase, early-release, or omitted-full-suite instruction in the five reviewed sources"
+    "a synthetic divergent-release repository passed the documented conflict-class exit and fresh-shell reconciliation-resume protocol",
+    "targeted searches found no RELEASE_START_SHA or paused-release instruction in the amended documents",
+    "independent orchestration-contract and Wardline reviewers returned APPROVED after repair"
   ]
 }

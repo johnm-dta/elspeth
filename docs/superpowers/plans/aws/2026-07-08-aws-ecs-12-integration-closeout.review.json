@@ -1,13 +1,13 @@
 {
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_EXECUTE_AFTER_ALL_DEPENDENCIES",
-  "summary": "Plan 12 is execution-ready after all 19 prerequisites close on feat/aws-ecs-program. Tasks 1 through 8 freeze and test one unchanged candidate, including the complete unfiltered suite and exact-SHA RC push workflows; after cleanup, Task 9 alone fast-forwards and pushes release/0.7.1 to that same SHA before GO and lifecycle closure.",
+  "summary": "Plan 12 is execution-ready after all 19 prerequisites close on feat/aws-ecs-program. Stage 9 first reviews and merges the then-current release/0.7.1 tip into the program lineage, preserves every close anchor, reruns the reconciliation affected-area checkpoint, and records RECONCILED_RELEASE_SHA. Task 1 then freezes one candidate, Major Checkpoint 6 runs on that exact SHA before Task 2, and Tasks 1 through 8 test it unchanged. If release moves after external mutation, Task 8 cleanup must finish before rereconciliation. Task 9 alone fast-forwards and pushes the still-reconciled release branch to that tested SHA before GO.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-  "reviewed_at": "2026-07-12T11:58:37Z",
+  "reviewed_at": "2026-07-13T04:57:30Z",
   "review_basis": {
-    "branch": "release/0.7.1",
-    "head": "b50b5da62a2fee91128e9993df0828f50feaf8fc",
-    "baseline": "Current Plan 12, Plans 00/10, the repaired run sheet and autonomous prompt, live Filigree DAG, current CI/CodeQL/judge workflow triggers, exact final fast-forward commands, cleanup ordering, shell syntax, links, and source hashes were rechecked. The review PR to release/0.7.1 is metadata only; exact-SHA hosted evidence comes from the immutable RC* push ref accepted by all three required workflows."
+    "branch": "feat/aws-ecs-program",
+    "head": "a579626e46c97973bc50b5dc9235032ad98199d9",
+    "baseline": "The uncommitted reviewed planning repair was checked in the isolated program worktree against Plan 10 replacement-lineage semantics, Plan 12 cleanup ordering, the exact final fast-forward boundary, the autonomous prompt and run sheet, shell syntax, links, and a synthetic divergent-release conflict/resume repository."
   },
   "blocking_issues": [],
   "warnings": [
@@ -30,11 +30,6 @@
       "id": "R12-4",
       "status": "SYNTHETIC_ROLLBACK_BASELINE",
       "detail": "Scenario B qualifies a source-complete synthetic rollback rehearsal image built from the recorded pre-Plan-10 SHA. This proves code/schema rollback behavior, not historical production-artifact retention. The final verdict now states that distinction explicitly."
-    },
-    {
-      "id": "R12-5",
-      "status": "CONCURRENT_WORKTREE",
-      "detail": "HEAD advanced twice during review because unrelated guided/frontend work was committed concurrently. The final review and artifact were rebound to the live final HEAD; unrelated dirty frontend and earlier plan-review changes were preserved and were not staged, reverted, or committed by this review."
     }
   ],
   "resolved_findings": [
@@ -117,6 +112,16 @@
       "id": "B12-16",
       "status": "RESOLVED",
       "resolution": "Narrowed the final GO and cross-plan/spec/index contracts so deletion and later rebuilding cannot masquerade as build-once artifact acceptance: only an equal recorded digest can inherit the target-platform live result; any different or other-platform digest repeats acceptance."
+    },
+    {
+      "id": "B12-17",
+      "status": "RESOLVED",
+      "resolution": "Separated the pre-candidate release reconciliation checkpoint from Major Checkpoint 6, made conflict resume reconstruct exact HEAD/ORIG_HEAD and MERGE_HEAD anchors without resampling release, and required Task 8 cleanup before any post-mutation HEAD change or rereconciliation."
+    },
+    {
+      "id": "B12-18",
+      "status": "RESOLVED",
+      "resolution": "Concurrent main-checkout and release-branch documentation is out of scope during Stages 1-8. Stage 9 absorbs unrelated documentation, while every non-documentation change and any AWS program plan, review, design, specification, CI/security policy, generated contract, runtime, or test change triggers impact and evidence handling."
     }
   ],
   "reviewer_summaries": {
@@ -147,14 +152,20 @@
       "reviewed_at": "2026-07-12T04:15:00Z",
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found an impossible exact-SHA PR assertion, circular image/Terraform ordering, shell-only cleanup state, mutable/unbound external IaC, unsafe destroy, colliding ECR tags and run IDs, unverifiable ECS Exec output, incomplete expiry/interruption recovery, and ambiguous artifact/task-definition closeout semantics."
+    },
+    {
+      "reviewed_at": "2026-07-13T04:57:30Z",
+      "verdict": "APPROVED_AFTER_ORCHESTRATION_REPAIR",
+      "summary": "Plan 12 now consumes a reviewed release reconciliation anchor, keeps pre-freeze reconciliation distinct from candidate-bound Major Checkpoint 6, and finishes cleanup before any post-mutation rereconciliation."
     }
   ],
   "verification": [
     "Three independent reviewers returned APPROVED after repairs.",
-    "All Plan 12 and Plan 10 Bash code fences concatenate and parse with bash -n; Markdown fence counts are balanced.",
+    "All 75 Bash or shell fences in the four amended orchestration documents parse with bash -n; Markdown fences are balanced and all 24 local links resolve.",
+    "A synthetic divergent-release repository exercised conflict-class exit, fresh-shell HEAD/ORIG_HEAD and MERGE_HEAD reconstruction, staged-resolution checks, merge commit, and preserved ancestry successfully.",
     "git diff --check passes; direct AWS invocation, unsafe destroy -auto-approve, stale tag templates, RUN_ID collision, forbidden aws_capture login pipe, and || true bypass markers are absent.",
     "Current CI/CodeQL/allowlist triggers, gh/filigree command options, Terraform saved-plan contract, exact Filigree dependency set, and fresh Loomweave repository state were checked.",
     "Plan 12 remains pending, unassigned, and dependency-controlled; this review did not claim, transition, implement, push, merge, tag, or deploy it."
   ],
-  "plan_sha256": "50d7afb72f7cbb5483879a8a94365968db818d163653d13e20fd0e56ba2f52e8"
+  "plan_sha256": "7625b9bd970daa9e32966163f28e51241f262478823ab440d78f88ee67e52d1f"
 }

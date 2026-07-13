@@ -1,26 +1,28 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 8 single-worktree autonomous handoff",
-  "date": "2026-07-12",
-  "reviewed_at": "2026-07-12T11:58:37Z",
-  "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ release/0.7.1",
-  "process": "Independent xhigh re-review of the repaired autonomous prompt, run sheet, Plan 00, Plan 10, and Plan 12 using reality, architecture, quality/security, systems, documentation-testing, supply-chain, worktree, and verification lenses. The current diff, full resulting sources, all AWS plan-folder orchestration references, live Filigree DAG and critical path, workflow triggers, shell fences, links, JSON, whitespace, stale terms, and SHA256 bindings were checked.",
+  "review": "AWS ECS runtime-readiness plan set — round 9 worktree-only orchestration repair",
+  "date": "2026-07-13",
+  "reviewed_at": "2026-07-13T04:57:30Z",
+  "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ feat/aws-ecs-program",
+  "process": "Independent orchestration-contract, mechanical, and Wardline re-review of the planning repair in the isolated program worktree. The review covered immutable PROGRAM_BASE_SHA ancestry, ignored concurrent documentation through Stages 1-8, substantive documentation classification, Stage 9 pre-merge inventory and conflict resume, Plan 10 replacement lineage, Plan 12 cleanup ordering, candidate-bound Major Checkpoint 6, exact final fast-forward, shell fences, links, JSON, whitespace, stale terms, and SHA256 bindings.",
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO to execute the dependency DAG in one ignored feat/aws-ecs-program worktree. All slice mutations and tracker transitions are serialized, the full unfiltered suite is held until final washup, and runtime GO still requires one unchanged candidate to pass Plan 12 Tasks 1 through 8, cleanup, exact-SHA hosted CI, and the final no-merge-commit fast-forward into release/0.7.1.",
+  "verdict_summary": "GO to execute the dependency DAG in one ignored feat/aws-ecs-program worktree. Concurrent main/release documentation is ignored through Stages 1-8. Stage 9 reviews and merges the current release tip, records RECONCILED_RELEASE_SHA, and runs the reconciliation checkpoint before Task 1 freezes the candidate. Runtime GO still requires Major Checkpoint 6 and Plan 12 Tasks 1 through 8 on that unchanged SHA, cleanup, exact-SHA hosted CI, and the final fast-forward from the unchanged reconciliation anchor.",
   "source_sha256": {
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "cd8a63cf02cca9aa2d71e61448634d8e1e405e33e805420246f109510cca9940",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "cc0310767206c68db1700c47109bd221eb8930bcd03592b68aff4f61a53c6cba",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "40d103810fa11916dda54f665376774cc26a2c69efc333531b0c12942f33744f",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "7fffe7aa6810e435bb0990c989199fcee248e6757bb786e9e6df012e49753099",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "94047e986bd687f2c7e5b3f5d508a647a7879f3ad31b9741b378c9320bfdaa44",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "3bb971d0db88f1575c362f970f37c80728ee064d58207e285c9d2726d32ba4f6",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "50d7afb72f7cbb5483879a8a94365968db818d163653d13e20fd0e56ba2f52e8"
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "7625b9bd970daa9e32966163f28e51241f262478823ab440d78f88ee67e52d1f"
   },
   "reviewer_verdicts": {
     "reality": "APPROVED_AFTER_REPAIRS",
     "architecture": "APPROVED_AFTER_REPAIRS",
     "quality_security": "APPROVED_AFTER_REPAIRS",
     "systems_dependencies": "APPROVED_AFTER_REPAIRS",
-    "final_rechecks": "APPROVED"
+    "final_rechecks": "APPROVED",
+    "orchestration_contract": "APPROVED",
+    "wardline_contract": "APPROVED"
   },
   "blocking": [],
   "non_blocking_residuals": [
@@ -55,17 +57,21 @@
     "Landscape epoch 23 has explicit SQLite and PostgreSQL old-populated refusal/recreate behavior, atomic policy evidence, audit-before-telemetry ordering, and release compatibility ownership.",
     "Plan 15C recursively pins the installed ApplyGuardrail model, validates complete usage, blocks detect-only positives, accepts bounded 1..N intervention outputs, and discards provider text.",
     "Full CLI catalog schemas remain explicit while web policy-view schemas expose only usable opaque aliases and safe options.",
-    "Plan 12 mechanically checks all 19 pre-closeout tracker steps: 18 application slices plus the verification-baseline task; the live milestone has 20 steps including closeout."
+    "Plan 12 mechanically checks all 19 pre-closeout tracker steps: 18 application slices plus the verification-baseline task; the live milestone has 20 steps including closeout.",
+    "PROGRAM_BASE_SHA is the immutable Stages 1-8 ancestry marker; unrelated concurrent documentation is not inspected or gated until Stage 9.",
+    "Stage 9 inventories and classifies the release-only delta before merge, reconstructs conflict-resume anchors without resampling release, and preserves all historical close anchors.",
+    "Plan 10 itself and consumed prerequisites use the owner-approved replacement-lineage protocol when a substantive reconciliation delta invalidates the historical baseline.",
+    "The reconciliation affected-area checkpoint precedes Task 1; Major Checkpoint 6 runs only on the frozen candidate before Task 2, and external cleanup precedes any post-mutation rereconciliation."
   ],
   "verification": [
-    "git diff --check passes for tracked changes and the untracked autonomous prompt",
-    "balanced Markdown fences across all five reviewed sources",
-    "all 56 Bash or shell fences pass bash -n",
-    "all current local links resolve, excluding three intentional Plan 10 forward-link examples created during implementation",
+    "git diff --check passes",
+    "balanced Markdown fences across all four amended orchestration documents",
+    "all 75 Bash or shell fences in those documents pass bash -n",
+    "all 24 local links in those documents resolve",
     "all AWS ECS review artifacts parse as JSON",
-    "targeted stale orchestration-term searches found no executable per-slice worktree, branch, rebase, early release integration, or omitted-full-suite instruction in the five reviewed sources",
-    "live Filigree milestone has exactly 20 expected steps, exact direct dependencies, and the documented nine-node critical path",
-    "CI, CodeQL, and judge-gate workflows all accept Plan 12's immutable RC* exact-SHA push ref",
+    "targeted stale-term searches found no RELEASE_START_SHA or paused-release instruction in the amended documents",
+    "a synthetic divergent-release repository passed conflict-class exit, fresh-shell anchor reconstruction, staged resolution, reconciliation commit, and preserved ancestry",
+    "independent orchestration-contract and Wardline reviewers returned APPROVED after repair",
     "every reviewed source SHA256 matches its refreshed sidecar or aggregate source_sha256 binding"
   ],
   "reviewed_files": [
@@ -122,6 +128,12 @@
       "date": "2026-07-12",
       "verdict": "APPROVED_WITH_WARNINGS",
       "summary": "The single-worktree autonomous model was independently re-reviewed after repair. The release-ancestry stop condition, stale start-next/merge/rebase wording, full-suite timing, exact-SHA CI path, and review hash bindings now agree across the prompt, run sheet, Plan 00, Plan 10, and Plan 12."
+    },
+    {
+      "round": 9,
+      "date": "2026-07-13",
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "summary": "The worktree-only Stages 1-8 contract and explicit Stage 9 release reconciliation were independently re-reviewed. Conflict resume, substantive documentation classification, Plan 10 replacement lineage, candidate-bound Major Checkpoint 6, cleanup-before-rereconciliation, and review hashes now agree."
     }
   ]
 }

@@ -1,14 +1,14 @@
 {
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_ORCHESTRATE",
-  "summary": "The run sheet is ready for orchestration. One coordinator owns one ignored feat/aws-ecs-program worktree, serializes all mutations, closes slices on truthful program-branch anchors, preserves the Plan 02 to 06 to 07 lock chain, runs the full suite only in final washup, and fast-forwards the exact tested candidate into release/0.7.1 before GO.",
+  "summary": "The run sheet is ready for orchestration. One coordinator owns one ignored feat/aws-ecs-program worktree rooted at immutable PROGRAM_BASE_SHA, serializes all mutations, closes slices on truthful program-branch anchors, and ignores unrelated concurrent documentation through Stages 1-8. Stage 9 reviews and merges the then-current release tip, preserves close ancestry, records RECONCILED_RELEASE_SHA, and runs a reconciliation checkpoint. Plan 12 Task 1 then freezes the candidate, Major Checkpoint 6 runs before Task 2, cleanup gates rereconciliation, and Task 9 fast-forwards the exact tested candidate before GO.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-  "plan_sha256": "cc0310767206c68db1700c47109bd221eb8930bcd03592b68aff4f61a53c6cba",
-  "reviewed_at": "2026-07-12T11:58:37Z",
+  "plan_sha256": "7fffe7aa6810e435bb0990c989199fcee248e6757bb786e9e6df012e49753099",
+  "reviewed_at": "2026-07-13T04:57:30Z",
   "review_basis": {
-    "branch": "release/0.7.1",
-    "head": "b50b5da62a2fee91128e9993df0828f50feaf8fc",
-    "process": "Independent xhigh reality, architecture, quality/security, and systems re-review followed by source-diff inspection, stale-term search, checksum, link, JSON, shell-syntax, workflow-trigger, tracker-path, live-DAG, critical-path, and final-fast-forward checks."
+    "branch": "feat/aws-ecs-program",
+    "head": "a579626e46c97973bc50b5dc9235032ad98199d9",
+    "process": "Independent orchestration-contract, mechanical, and Wardline re-review of the uncommitted planning repair in the isolated program worktree. Checks covered worktree-only Stages 1-8, substantive documentation classification, Stage 9 conflict resume, Plan 10 replacement lineage, reconciliation versus candidate checkpoint ordering, cleanup-before-rereconciliation, source hashes, shell syntax, links, JSON, whitespace, and stale terms."
   },
   "blocking_issues": [],
   "warnings": [
@@ -37,7 +37,7 @@
     {
       "id": "B-RUN-3",
       "status": "RESOLVED",
-      "resolution": "Plan 12 runs Tasks 1 through 8 on one frozen feat/aws-ecs-program candidate; Task 9 alone fast-forwards the paused release branch to that exact tested SHA before GO."
+      "resolution": "Stage 9 merges the reviewed release tip into feat/aws-ecs-program and records RECONCILED_RELEASE_SHA before Task 1 freezes the candidate; Task 9 alone fast-forwards the still-anchored release branch to that exact tested SHA before GO."
     },
     {
       "id": "B-RUN-4",
@@ -63,6 +63,21 @@
       "id": "B-RUN-8",
       "status": "RESOLVED",
       "resolution": "Reopen handling derives transitive descendants and affected phases from the refreshed live graph, reopens closed descendants in reverse topological order, invalidates their evidence, and re-executes topologically."
+    },
+    {
+      "id": "B-RUN-9",
+      "status": "RESOLVED",
+      "resolution": "Stage 9 is one persistent protocol. Conflict resume reconstructs the reviewed program and release anchors from HEAD/ORIG_HEAD and MERGE_HEAD, rejects unresolved, unstaged, or untracked resolution state, and distinguishes conflict-class exit 2 from other merge failures."
+    },
+    {
+      "id": "B-RUN-10",
+      "status": "RESOLVED",
+      "resolution": "A substantive reconciliation delta touching Plan 10 itself or a consumed prerequisite uses the owner-approved replacement-lineage protocol; authoritative AWS plans, reviews, designs, and specifications are all substantive."
+    },
+    {
+      "id": "B-RUN-11",
+      "status": "RESOLVED",
+      "resolution": "The pre-freeze reconciliation affected-area checkpoint is distinct from Major Checkpoint 6, which runs on the Task 1 frozen candidate. After external mutation, Task 8 cleanup must finish before any HEAD change or rereconciliation."
     }
   ],
   "reviewer_summaries": {
@@ -80,23 +95,26 @@
     }
   },
   "verification": [
-    "all 18 dated program plans exist in docs/superpowers/plans/aws with 18 matching review sidecars",
-    "every plan_file exists and all 18 plan_sha256 values match",
+    "all four amended orchestration documents have balanced Markdown fences",
+    "all 75 Bash or shell fences in those documents pass bash -n",
+    "all 24 local links in those documents resolve",
     "all local run-sheet links resolve",
     "all AWS review JSON parses",
-    "all Markdown code fences are balanced",
-    "all 56 Bash or shell fences in the five reviewed sources pass bash -n",
     "git diff --check passes",
-    "no pre-relocation AWS plan path remains in repository or live milestone data",
-    "live Filigree milestone contains exactly 20 expected steps and every direct dependency matches",
-    "live Plan 03B tracker scope owns Tasks 3-4 and the complete handoff",
-    "read-only descendant derivation produces a valid reverse-topological worklist and affected-phase set"
+    "a synthetic divergent-release repository passed conflict-class exit, fresh-shell anchor reconstruction, staged resolution, merge commit, and preserved ancestry",
+    "targeted searches found no RELEASE_START_SHA or paused-release instruction in the amended documents",
+    "independent orchestration-contract and Wardline reviewers returned APPROVED after repair"
   ],
   "review_history": [
     {
       "reviewed_at": "2026-07-12T08:52:19Z",
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial orchestration reviews found duplicate claim/worktree/close mechanics, an invalid Plan 12 feature-worktree path, pre-qualification Plan 10 baseline recording, stale review/evidence risks, and incomplete descendant reopen handling."
+    },
+    {
+      "reviewed_at": "2026-07-13T04:57:30Z",
+      "verdict": "APPROVED_AFTER_REPAIRS",
+      "summary": "The worktree-only Stages 1-8 contract, Stage 9 release reconciliation and conflict resume, Plan 10 special recovery, candidate-bound Major Checkpoint 6, and cleanup-before-rereconciliation ordering were independently approved."
     }
   ]
 }

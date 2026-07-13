@@ -145,24 +145,26 @@ _ALL_TEXT_CONCAT_SHAPES: frozenset[_TextConcatShape] = frozenset(
 # PostgreSQL reserves bootstrap OIDs below FirstNormalObjectId.  This is
 # stronger identity evidence than namespace membership: user-created objects
 # in pg_catalog still receive normal-range OIDs and remain shadow candidates.
+# Every operation inside the proof query is pinned to pg_catalog so a caller's
+# search_path can affect visibility without redefining the proof's own logic.
 _FIRST_NORMAL_POSTGRESQL_OID = 16_384
 _TEXT_BUILTIN_IDENTITY_PROOF = text(
     """
     WITH allowed(proname, arity, allowed_oid) AS (
         VALUES
-          (:length_name, 1, pg_catalog.to_regprocedure(:length_signature)::oid),
-          (:btrim_name, 1, pg_catalog.to_regprocedure(:btrim_one_signature)::oid),
-          (:btrim_name, 2, pg_catalog.to_regprocedure(:btrim_two_signature)::oid),
-          (:chr_name, 1, pg_catalog.to_regprocedure(:chr_signature)::oid)
+          (:length_name, 1, pg_catalog.to_regprocedure(:length_signature)::pg_catalog.oid),
+          (:btrim_name, 1, pg_catalog.to_regprocedure(:btrim_one_signature)::pg_catalog.oid),
+          (:btrim_name, 2, pg_catalog.to_regprocedure(:btrim_two_signature)::pg_catalog.oid),
+          (:chr_name, 1, pg_catalog.to_regprocedure(:chr_signature)::pg_catalog.oid)
     ),
     sources(source_family, source_oid) AS (
         VALUES
-          (:text_family, pg_catalog.to_regtype(:text_type)::oid),
-          (:varchar_family, pg_catalog.to_regtype(:varchar_type)::oid),
-          (:int4_family, pg_catalog.to_regtype(:int4_type)::oid)
+          (:text_family, pg_catalog.to_regtype(:text_type)::pg_catalog.oid),
+          (:varchar_family, pg_catalog.to_regtype(:varchar_type)::pg_catalog.oid),
+          (:int4_family, pg_catalog.to_regtype(:int4_type)::pg_catalog.oid)
     ),
     allowed_operator(operator_oid) AS (
-        SELECT pg_catalog.to_regoperator(:text_concat_signature)::oid
+        SELECT pg_catalog.to_regoperator(:text_concat_signature)::pg_catalog.oid
     ),
     call_shapes(call_kind, proname, arity, source_family) AS (
         VALUES
@@ -180,19 +182,23 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
         SELECT call_shapes.call_kind, call_shapes.proname, call_shapes.arity,
                call_shapes.source_family, 0, sources.source_oid, false
         FROM call_shapes
-        JOIN sources ON sources.source_family = call_shapes.source_family
+        JOIN sources ON sources.source_family OPERATOR(pg_catalog.=) call_shapes.source_family
         UNION ALL
         SELECT :btrim_name, :btrim_name, 2, sources.source_family, 1,
                text_source.source_oid, false
         FROM sources
         CROSS JOIN sources AS text_source
-        WHERE sources.source_family IN (:text_family, :varchar_family)
-          AND text_source.source_family = :text_family
+        WHERE (
+            sources.source_family OPERATOR(pg_catalog.=) :text_family
+            OR sources.source_family OPERATOR(pg_catalog.=) :varchar_family
+        )
+          AND text_source.source_family OPERATOR(pg_catalog.=) :text_family
         UNION ALL
         SELECT :btrim_unknown_kind, :btrim_name, 2, sources.source_family, 1,
-               NULL::oid, true
+               NULL::pg_catalog.oid, true
         FROM sources
-        WHERE sources.source_family IN (:text_family, :varchar_family)
+        WHERE sources.source_family OPERATOR(pg_catalog.=) :text_family
+           OR sources.source_family OPERATOR(pg_catalog.=) :varchar_family
     ),
     candidates AS (
         SELECT
@@ -201,85 +207,99 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
           sources.source_family,
           sources.source_oid,
           proc.oid AS candidate_oid,
-          proc.pronargs::integer AS candidate_pronargs,
-          proc.pronargdefaults::integer AS candidate_pronargdefaults,
+          proc.pronargs::pg_catalog.int4 AS candidate_pronargs,
+          proc.pronargdefaults::pg_catalog.int4 AS candidate_pronargdefaults,
           proc.provariadic AS candidate_variadic_oid,
           CASE
-            WHEN proc.provariadic <> 0 AND proc.pronargs = 1 THEN proc.provariadic
+            WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0
+             AND proc.pronargs OPERATOR(pg_catalog.=) 1
+              THEN proc.provariadic
             ELSE proc.proargtypes[0]
           END AS candidate_first_arg_oid,
           proc.proargtypes[1] AS candidate_second_arg_oid
         FROM pg_catalog.pg_proc AS proc
         JOIN allowed
-          ON allowed.proname = proc.proname
+          ON allowed.proname OPERATOR(pg_catalog.=) proc.proname
         JOIN pg_catalog.pg_proc AS allowed_proc
-          ON allowed_proc.oid = allowed.allowed_oid
+          ON allowed_proc.oid OPERATOR(pg_catalog.=) allowed.allowed_oid
         JOIN call_shapes
-          ON call_shapes.proname = allowed.proname
-         AND call_shapes.arity = allowed.arity
-         AND call_shapes.arity >= (
+          ON call_shapes.proname OPERATOR(pg_catalog.=) allowed.proname
+         AND call_shapes.arity OPERATOR(pg_catalog.=) allowed.arity
+         AND call_shapes.arity OPERATOR(pg_catalog.>=) (
              proc.pronargs
-             - proc.pronargdefaults
-             - CASE WHEN proc.provariadic <> 0 THEN 1 ELSE 0 END
+             OPERATOR(pg_catalog.-) proc.pronargdefaults
+             OPERATOR(pg_catalog.-) CASE
+                 WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0 THEN 1
+                 ELSE 0
+             END
          )
-         AND (proc.provariadic <> 0 OR call_shapes.arity <= proc.pronargs)
-        JOIN sources ON sources.source_family = call_shapes.source_family
+         AND (
+             proc.provariadic OPERATOR(pg_catalog.<>) 0
+             OR call_shapes.arity OPERATOR(pg_catalog.<=) proc.pronargs
+         )
+        JOIN sources ON sources.source_family OPERATOR(pg_catalog.=) call_shapes.source_family
         WHERE allowed.allowed_oid IS NOT NULL
-          AND proc.oid <> allowed.allowed_oid
-          AND proc.oid >= :first_normal_oid
+          AND proc.oid OPERATOR(pg_catalog.<>) allowed.allowed_oid
+          AND proc.oid OPERATOR(pg_catalog.>=) :first_normal_oid
           AND pg_catalog.pg_function_is_visible(proc.oid)
           AND NOT EXISTS (
               SELECT 1
               FROM expected_arguments
-              WHERE expected_arguments.call_kind = call_shapes.call_kind
-                AND expected_arguments.proname = call_shapes.proname
-                AND expected_arguments.arity = call_shapes.arity
-                AND expected_arguments.source_family = sources.source_family
+              WHERE expected_arguments.call_kind OPERATOR(pg_catalog.=) call_shapes.call_kind
+                AND expected_arguments.proname OPERATOR(pg_catalog.=) call_shapes.proname
+                AND expected_arguments.arity OPERATOR(pg_catalog.=) call_shapes.arity
+                AND expected_arguments.source_family OPERATOR(pg_catalog.=) sources.source_family
                 AND NOT expected_arguments.is_unknown
                 AND NOT (
-                    expected_arguments.expected_oid = CASE
-                      WHEN proc.provariadic <> 0
-                       AND expected_arguments.arg_index >= proc.pronargs - 1
+                    expected_arguments.expected_oid OPERATOR(pg_catalog.=) CASE
+                      WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0
+                       AND expected_arguments.arg_index OPERATOR(pg_catalog.>=) (
+                           proc.pronargs OPERATOR(pg_catalog.-) 1
+                       )
                         THEN proc.provariadic
                       ELSE proc.proargtypes[expected_arguments.arg_index]
                     END
                     OR EXISTS (
                         SELECT 1
                         FROM pg_catalog.pg_cast AS casts
-                        WHERE casts.castsource = expected_arguments.expected_oid
-                          AND casts.casttarget = CASE
-                            WHEN proc.provariadic <> 0
-                             AND expected_arguments.arg_index >= proc.pronargs - 1
+                        WHERE casts.castsource OPERATOR(pg_catalog.=) expected_arguments.expected_oid
+                          AND casts.casttarget OPERATOR(pg_catalog.=) CASE
+                            WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0
+                             AND expected_arguments.arg_index OPERATOR(pg_catalog.>=) (
+                                 proc.pronargs OPERATOR(pg_catalog.-) 1
+                             )
                               THEN proc.provariadic
                             ELSE proc.proargtypes[expected_arguments.arg_index]
                           END
-                          AND casts.castcontext = 'i'
+                          AND casts.castcontext OPERATOR(pg_catalog.=) 'i'
                     )
                 )
           )
           AND (
-              SELECT count(*)
+              SELECT pg_catalog.count(*)
               FROM expected_arguments
-              WHERE expected_arguments.call_kind = call_shapes.call_kind
-                AND expected_arguments.proname = call_shapes.proname
-                AND expected_arguments.arity = call_shapes.arity
-                AND expected_arguments.source_family = sources.source_family
+              WHERE expected_arguments.call_kind OPERATOR(pg_catalog.=) call_shapes.call_kind
+                AND expected_arguments.proname OPERATOR(pg_catalog.=) call_shapes.proname
+                AND expected_arguments.arity OPERATOR(pg_catalog.=) call_shapes.arity
+                AND expected_arguments.source_family OPERATOR(pg_catalog.=) sources.source_family
                 AND NOT expected_arguments.is_unknown
-                AND expected_arguments.expected_oid = CASE
-                  WHEN proc.provariadic <> 0
-                   AND expected_arguments.arg_index >= proc.pronargs - 1
+                AND expected_arguments.expected_oid OPERATOR(pg_catalog.=) CASE
+                  WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0
+                   AND expected_arguments.arg_index OPERATOR(pg_catalog.>=) (
+                       proc.pronargs OPERATOR(pg_catalog.-) 1
+                   )
                     THEN proc.provariadic
                   ELSE proc.proargtypes[expected_arguments.arg_index]
                 END
-          ) >= (
-              SELECT count(*)
+          ) OPERATOR(pg_catalog.>=) (
+              SELECT pg_catalog.count(*)
               FROM expected_arguments
-              WHERE expected_arguments.call_kind = call_shapes.call_kind
-                AND expected_arguments.proname = call_shapes.proname
-                AND expected_arguments.arity = call_shapes.arity
-                AND expected_arguments.source_family = sources.source_family
+              WHERE expected_arguments.call_kind OPERATOR(pg_catalog.=) call_shapes.call_kind
+                AND expected_arguments.proname OPERATOR(pg_catalog.=) call_shapes.proname
+                AND expected_arguments.arity OPERATOR(pg_catalog.=) call_shapes.arity
+                AND expected_arguments.source_family OPERATOR(pg_catalog.=) sources.source_family
                 AND NOT expected_arguments.is_unknown
-                AND expected_arguments.expected_oid = allowed_proc.proargtypes[expected_arguments.arg_index]
+                AND expected_arguments.expected_oid OPERATOR(pg_catalog.=) allowed_proc.proargtypes[expected_arguments.arg_index]
           )
     ),
     exact_call_text_results AS (
@@ -289,95 +309,115 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
           sources.source_family
         FROM pg_catalog.pg_proc AS proc
         JOIN call_shapes
-          ON call_shapes.proname = proc.proname
-         AND call_shapes.call_kind = :chr_name
-         AND call_shapes.arity >= (
+          ON call_shapes.proname OPERATOR(pg_catalog.=) proc.proname
+         AND call_shapes.call_kind OPERATOR(pg_catalog.=) :chr_name
+         AND call_shapes.arity OPERATOR(pg_catalog.>=) (
              proc.pronargs
-             - proc.pronargdefaults
-             - CASE WHEN proc.provariadic <> 0 THEN 1 ELSE 0 END
+             OPERATOR(pg_catalog.-) proc.pronargdefaults
+             OPERATOR(pg_catalog.-) CASE
+                 WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0 THEN 1
+                 ELSE 0
+             END
          )
-         AND (proc.provariadic <> 0 OR call_shapes.arity <= proc.pronargs)
-        JOIN sources ON sources.source_family = call_shapes.source_family
+         AND (
+             proc.provariadic OPERATOR(pg_catalog.<>) 0
+             OR call_shapes.arity OPERATOR(pg_catalog.<=) proc.pronargs
+         )
+        JOIN sources ON sources.source_family OPERATOR(pg_catalog.=) call_shapes.source_family
         CROSS JOIN LATERAL (
             SELECT source_oid
             FROM sources
-            WHERE source_family = :text_family
+            WHERE source_family OPERATOR(pg_catalog.=) :text_family
         ) AS text_source
-        WHERE proc.prokind = 'f'
+        WHERE proc.prokind OPERATOR(pg_catalog.=) 'f'
           AND pg_catalog.pg_function_is_visible(proc.oid)
           AND NOT EXISTS (
               SELECT 1
               FROM expected_arguments
-              WHERE expected_arguments.call_kind = call_shapes.call_kind
-                AND expected_arguments.proname = call_shapes.proname
-                AND expected_arguments.arity = call_shapes.arity
-                AND expected_arguments.source_family = sources.source_family
+              WHERE expected_arguments.call_kind OPERATOR(pg_catalog.=) call_shapes.call_kind
+                AND expected_arguments.proname OPERATOR(pg_catalog.=) call_shapes.proname
+                AND expected_arguments.arity OPERATOR(pg_catalog.=) call_shapes.arity
+                AND expected_arguments.source_family OPERATOR(pg_catalog.=) sources.source_family
                 AND (
                     expected_arguments.is_unknown
-                    OR expected_arguments.expected_oid <> CASE
-                      WHEN proc.provariadic <> 0
-                       AND expected_arguments.arg_index >= proc.pronargs - 1
+                    OR expected_arguments.expected_oid OPERATOR(pg_catalog.<>) CASE
+                      WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0
+                       AND expected_arguments.arg_index OPERATOR(pg_catalog.>=) (
+                           proc.pronargs OPERATOR(pg_catalog.-) 1
+                       )
                         THEN proc.provariadic
                       ELSE proc.proargtypes[expected_arguments.arg_index]
                     END
                 )
           )
         GROUP BY call_shapes.call_kind, call_shapes.arity, sources.source_family
-        HAVING count(*) = 1
-          AND bool_and(proc.prorettype = text_source.source_oid)
+        HAVING pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
+          AND pg_catalog.bool_and(proc.prorettype OPERATOR(pg_catalog.=) text_source.source_oid)
     ),
     unknown_literal_exact_first_candidates AS (
         SELECT
           call_shapes.call_kind AS proname,
           call_shapes.arity,
           sources.source_family,
-          proc.pronargs::integer AS candidate_pronargs,
-          proc.pronargdefaults::integer AS candidate_pronargdefaults,
+          proc.pronargs::pg_catalog.int4 AS candidate_pronargs,
+          proc.pronargdefaults::pg_catalog.int4 AS candidate_pronargdefaults,
           proc.provariadic AS candidate_variadic_oid,
           proc.proargtypes[1] AS candidate_second_arg_oid,
           proc.prorettype AS candidate_result_oid
         FROM pg_catalog.pg_proc AS proc
         JOIN call_shapes
-          ON call_shapes.proname = proc.proname
-         AND call_shapes.call_kind = :btrim_unknown_kind
-         AND call_shapes.arity >= (
+          ON call_shapes.proname OPERATOR(pg_catalog.=) proc.proname
+         AND call_shapes.call_kind OPERATOR(pg_catalog.=) :btrim_unknown_kind
+         AND call_shapes.arity OPERATOR(pg_catalog.>=) (
              proc.pronargs
-             - proc.pronargdefaults
-             - CASE WHEN proc.provariadic <> 0 THEN 1 ELSE 0 END
+             OPERATOR(pg_catalog.-) proc.pronargdefaults
+             OPERATOR(pg_catalog.-) CASE
+                 WHEN proc.provariadic OPERATOR(pg_catalog.<>) 0 THEN 1
+                 ELSE 0
+             END
          )
-         AND (proc.provariadic <> 0 OR call_shapes.arity <= proc.pronargs)
-        JOIN sources ON sources.source_family = call_shapes.source_family
-        WHERE proc.prokind = 'f'
+         AND (
+             proc.provariadic OPERATOR(pg_catalog.<>) 0
+             OR call_shapes.arity OPERATOR(pg_catalog.<=) proc.pronargs
+         )
+        JOIN sources ON sources.source_family OPERATOR(pg_catalog.=) call_shapes.source_family
+        WHERE proc.prokind OPERATOR(pg_catalog.=) 'f'
           AND pg_catalog.pg_function_is_visible(proc.oid)
-          AND proc.proargtypes[0] = sources.source_oid
+          AND proc.proargtypes[0] OPERATOR(pg_catalog.=) sources.source_oid
     ),
     unknown_literal_winners AS (
         SELECT
           candidates.proname,
           candidates.arity,
           candidates.source_family,
-          bool_and(
-              candidates.candidate_pronargs = 2
-              AND candidates.candidate_pronargdefaults = 0
-              AND candidates.candidate_variadic_oid = 0
-              AND candidates.candidate_second_arg_oid = (
-                  SELECT source_oid FROM sources WHERE source_family = :int4_family
+          pg_catalog.bool_and(
+              candidates.candidate_pronargs OPERATOR(pg_catalog.=) 2
+              AND candidates.candidate_pronargdefaults OPERATOR(pg_catalog.=) 0
+              AND candidates.candidate_variadic_oid OPERATOR(pg_catalog.=) 0
+              AND candidates.candidate_second_arg_oid OPERATOR(pg_catalog.=) (
+                  SELECT source_oid
+                  FROM sources
+                  WHERE source_family OPERATOR(pg_catalog.=) :int4_family
               )
           ) AS accepts_int4_literal,
-          bool_and(
-              candidates.candidate_pronargs = 2
-              AND candidates.candidate_pronargdefaults = 0
-              AND candidates.candidate_variadic_oid = 0
-              AND candidates.candidate_second_arg_oid = (
-                  SELECT source_oid FROM sources WHERE source_family = :int4_family
+          pg_catalog.bool_and(
+              candidates.candidate_pronargs OPERATOR(pg_catalog.=) 2
+              AND candidates.candidate_pronargdefaults OPERATOR(pg_catalog.=) 0
+              AND candidates.candidate_variadic_oid OPERATOR(pg_catalog.=) 0
+              AND candidates.candidate_second_arg_oid OPERATOR(pg_catalog.=) (
+                  SELECT source_oid
+                  FROM sources
+                  WHERE source_family OPERATOR(pg_catalog.=) :int4_family
               )
-              AND candidates.candidate_result_oid = (
-                  SELECT source_oid FROM sources WHERE source_family = :text_family
+              AND candidates.candidate_result_oid OPERATOR(pg_catalog.=) (
+                  SELECT source_oid
+                  FROM sources
+                  WHERE source_family OPERATOR(pg_catalog.=) :text_family
               )
           ) AS returns_text
         FROM unknown_literal_exact_first_candidates AS candidates
         GROUP BY candidates.proname, candidates.arity, candidates.source_family
-        HAVING count(*) = 1
+        HAVING pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
     ),
     operator_shapes(left_family, right_family) AS (
         VALUES
@@ -395,43 +435,55 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
         FROM pg_catalog.pg_operator AS candidate
         CROSS JOIN allowed_operator
         JOIN pg_catalog.pg_operator AS builtin
-          ON builtin.oid = allowed_operator.operator_oid
+          ON builtin.oid OPERATOR(pg_catalog.=) allowed_operator.operator_oid
         CROSS JOIN operator_shapes
         LEFT JOIN sources AS left_source
-          ON left_source.source_family = operator_shapes.left_family
+          ON left_source.source_family OPERATOR(pg_catalog.=) operator_shapes.left_family
         LEFT JOIN sources AS right_source
-          ON right_source.source_family = operator_shapes.right_family
+          ON right_source.source_family OPERATOR(pg_catalog.=) operator_shapes.right_family
         WHERE allowed_operator.operator_oid IS NOT NULL
-          AND candidate.oprname = :text_concat_name
-          AND candidate.oid <> allowed_operator.operator_oid
-          AND candidate.oid >= :first_normal_oid
+          AND candidate.oprname OPERATOR(pg_catalog.=) :text_concat_name
+          AND candidate.oid OPERATOR(pg_catalog.<>) allowed_operator.operator_oid
+          AND candidate.oid OPERATOR(pg_catalog.>=) :first_normal_oid
           AND pg_catalog.pg_operator_is_visible(candidate.oid)
           AND (
-              operator_shapes.left_family = :unknown_family
-              OR candidate.oprleft = left_source.source_oid
+              operator_shapes.left_family OPERATOR(pg_catalog.=) :unknown_family
+              OR candidate.oprleft OPERATOR(pg_catalog.=) left_source.source_oid
               OR EXISTS (
                   SELECT 1 FROM pg_catalog.pg_cast AS left_cast
-                  WHERE left_cast.castsource = left_source.source_oid
-                    AND left_cast.casttarget = candidate.oprleft
-                    AND left_cast.castcontext = 'i'
+                  WHERE left_cast.castsource OPERATOR(pg_catalog.=) left_source.source_oid
+                    AND left_cast.casttarget OPERATOR(pg_catalog.=) candidate.oprleft
+                    AND left_cast.castcontext OPERATOR(pg_catalog.=) 'i'
               )
           )
           AND (
-              operator_shapes.right_family = :unknown_family
-              OR candidate.oprright = right_source.source_oid
+              operator_shapes.right_family OPERATOR(pg_catalog.=) :unknown_family
+              OR candidate.oprright OPERATOR(pg_catalog.=) right_source.source_oid
               OR EXISTS (
                   SELECT 1 FROM pg_catalog.pg_cast AS right_cast
-                  WHERE right_cast.castsource = right_source.source_oid
-                    AND right_cast.casttarget = candidate.oprright
-                    AND right_cast.castcontext = 'i'
+                  WHERE right_cast.castsource OPERATOR(pg_catalog.=) right_source.source_oid
+                    AND right_cast.casttarget OPERATOR(pg_catalog.=) candidate.oprright
+                    AND right_cast.castcontext OPERATOR(pg_catalog.=) 'i'
               )
           )
           AND (
-              CASE WHEN candidate.oprleft = left_source.source_oid THEN 1 ELSE 0 END
-              + CASE WHEN candidate.oprright = right_source.source_oid THEN 1 ELSE 0 END
-          ) >= (
-              CASE WHEN builtin.oprleft = left_source.source_oid THEN 1 ELSE 0 END
-              + CASE WHEN builtin.oprright = right_source.source_oid THEN 1 ELSE 0 END
+              CASE
+                  WHEN candidate.oprleft OPERATOR(pg_catalog.=) left_source.source_oid THEN 1
+                  ELSE 0
+              END
+              OPERATOR(pg_catalog.+) CASE
+                  WHEN candidate.oprright OPERATOR(pg_catalog.=) right_source.source_oid THEN 1
+                  ELSE 0
+              END
+          ) OPERATOR(pg_catalog.>=) (
+              CASE
+                  WHEN builtin.oprleft OPERATOR(pg_catalog.=) left_source.source_oid THEN 1
+                  ELSE 0
+              END
+              OPERATOR(pg_catalog.+) CASE
+                  WHEN builtin.oprright OPERATOR(pg_catalog.=) right_source.source_oid THEN 1
+                  ELSE 0
+              END
           )
     ),
     exact_operator_text_results AS (
@@ -439,21 +491,21 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
         FROM pg_catalog.pg_operator AS candidate
         CROSS JOIN operator_shapes
         JOIN sources AS left_source
-          ON left_source.source_family = operator_shapes.left_family
+          ON left_source.source_family OPERATOR(pg_catalog.=) operator_shapes.left_family
         JOIN sources AS right_source
-          ON right_source.source_family = operator_shapes.right_family
+          ON right_source.source_family OPERATOR(pg_catalog.=) operator_shapes.right_family
         CROSS JOIN LATERAL (
             SELECT source_oid
             FROM sources
-            WHERE source_family = :text_family
+            WHERE source_family OPERATOR(pg_catalog.=) :text_family
         ) AS text_source
-        WHERE candidate.oprname = :text_concat_name
+        WHERE candidate.oprname OPERATOR(pg_catalog.=) :text_concat_name
           AND pg_catalog.pg_operator_is_visible(candidate.oid)
-          AND candidate.oprleft = left_source.source_oid
-          AND candidate.oprright = right_source.source_oid
+          AND candidate.oprleft OPERATOR(pg_catalog.=) left_source.source_oid
+          AND candidate.oprright OPERATOR(pg_catalog.=) right_source.source_oid
         GROUP BY operator_shapes.left_family, operator_shapes.right_family
-        HAVING count(*) = 1
-          AND bool_and(candidate.oprresult = text_source.source_oid)
+        HAVING pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
+          AND pg_catalog.bool_and(candidate.oprresult OPERATOR(pg_catalog.=) text_source.source_oid)
     ),
     blocked AS (
         SELECT DISTINCT proname, arity, source_family
@@ -462,42 +514,60 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
     literal_only AS (
         SELECT candidates.proname, candidates.arity, candidates.source_family
         FROM candidates
-        WHERE candidates.proname IN (:btrim_name, :btrim_unknown_kind)
-          AND candidates.arity = 2
+        WHERE (
+            candidates.proname OPERATOR(pg_catalog.=) :btrim_name
+            OR candidates.proname OPERATOR(pg_catalog.=) :btrim_unknown_kind
+        )
+          AND candidates.arity OPERATOR(pg_catalog.=) 2
         GROUP BY candidates.proname, candidates.arity, candidates.source_family
-        HAVING count(*) = 1
-          AND bool_and(candidates.candidate_first_arg_oid = candidates.source_oid)
-          AND bool_and(candidates.candidate_second_arg_oid = (
-              SELECT source_oid FROM sources WHERE source_family = :text_family
+        HAVING pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
+          AND pg_catalog.bool_and(
+              candidates.candidate_first_arg_oid OPERATOR(pg_catalog.=) candidates.source_oid
+          )
+          AND pg_catalog.bool_and(candidates.candidate_second_arg_oid OPERATOR(pg_catalog.=) (
+              SELECT source_oid
+              FROM sources
+              WHERE source_family OPERATOR(pg_catalog.=) :text_family
           ))
-          AND bool_and(candidates.candidate_variadic_oid = 0)
-          AND bool_and(candidates.candidate_pronargs = 2)
-          AND bool_and(candidates.candidate_pronargdefaults = 0)
+          AND pg_catalog.bool_and(candidates.candidate_variadic_oid OPERATOR(pg_catalog.=) 0)
+          AND pg_catalog.bool_and(candidates.candidate_pronargs OPERATOR(pg_catalog.=) 2)
+          AND pg_catalog.bool_and(candidates.candidate_pronargdefaults OPERATOR(pg_catalog.=) 0)
     ),
     variadic_only AS (
         SELECT candidates.proname, candidates.arity, candidates.source_family
         FROM candidates
         GROUP BY candidates.proname, candidates.arity, candidates.source_family
-        HAVING count(*) = 1
-          AND bool_and(candidates.candidate_variadic_oid <> 0)
-          AND bool_and(candidates.candidate_first_arg_oid = candidates.source_oid)
+        HAVING pg_catalog.count(*) OPERATOR(pg_catalog.=) 1
+          AND pg_catalog.bool_and(candidates.candidate_variadic_oid OPERATOR(pg_catalog.<>) 0)
+          AND pg_catalog.bool_and(
+              candidates.candidate_first_arg_oid OPERATOR(pg_catalog.=) candidates.source_oid
+          )
     )
-    SELECT 'allowed' AS row_kind, proname, arity, allowed_oid::text AS detail
+    SELECT 'allowed' AS row_kind, proname, arity, allowed_oid::pg_catalog.text AS detail
     FROM allowed
     UNION ALL
-    SELECT 'source' AS row_kind, source_family AS proname, 0 AS arity, source_oid::text AS detail
+    SELECT 'source' AS row_kind, source_family AS proname, 0 AS arity,
+           source_oid::pg_catalog.text AS detail
     FROM sources
     UNION ALL
     SELECT 'operator_allowed' AS row_kind, :text_concat_name AS proname, 2 AS arity,
-           operator_oid::text AS detail
+           operator_oid::pg_catalog.text AS detail
     FROM allowed_operator
     UNION ALL
     SELECT DISTINCT 'operator_blocked' AS row_kind, :text_concat_name AS proname, 2 AS arity,
-           left_family || ',' || right_family AS detail
+           pg_catalog.concat(
+               left_family::pg_catalog.text,
+               ','::pg_catalog.text,
+               right_family::pg_catalog.text
+           ) AS detail
     FROM operator_candidates
     UNION ALL
     SELECT 'operator_text_result' AS row_kind, :text_concat_name AS proname, 2 AS arity,
-           left_family || ',' || right_family AS detail
+           pg_catalog.concat(
+               left_family::pg_catalog.text,
+               ','::pg_catalog.text,
+               right_family::pg_catalog.text
+           ) AS detail
     FROM exact_operator_text_results
     UNION ALL
     SELECT 'blocked' AS row_kind, proname, arity, source_family AS detail

@@ -13,7 +13,7 @@ from elspeth.plugins.aws_s3_common import build_s3_client
 from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink, S3ConditionalWriteRejectedError
 from tests.fixtures.base_classes import inject_write_failure
 
-pytestmark = (pytest.mark.slow, pytest.mark.integration)
+pytestmark = [pytest.mark.slow, pytest.mark.integration]
 
 
 @dataclass

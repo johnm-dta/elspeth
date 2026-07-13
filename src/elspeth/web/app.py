@@ -55,6 +55,7 @@ from elspeth.web.auth.routes import create_auth_router
 from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.aws_ecs_startup import (
     _CONNECT_TIMEOUT_SECONDS,
+    AwsEcsSchemaNotReadyError,
     enforce_aws_ecs_contract,
     require_runtime_directories_mounted,
     validate_only_schema_or_raise,
@@ -842,11 +843,16 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         require_runtime_directories_mounted(settings)
         raw_session_url = settings.session_db_url
         assert raw_session_url is not None
-        aws_session_engine = create_session_engine(
-            raw_session_url,
-            connect_args={"connect_timeout": _CONNECT_TIMEOUT_SECONDS},
-            **postgres_engine_kwargs(raw_session_url),
-        )
+        try:
+            aws_session_engine = create_session_engine(
+                raw_session_url,
+                connect_args={"connect_timeout": _CONNECT_TIMEOUT_SECONDS},
+                **postgres_engine_kwargs(raw_session_url),
+            )
+        except (SQLAlchemyError, ImportError):
+            raise AwsEcsSchemaNotReadyError(
+                "AWS ECS session_schema engine could not be constructed. Run 'elspeth doctor aws-ecs' for full diagnostics."
+            ) from None
         try:
             validate_only_schema_or_raise(settings, aws_session_engine)
         except BaseException:

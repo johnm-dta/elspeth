@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationInfo, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
@@ -466,11 +466,20 @@ class WebSettings(BaseModel):
 
     @field_validator("data_dir", "payload_store_path")
     @classmethod
-    def _normalize_paths(cls, v: Path | None) -> Path | None:
+    def _normalize_paths(cls, v: Path | None, info: ValidationInfo) -> Path | None:
         if v is None:
             return None
         if not str(v).strip():
             raise ValueError("must not be blank")
+        expanded = v.expanduser()
+        if info.field_name == "payload_store_path":
+            # Preserve the configured lexical path so the payload-store
+            # boundary can detect and reject a pre-existing symlink. resolve()
+            # would follow the link here and erase the evidence before either
+            # AWS startup validation or FilesystemPayloadStore sees it.
+            # absolute() still pins relative configuration to the construction
+            # CWD, preserving the process-lifetime stability promised below.
+            return expanded.absolute()
         # Resolve to an absolute path at validation time so downstream
         # consumers do not depend on the running process CWD. Without
         # this, a relative `data_dir` (e.g. the default Path("data"))
@@ -479,7 +488,7 @@ class WebSettings(BaseModel):
         # sink-allowlist is checked — same code, different answers.
         # `.resolve()` makes the answer immutable for the process
         # lifetime regardless of later os.chdir calls.
-        return v.expanduser().resolve()
+        return expanded.resolve()
 
     @field_validator("server_secret_allowlist")
     @classmethod

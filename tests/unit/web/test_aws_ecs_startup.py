@@ -273,6 +273,20 @@ def test_payload_symlink_is_rejected_by_startup_and_payload_store(tmp_path: Path
         FilesystemPayloadStore(settings.payload_store_path)
 
 
+def test_preexisting_payload_symlink_is_rejected_by_startup_and_payload_store(tmp_path: Path) -> None:
+    target = tmp_path / "preexisting-target"
+    target.mkdir(mode=0o700)
+    configured_path = tmp_path / "preexisting-payload-link"
+    configured_path.symlink_to(target, target_is_directory=True)
+    settings = _settings(tmp_path, payload_store_path=configured_path)
+
+    assert settings.payload_store_path == configured_path.absolute()
+    with pytest.raises(startup.AwsEcsStartupContractError, match="payload_store"):
+        startup.require_runtime_directories_mounted(settings)
+    with pytest.raises(ValueError, match="symlink"):
+        FilesystemPayloadStore(settings.payload_store_path)
+
+
 @pytest.mark.parametrize("mode", [0o720, 0o702])
 def test_payload_unsafe_mode_is_rejected_by_startup_and_payload_store(tmp_path: Path, mode: int) -> None:
     settings = _settings(tmp_path)

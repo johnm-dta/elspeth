@@ -635,6 +635,24 @@ class TestPathFieldValidation:
         assert settings.get_payload_store_path() == Path("~/payloads").expanduser().resolve()
         assert settings.get_payload_store_path().is_absolute()
 
+    def test_preexisting_payload_symlink_preserves_configured_lexical_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "payload-target"
+        target.mkdir()
+        configured_path = tmp_path / "payload-link"
+        configured_path.symlink_to(target, target_is_directory=True)
+
+        settings = WebSettings(
+            payload_store_path=configured_path,
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.payload_store_path == configured_path.absolute()
+        assert settings.payload_store_path != target.resolve()
+
     def test_relative_data_dir_resolved_at_validation_immune_to_chdir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The download/preview path-allowlist check used to silently
         depend on the running process CWD: a relative data_dir was

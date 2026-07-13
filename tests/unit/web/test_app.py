@@ -2060,6 +2060,25 @@ class TestAwsEcsValidateOnlyStartup:
 
         assert (settings.data_dir / "auth.db").exists() is False
 
+    def test_session_engine_construction_failure_is_static_redacted_and_unchained(self, tmp_path: Path) -> None:
+        sentinel_driver = "sentinel_driver_raw_sqlalchemy_text"
+        session_url = f"postgresql+{sentinel_driver}://runtime@db/session"
+        settings = _aws_settings(tmp_path, session_db_url=session_url)
+
+        with capture_logs() as logs, pytest.raises(AwsEcsSchemaNotReadyError) as exc_info:
+            create_app(settings)
+
+        rendered = repr(exc_info.value)
+        assert "session_schema" in str(exc_info.value)
+        assert "Run 'elspeth doctor aws-ecs' for full diagnostics." in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert sentinel_driver not in rendered
+        assert session_url not in rendered
+        assert "Can't load plugin" not in rendered
+        assert sentinel_driver not in repr(logs)
+        assert session_url not in repr(logs)
+        assert "Can't load plugin" not in repr(logs)
+
     def test_success_reuses_prevalidated_engine_and_installs_one_finalizer(
         self,
         tmp_path: Path,

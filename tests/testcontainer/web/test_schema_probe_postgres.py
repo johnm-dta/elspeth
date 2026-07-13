@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 from tests.unit.core.test_schema_shape import _static_check_issues
 
@@ -293,35 +294,57 @@ class _CustomBaseException(BaseException):
     pass
 
 
-@pytest.mark.parametrize("failure_kind", ["sqlstate_22012", "base_exception"])
-def test_lock_is_released_after_body_failure(postgres_engine: Engine, failure_kind: str) -> None:
+@pytest.mark.parametrize("outcome", ["success", "sqlstate_22012", "base_exception"])
+def test_lock_is_released_after_body_outcome(postgres_engine: Engine, outcome: str) -> None:
+    owner_pids: list[int] = []
+
     def body(conn: Connection) -> None:
-        if failure_kind == "sqlstate_22012":
+        owner_pids.append(conn.exec_driver_sql("SELECT pg_backend_pid()").scalar_one())
+        if outcome == "sqlstate_22012":
             conn.exec_driver_sql("SELECT 1 / 0")
-        raise _CustomBaseException
+        if outcome == "base_exception":
+            raise _CustomBaseException
 
-    expected = SQLAlchemyError if failure_kind == "sqlstate_22012" else _CustomBaseException
-    with pytest.raises(expected):
-        _run_locked(
-            postgres_engine,
-            target="elspeth_schema_init",
-            body=body,
-            verify=lambda _conn: pytest.fail("verify must not run after body failure"),
-        )
+    observer_engine = create_engine(postgres_engine.url, poolclass=NullPool)
+    try:
+        with observer_engine.connect() as observer:
+            observer_pid = observer.exec_driver_sql("SELECT pg_backend_pid()").scalar_one()
+            if outcome == "success":
+                _run_locked(
+                    postgres_engine,
+                    target="elspeth_schema_init",
+                    body=body,
+                    verify=lambda _conn: None,
+                )
+            else:
+                expected = SQLAlchemyError if outcome == "sqlstate_22012" else _CustomBaseException
+                with pytest.raises(expected):
+                    _run_locked(
+                        postgres_engine,
+                        target="elspeth_schema_init",
+                        body=body,
+                        verify=lambda _conn: pytest.fail("verify must not run after body failure"),
+                    )
 
-    with postgres_engine.connect() as observer:
-        acquired = observer.execute(
-            text("SELECT pg_try_advisory_lock(:classid, hashtext('elspeth_schema_init'))"),
-            {"classid": schema_probe_module.ELSPETH_SCHEMA_INIT_LOCK_CLASSID},
-        ).scalar_one()
-        assert acquired is True
-        assert (
-            observer.execute(
-                text("SELECT pg_advisory_unlock(:classid, hashtext('elspeth_schema_init'))"),
+            assert len(owner_pids) == 1
+            assert observer_pid != owner_pids[0]
+            acquired = observer.execute(
+                text("SELECT pg_try_advisory_lock(:classid, hashtext('elspeth_schema_init'))"),
                 {"classid": schema_probe_module.ELSPETH_SCHEMA_INIT_LOCK_CLASSID},
             ).scalar_one()
-            is True
-        )
+            try:
+                assert acquired is True
+            finally:
+                if acquired:
+                    assert (
+                        observer.execute(
+                            text("SELECT pg_advisory_unlock(:classid, hashtext('elspeth_schema_init'))"),
+                            {"classid": schema_probe_module.ELSPETH_SCHEMA_INIT_LOCK_CLASSID},
+                        ).scalar_one()
+                        is True
+                    )
+    finally:
+        observer_engine.dispose()
 
 
 @pytest.mark.parametrize("kind", ["session", "landscape"])

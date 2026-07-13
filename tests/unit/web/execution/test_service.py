@@ -83,6 +83,7 @@ class _WebSettingsStub:
     """Settings collaborator for execution-service tests."""
 
     def __init__(self) -> None:
+        self.deployment_target = "default"
         self.landscape_url = "sqlite:///test_audit.db"
         self.payload_store_path = Path("/tmp/test_payloads")
         self.landscape_passphrase = None
@@ -1419,7 +1420,7 @@ class TestB2ShutdownEvent:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_shutdown_event_passed_to_orchestrator_run(
         self,
@@ -1478,12 +1479,12 @@ class TestB3Construction:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_landscape_db_constructed_from_settings(
         self,
         mock_payload_cls: MagicMock,
-        mock_landscape_cls: MagicMock,
+        mock_open_landscape: MagicMock,
         mock_graph_cls: MagicMock,
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
@@ -1504,8 +1505,8 @@ class TestB3Construction:
         ):
             service._run_pipeline(str(uuid4()), "yaml", threading.Event())
 
-        # B3: LandscapeDB constructed from settings URL
-        mock_landscape_cls.assert_called_once_with(connection_string="sqlite:///test_audit.db", passphrase=None)
+        # B3: LandscapeDB opened through the deployment-gated factory.
+        mock_open_landscape.assert_called_once_with(service._settings)
         # B3: PayloadStore constructed from settings path
         mock_payload_cls.assert_called_once_with(base_path=Path("/tmp/test_payloads"))
 
@@ -1513,7 +1514,7 @@ class TestB3Construction:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_rate_limit_config_uses_web_data_dir(
         self,
@@ -1562,7 +1563,7 @@ class TestInlineBlobRuntimePreflight:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_resolves_inline_content_and_records_audit_before_settings_load(
         self,
@@ -1683,7 +1684,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_audit_write_failure_prevents_settings_load(
         self,
@@ -1746,7 +1747,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_oversized_inline_content_metadata_fails_before_blob_read(
         self,
@@ -1814,7 +1815,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_aggregate_inline_content_metadata_fails_before_blob_read(
         self,
@@ -1894,7 +1895,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_hash_mismatch_increments_zero_threshold_counter_without_run_id_label(
         self,
@@ -1967,7 +1968,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_rejects_cross_session_inline_blob_uniformly(
         self,
@@ -2066,7 +2067,7 @@ class TestWebRuntimeConfigLoading:
     """Web execution rejects file-backed config options before runtime graph construction."""
 
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_file_backed_template_options_fail_before_runtime_graph(
         self,
@@ -2117,7 +2118,7 @@ class TestB7ExceptionHandling:
     Layer 2: future.add_done_callback() logs as safety net.
     """
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_keyboard_interrupt_skips_failed_status_update(
         self,
@@ -2141,7 +2142,7 @@ class TestB7ExceptionHandling:
         assert len(calls) == 1  # Only the initial "running" call
         assert calls[0][1].get("status") == "running"
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_system_exit_skips_failed_status_update(
         self,
@@ -2170,7 +2171,7 @@ class TestB7ExceptionHandling:
         event = threading.Event()
         service._shutdown_events[run_id] = event
 
-        with patch("elspeth.web.execution.service.LandscapeDB") as mock_db:
+        with patch("elspeth.web.execution.service.open_landscape_db") as mock_db:
             mock_db.side_effect = RuntimeError("boom")
             with pytest.raises(RuntimeError):
                 service._run_pipeline(run_id, "yaml", event)
@@ -2237,7 +2238,7 @@ class TestB7ExceptionHandling:
             service._on_pipeline_done(future)
             mock_slog.error.assert_not_called()
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_pydantic_validation_error_emits_schema_contract_diagnostic(
         self,
@@ -2368,7 +2369,7 @@ class TestCancelMechanism:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_cancelled_run_broadcasts_cancelled_event(
         self,
@@ -2424,7 +2425,7 @@ class TestCancelMechanism:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_graceful_shutdown_forwards_row_counts(
         self,
@@ -2488,7 +2489,7 @@ class TestCancelMechanism:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_completed_run_not_misclassified_when_event_set_late(
         self,
@@ -2548,7 +2549,7 @@ class TestCancelMechanism:
 
     # ── Race condition: cancel() before _run_pipeline starts ──────────
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_exits_gracefully_when_already_cancelled(
         self,
@@ -2576,7 +2577,7 @@ class TestCancelMechanism:
         # Only the one failed "running" attempt — no "failed" status update
         assert mock_session_service.update_run_status.call_count == 1
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_early_shutdown_skips_setup(
         self,
@@ -2603,7 +2604,7 @@ class TestCancelMechanism:
         assert len(status_calls) == 1
         assert "cancelled" in str(status_calls[0])
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_reraises_valueerror_when_not_cancelled(
         self,
@@ -2622,7 +2623,7 @@ class TestCancelMechanism:
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "yaml", threading.Event())
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_running_transition_does_not_swallow_non_illegal_value_errors(
         self,
@@ -2864,7 +2865,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_exits_gracefully_when_completed_but_db_cancelled(
         self,
@@ -2921,7 +2922,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_cancelled_compensating_event_broadcast_on_external_cancel(
         self,
@@ -2984,7 +2985,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_external_cancel_finalizes_output_blobs_as_error(
         self,
@@ -3046,7 +3047,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_completion_guard_reraises_for_non_cancelled_status(
         self,
@@ -3090,7 +3091,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_completion_guard_does_not_swallow_non_illegal_value_errors(
         self,
@@ -3257,7 +3258,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_broadcast_crash_skips_failed_status_update(
         self,
@@ -3344,7 +3345,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_with_failures_also_skips_failed_status_update(
         self,
@@ -3411,7 +3412,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_get_run_probe_failure_falls_through(
         self,
@@ -3488,7 +3489,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_probe_failure_with_legal_transitions_preserves_original_exception(
         self,
@@ -3609,7 +3610,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_get_run_probe_value_error_propagates(
         self,
@@ -3702,7 +3703,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_running_state_exception_still_records_failed(
         self,
@@ -4593,7 +4594,7 @@ class TestAsyncShutdown:
 class TestRunningStatusFailure:
     """W15: What happens when the initial status update to 'running' fails."""
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_running_status_failure_marks_run_failed(
         self,
@@ -5981,7 +5982,7 @@ class TestEdgeCompatibility:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_validate_edge_compatibility_called(
         self,
@@ -6016,7 +6017,7 @@ class TestEdgeCompatibility:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_edge_compatibility_failure_crashes_pipeline(
         self,
@@ -6168,7 +6169,7 @@ class TestTerminalOrderingInvariant:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_single_terminal_when_finalize_raises_blob_not_found(
         self,
@@ -6231,7 +6232,7 @@ class TestTerminalOrderingInvariant:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_externally_cancelled_run_emits_single_cancelled_terminal(
         self,

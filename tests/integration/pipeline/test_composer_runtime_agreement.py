@@ -3400,7 +3400,7 @@ sinks:
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
         self,
@@ -3434,7 +3434,7 @@ sinks:
         mock_orch_cls.assert_not_called()
 
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_records_audit_hash_before_settings_load(
         self,

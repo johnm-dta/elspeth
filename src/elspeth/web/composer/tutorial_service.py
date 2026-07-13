@@ -19,7 +19,6 @@ from sqlalchemy import func, select, update
 
 from elspeth.contracts import CallType
 from elspeth.core.canonical import stable_hash
-from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     artifacts_table,
     calls_table,
@@ -40,6 +39,7 @@ from elspeth.web.composer.tutorial_models import (
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.outputs import filesystem_path_candidates
 from elspeth.web.execution.protocol import ExecutionService
+from elspeth.web.landscape_access import open_landscape_db
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.sessions.ownership import verify_session_ownership
@@ -201,10 +201,7 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
     # read-then-write shape on a DEFERRED BEGIN is exactly the
     # SQLITE_BUSY_SNAPSHOT hazard the write-intent discipline closes.
     with (
-        LandscapeDB.from_url(
-            settings.get_landscape_url(),
-            passphrase=settings.landscape_passphrase,
-        ) as db,
+        open_landscape_db(settings) as db,
         db.write_connection() as conn,
     ):
         llm_call_count = _count_calls_for_run(conn, landscape_run_id)

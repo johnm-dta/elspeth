@@ -11,11 +11,13 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
-from elspeth.core.landscape.schema import calls_table
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.schema import calls_table, runs_table
 from elspeth.web.composer import tutorial_service as tutorial_service_module
 from elspeth.web.composer.tutorial_service import (
     TutorialRunIntegrityError,
@@ -269,6 +271,67 @@ def test_count_discarded_rows_counts_only_discard_destination() -> None:
     factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=other)
     with db.connection() as conn:
         assert _count_discarded_rows(conn, other) == 0
+
+
+def test_projection_opens_landscape_via_gated_factory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    landscape_url = f"sqlite:///{tmp_path / 'tutorial-landscape.db'}"
+    seed_db = LandscapeDB(landscape_url)
+    factory = make_factory(seed_db)
+    landscape_run_id = "tutorial-landscape-run"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=landscape_run_id)
+    source = factory.data_flow.register_node(
+        run_id=landscape_run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+    )
+    factory.data_flow.create_row_with_token(
+        run_id=landscape_run_id,
+        source_node_id=source.node_id,
+        row_index=0,
+        source_row_index=0,
+        ingest_sequence=0,
+        data={"title": "bounded source row"},
+    )
+    seed_db.close()
+
+    settings = _make_tutorial_settings(
+        tmp_path,
+        deployment_target="default",
+        landscape_url=landscape_url,
+    )
+    opened_with: list[WebSettings] = []
+    from elspeth.web.landscape_access import open_landscape_db as real_open_landscape_db
+
+    def _spy_open_landscape_db(candidate: WebSettings) -> LandscapeDB:
+        opened_with.append(candidate)
+        return real_open_landscape_db(candidate)
+
+    monkeypatch.setattr(tutorial_service_module, "open_landscape_db", _spy_open_landscape_db)
+    monkeypatch.setattr(
+        tutorial_service_module,
+        "_rows_from_artifacts",
+        lambda *args, **kwargs: [{"title": "bounded projection"}],
+    )
+
+    projection = tutorial_service_module._project_live_tutorial_output(
+        settings,
+        run_id="web-run-id",
+        landscape_run_id=landscape_run_id,
+        session_id="session-id",
+    )
+
+    assert opened_with == [settings]
+    assert projection.output.rows == ({"title": "bounded projection"},)
+    with LandscapeDB.from_url(landscape_url, create_tables=False) as persisted_db, persisted_db.connection() as conn:
+        persisted = conn.execute(
+            select(runs_table.c.llm_call_count, runs_table.c.seeded_from_cache, runs_table.c.cache_key).where(
+                runs_table.c.run_id == landscape_run_id
+            )
+        ).one()
+    assert persisted == (0, False, None)
 
 
 def test_coalesce_run_source_hashes_aggregates_row_hashes() -> None:

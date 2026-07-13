@@ -21,7 +21,7 @@ from collections.abc import Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import UUID
 
 import structlog
@@ -44,7 +44,6 @@ from elspeth.core.blobs_inline import (
 )
 from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_config_dict, load_settings_from_yaml_string
 from elspeth.core.events import EventBus
-from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
@@ -99,8 +98,8 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
+from elspeth.web.landscape_access import open_landscape_db
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
-from elspeth.web.schema_probe import postgres_engine_kwargs
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -112,6 +111,9 @@ from elspeth.web.sessions.protocol import (
     SessionServiceProtocol,
 )  # B1: canonical definition
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.database import LandscapeDB
 
 slog = structlog.get_logger()
 _meter = metrics.get_meter(__name__)
@@ -1098,12 +1100,7 @@ class ExecutionServiceImpl:
             # with max_workers=1 (no concurrent access) but wasteful — each run
             # creates a new SQLAlchemy engine. Acceptable for MVP; consider
             # sharing a single instance if profiling shows connection overhead.
-            landscape_url = self._settings.get_landscape_url()
-            landscape_db = LandscapeDB(
-                connection_string=landscape_url,
-                passphrase=self._settings.landscape_passphrase,
-                **postgres_engine_kwargs(landscape_url),
-            )
+            landscape_db = open_landscape_db(self._settings)
             payload_store = FilesystemPayloadStore(base_path=self._settings.get_payload_store_path())
 
             # Resolve secret refs before writing YAML to temp file.

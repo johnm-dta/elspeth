@@ -279,8 +279,30 @@ class TestSerialization:
     def test_csv_unencodable_value_is_static_failure(self) -> None:
         from elspeth.plugins.sinks.aws_s3_sink import S3RecordSerializationError
 
-        with pytest.raises(S3RecordSerializationError):
+        with pytest.raises(S3RecordSerializationError) as captured:
             _serialize([{"id": 1, "name": "snowman ☃"}], format="csv", encoding="ascii")
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
+
+    def test_stateful_csv_encoding_uses_one_incremental_encoder_and_one_bom(self) -> None:
+        serialized = _serialize(
+            [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}],
+            format="csv",
+            encoding="utf-16",
+        )
+        payload = serialized.body.read()
+        serialized.close()
+        assert payload.count(b"\xff\xfe") + payload.count(b"\xfe\xff") == 1
+        assert payload.decode("utf-16") == "id,name\r\n1,Ada\r\n2,Grace\r\n"
+
+    @pytest.mark.parametrize("format", ["csv", "json", "jsonl"])
+    def test_huge_integer_conversion_is_a_static_serialization_failure(self, format: str) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import S3RecordSerializationError
+
+        with pytest.raises(S3RecordSerializationError) as captured:
+            _serialize([{"id": 10**5000, "name": "Ada"}], format=format)
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
 
     @pytest.mark.parametrize("format", ["csv", "json", "jsonl"])
     def test_record_limit_rejects_huge_single_value_before_writing(self, format: str) -> None:
@@ -538,6 +560,34 @@ class TestAWSS3SinkRuntime:
         assert len(client.requests) == 1
         assert context.calls[0]["error"] == {"type": "_ProviderFailure"}
 
+    def test_put_object_import_error_is_ambiguous_audited_and_poisoned(self) -> None:
+        sink, client = _runtime_sink(client=_S3Client([ImportError("post-dispatch provider sentinel")]))
+        context = _SinkContext()
+        with pytest.raises(Exception, match="outcome is unknown") as captured:
+            sink.write([{"id": 1, "name": "Ada"}], context)
+        assert len(client.requests) == 1
+        assert context.calls[0]["error"] == {"type": "ImportError"}
+        assert sink._poisoned is True
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
+
+    def test_builder_import_error_preserves_optional_dependency_guidance(self) -> None:
+        from unittest.mock import patch
+
+        from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
+        from tests.fixtures.base_classes import inject_write_failure
+
+        expected = ImportError('boto3 is required; install Elspeth with the "aws" extra')
+        sink = inject_write_failure(AWSS3Sink(_base_config()))
+        context = _SinkContext()
+        with (
+            patch("elspeth.plugins.sinks.aws_s3_sink.build_s3_client", side_effect=expected),
+            pytest.raises(ImportError) as captured,
+        ):
+            sink.write([{"id": 1, "name": "Ada"}], context)
+        assert captured.value is expected
+        assert context.calls == []
+        assert sink._poisoned is False
+
     def test_client_creation_failure_redacts_endpoint_and_provider_details(self, caplog: pytest.LogCaptureFixture) -> None:
         from unittest.mock import patch
 
@@ -599,6 +649,33 @@ class TestAWSS3SinkRuntime:
             sink.write([{"id": 1, "name": "x" * 100}], _SinkContext())
         assert client.requests == []
         assert sink._buffered_rows == []
+
+    def test_rejected_row_fields_do_not_enter_observed_csv_schema(self) -> None:
+        sink, client = _runtime_sink(format="csv")
+        result = sink.write([{"rejected": object()}, {"id": 1}], _SinkContext())
+        assert len(result.diversions) == 1
+        assert client.bodies == [b"id\r\n1\r\n"]
+        assert sink._buffered_rows == [{"id": 1}]
+
+    def test_all_diverted_later_batch_preserves_confirmed_remote_artifact(self) -> None:
+        sink, client = _runtime_sink(format="csv")
+        context = _SinkContext()
+        confirmed = sink.write([{"id": 1}], context)
+
+        all_diverted = sink.write([{"rejected": object()}], context)
+
+        assert len(client.requests) == 1
+        assert len(all_diverted.diversions) == 1
+        assert all_diverted.artifact == confirmed.artifact
+        assert sink._buffered_rows == [{"id": 1}]
+
+    @pytest.mark.parametrize("format", ["csv", "json", "jsonl"])
+    def test_huge_integer_is_diverted_instead_of_escaping_write(self, format: str) -> None:
+        sink, client = _runtime_sink(format=format)
+        result = sink.write([{"id": 10**5000, "name": "Ada"}], _SinkContext())
+        assert len(result.diversions) == 1
+        assert "could not be" in result.diversions[0].reason
+        assert client.requests == []
 
     def test_close_detaches_clears_and_closes_exactly_once(self) -> None:
         sink, client = _runtime_sink(overwrite=False)

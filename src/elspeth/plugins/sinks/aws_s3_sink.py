@@ -297,15 +297,30 @@ class _BoundedBinaryWriter:
 class _EncodedTextWriter:
     def __init__(self, writer: _BoundedBinaryWriter, encoding: str) -> None:
         self._writer = writer
-        self._encoding = encoding
+        self._encoder = codecs.getincrementalencoder(encoding)(errors="strict")
 
     def write(self, value: str) -> int:
+        encoding_failed = False
+        encoded = b""
         try:
-            encoded = value.encode(self._encoding)
-        except (UnicodeEncodeError, LookupError):
+            encoded = self._encoder.encode(value, final=False)
+        except (UnicodeError, LookupError, ValueError):
+            encoding_failed = True
+        if encoding_failed:
             raise S3RecordSerializationError from None
         self._writer.write(encoded)
         return len(value)
+
+    def finalize(self) -> None:
+        encoding_failed = False
+        encoded = b""
+        try:
+            encoded = self._encoder.encode("", final=True)
+        except (UnicodeError, LookupError, ValueError):
+            encoding_failed = True
+        if encoding_failed:
+            raise S3RecordSerializationError from None
+        self._writer.write(encoded)
 
 
 def _json_string_chars(value: str) -> int:
@@ -365,7 +380,17 @@ def _json_value_chars(value: Any, *, seen: set[int]) -> int:
 
 
 def _check_json_record(row: Mapping[str, Any], max_record_chars: int) -> None:
-    if _json_value_chars(row, seen=set()) > max_record_chars:
+    traversal_failed = False
+    record_chars = 0
+    try:
+        record_chars = _json_value_chars(row, seen=set())
+    except S3RecordSerializationError:
+        raise
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        traversal_failed = True
+    if traversal_failed:
+        raise S3RecordSerializationError from None
+    if record_chars > max_record_chars:
         raise S3RecordSizeLimitError
 
 
@@ -377,11 +402,27 @@ def _csv_scalar_text(value: Any) -> str:
     if type(value) is bool:
         return str(value)
     if type(value) is int:
-        return str(value)
+        conversion_failed = False
+        rendered = ""
+        try:
+            rendered = str(value)
+        except (ValueError, TypeError, OverflowError):
+            conversion_failed = True
+        if conversion_failed:
+            raise S3RecordSerializationError from None
+        return rendered
     if type(value) is float:
         if not math.isfinite(value):
             raise S3RecordSerializationError
-        return str(value)
+        conversion_failed = False
+        rendered = ""
+        try:
+            rendered = str(value)
+        except (ValueError, TypeError, OverflowError):
+            conversion_failed = True
+        if conversion_failed:
+            raise S3RecordSerializationError from None
+        return rendered
     raise S3RecordSerializationError
 
 
@@ -427,7 +468,9 @@ def _serialize_rows_to_spool(
                 if _csv_record_chars(values, csv_options.delimiter) > max_record_chars:
                     raise S3RecordSizeLimitError
                 csv_writer.writerow(values)
+            text_writer.finalize()
         elif format in {"json", "jsonl"}:
+            text_writer = _EncodedTextWriter(writer, "utf-8")
             if format == "json":
                 writer.write(b"[")
             for index, row in enumerate(rows):
@@ -436,15 +479,20 @@ def _serialize_rows_to_spool(
                     writer.write(b",")
                 try:
                     for fragment in json_encoder.iterencode(row):
-                        _EncodedTextWriter(writer, "utf-8").write(fragment)
+                        text_writer.write(fragment)
                 except S3ObjectSizeLimitError:
                     raise
                 except (TypeError, ValueError, UnicodeError):
+                    serialization_failed = True
+                else:
+                    serialization_failed = False
+                if serialization_failed:
                     raise S3RecordSerializationError from None
                 if format == "jsonl":
                     writer.write(b"\n")
             if format == "json":
                 writer.write(b"]")
+            text_writer.finalize()
         else:
             raise AssertionError(f"Unsupported S3 sink format: {format}")
         body.seek(0)
@@ -550,7 +598,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4784cb7dc9f5d1e1"
+    source_file_hash: str | None = "sha256:5495a79bf6ebdaca"
     config_model = AWSS3SinkConfig
     supports_resume = False
 
@@ -600,6 +648,7 @@ class AWSS3Sink(BaseSink):
         self._buffered_rows: list[dict[str, Any]] = []
         self._resolved_key: str | None = None
         self._remote_etag: str | None = None
+        self._confirmed_artifact: ArtifactDescriptor | None = None
         self._poisoned = False
         self._closed = False
 
@@ -651,19 +700,16 @@ class AWSS3Sink(BaseSink):
     def _preflight_rows(
         self,
         rows: list[dict[str, Any]],
-        *,
-        data_fields: Sequence[str],
-        display_fields: Sequence[str],
     ) -> list[dict[str, Any]]:
         accepted: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
-            displayed = apply_display_headers(self, [row])[0]
+            probe_fields = self._get_fieldnames_from_schema_or_rows([row])
             try:
                 serialized = _serialize_rows_to_spool(
-                    [displayed],
+                    [row],
                     format=self._format,
                     csv_options=self._csv_options,
-                    fieldnames=display_fields,
+                    fieldnames=probe_fields,
                     max_object_bytes=1024 * 1024 * 1024,
                     max_record_chars=self._max_record_chars,
                 )
@@ -736,25 +782,17 @@ class AWSS3Sink(BaseSink):
         resolve_contract_from_context_if_needed(self, ctx)
         resolve_display_headers_if_needed(self, ctx)
         key = self._get_or_init_key(ctx)
-        all_rows_for_fields = [*self._buffered_rows, *rows]
-        data_fields = self._get_fieldnames_from_schema_or_rows(all_rows_for_fields)
-        display_fields = self._display_fieldnames(data_fields)
-        accepted = self._preflight_rows(rows, data_fields=data_fields, display_fields=display_fields)
-        candidate_rows = [*self._buffered_rows, *accepted]
-        displayed_candidate = apply_display_headers(self, candidate_rows)
+        accepted = self._preflight_rows(rows)
 
         if not accepted:
-            if not candidate_rows:
-                return self._artifact(key, content_hash=hashlib.sha256(b"").hexdigest(), size_bytes=0)
-            with _serialize_rows_to_spool(
-                displayed_candidate,
-                format=self._format,
-                csv_options=self._csv_options,
-                fieldnames=display_fields,
-                max_object_bytes=self._max_object_bytes,
-                max_record_chars=self._max_record_chars,
-            ) as existing:
-                return self._artifact(key, content_hash=existing.content_hash, size_bytes=existing.size_bytes)
+            if self._confirmed_artifact is not None:
+                return SinkWriteResult(artifact=self._confirmed_artifact, diversions=self._get_diversions())
+            return self._artifact(key, content_hash=hashlib.sha256(b"").hexdigest(), size_bytes=0)
+
+        candidate_rows = [*self._buffered_rows, *accepted]
+        data_fields = self._get_fieldnames_from_schema_or_rows(candidate_rows)
+        display_fields = self._display_fieldnames(data_fields)
+        displayed_candidate = apply_display_headers(self, candidate_rows)
 
         serialized = _serialize_rows_to_spool(
             displayed_candidate,
@@ -785,16 +823,30 @@ class AWSS3Sink(BaseSink):
             provider_error_type: str | None = None
             failure_kind: Literal["conditional", "rejected", "unknown"] | None = None
             response: Any = None
-            try:
-                serialized.body.seek(0)
-                response = self._get_s3_client().put_object(**request)
-            except ImportError:
-                raise
-            except contract_errors.TIER_1_ERRORS:
-                raise
-            except BaseException as error:
-                provider_error_type = _normalize_error_type(error)
-                failure_kind = _provider_failure_kind(error)
+            client: Any | None = self._s3_client
+            if client is None:
+                try:
+                    client = self._get_s3_client()
+                except ImportError:
+                    raise
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except BaseException as error:
+                    provider_error_type = _normalize_error_type(error)
+                    failure_kind = "unknown"
+            if failure_kind is None and client is None:
+                provider_error_type = "InvalidS3Client"
+                failure_kind = "unknown"
+            if failure_kind is None:
+                assert client is not None
+                try:
+                    serialized.body.seek(0)
+                    response = client.put_object(**request)
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except BaseException as error:
+                    provider_error_type = _normalize_error_type(error)
+                    failure_kind = _provider_failure_kind(error)
             latency_ms = (time.perf_counter() - started) * 1000
 
             if failure_kind is not None and provider_error_type is not None:
@@ -852,7 +904,9 @@ class AWSS3Sink(BaseSink):
                 },
             )
             self._buffered_rows = candidate_rows
-            return self._artifact(key, content_hash=serialized.content_hash, size_bytes=serialized.size_bytes)
+            result = self._artifact(key, content_hash=serialized.content_hash, size_bytes=serialized.size_bytes)
+            self._confirmed_artifact = result.artifact
+            return result
         finally:
             serialized.close()
 
@@ -868,6 +922,7 @@ class AWSS3Sink(BaseSink):
         self._buffered_rows = []
         self._resolved_key = None
         self._remote_etag = None
+        self._confirmed_artifact = None
         self._poisoned = False
         close_error_type: str | None = None
         if client is not None:

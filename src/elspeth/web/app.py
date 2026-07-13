@@ -12,7 +12,9 @@ import time
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import structlog
@@ -84,6 +86,12 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
+from elspeth.web.readiness import (
+    ReadinessCache,
+    ReadinessProbeRunner,
+    overall_timeout_report,
+    readiness_report,
+)
 from elspeth.web.schema_probe import postgres_engine_kwargs
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
@@ -91,7 +99,13 @@ from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryNotRecordedError
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, RunRecord, StaleComposeStateError
+from elspeth.web.sessions.protocol import (
+    LANDSCAPE_RECONCILIATION_PENDING_SUFFIX,
+    AuditAccessLogWriteError,
+    RunAlreadyActiveError,
+    RunRecord,
+    StaleComposeStateError,
+)
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -138,6 +152,11 @@ _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
 def _dispose_session_engine(engine: Engine) -> None:
     """Dispose the sessions DB pool for app instances that never run lifespan."""
     engine.dispose()
+
+
+def _close_readiness_runner(runner: ReadinessProbeRunner) -> None:
+    """Close readiness workers for app instances that never run lifespan."""
+    runner.close()
 
 
 class _BrowserEndpointDiscoveryDocument(BaseModel):
@@ -192,33 +211,56 @@ def _finalize_orphaned_landscape_runs(
     cancelled_runs: list[RunRecord],
     *,
     create_tables: bool = True,
-) -> int:
-    """Mark Landscape rows interrupted for session runs cancelled as orphans."""
-    landscape_run_ids: list[str] = []
-    seen: set[str] = set()
+) -> tuple[frozenset[UUID], frozenset[UUID]]:
+    """Idempotently reconcile candidates and classify complete versus absent."""
+    complete_run_ids: set[UUID] = set()
+    absent_run_ids: set[UUID] = set()
+    by_landscape_id: dict[str, list[UUID]] = {}
     for run in cancelled_runs:
-        if run.landscape_run_id is None or run.landscape_run_id in seen:
+        if run.landscape_run_id is None:
+            complete_run_ids.add(run.id)
             continue
-        seen.add(run.landscape_run_id)
-        landscape_run_ids.append(run.landscape_run_id)
+        by_landscape_id.setdefault(run.landscape_run_id, []).append(run.id)
 
-    if not landscape_run_ids:
-        return 0
+    if not by_landscape_id:
+        return frozenset(complete_run_ids), frozenset()
 
-    finalized = 0
     with LandscapeDB.from_url(landscape_url, create_tables=create_tables) as landscape_db:
         lifecycle = RecorderFactory(landscape_db).run_lifecycle
-        for landscape_run_id in landscape_run_ids:
+        for landscape_run_id, session_run_ids in by_landscape_id.items():
             landscape_run = lifecycle.get_run(landscape_run_id)
             if landscape_run is None:
-                raise AuditIntegrityError(
-                    f"Orphan cleanup cancelled a session run with landscape_run_id={landscape_run_id!r}, "
-                    "but no matching Landscape run row exists."
-                )
+                absent_run_ids.update(session_run_ids)
+                continue
             if landscape_run.status == RunStatus.RUNNING:
                 lifecycle.complete_run(landscape_run_id, RunStatus.INTERRUPTED)
-                finalized += 1
-    return finalized
+            complete_run_ids.update(session_run_ids)
+    if absent_run_ids:
+        structlog.get_logger().error(
+            "orphan_landscape_run_absent",
+            outcome="absent",
+            count=len(absent_run_ids),
+            operator_action="investigate audit-row absence",
+        )
+    return frozenset(complete_run_ids), frozenset(absent_run_ids)
+
+
+async def _reconcile_pending_landscape_runs(
+    session_service: SessionServiceImpl,
+    landscape_url: str,
+    *,
+    create_tables: bool,
+) -> None:
+    candidates = await session_service.list_pending_landscape_reconciliations()
+    complete_run_ids, absent_run_ids = _finalize_orphaned_landscape_runs(
+        landscape_url,
+        candidates,
+        create_tables=create_tables,
+    )
+    await session_service.mark_landscape_reconciliation_outcomes(
+        complete_run_ids=complete_run_ids,
+        absent_run_ids=absent_run_ids,
+    )
 
 
 async def _periodic_orphan_cleanup(
@@ -248,6 +290,8 @@ async def _periodic_orphan_cleanup(
     slog = structlog.get_logger()
     while True:
         await asyncio.sleep(interval_seconds)
+        cancelled = 0
+        live_run_ids: frozenset[str] = frozenset()
         try:
             live_run_ids = execution_service.get_live_run_ids()
             if landscape_url is None:
@@ -260,18 +304,13 @@ async def _periodic_orphan_cleanup(
                 cancelled_runs = await session_service.cancel_all_orphaned_run_records(
                     max_age_seconds=max_age_seconds,
                     exclude_run_ids=live_run_ids,
-                    reason="Orphaned by periodic cleanup — no active executor thread",
-                )
-                _finalize_orphaned_landscape_runs(
-                    landscape_url,
-                    cancelled_runs,
-                    create_tables=create_tables,
+                    reason=(f"Orphaned by periodic cleanup — no active executor thread {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}"),
                 )
                 cancelled = len(cancelled_runs)
-            if cancelled:
-                telemetry.orphaned_runs_cancelled_total.add(
-                    cancelled,
-                    attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
+                await _reconcile_pending_landscape_runs(
+                    session_service,
+                    landscape_url,
+                    create_tables=create_tables,
                 )
         except (SQLAlchemyError, OSError, SchemaCompatibilityError) as cleanup_exc:
             # Narrow catch — only recoverable audit/IO failures are
@@ -306,6 +345,11 @@ async def _periodic_orphan_cleanup(
                 "periodic_orphan_cleanup_failed",
                 exc_class=type(cleanup_exc).__name__,
             )
+        if cancelled:
+            telemetry.orphaned_runs_cancelled_total.add(
+                cancelled,
+                attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
+            )
 
 
 @asynccontextmanager
@@ -327,14 +371,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: WebSettings = app.state.settings
     create_landscape_tables = settings.deployment_target != DEPLOYMENT_TARGET_AWS_ECS
     session_service = app.state.session_service
-    cancelled_runs = await session_service.cancel_all_orphaned_run_records(
-        reason="Orphaned by server restart — no active process",
-    )
-    _finalize_orphaned_landscape_runs(
-        settings.get_landscape_url(),
-        cancelled_runs,
-        create_tables=create_landscape_tables,
-    )
+    cancelled_runs: list[RunRecord] = []
+    try:
+        cancelled_runs = await session_service.cancel_all_orphaned_run_records(
+            reason=f"Orphaned by server restart — no active process {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+        )
+        await _reconcile_pending_landscape_runs(
+            session_service,
+            settings.get_landscape_url(),
+            create_tables=create_landscape_tables,
+        )
+    except (SQLAlchemyError, OSError, SchemaCompatibilityError) as cleanup_exc:
+        slog.error(
+            "lifespan_orphan_cleanup_failed",
+            exc_class=type(cleanup_exc).__name__,
+        )
     cancelled = len(cancelled_runs)
     if cancelled:
         app.state.sessions_telemetry.orphaned_runs_cancelled_total.add(
@@ -578,6 +629,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         orphan_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await orphan_task
+
+        app.state.readiness_probe_runner.close()
 
         # Shutdown execution service thread pool without blocking the loop:
         # worker cleanup still schedules terminal-state writes back onto it.
@@ -1010,6 +1063,10 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     )
     app.state.session_service = session_service
     app.state.session_engine = session_engine  # available to guided step handlers
+    readiness_probe_runner = ReadinessProbeRunner()
+    app.state.readiness_probe_runner = readiness_probe_runner
+    app.state.readiness_cache = ReadinessCache()
+    weakref.finalize(app, _close_readiness_runner, readiness_probe_runner)
 
     # --- Preferences service ---
     # Per-user composer settings (default_composer_mode, banner_dismissed_at,
@@ -1274,6 +1331,25 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/ready")
+    async def ready(request: Request) -> JSONResponse:
+        async def compute():  # type: ignore[no-untyped-def]
+            return await readiness_report(
+                request.app.state.settings,
+                request.app.state.session_engine,
+                request.app.state.readiness_probe_runner,
+            )
+
+        try:
+            async with asyncio.timeout(5.0):
+                report = await request.app.state.readiness_cache.get(compute)
+        except TimeoutError:
+            report = overall_timeout_report()
+        return JSONResponse(
+            status_code=200 if report.ready else 503,
+            content={"ready": report.ready, "checks": [asdict(check) for check in report.checks]},
+        )
 
     @app.get("/api/system/status")
     async def system_status() -> dict[str, object]:

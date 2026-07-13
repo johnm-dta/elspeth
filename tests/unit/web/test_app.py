@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import gc
 import sys
+import threading
 import weakref
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -42,7 +43,14 @@ from elspeth.web.aws_ecs_startup import AwsEcsSchemaNotReadyError, AwsEcsStartup
 from elspeth.web.composer.boot_probe import ComposerBootConfigError
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
-from elspeth.web.sessions.protocol import CompositionStateData, RunRecord
+from elspeth.web.readiness import READINESS_CHECK_NAMES, ReadinessCache, ReadinessCheck, ReadinessProbeRunner, ReadinessReport
+from elspeth.web.sessions.protocol import (
+    LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX,
+    LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX,
+    LANDSCAPE_RECONCILIATION_PENDING_SUFFIX,
+    CompositionStateData,
+    RunRecord,
+)
 from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -247,6 +255,25 @@ class TestCreateApp:
         assert app_ref() is None
         assert disposed
 
+    def test_readiness_runner_and_cache_are_process_state_and_runner_is_finalized(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path))
+        assert isinstance(app.state.readiness_probe_runner, ReadinessProbeRunner)
+        assert isinstance(app.state.readiness_cache, ReadinessCache)
+        closed = False
+        original_close = app.state.readiness_probe_runner.close
+
+        def close() -> None:
+            nonlocal closed
+            closed = True
+            original_close()
+
+        monkeypatch.setattr(app.state.readiness_probe_runner, "close", close)
+        app_ref = weakref.ref(app)
+        del app
+        gc.collect()
+        assert app_ref() is None
+        assert closed is True
+
 
 class TestHealthEndpoint:
     """Tests for GET /api/health."""
@@ -262,6 +289,135 @@ class TestHealthEndpoint:
         client = TestClient(app)
         response = client.get("/api/health")
         assert response.json() == {"status": "ok"}
+
+    def test_health_stays_shallow_when_readiness_is_not_ready(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path))
+
+        async def failed(*_args: object, **_kwargs: object) -> ReadinessReport:
+            return ReadinessReport(False, tuple(ReadinessCheck(name, False, "static failure") for name in READINESS_CHECK_NAMES))
+
+        monkeypatch.setattr(app_module, "readiness_report", failed)
+        client = TestClient(app)
+        assert client.get("/api/health").json() == {"status": "ok"}
+        assert client.get("/api/ready").status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_health_remains_responsive_while_blob_resolution_blocks_in_worker(self, tmp_path, monkeypatch) -> None:
+        import elspeth.web.readiness as readiness_module
+
+        app = create_app(_settings(tmp_path))
+        entered = threading.Event()
+        release = threading.Event()
+        real_resolver = readiness_module.allowed_source_directories
+
+        def blocked_resolver(data_dir: str):
+            entered.set()
+            release.wait()
+            return real_resolver(data_dir)
+
+        monkeypatch.setattr("elspeth.web.readiness.allowed_source_directories", blocked_resolver)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            ready_task = asyncio.create_task(client.get("/api/ready"))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1.0)
+                started = asyncio.get_running_loop().time()
+                health = await client.get("/api/health")
+                assert asyncio.get_running_loop().time() - started < 0.5
+                assert health.status_code == 200
+                assert health.json() == {"status": "ok"}
+            finally:
+                release.set()
+            await ready_task
+
+
+class TestReadinessEndpoint:
+    def test_ready_returns_200_with_exact_eight_check_json(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path))
+        checks = tuple(ReadinessCheck(name, True, "ok") for name in READINESS_CHECK_NAMES)
+
+        async def green(*_args: object, **_kwargs: object) -> ReadinessReport:
+            return ReadinessReport(True, checks)
+
+        monkeypatch.setattr(app_module, "readiness_report", green)
+        response = TestClient(app).get("/api/ready")
+        assert response.status_code == 200
+        assert response.json() == {
+            "ready": True,
+            "checks": [{"name": name, "ok": True, "detail": "ok"} for name in READINESS_CHECK_NAMES],
+        }
+
+    def test_ready_returns_redacted_503_for_dependency_failure(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path))
+        checks = tuple(
+            ReadinessCheck(name, name != "session_db", "probe failed (OperationalError)" if name == "session_db" else "ok")
+            for name in READINESS_CHECK_NAMES
+        )
+
+        async def failed(*_args: object, **_kwargs: object) -> ReadinessReport:
+            return ReadinessReport(False, checks)
+
+        monkeypatch.setattr(app_module, "readiness_report", failed)
+        response = TestClient(app).get("/api/ready")
+        assert response.status_code == 503
+        rendered = response.text
+        assert "OperationalError" in rendered
+        assert "RAW_URL_SENTINEL" not in rendered
+        assert "/private/path" not in rendered
+
+    def test_route_timeout_covers_cache_wait_and_returns_exact_static_report(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path))
+        seen: list[float] = []
+
+        class ImmediateTimeout:
+            async def __aenter__(self) -> None:
+                raise TimeoutError
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        def timeout(seconds: float) -> ImmediateTimeout:
+            seen.append(seconds)
+            return ImmediateTimeout()
+
+        monkeypatch.setattr(app_module.asyncio, "timeout", timeout)
+        response = TestClient(app).get("/api/ready")
+        assert seen == [5.0]
+        assert response.status_code == 503
+        payload = response.json()
+        assert [check["name"] for check in payload["checks"]] == list(READINESS_CHECK_NAMES)
+        assert all(check["detail"] == "readiness request timed out" for check in payload["checks"])
+
+    @pytest.mark.asyncio
+    async def test_cancelled_leading_request_keeps_one_shared_batch_for_follower(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path))
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+        checks = tuple(ReadinessCheck(name, True, "ok") for name in READINESS_CHECK_NAMES)
+
+        async def slow(*_args: object, **_kwargs: object) -> ReadinessReport:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return ReadinessReport(True, checks)
+
+        monkeypatch.setattr(app_module, "readiness_report", slow)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            leader = asyncio.create_task(client.get("/api/ready"))
+            await started.wait()
+            follower = asyncio.create_task(client.get("/api/ready"))
+            await asyncio.sleep(0)
+            leader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await leader
+            assert calls == 1
+            release.set()
+            response = await follower
+        assert response.status_code == 200
+        assert calls == 1
 
 
 class TestSystemStatusEndpoint:
@@ -921,6 +1077,8 @@ class TestLifespanShutdown:
         updated_web_run = await session_service.get_run(web_run.id)
         assert updated_web_run.status == "cancelled"
         assert updated_web_run.finished_at is not None
+        assert updated_web_run.error is not None
+        assert updated_web_run.error.endswith(LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX)
 
         with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
             landscape_run = RecorderFactory(db).run_lifecycle.get_run(landscape_run_id)
@@ -928,6 +1086,113 @@ class TestLifespanShutdown:
         assert landscape_run is not None
         assert landscape_run.status == RunStatus.INTERRUPTED
         assert landscape_run.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_lifespan_marks_missing_landscape_anchor_absent_and_emits_static_event(self, tmp_path) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                composer_boot_probe_enabled=False,
+                orphan_run_check_interval_seconds=3600,
+            )
+        )
+        service = app.state.session_service
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        web_run = await service.create_run(session.id, state.id)
+        await service.update_run_status(web_run.id, "running", landscape_run_id="RAW_ABSENT_ANCHOR_SENTINEL")
+
+        with capture_logs() as logs, patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                pass
+
+        updated = await service.get_run(web_run.id)
+        assert updated.error is not None
+        assert updated.error.endswith(LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX)
+        events = [entry for entry in logs if entry.get("event") == "orphan_landscape_run_absent"]
+        assert events == [
+            {
+                "event": "orphan_landscape_run_absent",
+                "log_level": "error",
+                "outcome": "absent",
+                "count": 1,
+                "operator_action": "investigate audit-row absence",
+            }
+        ]
+        assert "RAW_ABSENT_ANCHOR_SENTINEL" not in repr(events)
+
+    @pytest.mark.asyncio
+    async def test_lifespan_null_anchor_receives_complete_marker_without_landscape_access(self, tmp_path, monkeypatch) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                composer_boot_probe_enabled=False,
+                orphan_run_check_interval_seconds=3600,
+            )
+        )
+        service = app.state.session_service
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        web_run = await service.create_run(session.id, state.id)
+
+        real_finalize = app_module._finalize_orphaned_landscape_runs
+
+        def finalize(url: str, runs: list[RunRecord], *, create_tables: bool = True):
+            assert all(run.landscape_run_id is None for run in runs)
+            return real_finalize("sqlite:////definitely/not/accessed.db", runs, create_tables=create_tables)
+
+        monkeypatch.setattr(app_module, "_finalize_orphaned_landscape_runs", finalize)
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                pass
+        updated = await service.get_run(web_run.id)
+        assert updated.error is not None
+        assert updated.error.endswith(LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX)
+
+    @pytest.mark.asyncio
+    async def test_marker_failure_after_landscape_completion_retries_idempotently(self, tmp_path, monkeypatch) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=False))
+        service = app.state.session_service
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        web_run = await service.create_run(session.id, state.id)
+        landscape_run_id = "landscape-marker-retry"
+        await service.update_run_status(web_run.id, "running", landscape_run_id=landscape_run_id)
+        with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
+            RecorderFactory(db).run_lifecycle.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id=landscape_run_id,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+        await service.cancel_all_orphaned_run_records(reason=f"startup reason {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}")
+        service_type = type(service)
+        original_mark = service_type.mark_landscape_reconciliation_outcomes
+
+        async def fail_mark(self, **_kwargs: object) -> None:
+            raise OperationalError("UPDATE runs", {}, Exception("RAW_DB_SENTINEL"))
+
+        monkeypatch.setattr(service_type, "mark_landscape_reconciliation_outcomes", fail_mark)
+        with pytest.raises(OperationalError):
+            await app_module._reconcile_pending_landscape_runs(
+                service,
+                app.state.settings.get_landscape_url(),
+                create_tables=True,
+            )
+        assert [row.id for row in await service.list_pending_landscape_reconciliations()] == [web_run.id]
+        with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
+            assert RecorderFactory(db).run_lifecycle.get_run(landscape_run_id).status == RunStatus.INTERRUPTED
+
+        monkeypatch.setattr(service_type, "mark_landscape_reconciliation_outcomes", original_mark)
+        await app_module._reconcile_pending_landscape_runs(
+            service,
+            app.state.settings.get_landscape_url(),
+            create_tables=True,
+        )
+        updated = await service.get_run(web_run.id)
+        assert updated.error is not None
+        assert updated.error.endswith(LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX)
 
     @pytest.mark.asyncio
     async def test_lifespan_emits_composer_boot_config_attributes(self, monkeypatch, tmp_path) -> None:
@@ -1079,9 +1344,14 @@ class TestLifespanShutdown:
         periodic_calls: list[bool] = []
         periodic_started = asyncio.Event()
 
-        def finalize(_url: str, _runs: list[RunRecord], *, create_tables: bool) -> int:
+        def finalize(
+            _url: str,
+            _runs: list[RunRecord],
+            *,
+            create_tables: bool,
+        ) -> tuple[frozenset[object], frozenset[object]]:
             one_shot_calls.append(create_tables)
-            return 0
+            return frozenset(), frozenset()
 
         async def periodic(*_args: object, create_tables: bool, **_kwargs: object) -> None:
             periodic_calls.append(create_tables)
@@ -1419,12 +1689,23 @@ class TestPeriodicOrphanCleanup:
             async def cancel_all_orphaned_run_records(self, **_kwargs: object) -> list[RunRecord]:
                 return []
 
-        def finalize(_url: str, _runs: list[RunRecord], *, create_tables: bool) -> int:
+            async def list_pending_landscape_reconciliations(self) -> list[RunRecord]:
+                return []
+
+            async def mark_landscape_reconciliation_outcomes(self, **_kwargs: object) -> None:
+                return None
+
+        def finalize(
+            _url: str,
+            _runs: list[RunRecord],
+            *,
+            create_tables: bool,
+        ) -> tuple[frozenset[object], frozenset[object]]:
             finalize_calls.append(create_tables)
             if len(finalize_calls) == 1:
                 raise SchemaCompatibilityError(sentinel)
             recovered.set()
-            return 0
+            return frozenset(), frozenset()
 
         monkeypatch.setattr(app_module, "_finalize_orphaned_landscape_runs", finalize)
         telemetry = build_sessions_telemetry()
@@ -1591,7 +1872,10 @@ class TestOrphanLandscapeReconciliation:
             pipeline_yaml=None,
         )
 
-        app_module._finalize_orphaned_landscape_runs(landscape_url, [cancelled_run])
+        complete, absent = app_module._finalize_orphaned_landscape_runs(landscape_url, [cancelled_run])
+
+        assert complete == frozenset({cancelled_run.id})
+        assert absent == frozenset()
 
         with LandscapeDB.from_url(landscape_url) as db:
             run = RecorderFactory(db).run_lifecycle.get_run(landscape_run_id)
@@ -1599,6 +1883,36 @@ class TestOrphanLandscapeReconciliation:
         assert run is not None
         assert run.status == RunStatus.INTERRUPTED
         assert run.completed_at is not None
+
+    def test_missing_landscape_row_returns_absent_outcome_without_identifier_log(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "runs").mkdir(exist_ok=True)
+        landscape_url = settings.get_landscape_url()
+        with LandscapeDB.from_url(landscape_url):
+            pass
+        cancelled_run = RunRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            state_id=uuid4(),
+            status="cancelled",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            error="orphaned",
+            landscape_run_id="RAW_MISSING_ANCHOR_SENTINEL",
+            pipeline_yaml=None,
+        )
+        with capture_logs() as logs:
+            complete, absent = app_module._finalize_orphaned_landscape_runs(landscape_url, [cancelled_run])
+        assert complete == frozenset()
+        assert absent == frozenset({cancelled_run.id})
+        assert "RAW_MISSING_ANCHOR_SENTINEL" not in repr(logs)
 
     def test_validate_only_reconciliation_rejects_fresh_database_without_creating_tables(self, tmp_path: Path) -> None:
         database_path = tmp_path / "fresh-landscape.db"
@@ -2205,7 +2519,7 @@ class TestAwsEcsValidateOnlyStartup:
         assert session_url not in repr(logs)
         assert "Can't load plugin" not in repr(logs)
 
-    def test_success_reuses_prevalidated_engine_and_installs_one_finalizer(
+    def test_success_reuses_prevalidated_engine_and_installs_engine_then_runner_finalizers(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -2265,10 +2579,13 @@ class TestAwsEcsValidateOnlyStartup:
             )
         ]
         assert app.state.session_engine is engine
-        assert len(finalizers) == 1
+        assert len(finalizers) == 2
         assert finalizers[0][0] is app
         assert finalizers[0][1] is app_module._dispose_session_engine
         assert finalizers[0][2] == (engine,)
+        assert finalizers[1][0] is app
+        assert finalizers[1][1] is app_module._close_readiness_runner
+        assert finalizers[1][2] == (app.state.readiness_probe_runner,)
         assert settings.data_dir not in mkdir_calls
         assert settings.data_dir / "runs" not in mkdir_calls
         engine.dispose()

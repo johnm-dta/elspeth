@@ -56,6 +56,10 @@ TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "fail
 OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
 SessionRunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 
+LANDSCAPE_RECONCILIATION_PENDING_SUFFIX = "[landscape-reconciliation:pending]"
+LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX = "[landscape-reconciliation:complete]"
+LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX = "[landscape-reconciliation:absent]"
+
 # Closed enum mirroring the ``ck_chat_messages_writer_principal`` CHECK
 # constraint in ``web/sessions/models.py``. The Python Literal and the SQL
 # CHECK are paired contracts: extending one without the other lets the
@@ -1204,6 +1208,19 @@ class SessionServiceProtocol(Protocol):
         Used by app-level startup reconciliation to terminalize matching
         Landscape audit rows via each record's ``landscape_run_id``.
         """
+        ...
+
+    async def list_pending_landscape_reconciliations(self) -> list[RunRecord]:
+        """Return cancelled runs whose error ends in the exact pending marker."""
+        ...
+
+    async def mark_landscape_reconciliation_outcomes(
+        self,
+        *,
+        complete_run_ids: frozenset[UUID],
+        absent_run_ids: frozenset[UUID],
+    ) -> None:
+        """Atomically replace exact pending suffixes with closed outcomes."""
         ...
 
     async def persist_compose_turn_async(

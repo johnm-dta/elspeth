@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from elspeth.contracts.composer_llm_audit import (
+    PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST,
     PROVIDER_COST_SOURCE_NOT_AVAILABLE,
     PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST,
     ComposerLLMCall,
@@ -224,24 +225,49 @@ def token_usage_from_response(response: Any | None) -> TokenUsage:
 def _provider_cost_from_response(response: Any | None) -> tuple[float | None, ComposerLLMProviderCostSource]:
     """Extract provider-reported request cost without fabricating a value.
 
-    OpenRouter exposes request cost as ``response.usage.cost`` through the
-    LiteLLM response object. This is external provider metadata, so malformed,
-    negative, non-finite, or absent values are treated as unavailable rather
-    than propagated into the audit row.
+    Prefer the public ``response.usage.cost`` field when the provider supplies
+    it. LiteLLM stores Bedrock's calculated cost in the Pydantic private-data
+    mapping at ``_hidden_params.response_cost``; consult that mapping only when
+    ``usage.cost`` is absent. A present but malformed public value is evidence
+    of malformed metadata and must not silently fall back to another source.
+
+    Both sources are external provider metadata, so booleans, non-numbers,
+    negative values, and non-finite values are treated as unavailable. The
+    private-data read goes directly through ``__pydantic_private__`` and never
+    invokes a provider-named property.
     """
     if response is None:
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
     usage = _provider_field(response, "usage")
-    if isinstance(usage, Mapping):
-        raw_cost = usage["cost"] if "cost" in usage else None
-    else:
-        raw_cost = _provider_field(usage, "cost")
+    usage_fields = _provider_field_map(usage)
+    if usage_fields is not None and "cost" in usage_fields:
+        return _validated_provider_cost(usage_fields["cost"], PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST)
+
+    try:
+        private = object.__getattribute__(response, "__pydantic_private__")
+    except AttributeError:
+        return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    if not isinstance(private, Mapping):
+        return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    hidden_params = private.get("_hidden_params")
+    if not isinstance(hidden_params, Mapping) or "response_cost" not in hidden_params:
+        return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    return _validated_provider_cost(
+        hidden_params["response_cost"],
+        PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST,
+    )
+
+
+def _validated_provider_cost(
+    raw_cost: Any,
+    source: ComposerLLMProviderCostSource,
+) -> tuple[float | None, ComposerLLMProviderCostSource]:
     if type(raw_cost) is bool or type(raw_cost) not in (int, float):
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
     cost = float(cast(int | float, raw_cost))
     if not math.isfinite(cost) or cost < 0:
         return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
-    return cost, PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST
+    return cost, source
 
 
 def safe_response_model(response: Any | None) -> str | None:

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from elspeth.contracts.composer_llm_audit import (
+    PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST,
     ComposerChatInitiator,
     ComposerChatTurn,
     ComposerChatTurnRecorder,
@@ -85,6 +86,18 @@ def test_provider_cost_fields_are_serialized_without_fabricating_cost() -> None:
 
     assert payload["provider_cost"] == 0.0037
     assert payload["provider_cost_source"] == "response_usage.cost"
+
+
+def test_private_provider_cost_source_is_serialized_with_provenance() -> None:
+    call = _make_call(
+        provider_cost=0.01234,
+        provider_cost_source=PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST,
+    )
+
+    payload = call.to_dict()
+
+    assert payload["provider_cost"] == 0.01234
+    assert payload["provider_cost_source"] == "_hidden_params.response_cost"
 
 
 def test_model_drift_preserves_requested_and_returned_models() -> None:

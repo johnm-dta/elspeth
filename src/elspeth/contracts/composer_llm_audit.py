@@ -20,11 +20,20 @@ from typing import Any, Literal, Protocol
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields, require_int
 
-ComposerLLMProviderCostSource = Literal["not_available", "response_usage.cost"]
+ComposerLLMProviderCostSource = Literal[
+    "not_available",
+    "response_usage.cost",
+    "_hidden_params.response_cost",
+]
 
 PROVIDER_COST_SOURCE_NOT_AVAILABLE: ComposerLLMProviderCostSource = "not_available"
 PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST: ComposerLLMProviderCostSource = "response_usage.cost"
-_VALID_PROVIDER_COST_SOURCES = {PROVIDER_COST_SOURCE_NOT_AVAILABLE, PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST}
+PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST: ComposerLLMProviderCostSource = "_hidden_params.response_cost"
+_VALID_PROVIDER_COST_SOURCES = {
+    PROVIDER_COST_SOURCE_NOT_AVAILABLE,
+    PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST,
+    PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST,
+}
 
 
 class ComposerLLMCallStatus(StrEnum):

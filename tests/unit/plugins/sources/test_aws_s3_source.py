@@ -180,6 +180,43 @@ class _Body:
 
 
 @dataclass
+class _CloseOnlyBody:
+    read: Any = None
+    close_error: BaseException | None = None
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
+@dataclass
+class _FaultingSpool:
+    write_error: BaseException | None = None
+    seek_error: BaseException | None = None
+    close_error: BaseException | None = None
+    closed: bool = False
+    writes: list[bytes] = field(default_factory=list)
+
+    def write(self, data: bytes) -> int:
+        if self.write_error is not None:
+            raise self.write_error
+        self.writes.append(data)
+        return len(data)
+
+    def seek(self, _offset: int) -> int:
+        if self.seek_error is not None:
+            raise self.seek_error
+        return 0
+
+    def close(self) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
+@dataclass
 class _Client:
     head: dict[str, Any]
     get: dict[str, Any]
@@ -325,6 +362,78 @@ class TestDownloadS3Object:
             client = _Client({"ContentLength": 0, "ETag": '"etag"'}, {"ContentLength": 0, "Body": body})
             with pytest.raises(S3SourceReadError):
                 _download_s3_object(client, bucket="bucket", key="key", max_object_bytes=1)
+
+    @pytest.mark.parametrize("read_value", [None, 1, "not-callable"])
+    def test_malformed_body_with_callable_close_is_closed(self, read_value: Any) -> None:
+        from elspeth.plugins.sources.aws_s3_source import S3SourceReadError, _download_s3_object
+
+        body = _CloseOnlyBody(read=read_value)
+        client = _Client({"ContentLength": 0, "ETag": '"etag"'}, {"ContentLength": 0, "Body": body})
+        with pytest.raises(S3SourceReadError) as exc_info:
+            _download_s3_object(client, bucket="bucket", key="key", max_object_bytes=1)
+        assert body.closed
+        assert exc_info.value.provider_error_type == "InvalidS3Body"
+
+    def test_malformed_body_close_failure_is_sanitized_cleanup_metadata(self) -> None:
+        from elspeth.plugins.sources.aws_s3_source import S3SourceReadError, _download_s3_object
+
+        body = _CloseOnlyBody(read=None, close_error=ValueError("credential endpoint SENTINEL"))
+        client = _Client({"ContentLength": 0, "ETag": '"etag"'}, {"ContentLength": 0, "Body": body})
+        with pytest.raises(S3SourceReadError) as exc_info:
+            _download_s3_object(client, bucket="bucket", key="key", max_object_bytes=1)
+        exc = exc_info.value
+        assert body.closed
+        assert exc.cleanup_error_type == "ValueError"
+        assert "SENTINEL" not in f"{exc!s} {exc!r} {exc.__cause__!r} {exc.__context__!r}"
+
+    def test_spool_constructor_failure_is_safe_and_closes_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        sentinel = "credential endpoint body SENTINEL"
+        body = _Body([b"x"])
+        client, _ = _client(b"x", body=body)
+
+        def fail_spool() -> Any:
+            raise OSError(sentinel)
+
+        monkeypatch.setattr(aws_s3_source, "_new_spool", fail_spool)
+        with pytest.raises(aws_s3_source.S3SourceReadError) as exc_info:
+            aws_s3_source._download_s3_object(client, bucket="bucket", key="key", max_object_bytes=1)
+        exc = exc_info.value
+        assert body.closed
+        assert exc.provider_error_type == "OSError"
+        assert sentinel not in f"{exc!s} {exc!r} {exc.__cause__!r} {exc.__context__!r}"
+
+    def test_spool_write_failure_preserves_primary_and_closes_body_and_spool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        sentinel = "credential endpoint body SENTINEL"
+        spool = _FaultingSpool(write_error=OSError(sentinel), close_error=LookupError(sentinel))
+        body = _Body([b"x"], close_error=ValueError(sentinel))
+        client, _ = _client(b"x", body=body)
+        monkeypatch.setattr(aws_s3_source, "_new_spool", lambda: spool)
+        with pytest.raises(aws_s3_source.S3SourceReadError) as exc_info:
+            aws_s3_source._download_s3_object(client, bucket="bucket", key="key", max_object_bytes=1)
+        exc = exc_info.value
+        assert body.closed and spool.closed
+        assert exc.provider_error_type == "OSError"
+        assert exc.cleanup_error_type == "ValueError"
+        assert sentinel not in f"{exc!s} {exc!r} {exc.__cause__!r} {exc.__context__!r}"
+
+    def test_spool_rewind_failure_is_safe_and_closes_spool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        sentinel = "credential endpoint body SENTINEL"
+        spool = _FaultingSpool(seek_error=OSError(sentinel))
+        body = _Body([b"x"])
+        client, _ = _client(b"x", body=body)
+        monkeypatch.setattr(aws_s3_source, "_new_spool", lambda: spool)
+        with pytest.raises(aws_s3_source.S3SourceReadError) as exc_info:
+            aws_s3_source._download_s3_object(client, bucket="bucket", key="key", max_object_bytes=1)
+        exc = exc_info.value
+        assert body.closed and spool.closed
+        assert exc.provider_error_type == "OSError"
+        assert sentinel not in f"{exc!s} {exc!r} {exc.__cause__!r} {exc.__context__!r}"
 
     def test_provider_and_cleanup_failures_are_redacted_and_unchained(self) -> None:
         from elspeth.plugins.sources.aws_s3_source import S3SourceReadError, _download_s3_object
@@ -620,6 +729,76 @@ class TestAWSS3SourceRegistrationAndParsing:
         rows = list(source.load(ctx))
         assert bool(rows and rows[0].is_quarantined) is quarantined
 
+    def test_json_budget_rejects_two_empty_fields_before_retention(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        retained: list[tuple[str, Any]] = []
+
+        class TrackingDict(dict[str, Any]):
+            def __setitem__(self, key: str, value: Any) -> None:
+                retained.append((key, value))
+                super().__setitem__(key, value)
+
+        monkeypatch.setattr(aws_s3_source, "_new_json_object", TrackingDict, raising=False)
+        events = iter([("map_key", "a"), ("string", ""), ("map_key", "b"), ("string", ""), ("end_map", None)])
+        with pytest.raises(aws_s3_source._RecordLimitExceeded):
+            aws_s3_source._build_json_value(
+                ("start_map", None),
+                events,
+                max_record_chars=5,
+                budget=[0],
+            )
+        assert retained == []
+
+    def test_json_array_budget_rejects_scalar_before_appending_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        retained: list[Any] = []
+
+        class TrackingList(list[Any]):
+            def append(self, value: Any) -> None:
+                retained.append(value)
+                super().append(value)
+
+        monkeypatch.setattr(aws_s3_source, "_new_json_array", TrackingList)
+        events = iter([("string", "a\n"), ("string", "b"), ("end_array", None)])
+        with pytest.raises(aws_s3_source._RecordLimitExceeded):
+            aws_s3_source._build_json_value(
+                ("start_array", None),
+                events,
+                max_record_chars=len('["a\\n","b"]') - 1,
+                budget=[0],
+            )
+        assert retained == ["a\n"]
+
+    @pytest.mark.parametrize(
+        "events,exact_cost",
+        [
+            (
+                [("map_key", "a\n"), ("string", "x\t"), ("end_map", None)],
+                len(json.dumps({"a\n": "x\t"}, ensure_ascii=False, separators=(",", ":"))),
+            ),
+            ([("map_key", "a"), ("start_array", None), ("end_array", None), ("end_map", None)], len('{"a":[]}')),
+            ([("string", "a\n"), ("string", "b"), ("end_array", None)], len('["a\\n","b"]')),
+        ],
+    )
+    def test_json_budget_accounts_for_escaping_separators_and_container_edges(
+        self,
+        events: list[tuple[str, Any]],
+        exact_cost: int,
+    ) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        first = ("start_array", None) if events[0][0] == "string" else ("start_map", None)
+        for limit, passes in ((exact_cost - 1, False), (exact_cost, True), (exact_cost + 1, True)):
+            event_iterator = iter(events)
+            if passes:
+                result = aws_s3_source._build_json_value(first, event_iterator, max_record_chars=limit, budget=[0])
+                assert result is not None
+            else:
+                with pytest.raises(aws_s3_source._RecordLimitExceeded):
+                    aws_s3_source._build_json_value(first, event_iterator, max_record_chars=limit, budget=[0])
+
     @pytest.mark.parametrize("max_chars,quarantined", [(2, True), (3, False), (4, False)])
     def test_ignored_json_scalar_token_cap_exact_boundary(self, max_chars: int, quarantined: bool) -> None:
         source, _, ctx = _source_for(
@@ -728,6 +907,45 @@ class TestAWSS3SourceAuditAndLifecycle:
         assert len(ctx.calls) == 1
         assert set(ctx.calls[0]["error"]) <= {"type", "bytes_read", "max_object_bytes", "cleanup_error_type"}
         assert "SENTINEL" not in repr(ctx.calls)
+
+    def test_client_construction_failure_is_static_unchained_and_audited(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        sentinel = "credential endpoint body SENTINEL"
+        source = aws_s3_source.AWSS3Source(_config())
+        ctx = _SourceContext()
+
+        def fail_builder(_region: str | None, _endpoint: str | None) -> Any:
+            raise RuntimeError(sentinel)
+
+        monkeypatch.setattr(aws_s3_source, "build_s3_client", fail_builder)
+        with pytest.raises(aws_s3_source.S3SourceReadError) as exc_info:
+            list(source.load(ctx))
+        exc = exc_info.value
+        assert exc.provider_error_type == "RuntimeError"
+        assert exc.__cause__ is None and exc.__context__ is None
+        assert sentinel not in f"{exc!s} {exc!r} {ctx.calls!r}"
+        assert len(ctx.calls) == 1
+        assert ctx.calls[0]["status"].value == "error"
+        assert ctx.calls[0]["error"] == {
+            "type": "RuntimeError",
+            "bytes_read": 0,
+            "max_object_bytes": 256 * 1024 * 1024,
+        }
+
+    def test_client_construction_missing_extra_importerror_remains_actionable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.sources import aws_s3_source
+
+        source = aws_s3_source.AWSS3Source(_config())
+        ctx = _SourceContext()
+
+        def missing_builder(_region: str | None, _endpoint: str | None) -> Any:
+            raise ImportError('install Elspeth with the "aws" extra')
+
+        monkeypatch.setattr(aws_s3_source, "build_s3_client", missing_builder)
+        with pytest.raises(ImportError, match="aws"):
+            list(source.load(ctx))
+        assert ctx.calls == []
 
     def test_audit_write_failure_is_static_unchained_integrity_error(self) -> None:
         from elspeth.contracts.errors import AuditIntegrityError

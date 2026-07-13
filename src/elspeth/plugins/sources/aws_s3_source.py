@@ -396,8 +396,12 @@ def _download_s3_object(client: Any, *, bucket: str, key: str, max_object_bytes:
         _raise_safe(_read_error("InvalidS3Metadata", max_object_bytes=max_object_bytes))
 
     body = get_response.get("Body")
-    if body is None or not callable(getattr(body, "read", None)) or not callable(getattr(body, "close", None)):
-        _raise_safe(_read_error("InvalidS3Body", max_object_bytes=max_object_bytes))
+    body_close = getattr(body, "close", None)
+    if body is None or not callable(getattr(body, "read", None)) or not callable(body_close):
+        interface_error = _read_error("InvalidS3Body", max_object_bytes=max_object_bytes)
+        if callable(body_close):
+            interface_error.cleanup_error_type = _close_body(body)
+        _raise_safe(interface_error)
 
     get_length = _validated_length(get_response)
     validation_error: S3SourceReadError | None = None
@@ -411,7 +415,19 @@ def _download_s3_object(client: Any, *, bucket: str, key: str, max_object_bytes:
         validation_error.cleanup_error_type = _close_body(body)
         _raise_safe(validation_error)
 
-    spool = _new_spool()
+    spool: BinaryIO | None = None
+    spool_create_error_type: str | None = None
+    try:
+        spool = _new_spool()
+    except BaseException as exc:
+        spool_create_error_type = _normalize_error_type(exc)
+    if spool_create_error_type is not None:
+        create_error = _read_error(spool_create_error_type, max_object_bytes=max_object_bytes)
+        create_error.cleanup_error_type = _close_body(body)
+        _raise_safe(create_error)
+    if spool is None:
+        raise AssertionError("S3 spool creation completed without a handle or failure")
+
     digest = hashlib.sha256()
     total = 0
     primary_error: S3SourceReadError | None = None
@@ -434,7 +450,18 @@ def _download_s3_object(client: Any, *, bucket: str, key: str, max_object_bytes:
         if observed > max_object_bytes:
             primary_error = S3ObjectSizeLimitError(observed_bytes=observed, limit_bytes=max_object_bytes)
             break
-        spool.write(chunk)
+        write_result: Any = None
+        write_error_type: str | None = None
+        try:
+            write_result = spool.write(chunk)
+        except BaseException as exc:
+            write_error_type = _normalize_error_type(exc)
+        if write_error_type is not None:
+            primary_error = _read_error(write_error_type, max_object_bytes=max_object_bytes, bytes_read=total)
+            break
+        if isinstance(write_result, bool) or not isinstance(write_result, int) or write_result != len(chunk):
+            primary_error = _read_error("InvalidS3Spool", max_object_bytes=max_object_bytes, bytes_read=total)
+            break
         digest.update(chunk)
         total = observed
 
@@ -446,13 +473,21 @@ def _download_s3_object(client: Any, *, bucket: str, key: str, max_object_bytes:
     elif primary_error is not None:
         primary_error.cleanup_error_type = cleanup_error_type
 
+    if primary_error is None:
+        rewind_error_type: str | None = None
+        try:
+            spool.seek(0)
+        except BaseException as exc:
+            rewind_error_type = _normalize_error_type(exc)
+        if rewind_error_type is not None:
+            primary_error = _read_error(rewind_error_type, max_object_bytes=max_object_bytes, bytes_read=total)
+
     if primary_error is not None:
         spool_cleanup_type = _close_spool(spool)
         if primary_error.cleanup_error_type is None:
             primary_error.cleanup_error_type = spool_cleanup_type
         _raise_safe(primary_error)
 
-    spool.seek(0)
     return _DownloadedObject(spool, size_bytes=total, content_hash=digest.hexdigest())
 
 
@@ -587,16 +622,19 @@ def _normalize_json_scalar(value: Any) -> Any:
     return value
 
 
-def _scalar_cost(value: Any) -> int:
-    if isinstance(value, str):
-        return len(value)
-    if value is None:
-        return 4
-    if value is True:
-        return 4
-    if value is False:
-        return 5
-    return len(str(value))
+def _rendered_json_cost(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
+    except (TypeError, ValueError) as exc:
+        raise _JSONBoundaryError("JSON value cannot be represented safely") from exc
+
+
+def _new_json_object() -> dict[str, Any]:
+    return {}
+
+
+def _new_json_array() -> list[Any]:
+    return []
 
 
 def _build_json_value(
@@ -610,21 +648,26 @@ def _build_json_value(
     event, value = first_event
     if event in {"string", "number", "boolean", "null"}:
         normalized = _normalize_json_scalar(value)
-        _budget_add(budget, _scalar_cost(normalized), max_record_chars)
+        _budget_add(budget, _rendered_json_cost(normalized), max_record_chars)
         return normalized
 
     if event == "start_map":
         if depth >= _MAX_JSON_DEPTH:
             raise _JSONBoundaryError("JSON nesting exceeds configured depth")
-        _budget_add(budget, 1, max_record_chars)
-        result: dict[str, Any] = {}
+        # Reserve both delimiters before retaining any member. Each member then
+        # reserves its optional comma, rendered key (including quotes/escapes),
+        # and colon before its value is constructed or stored.
+        _budget_add(budget, 2, max_record_chars)
+        result = _new_json_object()
+        first_member = True
         while True:
             key_event, key = _next_json_event(events)
             if key_event == "end_map":
                 return result
             if key_event != "map_key" or not isinstance(key, str):
                 raise _JSONBoundaryError("JSON object structure is invalid")
-            _budget_add(budget, len(key), max_record_chars)
+            member_syntax_cost = (0 if first_member else 1) + _rendered_json_cost(key) + 1
+            _budget_add(budget, member_syntax_cost, max_record_chars)
             value_event = _next_json_event(events)
             built = _build_json_value(
                 value_event,
@@ -634,25 +677,31 @@ def _build_json_value(
                 depth=depth + 1,
             )
             result[key] = built
+            first_member = False
 
     if event == "start_array":
         if depth >= _MAX_JSON_DEPTH:
             raise _JSONBoundaryError("JSON nesting exceeds configured depth")
-        _budget_add(budget, 1, max_record_chars)
-        result_list: list[Any] = []
+        # Reserve both delimiters before retaining any item. Commas are charged
+        # before constructing the following item.
+        _budget_add(budget, 2, max_record_chars)
+        result_list = _new_json_array()
+        first_item = True
         while True:
             item_event = _next_json_event(events)
             if item_event[0] == "end_array":
                 return result_list
-            result_list.append(
-                _build_json_value(
-                    item_event,
-                    events,
-                    max_record_chars=max_record_chars,
-                    budget=budget,
-                    depth=depth + 1,
-                )
+            if not first_item:
+                _budget_add(budget, 1, max_record_chars)
+            built_item = _build_json_value(
+                item_event,
+                events,
+                max_record_chars=max_record_chars,
+                budget=budget,
+                depth=depth + 1,
             )
+            result_list.append(built_item)
+            first_item = False
 
     raise _JSONBoundaryError("JSON value structure is invalid")
 
@@ -778,7 +827,7 @@ class AWSS3Source(BaseSource):
     name = "aws_s3"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:42139703aede4601"
+    source_file_hash: str | None = "sha256:bf19d531af899115"
     config_model = AWSS3SourceConfig
 
     @classmethod
@@ -837,7 +886,19 @@ class AWSS3Source(BaseSource):
 
     def _get_s3_client(self) -> Any:
         if self._s3_client is None:
-            self._s3_client = build_s3_client(self._region_name, self._endpoint_url)
+            client: Any = None
+            client_error_type: str | None = None
+            try:
+                client = build_s3_client(self._region_name, self._endpoint_url)
+            except ImportError:
+                raise
+            except BaseException as exc:
+                client_error_type = _normalize_error_type(exc)
+            if client_error_type is not None:
+                _raise_safe(_read_error(client_error_type, max_object_bytes=self._max_object_bytes))
+            if client is None:
+                raise AssertionError("S3 client construction completed without a client or failure")
+            self._s3_client = client
         return self._s3_client
 
     def _is_closed(self) -> bool:

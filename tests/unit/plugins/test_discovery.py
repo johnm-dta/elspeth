@@ -802,9 +802,9 @@ class TestDualSysModulesRegistration:
         assert passthrough_cls.__module__ == original_module.__name__
 
     def test_canonical_alias_registered_after_fresh_load(self, tmp_path: Path) -> None:
-        """After loading a file under the elspeth package tree, the canonical
-        name is registered in sys.modules as an alias.
-        """
+        """Fresh discovery leaves the canonical module normally importable."""
+        import importlib
+
         from elspeth.plugins.infrastructure.discovery import _discover_in_file
 
         # Build a valid elspeth package tree in tmp_path
@@ -841,10 +841,14 @@ class TestDualSysModulesRegistration:
 
         canonical = "elspeth.plugins.transforms.test_fresh_load_plugin"
         synthetic = f"elspeth.plugins._discovered.transforms.{plugin_file.stem}"
+        parent = importlib.import_module("elspeth.plugins.transforms")
+        child_name = plugin_file.stem
 
         # Ensure neither name exists before discovery
         sys.modules.pop(canonical, None)
         sys.modules.pop(synthetic, None)
+        if hasattr(parent, child_name):
+            delattr(parent, child_name)
 
         try:
             _discover_in_file(plugin_file, BaseTransform)
@@ -855,7 +859,17 @@ class TestDualSysModulesRegistration:
             assert canonical in sys.modules, f"Canonical alias {canonical!r} not registered in sys.modules"
             # Both must point to the SAME module object
             assert sys.modules[synthetic] is sys.modules[canonical], "Synthetic and canonical sys.modules entries must be the same object"
+            # Standard import machinery also binds a child module on its parent
+            # package.  Discovery must preserve that contract even though it
+            # loads the file through a synthetic name first.
+            assert getattr(parent, child_name) is sys.modules[canonical]
+            namespace: dict[str, object] = {}
+            exec(f"import {canonical} as imported", namespace)
+            assert namespace["imported"] is sys.modules[canonical]
         finally:
+            canonical_module = sys.modules.get(canonical)
+            if canonical_module is not None and getattr(parent, child_name, None) is canonical_module:
+                delattr(parent, child_name)
             sys.modules.pop(canonical, None)
             sys.modules.pop(synthetic, None)
 

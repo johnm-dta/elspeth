@@ -2314,7 +2314,9 @@ class TestValidatePipelineSuccess:
 
         # Verify real engine functions were called
         mock_load.assert_called_once()
-        mock_instantiate.assert_called_once_with(mock_settings, preflight_mode=True)
+        mock_instantiate.assert_called_once()
+        assert mock_instantiate.call_args.args == (mock_settings,)
+        assert isinstance(mock_instantiate.call_args.kwargs["plugin_snapshot"], PluginAvailabilitySnapshot)
         mock_build_graph.assert_called_once()
         mock_graph.validate.assert_called_once()
         mock_assemble.assert_called_once()
@@ -3892,7 +3894,7 @@ sinks:
 
         passed_names = {check.name for check in result.checks if check.passed}
         assert set(RUNTIME_GRAPH_VALIDATION_CHECKS).issubset(passed_names)
-        assert mock_instantiate.call_args.kwargs == {"preflight_mode": True}
+        assert isinstance(mock_instantiate.call_args.kwargs["plugin_snapshot"], PluginAvailabilitySnapshot)
         fake_graph.validate.assert_called_once_with()
         fake_graph.validate_edge_compatibility.assert_called_once_with()
 

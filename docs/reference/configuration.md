@@ -8,6 +8,7 @@ Complete reference for ELSPETH pipeline configuration.
 
 - [Configuration File Format](#configuration-file-format)
 - [Top-Level Settings](#top-level-settings)
+- [Web Plugin Policy](#web-plugin-policy)
 - [Secrets Settings](#secrets-settings)
 - [Source Settings](#source-settings)
 - [Queue Settings](#queue-settings)
@@ -85,6 +86,30 @@ Nested environment variables use double underscore: `ELSPETH_LANDSCAPE__URL`.
 | `live` | Execute normally, make real external calls |
 | `replay` | Use recorded responses from a previous run |
 | `verify` | Compare new results against a previous run |
+
+---
+
+## Web Plugin Policy
+
+The web service applies an operator-owned plugin policy in addition to the
+pipeline schema above. `WebSettings.plugin_allowlist` authorizes optional web
+plugins; the built-in web plugins remain available without appearing in that
+allowlist. Kind-qualified IDs such as `source:csv`, `transform:llm`, and
+`sink:database` prevent same-name plugins from being confused across roles.
+
+Every validation or execution request receives a principal-scoped availability
+snapshot. Execution freezes one fresh snapshot before creating the run, and
+the same snapshot controls initial plugin construction and delayed export-sink
+construction. A saved pipeline whose plugin has since been disabled is rejected
+before a run or plugin instance is created.
+
+Operator-profiled web plugins expose only an opaque `profile` alias plus safe
+pipeline options. Provider, model, endpoint, and credential bindings are
+lowered in memory for execution; Landscape run/node configuration and exported
+audit data retain the authored alias form. CLI and batch configuration remain
+explicit and unrestricted by web policy: `instantiate_plugins_from_config()`
+and `make_sink_factory()` consume normal pipeline settings without `WebSettings`
+or a web availability snapshot.
 
 ---
 

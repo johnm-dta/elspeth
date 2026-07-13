@@ -13,6 +13,7 @@ from elspeth.contracts.plugin_capabilities import ControlMode
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, SourceSpec
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.plugin_policy.coverage import control_coverage_findings
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
@@ -23,6 +24,8 @@ PolicyValidationStage = Literal[
     "required_control_availability",
     "required_control_coverage",
 ]
+
+_PROFILE_LOWERING_METADATA_OPTION_KEYS = AUTHORING_METADATA_OPTION_KEYS | {"resolved_prompt_template_hash"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +208,8 @@ def _lower_profiled_components(
         if plugin_id is None or plugin_id not in aliases_by_plugin:
             continue
         aliases = aliases_by_plugin[plugin_id]
-        authored_options = dict(component.options)
+        authored_options = {name: value for name, value in component.options.items() if name not in _PROFILE_LOWERING_METADATA_OPTION_KEYS}
+        authoring_metadata = {name: value for name, value in component.options.items() if name in _PROFILE_LOWERING_METADATA_OPTION_KEYS}
         alias = authored_options.pop("profile", None)
         if not isinstance(alias, str) or alias not in aliases:
             findings.append(
@@ -249,7 +253,10 @@ def _lower_profiled_components(
                 )
             )
             continue
-        lowered_options[(component.component_type, component.component_id)] = dict(lowered.executable_options)
+        lowered_options[(component.component_type, component.component_id)] = {
+            **dict(lowered.executable_options),
+            **authoring_metadata,
+        }
 
     if findings:
         return state, tuple(findings)

@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import UUID
@@ -33,6 +33,7 @@ from elspeth.contracts.audit import SecretResolutionInput
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
@@ -49,7 +50,7 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
-from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
+from elspeth.engine.orchestrator.types import PipelineConfig
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import (
@@ -80,9 +81,14 @@ from elspeth.web.execution.fanout_guard import (
     annotate_pipeline_yaml_with_fanout_guard,
     evaluate_execution_fanout_guard,
 )
-from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
+from elspeth.web.execution.preflight import (
+    audit_safe_resolved_config,
+    build_validated_runtime_graph,
+    make_policy_bound_sink_factory,
+    resolve_runtime_yaml_paths,
+)
 from elspeth.web.execution.progress import BroadcastResult, ProgressBroadcaster
-from elspeth.web.execution.protocol import ExecutionService, StateAccessError, YamlGenerator
+from elspeth.web.execution.protocol import ExecutionService, FrozenRunSettings, StateAccessError, YamlGenerator
 from elspeth.web.execution.schemas import (
     CancelledData,
     CompletedData,
@@ -101,6 +107,7 @@ from elspeth.web.interpretation_state import InterpretationReviewPending, materi
 from elspeth.web.landscape_access import open_landscape_db
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
@@ -676,7 +683,9 @@ class ExecutionServiceImpl:
         if self._plugin_snapshot_factory is not None and user_id is None:
             raise RuntimeError("Authenticated user_id is required for web plugin policy execution.")
         if self._plugin_snapshot_factory is None:
-            plugin_snapshot = None
+            from elspeth.web.dependencies import create_catalog_service
+
+            plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
         else:
             assert user_id is not None
             plugin_snapshot = self._plugin_snapshot_factory(user_id)
@@ -697,13 +706,23 @@ class ExecutionServiceImpl:
                 readiness=preflight_result.readiness,
             )
 
+        policy_result = validate_plugin_policy(
+            composition_state,
+            snapshot=plugin_snapshot,
+            profile_registry=self._operator_profile_registry,
+        )
+        if policy_result.findings:
+            raise RuntimeError("Plugin policy validation diverged between execution preflight and runtime preparation.")
+
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
+        executable_pipeline_yaml = self._yaml_generator.generate_yaml(policy_result.executable_state)
 
         # Resolve relative source/sink paths to absolute in the YAML so
         # plugins see the same paths the allowlist approved.  Without this,
         # plugins call PathConfig.resolved_path() with no base_dir, which
         # resolves relative paths against CWD — not data_dir.
         pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(self._settings.data_dir))
+        executable_pipeline_yaml = resolve_runtime_yaml_paths(executable_pipeline_yaml, str(self._settings.data_dir))
 
         # Pre-validate blob_ref UUID before creating the run record.
         # UUID() can raise ValueError on malformed strings; if that happens
@@ -772,6 +791,17 @@ class ExecutionServiceImpl:
             if fanout_ack_token != fanout_guard.ack_token:
                 raise ExecutionFanoutGuardRequired(fanout_guard)
             pipeline_yaml = annotate_pipeline_yaml_with_fanout_guard(pipeline_yaml, fanout_guard)
+            executable_pipeline_yaml = annotate_pipeline_yaml_with_fanout_guard(executable_pipeline_yaml, fanout_guard)
+
+        audit_safe_config = load_bounded_pipeline_yaml(pipeline_yaml)
+        executable_config = load_bounded_pipeline_yaml(executable_pipeline_yaml)
+        if type(audit_safe_config) is not dict or type(executable_config) is not dict:
+            raise TypeError("YamlGenerator.generate_yaml() must produce a mapping for runtime preparation")
+        frozen_run_settings = FrozenRunSettings(
+            plugin_snapshot=plugin_snapshot,
+            executable_config=cast(dict[str, Any], executable_config),
+            audit_safe_config=cast(dict[str, Any], audit_safe_config),
+        )
 
         # B9 fix: create_run() generates its own UUID internally and returns
         # a RunRecord. Read the run_id back from the returned record so our
@@ -807,6 +837,7 @@ class ExecutionServiceImpl:
                 str(run_id),
                 pipeline_yaml,
                 shutdown_event,
+                frozen_run_settings,
                 user_id,
                 auth_provider_type,
             )
@@ -1047,6 +1078,7 @@ class ExecutionServiceImpl:
         run_id: str,
         pipeline_yaml: str,
         shutdown_event: threading.Event,
+        frozen_run_settings: FrozenRunSettings | None = None,
         user_id: str | None = None,
         auth_provider_type: str | None = None,
     ) -> _RunPipelineOutcome:
@@ -1132,17 +1164,35 @@ class ExecutionServiceImpl:
             # Resolve secret refs before writing YAML to temp file.
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
-            resolved_dict: dict[str, Any] | None = None
+            if frozen_run_settings is None:
+                from elspeth.web.dependencies import create_catalog_service
+
+                plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+                executable_config: dict[str, Any] | None = None
+                audit_safe_config: dict[str, Any] | None = None
+            else:
+                plugin_snapshot = frozen_run_settings.plugin_snapshot
+                executable_config = cast(dict[str, Any], deep_thaw(frozen_run_settings.executable_config))
+                audit_safe_config = cast(dict[str, Any], deep_thaw(frozen_run_settings.audit_safe_config))
+
+            resolved_dict: dict[str, Any] | None = executable_config
             secret_resolution_inputs: list[SecretResolutionInput] = []
-            inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
-            needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
+            inline_blob_candidate = (
+                bool(_discover_blob_content_refs(executable_config))
+                if executable_config is not None
+                else "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
+            )
+            needs_config_tree = (
+                executable_config is not None or (self._secret_service is not None and user_id is not None) or inline_blob_candidate
+            )
             if needs_config_tree:
-                config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
-                if type(config_dict) is not dict:
-                    raise TypeError(
-                        f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
-                    )
-                resolved_dict = cast(dict[str, Any], config_dict)
+                if resolved_dict is None:
+                    config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
+                    if type(config_dict) is not dict:
+                        raise TypeError(
+                            f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
+                        )
+                    resolved_dict = cast(dict[str, Any], config_dict)
 
                 if self._secret_service is not None and user_id is not None:
                     from elspeth.core.secrets import resolve_secret_refs
@@ -1295,7 +1345,15 @@ class ExecutionServiceImpl:
             from elspeth.web.operator_telemetry import apply_operator_pipeline_telemetry
 
             settings = apply_operator_pipeline_telemetry(settings, self._settings)
-            runtime_graph = build_validated_runtime_graph(settings)
+            if audit_safe_config is None:
+                parsed_audit_config = load_bounded_pipeline_yaml(pipeline_yaml)
+                if type(parsed_audit_config) is dict:
+                    audit_safe_config = cast(dict[str, Any], parsed_audit_config)
+            runtime_graph = build_validated_runtime_graph(
+                settings,
+                plugin_snapshot=plugin_snapshot,
+                audit_safe_settings=audit_safe_config,
+            )
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph
 
@@ -1314,6 +1372,15 @@ class ExecutionServiceImpl:
                 settings=settings,
                 graph=graph,
             )
+            if isinstance(pipeline_config, PipelineConfig) and audit_safe_config is not None:
+                pipeline_config = replace(
+                    pipeline_config,
+                    config=audit_safe_resolved_config(
+                        settings,
+                        audit_safe_settings=audit_safe_config,
+                        plugin_snapshot=plugin_snapshot,
+                    ),
+                )
 
             # Set up EventBus to bridge ProgressEvent -> RunEvent -> broadcaster.
             # _to_run_event is a pure mapping (system code) — let it crash.
@@ -1384,7 +1451,10 @@ class ExecutionServiceImpl:
                 payload_store=payload_store,
                 secret_resolutions=secret_resolution_inputs or None,
                 shutdown_event=shutdown_event,  # B2: NEVER omit this
-                sink_factory=make_sink_factory(settings),
+                sink_factory=make_policy_bound_sink_factory(
+                    settings,
+                    plugin_snapshot=plugin_snapshot,
+                ),
                 run_id=run_id,
                 initiated_by_user_id=user_id,
                 auth_provider_type=auth_provider_type,

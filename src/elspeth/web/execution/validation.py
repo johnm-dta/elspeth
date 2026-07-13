@@ -819,7 +819,7 @@ def validate_pipeline(
     2. Generate YAML from CompositionState
     3. Load settings via load_settings_from_yaml_string() — resolve secret
        refs first if present, matching the execution service path exactly
-    4. instantiate_runtime_plugins(settings, preflight_mode=True)
+    4. instantiate_runtime_plugins(settings, plugin_snapshot=plugin_snapshot)
     5. build_runtime_graph(settings, bundle)
     6. graph.validate() + graph.validate_edge_compatibility()
 
@@ -1913,7 +1913,7 @@ def validate_pipeline(
     #   but rejected by the walker; PLUGINS check passed, VALUE_SOURCE
     #   compliance check failed, downstream checks skipped via cascade.
     try:
-        bundle = instantiate_runtime_plugins(elspeth_settings, preflight_mode=True)
+        bundle = instantiate_runtime_plugins(elspeth_settings, plugin_snapshot=plugin_snapshot)
         checks.append(
             ValidationCheck(
                 name=_CHECK_PLUGINS,

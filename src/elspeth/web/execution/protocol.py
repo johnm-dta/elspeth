@@ -3,14 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 from uuid import UUID
 
+from elspeth.contracts.freeze import deep_freeze
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.protocol import RunRecord
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenRunSettings:
+    """One run's immutable policy decision and split configuration forms.
+
+    Both mappings contain references rather than resolved secret values. The
+    executable form may contain operator-private profile bindings; the authored
+    form is the only form permitted to reach audit and export surfaces.
+    """
+
+    plugin_snapshot: PluginAvailabilitySnapshot
+    executable_config: Mapping[str, Any]
+    audit_safe_config: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "executable_config", cast(Mapping[str, Any], deep_freeze(dict(self.executable_config))))
+        object.__setattr__(self, "audit_safe_config", cast(Mapping[str, Any], deep_freeze(dict(self.audit_safe_config))))
 
 
 class ValidationSettings(Protocol):

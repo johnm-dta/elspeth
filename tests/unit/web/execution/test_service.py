@@ -46,6 +46,7 @@ from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobRecord, BlobServiceProtocol
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.errors import PipelineValidationError
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
@@ -62,6 +63,12 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.validation import validate_pipeline as _real_validate_pipeline
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
@@ -269,6 +276,10 @@ def _mock_pipeline_settings() -> SimpleNamespace:
     objects for the runtime conversion boundary.
     """
     return SimpleNamespace(
+        sources={},
+        transforms=[],
+        aggregations=[],
+        sinks={},
         gates=[],
         coalesce=[],
         queues={},
@@ -520,6 +531,143 @@ class TestExecutionFlow:
         }
 
     @pytest.mark.asyncio
+    async def test_execute_freezes_snapshot_and_distinct_configs_before_submission(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: _WebSettingsStub,
+        tmp_path: Path,
+    ) -> None:
+        session_id = uuid4()
+        (tmp_path / "blobs").mkdir()
+        (tmp_path / "outputs").mkdir()
+        source_path = tmp_path / "blobs" / "input.txt"
+        output_path = tmp_path / "outputs" / "output.jsonl"
+        source_path.write_text("Ada\n", encoding="utf-8")
+        mock_settings.data_dir = tmp_path
+        state_record = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=output_path,
+            nodes=[],
+        )
+        mock_session_service.get_current_state.return_value = state_record
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        service._plugin_snapshot_factory = lambda _user_id: snapshot
+        completed: Future[None] = Future()
+        completed.set_result(None)
+
+        with patch.object(service._executor, "submit", return_value=completed) as submit:
+            await service.execute(session_id=session_id, user_id="alice")
+
+        submitted_args = submit.call_args.args
+        assert submitted_args[4].plugin_snapshot is snapshot
+        assert submitted_args[4].executable_config is not submitted_args[4].audit_safe_config
+
+    @pytest.mark.asyncio
+    async def test_execute_lowers_profile_only_into_frozen_executable_config(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: _WebSettingsStub,
+        tmp_path: Path,
+    ) -> None:
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from elspeth.web.composer import yaml_generator
+        from elspeth.web.config import WebSettings
+        from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+        from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+
+        private_model = "bedrock/anthropic.claude-3-haiku-20240307-v1:0"
+        private_region = "ap-southeast-2"
+        web_settings = WebSettings(
+            data_dir=tmp_path,
+            composer_max_composition_turns=4,
+            composer_max_discovery_turns=4,
+            composer_timeout_seconds=60,
+            composer_rate_limit_per_minute=20,
+            shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+            llm_profiles={
+                "tutorial": {
+                    "provider": "bedrock",
+                    "model": private_model,
+                    "region_name": private_region,
+                }
+            },
+        )
+        runtime_policy = RuntimeWebPluginConfig.from_settings(web_settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime_policy)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime_policy)
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash=policy.policy_hash,
+            principal_scope="test:alice",
+            available=unrestricted.available,
+            unavailable=(),
+            selected=unrestricted.selected,
+            usable_profile_aliases=((PluginId("transform", "llm"), ("tutorial",)),),
+            selected_profile_aliases=((PluginId("transform", "llm"), "tutorial"),),
+            binding_generation_fingerprint="runtime-policy-generation",
+        )
+        session_id = uuid4()
+        (tmp_path / "blobs").mkdir()
+        (tmp_path / "outputs").mkdir()
+        source_path = tmp_path / "blobs" / "input.txt"
+        source_path.write_text("Ada\n", encoding="utf-8")
+        mock_settings.data_dir = tmp_path
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=tmp_path / "outputs" / "output.jsonl",
+            nodes=[
+                {
+                    "id": "summarise",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "source_rows",
+                    "on_success": "out",
+                    "on_error": "discard",
+                    "options": {
+                        "profile": "tutorial",
+                        "prompt_template": "Summarise {{ row }}",
+                        "schema": {"mode": "observed", "fields": None},
+                        "required_input_fields": [],
+                        INTERPRETATION_REQUIREMENTS_KEY: [
+                            {
+                                "id": "prompt_template_review:summarise",
+                                "kind": "llm_prompt_template",
+                                "user_term": "llm_prompt_template:summarise",
+                                "status": "resolved",
+                                "draft": "Summarise {{ row }}",
+                                "event_id": "prompt-template-accepted:summarise",
+                                "accepted_value": "Summarise {{ row }}",
+                                "accepted_artifact_hash": None,
+                                "resolved_prompt_template_hash": stable_hash("Summarise {{ row }}"),
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        service._yaml_generator = yaml_generator
+        service._plugin_snapshot_factory = lambda _user_id: snapshot
+        service._operator_profile_registry = profiles
+        completed: Future[None] = Future()
+        completed.set_result(None)
+
+        with patch.object(service._executor, "submit", return_value=completed) as submit:
+            await service.execute(session_id=session_id, user_id="alice")
+
+        frozen = submit.call_args.args[4]
+        executable = json.dumps(frozen.executable_config, default=dict)
+        audit_safe = json.dumps(frozen.audit_safe_config, default=dict)
+        assert private_model in executable
+        assert private_region in executable
+        assert "tutorial" in audit_safe
+        assert private_model not in audit_safe
+        assert private_region not in audit_safe
+
+    @pytest.mark.asyncio
     async def test_execute_rejects_invalid_pipeline_before_run_creation(
         self, service: ExecutionServiceImpl, mock_session_service: MagicMock
     ) -> None:
@@ -566,6 +714,52 @@ class TestExecutionFlow:
         # Carries the structured errors for the route to surface as a 422.
         assert exc_info.value.errors
         assert exc_info.value.errors[0].component_id == "rate"
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_saved_now_disabled_plugin_before_run_or_constructor(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: _WebSettingsStub,
+        tmp_path: Path,
+    ) -> None:
+        session_id = uuid4()
+        (tmp_path / "blobs").mkdir()
+        (tmp_path / "outputs").mkdir()
+        source_path = tmp_path / "blobs" / "input.txt"
+        source_path.write_text("Ada\n", encoding="utf-8")
+        mock_settings.data_dir = tmp_path
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=tmp_path / "outputs" / "output.jsonl",
+            nodes=[],
+        )
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        disabled = PluginId("sink", "json")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="runtime-policy",
+            principal_scope="test:alice",
+            available=unrestricted.available - {disabled},
+            unavailable=(PluginAvailability(disabled, PluginUnavailableReason.NOT_AUTHORIZED),),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="runtime-policy-generation",
+        )
+        service._plugin_snapshot_factory = lambda _user_id: snapshot
+
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", side_effect=_real_validate_pipeline),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as instantiate,
+            patch.object(service._executor, "submit") as submit,
+            pytest.raises(PipelineValidationError),
+        ):
+            await service.execute(session_id=session_id, user_id="alice")
+
+        mock_session_service.create_run.assert_not_awaited()
+        instantiate.assert_not_called()
+        submit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_rejects_aws_s3_endpoint_url_before_run_or_provider_instantiation(

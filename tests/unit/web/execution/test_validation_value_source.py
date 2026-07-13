@@ -302,7 +302,7 @@ class TestWalkerInValidatePipeline:
         state = _make_state()
         settings = _make_settings()
 
-        def raise_value_source_error(_settings: object, *, preflight_mode: bool = False) -> None:
+        def raise_value_source_error(_settings: object, *, plugin_snapshot: PluginAvailabilitySnapshot) -> None:
             raise injected_error
 
         with (
@@ -439,7 +439,11 @@ def _load_settings_from_yaml_string(_yaml_content: str, *, expand_env_vars: bool
 
 
 def _runtime_plugins_returning(bundle: _RuntimePluginBundleStub):
-    def instantiate_runtime_plugins(_settings: object, *, preflight_mode: bool = False) -> _RuntimePluginBundleStub:
+    def instantiate_runtime_plugins(
+        _settings: object,
+        *,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+    ) -> _RuntimePluginBundleStub:
         return bundle
 
     return instantiate_runtime_plugins

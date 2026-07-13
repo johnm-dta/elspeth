@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
 
+from elspeth.contracts import SinkProtocol
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.trust_boundary import trust_boundary
-from elspeth.core.config import load_bounded_pipeline_yaml
+from elspeth.core.config import ElspethSettings, load_bounded_pipeline_yaml, resolve_config
 from elspeth.core.dag.graph import ExecutionGraph
-from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
+from elspeth.plugins.infrastructure.runtime_factory import (
+    PluginBundle,
+    instantiate_plugins_from_config,
+    make_sink_factory,
+)
 from elspeth.web.execution import schemas as execution_schemas
 from elspeth.web.execution.protocol import ValidationSettings
 from elspeth.web.paths import (
@@ -22,6 +30,7 @@ from elspeth.web.paths import (
     SOURCE_LOCAL_PATH_OPTION_KEYS,
     resolve_data_path,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 RUNTIME_CHECK_PLUGIN_INSTANTIATION = execution_schemas.RUNTIME_CHECK_PLUGIN_INSTANTIATION
 RUNTIME_CHECK_GRAPH_STRUCTURE = execution_schemas.RUNTIME_CHECK_GRAPH_STRUCTURE
@@ -187,12 +196,198 @@ def runtime_preflight_settings_hash(settings: ValidationSettings) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def instantiate_runtime_plugins(settings: Any, *, preflight_mode: bool = False) -> PluginBundle:
-    """Instantiate configured plugins through the production helper."""
-    return instantiate_plugins_from_config(settings, preflight_mode=preflight_mode)
+def _configured_plugin_ids(settings: ElspethSettings) -> tuple[PluginId, ...]:
+    return (
+        *(PluginId("source", source.plugin) for source in settings.sources.values()),
+        *(PluginId("transform", transform.plugin) for transform in settings.transforms),
+        *(PluginId("transform", aggregation.plugin) for aggregation in settings.aggregations),
+        *(PluginId("sink", sink.plugin) for sink in settings.sinks.values()),
+    )
 
 
-def build_runtime_graph(settings: Any, bundle: PluginBundle) -> ExecutionGraph:
+def require_settings_plugins_available(
+    settings: ElspethSettings,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+) -> None:
+    """Fail before construction when settings exceed one frozen approval."""
+    unavailable = tuple(plugin_id for plugin_id in _configured_plugin_ids(settings) if plugin_id not in plugin_snapshot.available)
+    if unavailable:
+        raise ValueError("Configured plugin is not available in the frozen plugin snapshot.")
+
+
+def require_settings_sink_available(
+    settings: ElspethSettings,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    sink_name: str,
+) -> None:
+    """Check one delayed sink against the same snapshot that approved the run."""
+    if sink_name not in settings.sinks:
+        raise ValueError(f"Export sink '{sink_name}' not found in sink configuration")
+    plugin_id = PluginId("sink", settings.sinks[sink_name].plugin)
+    if plugin_id not in plugin_snapshot.available:
+        raise ValueError("Configured sink is not available in the frozen plugin snapshot.")
+
+
+def instantiate_runtime_plugins(
+    settings: ElspethSettings,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+) -> PluginBundle:
+    """Instantiate web runtime plugins only after frozen-snapshot approval."""
+    require_settings_plugins_available(settings, plugin_snapshot)
+    return instantiate_plugins_from_config(settings, preflight_mode=True)
+
+
+def make_policy_bound_sink_factory(
+    settings: ElspethSettings,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+) -> Callable[[str], SinkProtocol]:
+    """Bind delayed sink construction to the run's frozen approval."""
+    factory = make_sink_factory(settings)
+
+    def policy_bound_factory(sink_name: str) -> SinkProtocol:
+        require_settings_sink_available(settings, plugin_snapshot, sink_name)
+        return factory(sink_name)
+
+    return policy_bound_factory
+
+
+def _profiled_plugin_ids(plugin_snapshot: PluginAvailabilitySnapshot) -> frozenset[PluginId]:
+    return frozenset(plugin_id for plugin_id, _aliases in plugin_snapshot.usable_profile_aliases)
+
+
+def _authored_sources(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    sources = config.get("sources")
+    if isinstance(sources, Mapping):
+        return sources
+    source = config.get("source")
+    if isinstance(source, Mapping):
+        return {"source": source}
+    return {}
+
+
+def _authored_named_components(config: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]]:
+    raw = config.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return {}
+    return {
+        str(component["name"]): component for component in raw if isinstance(component, Mapping) and isinstance(component.get("name"), str)
+    }
+
+
+def _authored_options(component: object) -> dict[str, Any] | None:
+    if not isinstance(component, Mapping):
+        return None
+    options = component.get("options")
+    if not isinstance(options, Mapping):
+        return None
+    return cast(dict[str, Any], deep_thaw(options))
+
+
+@contextmanager
+def _audit_safe_plugin_configs(
+    bundle: PluginBundle,
+    *,
+    audit_safe_settings: Mapping[str, Any],
+    plugin_snapshot: PluginAvailabilitySnapshot,
+) -> Iterator[None]:
+    """Expose authored configs while the graph snapshots node audit data."""
+    profiled = _profiled_plugin_ids(plugin_snapshot)
+    if not profiled:
+        yield
+        return
+
+    authored_sources = _authored_sources(audit_safe_settings)
+    authored_transforms = _authored_named_components(audit_safe_settings, "transforms")
+    authored_aggregations = _authored_named_components(audit_safe_settings, "aggregations")
+    authored_sinks = audit_safe_settings.get("sinks")
+    sink_map = authored_sinks if isinstance(authored_sinks, Mapping) else {}
+    restored: list[tuple[Any, Any]] = []
+
+    def substitute(plugin: Any, component: object, plugin_id: PluginId) -> None:
+        if plugin_id not in profiled:
+            return
+        options = _authored_options(component)
+        if options is None:
+            raise RuntimeError("Audit-safe authored settings are missing profiled plugin options.")
+        restored.append((plugin, plugin.config))
+        plugin.config = options
+
+    try:
+        for source_name, source in bundle.sources.items():
+            substitute(source, authored_sources.get(source_name), PluginId("source", source.name))
+        for wired in bundle.transforms:
+            substitute(
+                wired.plugin,
+                authored_transforms.get(wired.settings.name),
+                PluginId("transform", wired.settings.plugin),
+            )
+        for aggregation_name, (plugin, aggregation_settings) in bundle.aggregations.items():
+            substitute(
+                plugin,
+                authored_aggregations.get(aggregation_name),
+                PluginId("transform", aggregation_settings.plugin),
+            )
+        for sink_name, sink in bundle.sinks.items():
+            substitute(sink, sink_map.get(sink_name), PluginId("sink", sink.name))
+        yield
+    finally:
+        for plugin, executable_config in restored:
+            plugin.config = executable_config
+
+
+def audit_safe_resolved_config(
+    settings: ElspethSettings,
+    *,
+    audit_safe_settings: Mapping[str, Any],
+    plugin_snapshot: PluginAvailabilitySnapshot,
+) -> dict[str, Any]:
+    """Resolve defaults/secrets, then restore authored options for profiled plugins."""
+    resolved = resolve_config(settings)
+    profiled = _profiled_plugin_ids(plugin_snapshot)
+    if not profiled:
+        return resolved
+
+    authored_sources = _authored_sources(audit_safe_settings)
+    authored_transforms = _authored_named_components(audit_safe_settings, "transforms")
+    authored_aggregations = _authored_named_components(audit_safe_settings, "aggregations")
+    authored_sinks = audit_safe_settings.get("sinks")
+    sink_map = authored_sinks if isinstance(authored_sinks, Mapping) else {}
+
+    def restore_options(component: dict[str, Any], authored: object, kind: str) -> None:
+        plugin_name = component.get("plugin")
+        if not isinstance(plugin_name, str) or PluginId(cast(Any, kind), plugin_name) not in profiled:
+            return
+        options = _authored_options(authored)
+        if options is None:
+            raise RuntimeError("Audit-safe authored settings are missing profiled plugin options.")
+        component["options"] = options
+
+    resolved_sources = resolved.get("sources")
+    if isinstance(resolved_sources, dict):
+        for source_name, component in resolved_sources.items():
+            if isinstance(component, dict):
+                restore_options(component, authored_sources.get(source_name), "source")
+    resolved_transforms = resolved.get("transforms")
+    if isinstance(resolved_transforms, list):
+        for component in resolved_transforms:
+            if isinstance(component, dict):
+                restore_options(component, authored_transforms.get(str(component.get("name"))), "transform")
+    resolved_aggregations = resolved.get("aggregations")
+    if isinstance(resolved_aggregations, list):
+        for component in resolved_aggregations:
+            if isinstance(component, dict):
+                restore_options(component, authored_aggregations.get(str(component.get("name"))), "transform")
+    resolved_sinks = resolved.get("sinks")
+    if isinstance(resolved_sinks, dict):
+        for sink_name, component in resolved_sinks.items():
+            if isinstance(component, dict):
+                restore_options(component, sink_map.get(sink_name), "sink")
+    return resolved
+
+
+def build_runtime_graph(settings: ElspethSettings, bundle: PluginBundle) -> ExecutionGraph:
     """Build an ExecutionGraph through the production graph factory."""
     return ExecutionGraph.from_plugin_instances(
         sources=bundle.sources,
@@ -206,15 +401,27 @@ def build_runtime_graph(settings: Any, bundle: PluginBundle) -> ExecutionGraph:
     )
 
 
-def build_validated_runtime_graph(settings: Any) -> RuntimeGraphBundle:
+def build_validated_runtime_graph(
+    settings: ElspethSettings,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    audit_safe_settings: Mapping[str, Any] | None = None,
+) -> RuntimeGraphBundle:
     """Instantiate runtime plugins, build the graph, and run both runtime graph checks.
 
-    Used by execution before running the pipeline, so this must use normal
-    runtime mode. Composer/web validation calls instantiate_runtime_plugins()
-    directly with preflight_mode=True instead.
+    The web wrapper always constructs under preflight mode. Lifecycle methods
+    still run normally once the approved bundle reaches the orchestrator.
     """
-    bundle = instantiate_runtime_plugins(settings, preflight_mode=False)
-    graph = build_runtime_graph(settings, bundle)
+    bundle = instantiate_runtime_plugins(settings, plugin_snapshot=plugin_snapshot)
+    if audit_safe_settings is None:
+        graph = build_runtime_graph(settings, bundle)
+    else:
+        with _audit_safe_plugin_configs(
+            bundle,
+            audit_safe_settings=audit_safe_settings,
+            plugin_snapshot=plugin_snapshot,
+        ):
+            graph = build_runtime_graph(settings, bundle)
     graph.validate()
     graph.validate_edge_compatibility()
     return RuntimeGraphBundle(plugin_bundle=bundle, graph=graph)

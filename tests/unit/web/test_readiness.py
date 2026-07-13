@@ -2,17 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
+import stat
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
+import elspeth.web.readiness as readiness
 from elspeth.web.readiness import (
     ReadinessCache,
     ReadinessCheck,
     ReadinessProbeRunner,
     ReadinessReport,
+    _check_auth_mode,
+    _check_blob_dir,
+    _check_data_dir,
+    _check_landscape_database,
+    _check_payload_store,
+    _check_session_database,
+    overall_timeout_report,
+    readiness_report,
 )
+from elspeth.web.schema_probe import SchemaState
+from elspeth.web.sessions.engine import create_session_engine
 
 
 def _ok(name: str) -> tuple[ReadinessCheck, ...]:
@@ -392,3 +409,368 @@ class TestReadinessCache:
         results = await asyncio.gather(leader, follower, return_exceptions=True)
         assert calls == 1
         assert all(isinstance(result, RuntimeError) for result in results)
+
+
+class _FakeConnection:
+    def __init__(self, *, failure: BaseException | None = None) -> None:
+        self.failure = failure
+        self.statements: list[str] = []
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, statement: object) -> object:
+        self.statements.append(str(statement))
+        if self.failure is not None:
+            raise self.failure
+        return object()
+
+
+class _FakeEngine:
+    def __init__(
+        self,
+        *,
+        dialect: str = "postgresql",
+        connection: _FakeConnection | None = None,
+        url: str = "postgresql+psycopg://redacted.invalid/db",
+    ) -> None:
+        self.dialect = SimpleNamespace(name=dialect)
+        self.url = url
+        self.connection = connection or _FakeConnection()
+        self.connect_calls = 0
+        self.disposed = False
+
+    def connect(self) -> _FakeConnection:
+        self.connect_calls += 1
+        return self.connection
+
+    def dispose(self) -> None:
+        self.disposed = True
+
+
+def _settings_stub(tmp_path: Path, **overrides: object) -> Any:
+    data_dir = tmp_path / "data"
+    payload_dir = tmp_path / "payloads"
+    blob_dir = data_dir / "blobs"
+    data_dir.mkdir(exist_ok=True)
+    payload_dir.mkdir(mode=0o700, exist_ok=True)
+    blob_dir.mkdir(exist_ok=True)
+    values: dict[str, object] = {
+        "deployment_target": "default",
+        "auth_provider": "local",
+        "session_db_url": None,
+        "landscape_url": None,
+        "data_dir": data_dir,
+        "payload_store_path": payload_dir,
+        "oidc_issuer": None,
+        "oidc_audience": None,
+        "oidc_client_id": None,
+        "entra_tenant_id": None,
+    }
+    values.update(overrides)
+    settings = SimpleNamespace(**values)
+    settings.get_session_db_url = lambda: str(values.get("session_db_url") or f"sqlite:///{data_dir / 'sessions.db'}")
+    settings.get_landscape_url = lambda: str(values.get("landscape_url") or f"sqlite:///{data_dir / 'audit.db'}")
+    settings.get_payload_store_path = lambda: Path(values.get("payload_store_path") or payload_dir)
+    return settings
+
+
+class TestReadinessDatabaseChecks:
+    def test_aws_session_uses_raw_url_isolated_factory_and_same_connection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        raw_url = "postgresql+psycopg://runtime@db.internal/session"
+        settings = _settings_stub(tmp_path, deployment_target="aws-ecs", session_db_url=raw_url)
+        settings.get_session_db_url = lambda: pytest.fail("fallback getter must not run in AWS mode")
+        live_engine = _FakeEngine()
+        owned = _FakeEngine()
+        captured: dict[str, object] = {}
+
+        def factory(url: str, **kwargs: object) -> _FakeEngine:
+            captured.update(url=url, kwargs=kwargs)
+            return owned
+
+        probe_connections: list[object] = []
+        monkeypatch.setattr(readiness, "create_session_engine", factory)
+        monkeypatch.setattr(
+            readiness,
+            "probe_session_schema",
+            lambda conn: probe_connections.append(conn) or SchemaState.CURRENT,
+        )
+
+        checks = _check_session_database(settings, live_engine)
+
+        assert captured == {
+            "url": raw_url,
+            "kwargs": {
+                "pool_size": 1,
+                "max_overflow": 0,
+                "pool_pre_ping": True,
+                "pool_timeout": 0.5,
+                "connect_args": {"connect_timeout": 1},
+            },
+        }
+        assert live_engine.connect_calls == 0
+        assert probe_connections == [owned.connection]
+        assert owned.connection.statements == ["SET LOCAL statement_timeout = '1000ms'", "SELECT 1"]
+        assert owned.disposed is True
+        assert checks == (
+            ReadinessCheck("session_db", True, "connected"),
+            ReadinessCheck("session_schema", True, "schema state: CURRENT"),
+        )
+
+    def test_aws_landscape_uses_raw_url_and_landscape_factory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        raw_url = "postgresql+psycopg://runtime@db.internal/landscape"
+        settings = _settings_stub(tmp_path, deployment_target="aws-ecs", landscape_url=raw_url)
+        settings.get_landscape_url = lambda: pytest.fail("fallback getter must not run in AWS mode")
+        owned = _FakeEngine()
+        captured: dict[str, object] = {}
+
+        def factory(url: str, **kwargs: object) -> _FakeEngine:
+            captured.update(url=url, kwargs=kwargs)
+            return owned
+
+        monkeypatch.setattr(readiness, "create_engine", factory)
+        monkeypatch.setattr(readiness, "probe_landscape_schema", lambda conn: SchemaState.CURRENT)
+
+        checks = _check_landscape_database(settings)
+
+        assert captured["url"] == raw_url
+        assert captured["kwargs"] == {
+            "pool_size": 1,
+            "max_overflow": 0,
+            "pool_pre_ping": True,
+            "pool_timeout": 0.5,
+            "connect_args": {"connect_timeout": 1},
+        }
+        assert owned.disposed is True
+        assert checks[1] == ReadinessCheck("landscape_schema", True, "schema state: CURRENT")
+
+    def test_default_file_sqlite_reuses_live_session_engine(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        settings = _settings_stub(tmp_path)
+        engine = create_session_engine(f"sqlite:///{tmp_path / 'session.db'}")
+        monkeypatch.setattr(readiness, "create_session_engine", lambda *_a, **_kw: pytest.fail("must reuse live SQLite"))
+        monkeypatch.setattr(readiness, "probe_session_schema", lambda conn: SchemaState.CURRENT)
+        try:
+            checks = _check_session_database(settings, engine)
+        finally:
+            engine.dispose()
+        assert checks[0].ok is True
+        assert checks[1].detail == "schema state: CURRENT"
+
+    def test_memory_sqlite_is_rejected_without_checkout(self, tmp_path: Path) -> None:
+        settings = _settings_stub(tmp_path, session_db_url="sqlite:///:memory:")
+        engine = _FakeEngine(dialect="sqlite", url="sqlite:///:memory:")
+        checks = _check_session_database(settings, engine)
+        remedy = "in-memory SQLite is not readiness-probeable; use a file-backed session database"
+        assert checks == (
+            ReadinessCheck("session_db", False, remedy),
+            ReadinessCheck("session_schema", False, remedy),
+        )
+        assert engine.connect_calls == 0
+
+    @pytest.mark.parametrize(
+        ("state", "ok"),
+        [(SchemaState.CURRENT, True), (SchemaState.MISSING, False), (SchemaState.PARTIAL, False), (SchemaState.STALE, False)],
+    )
+    def test_every_schema_state_is_rendered(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: SchemaState, ok: bool) -> None:
+        settings = _settings_stub(tmp_path)
+        engine = create_session_engine(f"sqlite:///{tmp_path / 'session.db'}")
+        monkeypatch.setattr(readiness, "probe_session_schema", lambda conn: state)
+        try:
+            checks = _check_session_database(settings, engine)
+        finally:
+            engine.dispose()
+        assert checks[1] == ReadinessCheck("session_schema", ok, f"schema state: {state.name}")
+
+    @pytest.mark.parametrize("failure", [RuntimeError("RAW_DB_SENTINEL"), KeyboardInterrupt("RAW_DB_SENTINEL")])
+    def test_owned_engine_disposed_for_exception_and_base_exception(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ) -> None:
+        settings = _settings_stub(
+            tmp_path,
+            deployment_target="aws-ecs",
+            landscape_url="postgresql+psycopg://runtime@db.invalid/landscape",
+        )
+        owned = _FakeEngine(connection=_FakeConnection(failure=failure))
+        monkeypatch.setattr(readiness, "create_engine", lambda *_a, **_kw: owned)
+        with pytest.raises(type(failure)):
+            _check_landscape_database(settings)
+        assert owned.disposed is True
+
+    @pytest.mark.asyncio
+    async def test_database_failure_response_and_log_are_class_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        settings = _settings_stub(
+            tmp_path,
+            deployment_target="aws-ecs",
+            session_db_url="postgresql+psycopg://runtime@db.invalid/session",
+            landscape_url="postgresql+psycopg://runtime@db.invalid/landscape",
+        )
+
+        def fail(*_args: object, **_kwargs: object) -> _FakeEngine:
+            raise RuntimeError("RAW_URL_SENTINEL RAW_SQL_SENTINEL RAW_DRIVER_SENTINEL")
+
+        monkeypatch.setattr(readiness, "create_session_engine", fail)
+        monkeypatch.setattr(readiness, "create_engine", fail)
+        runner = ReadinessProbeRunner()
+        try:
+            with capture_logs() as logs:
+                report = await readiness_report(settings, _FakeEngine(), runner)
+        finally:
+            runner.close()
+        rendered = repr((report, logs))
+        assert report.ready is False
+        assert "RuntimeError" in rendered
+        assert "RAW_URL_SENTINEL" not in rendered
+        assert "RAW_SQL_SENTINEL" not in rendered
+        assert "RAW_DRIVER_SENTINEL" not in rendered
+
+
+class TestReadinessFilesystemChecks:
+    @pytest.mark.parametrize(
+        "function,name", [(_check_data_dir, "data_dir"), (_check_payload_store, "payload_store"), (_check_blob_dir, "blob_dir")]
+    )
+    def test_existing_directories_pass_without_named_residue(
+        self,
+        tmp_path: Path,
+        function: Any,
+        name: str,
+    ) -> None:
+        settings = _settings_stub(tmp_path)
+        assert function(settings) == (ReadinessCheck(name, True, "directory is writable"),)
+        assert list(tmp_path.rglob(".readiness-probe-*")) == []
+
+    def test_payload_rejects_symlink_and_unsafe_mode(self, tmp_path: Path) -> None:
+        settings = _settings_stub(tmp_path)
+        payload = Path(settings.payload_store_path)
+        target = tmp_path / "target"
+        target.mkdir()
+        payload.rmdir()
+        payload.symlink_to(target, target_is_directory=True)
+        assert _check_payload_store(settings)[0].detail == "payload_store directory must not be a symlink"
+        payload.unlink()
+        payload.mkdir(mode=0o700)
+        payload.chmod(payload.stat().st_mode | stat.S_IWGRP)
+        assert _check_payload_store(settings)[0].detail == "payload_store group/world-writable directory is not allowed"
+
+    def test_probe_uses_exclusive_create_immediate_unlink_and_same_fd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        settings = _settings_stub(tmp_path)
+        calls: list[tuple[str, Path]] = []
+        real_mkstemp = readiness.tempfile.mkstemp
+        real_unlink = readiness.os.unlink
+
+        def mkstemp(*, prefix: str, dir: Path) -> tuple[int, str]:
+            calls.append((prefix, dir))
+            return real_mkstemp(prefix=prefix, dir=dir)
+
+        def unlink(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> None:
+            assert Path(path).exists()
+            real_unlink(path)
+
+        monkeypatch.setattr(readiness.tempfile, "mkstemp", mkstemp)
+        monkeypatch.setattr(readiness.os, "unlink", unlink)
+        assert _check_data_dir(settings)[0].ok is True
+        assert calls == [(".readiness-probe-", Path(settings.data_dir).resolve(strict=True))]
+        assert list(tmp_path.rglob(".readiness-probe-*")) == []
+
+    def test_fsync_and_cleanup_failures_are_static_and_leave_no_named_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        settings = _settings_stub(tmp_path)
+        monkeypatch.setattr(readiness.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("RAW_PATH_SENTINEL")))
+        check = _check_data_dir(settings)[0]
+        assert check == ReadinessCheck("data_dir", False, "directory probe failed (OSError)")
+        assert "RAW_PATH_SENTINEL" not in check.detail
+        assert list(tmp_path.rglob(".readiness-probe-*")) == []
+
+    def test_concurrent_probes_do_not_collide(self, tmp_path: Path) -> None:
+        settings = _settings_stub(tmp_path)
+        with readiness.concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _: _check_data_dir(settings), range(20)))
+        assert all(result[0].ok for result in results)
+        assert list(tmp_path.rglob(".readiness-probe-*")) == []
+
+
+class TestReadinessAuthAndReport:
+    @pytest.mark.parametrize(
+        ("provider", "fields", "ok"),
+        [
+            ("local", {}, True),
+            ("oidc", {"oidc_issuer": "https://issuer.invalid", "oidc_audience": "aud", "oidc_client_id": "client"}, True),
+            ("oidc", {"oidc_audience": "aud", "oidc_client_id": "client"}, False),
+            ("oidc", {"oidc_issuer": "https://issuer.invalid", "oidc_client_id": "client"}, False),
+            ("oidc", {"oidc_issuer": "https://issuer.invalid", "oidc_audience": "aud"}, False),
+            ("entra", {"entra_tenant_id": "tenant", "oidc_audience": "aud", "oidc_client_id": "client"}, True),
+            ("entra", {"oidc_audience": "aud", "oidc_client_id": "client"}, False),
+            ("entra", {"entra_tenant_id": "tenant", "oidc_client_id": "client"}, False),
+            ("entra", {"entra_tenant_id": "tenant", "oidc_audience": "aud"}, False),
+            ("unknown", {}, False),
+        ],
+    )
+    def test_auth_mode_is_total(self, tmp_path: Path, provider: str, fields: dict[str, object], ok: bool) -> None:
+        settings = _settings_stub(tmp_path, auth_provider=provider, **fields)
+        check = _check_auth_mode(settings)
+        assert check.name == "auth_mode"
+        assert check.ok is ok
+
+    @pytest.mark.asyncio
+    async def test_report_has_exact_order_and_unique_names(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        settings = _settings_stub(tmp_path)
+        session_engine = create_session_engine(f"sqlite:///{tmp_path / 'session.db'}")
+        monkeypatch.setattr(readiness, "probe_session_schema", lambda conn: SchemaState.CURRENT)
+        monkeypatch.setattr(readiness, "probe_landscape_schema", lambda conn: SchemaState.CURRENT)
+        runner = ReadinessProbeRunner()
+        try:
+            report = await readiness_report(settings, session_engine, runner)
+        finally:
+            runner.close()
+            session_engine.dispose()
+        assert [check.name for check in report.checks] == list(readiness.READINESS_CHECK_NAMES)
+        assert len({check.name for check in report.checks}) == 8
+        assert report.ready is True
+
+    @pytest.mark.asyncio
+    async def test_unexpected_gather_error_becomes_static_eight_check_report(self, tmp_path: Path) -> None:
+        settings = _settings_stub(tmp_path)
+
+        class BrokenRunner:
+            async def run(self, *_args: object, **_kwargs: object) -> tuple[ReadinessCheck, ...]:
+                raise RuntimeError("RAW_URL_SENTINEL /private/path")
+
+        with capture_logs() as logs:
+            report = await readiness_report(settings, _FakeEngine(), BrokenRunner())
+        assert [check.name for check in report.checks] == list(readiness.READINESS_CHECK_NAMES)
+        assert all(not check.ok and check.detail == "readiness evaluation failed (RuntimeError)" for check in report.checks)
+        assert "RAW_URL_SENTINEL" not in repr((report, logs))
+        assert "/private/path" not in repr((report, logs))
+
+    def test_overall_timeout_report_is_exact_and_class_free(self) -> None:
+        with capture_logs() as logs:
+            report = overall_timeout_report()
+        assert report.ready is False
+        assert [check.name for check in report.checks] == list(readiness.READINESS_CHECK_NAMES)
+        assert all(check.detail == "readiness request timed out" for check in report.checks)
+        assert len(logs) == 8
+        assert all(set(log) >= {"check", "detail"} for log in logs)

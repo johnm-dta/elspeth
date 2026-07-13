@@ -82,13 +82,26 @@ type _TextConcatShape = tuple[str, str]
 
 @dataclass(frozen=True, slots=True)
 class _TextBuiltinProof:
+    pg_catalog_calls: frozenset[tuple[str, int]]
     safe_calls: frozenset[_TextBuiltinCallKey]
     literal_only_calls: frozenset[_TextBuiltinCallKey]
+    int4_literal_calls: frozenset[_TextBuiltinCallKey]
     variadic_calls: frozenset[_TextBuiltinCallKey]
+    text_result_calls: frozenset[_TextBuiltinCallKey]
     safe_concat_shapes: frozenset[_TextConcatShape]
+    text_result_concat_shapes: frozenset[_TextConcatShape]
 
 
-_EMPTY_TEXT_BUILTIN_PROOF = _TextBuiltinProof(frozenset(), frozenset(), frozenset(), frozenset())
+_EMPTY_TEXT_BUILTIN_PROOF = _TextBuiltinProof(
+    frozenset(),
+    frozenset(),
+    frozenset(),
+    frozenset(),
+    frozenset(),
+    frozenset(),
+    frozenset(),
+    frozenset(),
+)
 
 _ALL_TEXT_BUILTIN_CALL_KEYS: frozenset[_TextBuiltinCallKey] = frozenset(
     {
@@ -104,6 +117,19 @@ _ALL_TEXT_BUILTIN_CALL_KEYS: frozenset[_TextBuiltinCallKey] = frozenset(
     }
 )
 _ALLOWED_TEXT_BUILTIN_SIGNATURES = frozenset({("length", 1), ("btrim", 1), ("btrim", 2), ("chr", 1)})
+_TEXT_RESULT_CALL_KEYS = frozenset(
+    {
+        ("chr", 1, "int4"),
+        ("btrim_unknown", 2, "text"),
+        ("btrim_unknown", 2, "varchar"),
+    }
+)
+_INT4_LITERAL_CALL_KEYS = frozenset(
+    {
+        ("btrim_unknown", 2, "text"),
+        ("btrim_unknown", 2, "varchar"),
+    }
+)
 _ALL_TEXT_CONCAT_SHAPES: frozenset[_TextConcatShape] = frozenset(
     {
         ("text", "text"),
@@ -256,6 +282,103 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
                 AND expected_arguments.expected_oid = allowed_proc.proargtypes[expected_arguments.arg_index]
           )
     ),
+    exact_call_text_results AS (
+        SELECT
+          call_shapes.call_kind AS proname,
+          call_shapes.arity,
+          sources.source_family
+        FROM pg_catalog.pg_proc AS proc
+        JOIN call_shapes
+          ON call_shapes.proname = proc.proname
+         AND call_shapes.call_kind = :chr_name
+         AND call_shapes.arity >= (
+             proc.pronargs
+             - proc.pronargdefaults
+             - CASE WHEN proc.provariadic <> 0 THEN 1 ELSE 0 END
+         )
+         AND (proc.provariadic <> 0 OR call_shapes.arity <= proc.pronargs)
+        JOIN sources ON sources.source_family = call_shapes.source_family
+        CROSS JOIN LATERAL (
+            SELECT source_oid
+            FROM sources
+            WHERE source_family = :text_family
+        ) AS text_source
+        WHERE proc.prokind = 'f'
+          AND pg_catalog.pg_function_is_visible(proc.oid)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM expected_arguments
+              WHERE expected_arguments.call_kind = call_shapes.call_kind
+                AND expected_arguments.proname = call_shapes.proname
+                AND expected_arguments.arity = call_shapes.arity
+                AND expected_arguments.source_family = sources.source_family
+                AND (
+                    expected_arguments.is_unknown
+                    OR expected_arguments.expected_oid <> CASE
+                      WHEN proc.provariadic <> 0
+                       AND expected_arguments.arg_index >= proc.pronargs - 1
+                        THEN proc.provariadic
+                      ELSE proc.proargtypes[expected_arguments.arg_index]
+                    END
+                )
+          )
+        GROUP BY call_shapes.call_kind, call_shapes.arity, sources.source_family
+        HAVING count(*) = 1
+          AND bool_and(proc.prorettype = text_source.source_oid)
+    ),
+    unknown_literal_exact_first_candidates AS (
+        SELECT
+          call_shapes.call_kind AS proname,
+          call_shapes.arity,
+          sources.source_family,
+          proc.pronargs::integer AS candidate_pronargs,
+          proc.pronargdefaults::integer AS candidate_pronargdefaults,
+          proc.provariadic AS candidate_variadic_oid,
+          proc.proargtypes[1] AS candidate_second_arg_oid,
+          proc.prorettype AS candidate_result_oid
+        FROM pg_catalog.pg_proc AS proc
+        JOIN call_shapes
+          ON call_shapes.proname = proc.proname
+         AND call_shapes.call_kind = :btrim_unknown_kind
+         AND call_shapes.arity >= (
+             proc.pronargs
+             - proc.pronargdefaults
+             - CASE WHEN proc.provariadic <> 0 THEN 1 ELSE 0 END
+         )
+         AND (proc.provariadic <> 0 OR call_shapes.arity <= proc.pronargs)
+        JOIN sources ON sources.source_family = call_shapes.source_family
+        WHERE proc.prokind = 'f'
+          AND pg_catalog.pg_function_is_visible(proc.oid)
+          AND proc.proargtypes[0] = sources.source_oid
+    ),
+    unknown_literal_winners AS (
+        SELECT
+          candidates.proname,
+          candidates.arity,
+          candidates.source_family,
+          bool_and(
+              candidates.candidate_pronargs = 2
+              AND candidates.candidate_pronargdefaults = 0
+              AND candidates.candidate_variadic_oid = 0
+              AND candidates.candidate_second_arg_oid = (
+                  SELECT source_oid FROM sources WHERE source_family = :int4_family
+              )
+          ) AS accepts_int4_literal,
+          bool_and(
+              candidates.candidate_pronargs = 2
+              AND candidates.candidate_pronargdefaults = 0
+              AND candidates.candidate_variadic_oid = 0
+              AND candidates.candidate_second_arg_oid = (
+                  SELECT source_oid FROM sources WHERE source_family = :int4_family
+              )
+              AND candidates.candidate_result_oid = (
+                  SELECT source_oid FROM sources WHERE source_family = :text_family
+              )
+          ) AS returns_text
+        FROM unknown_literal_exact_first_candidates AS candidates
+        GROUP BY candidates.proname, candidates.arity, candidates.source_family
+        HAVING count(*) = 1
+    ),
     operator_shapes(left_family, right_family) AS (
         VALUES
           (:text_family, :text_family),
@@ -311,6 +434,27 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
               + CASE WHEN builtin.oprright = right_source.source_oid THEN 1 ELSE 0 END
           )
     ),
+    exact_operator_text_results AS (
+        SELECT operator_shapes.left_family, operator_shapes.right_family
+        FROM pg_catalog.pg_operator AS candidate
+        CROSS JOIN operator_shapes
+        JOIN sources AS left_source
+          ON left_source.source_family = operator_shapes.left_family
+        JOIN sources AS right_source
+          ON right_source.source_family = operator_shapes.right_family
+        CROSS JOIN LATERAL (
+            SELECT source_oid
+            FROM sources
+            WHERE source_family = :text_family
+        ) AS text_source
+        WHERE candidate.oprname = :text_concat_name
+          AND pg_catalog.pg_operator_is_visible(candidate.oid)
+          AND candidate.oprleft = left_source.source_oid
+          AND candidate.oprright = right_source.source_oid
+        GROUP BY operator_shapes.left_family, operator_shapes.right_family
+        HAVING count(*) = 1
+          AND bool_and(candidate.oprresult = text_source.source_oid)
+    ),
     blocked AS (
         SELECT DISTINCT proname, arity, source_family
         FROM candidates
@@ -352,6 +496,10 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
            left_family || ',' || right_family AS detail
     FROM operator_candidates
     UNION ALL
+    SELECT 'operator_text_result' AS row_kind, :text_concat_name AS proname, 2 AS arity,
+           left_family || ',' || right_family AS detail
+    FROM exact_operator_text_results
+    UNION ALL
     SELECT 'blocked' AS row_kind, proname, arity, source_family AS detail
     FROM blocked
     UNION ALL
@@ -360,6 +508,17 @@ _TEXT_BUILTIN_IDENTITY_PROOF = text(
     UNION ALL
     SELECT 'variadic' AS row_kind, proname, arity, source_family AS detail
     FROM variadic_only
+    UNION ALL
+    SELECT 'text_result' AS row_kind, proname, arity, source_family AS detail
+    FROM exact_call_text_results
+    UNION ALL
+    SELECT 'int4_literal' AS row_kind, proname, arity, source_family AS detail
+    FROM unknown_literal_winners
+    WHERE accepts_int4_literal
+    UNION ALL
+    SELECT 'text_result' AS row_kind, proname, arity, source_family AS detail
+    FROM unknown_literal_winners
+    WHERE returns_text
     """
 )
 
@@ -425,9 +584,12 @@ def _proven_pg_catalog_text_builtin_calls(
     sources: dict[str, int] = {}
     blocked: set[_TextBuiltinCallKey] = set()
     literal_only: set[_TextBuiltinCallKey] = set()
+    int4_literal: set[_TextBuiltinCallKey] = set()
     variadic: set[_TextBuiltinCallKey] = set()
+    text_results: set[_TextBuiltinCallKey] = set()
     operator_allowed_oid: int | None = None
     blocked_concat_shapes: set[_TextConcatShape] = set()
+    text_result_concat_shapes: set[_TextConcatShape] = set()
     try:
         for row_kind, raw_name, raw_arity, raw_detail in proof_rows:
             name = str(raw_name)
@@ -447,8 +609,12 @@ def _proven_pg_catalog_text_builtin_calls(
                 blocked.add((name, arity, str(raw_detail)))
             elif row_kind == "literal_only":
                 literal_only.add((name, arity, str(raw_detail)))
+            elif row_kind == "int4_literal":
+                int4_literal.add((name, arity, str(raw_detail)))
             elif row_kind == "variadic":
                 variadic.add((name, arity, str(raw_detail)))
+            elif row_kind == "text_result":
+                text_results.add((name, arity, str(raw_detail)))
             elif row_kind == "operator_allowed":
                 oid = int(raw_detail)
                 if name != "||" or arity != 2 or operator_allowed_oid is not None or not 0 < oid < _FIRST_NORMAL_POSTGRESQL_OID:
@@ -460,6 +626,12 @@ def _proven_pg_catalog_text_builtin_calls(
                 if name != "||" or arity != 2 or not separator or shape not in _ALL_TEXT_CONCAT_SHAPES:
                     return _EMPTY_TEXT_BUILTIN_PROOF
                 blocked_concat_shapes.add(shape)
+            elif row_kind == "operator_text_result":
+                left_family, separator, right_family = str(raw_detail).partition(",")
+                shape = (left_family, right_family)
+                if name != "||" or arity != 2 or not separator or shape not in _ALL_TEXT_CONCAT_SHAPES:
+                    return _EMPTY_TEXT_BUILTIN_PROOF
+                text_result_concat_shapes.add(shape)
             else:
                 return _EMPTY_TEXT_BUILTIN_PROOF
     except (TypeError, ValueError):
@@ -478,16 +650,24 @@ def _proven_pg_catalog_text_builtin_calls(
         or not blocked <= _ALL_TEXT_BUILTIN_CALL_KEYS
         or not literal_only <= literal_only_keys
         or not literal_only <= blocked
+        or not int4_literal <= _INT4_LITERAL_CALL_KEYS
+        or not int4_literal <= blocked
         or not variadic <= _ALL_TEXT_BUILTIN_CALL_KEYS
         or not variadic <= blocked
+        or not text_results <= _TEXT_RESULT_CALL_KEYS
+        or not (text_results - {("chr", 1, "int4")}) <= int4_literal
         or operator_allowed_oid is None
     ):
         return _EMPTY_TEXT_BUILTIN_PROOF
     return _TextBuiltinProof(
+        pg_catalog_calls=frozenset(allowed),
         safe_calls=_ALL_TEXT_BUILTIN_CALL_KEYS - blocked,
         literal_only_calls=frozenset(literal_only),
+        int4_literal_calls=frozenset(int4_literal),
         variadic_calls=frozenset(variadic),
+        text_result_calls=frozenset(text_results),
         safe_concat_shapes=_ALL_TEXT_CONCAT_SHAPES - blocked_concat_shapes,
+        text_result_concat_shapes=frozenset(text_result_concat_shapes),
     )
 
 
@@ -1694,6 +1874,8 @@ def _expression_asts_equivalent(expected: _Ast, actual: _Ast, context: _Expressi
             return _text_builtin_arguments_equivalent(expected_arguments, actual_arguments, context)
         if call_key is not None and call_key in context.text_builtin_proof.literal_only_calls:
             return _text_builtin_literal_arguments_equivalent(expected_arguments, actual_arguments, context)
+        if call_key is not None and call_key in context.text_builtin_proof.int4_literal_calls:
+            return _text_builtin_int4_literal_arguments_equivalent(expected_arguments, actual_arguments, context)
         return _expression_sequences_equivalent(expected_arguments, actual_arguments, context)
     if kind == "in":
         expected_values = cast("tuple[_Ast, ...]", expected[3])
@@ -1794,6 +1976,40 @@ def _text_builtin_literal_arguments_equivalent(
     )
 
 
+def _text_builtin_int4_literal_arguments_equivalent(
+    expected: tuple[_Ast, ...],
+    actual: tuple[_Ast, ...],
+    context: _ExpressionContext,
+) -> bool:
+    if len(expected) != 2 or len(actual) != 2:
+        return False
+    if not _expression_asts_equivalent(expected[0], actual[0], context):
+        return False
+    return _expression_asts_equivalent(expected[1], actual[1], context) or _unknown_literal_int4_equivalent(
+        expected[1],
+        actual[1],
+    )
+
+
+def _unknown_literal_int4_equivalent(expected: _Ast, actual: _Ast) -> bool:
+    if expected[0] != "literal":
+        return False
+    match = re.fullmatch(r"'([+-]?\d+)'", cast("str", expected[1]))
+    if match is None:
+        return False
+    expected_value = int(match.group(1))
+    if not -(2**31) <= expected_value <= 2**31 - 1:
+        return False
+    sign = 1
+    number = actual
+    if actual[0] == "unary" and actual[1] in {"+", "-"}:
+        sign = -1 if actual[1] == "-" else 1
+        number = cast("_Ast", actual[2])
+    if number[0] != "number" or re.fullmatch(r"\d+", cast("str", number[1])) is None:
+        return False
+    return expected_value == sign * int(cast("str", number[1]))
+
+
 def _text_cast_builtin_kind(name: object, arity: int) -> str | None:
     if name in _LENGTH_BUILTIN_NAMES and arity == 1:
         return "length"
@@ -1842,13 +2058,11 @@ def _postgresql_text_expression_family(expression: _Ast, context: _ExpressionCon
         return None
     if kind == "call":
         arguments = cast("tuple[_Ast, ...]", expression[2])
-        if (
-            expression[1] in {_CHR_BUILTIN_NAME, _QUALIFIED_CHR_BUILTIN_NAME}
-            and len(arguments) == 1
-            and _proven_postgresql_int4_expression(arguments[0])
-            and ("chr", 1, "int4") in context.text_builtin_proof.safe_calls
-        ):
-            return "text"
+        if len(arguments) == 1 and _proven_postgresql_int4_expression(arguments[0]):
+            if expression[1] == _QUALIFIED_CHR_BUILTIN_NAME and ("chr", 1) in context.text_builtin_proof.pg_catalog_calls:
+                return "text"
+            if expression[1] == _CHR_BUILTIN_NAME and ("chr", 1, "int4") in context.text_builtin_proof.text_result_calls:
+                return "text"
         return None
     if kind == "binary" and expression[1] == "||":
         operands = cast("tuple[_Ast, ...]", expression[2:])
@@ -1862,7 +2076,11 @@ def _postgresql_text_expression_family(expression: _Ast, context: _ExpressionCon
         if None in contextual_families or all(family == "unknown" for family in contextual_families):
             return None
         shape = cast("_TextConcatShape", contextual_families)
-        return "text" if shape in context.text_builtin_proof.safe_concat_shapes else None
+        if shape == ("text", "text"):
+            return "text" if shape in context.text_builtin_proof.text_result_concat_shapes else None
+        if shape in context.text_builtin_proof.safe_concat_shapes or shape in context.text_builtin_proof.text_result_concat_shapes:
+            return "text"
+        return None
     return None
 
 
@@ -1937,6 +2155,7 @@ def _literal_reflection_cast_types(
             and (
                 call_key in context.text_builtin_proof.safe_calls
                 or call_key in context.text_builtin_proof.literal_only_calls
+                or call_key in context.text_builtin_proof.text_result_calls
                 or exact_reflected_call
             )
         ):

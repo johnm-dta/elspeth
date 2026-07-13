@@ -710,14 +710,19 @@ _ALLOWED_BUILTIN_PROOF_ROWS = [
     ("source", "varchar", 0, "1043"),
     ("source", "int4", 0, "23"),
     ("operator_allowed", "||", 2, "654"),
+    ("text_result", "chr", 1, "int4"),
+    ("operator_text_result", "||", 2, "text,text"),
 ]
 
 
 def _builtin_visibility_connection(
     *blocked_calls: tuple[str, int, str],
     literal_only_calls: tuple[tuple[str, int, str], ...] = (),
+    int4_literal_calls: tuple[tuple[str, int, str], ...] = (),
     variadic_calls: tuple[tuple[str, int, str], ...] = (),
     blocked_concat_shapes: tuple[tuple[str, str], ...] = (),
+    text_result_calls: tuple[tuple[str, int, str], ...] = (),
+    operator_text_result_shapes: tuple[tuple[str, str], ...] = (),
     proof_rows: list[tuple[str, str, int, str | None]] | None = None,
     query_error: bool = False,
 ) -> Connection:
@@ -730,11 +735,19 @@ def _builtin_visibility_connection(
             proof_rows
             if proof_rows is not None
             else [
-                *_ALLOWED_BUILTIN_PROOF_ROWS,
+                *(
+                    row
+                    for row in _ALLOWED_BUILTIN_PROOF_ROWS
+                    if not (row[0] == "text_result" and (row[1], row[2], row[3]) in blocked_calls)
+                    and not (row[0] == "operator_text_result" and tuple(str(row[3]).split(",", maxsplit=1)) in blocked_concat_shapes)
+                ),
                 *(("blocked", name, arity, family) for name, arity, family in blocked_calls),
                 *(("literal_only", name, arity, family) for name, arity, family in literal_only_calls),
+                *(("int4_literal", name, arity, family) for name, arity, family in int4_literal_calls),
                 *(("variadic", name, arity, family) for name, arity, family in variadic_calls),
                 *(("operator_blocked", "||", 2, f"{left},{right}") for left, right in blocked_concat_shapes),
+                *(("text_result", name, arity, family) for name, arity, family in text_result_calls),
+                *(("operator_text_result", "||", 2, f"{left},{right}") for left, right in operator_text_result_shapes),
             ]
         )
     return connection
@@ -746,8 +759,11 @@ def _static_check_issues(
     *,
     blocked_builtin_calls: tuple[tuple[str, int, str], ...] | None = None,
     literal_only_builtin_calls: tuple[tuple[str, int, str], ...] = (),
+    int4_literal_builtin_calls: tuple[tuple[str, int, str], ...] = (),
     variadic_builtin_calls: tuple[tuple[str, int, str], ...] = (),
     blocked_concat_shapes: tuple[tuple[str, str], ...] = (),
+    text_result_builtin_calls: tuple[tuple[str, int, str], ...] = (),
+    operator_text_result_shapes: tuple[tuple[str, str], ...] = (),
     builtin_proof_rows: list[tuple[str, str, int, str | None]] | None = None,
     builtin_visibility_query_error: bool = False,
 ) -> tuple[SchemaShapeIssue, ...]:
@@ -800,8 +816,11 @@ def _static_check_issues(
             else _builtin_visibility_connection(
                 *blocked_builtin_calls,
                 literal_only_calls=literal_only_builtin_calls,
+                int4_literal_calls=int4_literal_builtin_calls,
                 variadic_calls=variadic_builtin_calls,
                 blocked_concat_shapes=blocked_concat_shapes,
+                text_result_calls=text_result_builtin_calls,
+                operator_text_result_shapes=operator_text_result_shapes,
                 proof_rows=builtin_proof_rows,
                 query_error=builtin_visibility_query_error,
             )
@@ -960,7 +979,10 @@ def test_collector_fails_closed_for_invalid_source_type_oid(invalid_detail: str,
     assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
 
 
-@pytest.mark.parametrize("missing_index", range(len(_ALLOWED_BUILTIN_PROOF_ROWS)))
+@pytest.mark.parametrize(
+    "missing_index",
+    [index for index, row in enumerate(_ALLOWED_BUILTIN_PROOF_ROWS) if row[0] in {"allowed", "source", "operator_allowed"}],
+)
 def test_collector_fails_closed_for_missing_catalog_proof_row(missing_index: int) -> None:
     proof_rows = [row for index, row in enumerate(_ALLOWED_BUILTIN_PROOF_ROWS) if index != missing_index]
     issues = _static_check_issues(
@@ -1083,6 +1105,33 @@ def test_collector_rejects_unknown_literal_shadow_column_cast_mutation() -> None
     assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
 
 
+def test_collector_preserves_int4_coercion_for_unique_unknown_literal_btrim_winner() -> None:
+    call_key = ("btrim_unknown", 2, "varchar")
+    declared_sql = "btrim(value_text, '1') = 'CUSTOM'"
+    reflected_sql = "btrim(value_text, 1) = 'CUSTOM'::text"
+
+    assert (
+        _static_check_issues(
+            declared_sql,
+            reflected_sql,
+            blocked_builtin_calls=(call_key,),
+            int4_literal_builtin_calls=(call_key,),
+            text_result_builtin_calls=(call_key,),
+        )
+        == ()
+    )
+
+    mutated_issues = _static_check_issues(
+        declared_sql,
+        "btrim(value_text::text, 1) = 'CUSTOM'::text",
+        blocked_builtin_calls=(call_key,),
+        int4_literal_builtin_calls=(call_key,),
+        text_result_builtin_calls=(call_key,),
+    )
+
+    assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in mutated_issues)
+
+
 def test_collector_rejects_shadowed_chr_column_cast_mutation() -> None:
     blocked_chr = ("chr", 1, "int4")
     declared_sql = "btrim(value_text, chr(49)) IS NOT NULL"
@@ -1095,6 +1144,31 @@ def test_collector_rejects_shadowed_chr_column_cast_mutation() -> None:
     )
 
     assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
+
+
+def test_collector_uses_unique_exact_chr_winner_text_result_for_outer_cast_relaxation() -> None:
+    blocked_chr = ("chr", 1, "int4")
+    proof_kwargs = {
+        "blocked_builtin_calls": (blocked_chr,),
+        "text_result_builtin_calls": (blocked_chr,),
+    }
+
+    assert (
+        _static_check_issues(
+            "btrim(value_text, chr(49)) IS NOT NULL",
+            "btrim(value_text::text, chr(49)) IS NOT NULL",
+            **proof_kwargs,
+        )
+        == ()
+    )
+
+    changed_inner_issues = _static_check_issues(
+        "btrim(value_text, chr(49)) IS NOT NULL",
+        "btrim(value_text::text, chr(50)) IS NOT NULL",
+        **proof_kwargs,
+    )
+
+    assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in changed_inner_issues)
 
 
 @pytest.mark.parametrize(
@@ -1123,14 +1197,15 @@ def test_collector_accepts_chr_with_proven_int4_argument(chr_argument: str) -> N
     )
 
 
-def test_collector_requires_safe_chr_call_key_even_when_qualified() -> None:
-    issues = _static_check_issues(
-        "btrim(value_text, pg_catalog.chr(49)) IS NOT NULL",
-        "btrim(value_text::text, pg_catalog.chr(49)) IS NOT NULL",
-        blocked_builtin_calls=(("chr", 1, "int4"),),
+def test_collector_trusts_qualified_chr_bootstrap_identity_despite_unqualified_shadow() -> None:
+    assert (
+        _static_check_issues(
+            "btrim(value_text, pg_catalog.chr(49)) IS NOT NULL",
+            "btrim(value_text::text, pg_catalog.chr(49)) IS NOT NULL",
+            blocked_builtin_calls=(("chr", 1, "int4"),),
+        )
+        == ()
     )
-
-    assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
 
 
 def test_collector_fails_closed_for_qualified_chr_without_validated_identity() -> None:
@@ -1186,6 +1261,32 @@ def test_collector_rejects_text_concat_relaxation_when_operator_identity_is_bloc
     )
 
     assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
+
+
+def test_collector_uses_unique_exact_concat_winner_text_result_for_outer_cast_relaxation() -> None:
+    declared_sql = "btrim(value_text, chr(49) || chr(50)) IS NOT NULL"
+    proof_kwargs = {
+        "blocked_builtin_calls": (),
+        "blocked_concat_shapes": (("text", "text"),),
+        "operator_text_result_shapes": (("text", "text"),),
+    }
+
+    assert (
+        _static_check_issues(
+            declared_sql,
+            "btrim(value_text::text, chr(49) || chr(50)) IS NOT NULL",
+            **proof_kwargs,
+        )
+        == ()
+    )
+
+    changed_inner_issues = _static_check_issues(
+        declared_sql,
+        "btrim(value_text::text, chr(49) || chr(51)) IS NOT NULL",
+        **proof_kwargs,
+    )
+
+    assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in changed_inner_issues)
 
 
 def test_collector_ignores_blocked_concat_shape_for_different_operand_families() -> None:

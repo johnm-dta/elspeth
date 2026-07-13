@@ -77,6 +77,15 @@ class CSVWriteOptions(BaseModel):
             codecs.lookup(value)
         except LookupError as exc:
             raise ValueError("unknown CSV encoding") from exc
+        probe_failed = False
+        encoded: object = None
+        try:
+            encoder = codecs.getincrementalencoder(value)(errors="strict")
+            encoded = encoder.encode("", final=True)
+        except (LookupError, TypeError, UnicodeError, ValueError):
+            probe_failed = True
+        if probe_failed or not isinstance(encoded, bytes):
+            raise ValueError("CSV encoding must encode text to bytes") from None
         return value
 
 
@@ -297,28 +306,36 @@ class _BoundedBinaryWriter:
 class _EncodedTextWriter:
     def __init__(self, writer: _BoundedBinaryWriter, encoding: str) -> None:
         self._writer = writer
-        self._encoder = codecs.getincrementalencoder(encoding)(errors="strict")
+        encoder_failed = False
+        encoder: Any | None = None
+        try:
+            encoder = codecs.getincrementalencoder(encoding)(errors="strict")
+        except (LookupError, TypeError, UnicodeError, ValueError):
+            encoder_failed = True
+        if encoder_failed or encoder is None:
+            raise S3RecordSerializationError from None
+        self._encoder = encoder
 
     def write(self, value: str) -> int:
         encoding_failed = False
-        encoded = b""
+        encoded: object = None
         try:
             encoded = self._encoder.encode(value, final=False)
-        except (UnicodeError, LookupError, ValueError):
+        except (LookupError, TypeError, UnicodeError, ValueError):
             encoding_failed = True
-        if encoding_failed:
+        if encoding_failed or not isinstance(encoded, bytes):
             raise S3RecordSerializationError from None
         self._writer.write(encoded)
         return len(value)
 
     def finalize(self) -> None:
         encoding_failed = False
-        encoded = b""
+        encoded: object = None
         try:
             encoded = self._encoder.encode("", final=True)
-        except (UnicodeError, LookupError, ValueError):
+        except (LookupError, TypeError, UnicodeError, ValueError):
             encoding_failed = True
-        if encoding_failed:
+        if encoding_failed or not isinstance(encoded, bytes):
             raise S3RecordSerializationError from None
         self._writer.write(encoded)
 
@@ -598,7 +615,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5495a79bf6ebdaca"
+    source_file_hash: str | None = "sha256:8107dee3b855d0e0"
     config_model = AWSS3SinkConfig
     supports_resume = False
 
@@ -704,9 +721,10 @@ class AWSS3Sink(BaseSink):
         accepted: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             probe_fields = self._get_fieldnames_from_schema_or_rows([row])
+            probe_rows = apply_display_headers(self, [row]) if self._format in {"json", "jsonl"} else [row]
             try:
                 serialized = _serialize_rows_to_spool(
-                    [row],
+                    probe_rows,
                     format=self._format,
                     csv_options=self._csv_options,
                     fieldnames=probe_fields,

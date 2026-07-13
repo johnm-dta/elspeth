@@ -172,6 +172,13 @@ class TestAWSS3SinkConfig:
         with pytest.raises(PluginConfigError):
             AWSS3SinkConfig.from_dict(_base_config(csv_options={"unknown": True}))
 
+    @pytest.mark.parametrize("encoding", ["rot_13", "base64_codec"])
+    def test_non_text_to_bytes_csv_codec_is_rejected_at_config(self, encoding: str) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import AWSS3SinkConfig
+
+        with pytest.raises(PluginConfigError, match="text to bytes"):
+            AWSS3SinkConfig.from_dict(_base_config(csv_options={"encoding": encoding}), plugin_name="aws_s3")
+
 
 def _serialize(
     rows: list[dict[str, Any]],
@@ -294,6 +301,27 @@ class TestSerialization:
         serialized.close()
         assert payload.count(b"\xff\xfe") + payload.count(b"\xfe\xff") == 1
         assert payload.decode("utf-16") == "id,name\r\n1,Ada\r\n2,Grace\r\n"
+
+    @pytest.mark.parametrize("encoding", ["rot_13", "base64_codec"])
+    def test_non_text_codec_runtime_failure_is_static_and_cause_free(self, encoding: str) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import (
+            CSVWriteOptions,
+            S3RecordSerializationError,
+            _serialize_rows_to_spool,
+        )
+
+        options = CSVWriteOptions.model_construct(delimiter=",", encoding=encoding, include_header=True)
+        with pytest.raises(S3RecordSerializationError) as captured:
+            _serialize_rows_to_spool(
+                [{"id": 1}],
+                format="csv",
+                csv_options=options,
+                fieldnames=["id"],
+                max_object_bytes=1024,
+                max_record_chars=100,
+            )
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
 
     @pytest.mark.parametrize("format", ["csv", "json", "jsonl"])
     def test_huge_integer_conversion_is_a_static_serialization_failure(self, format: str) -> None:
@@ -656,6 +684,19 @@ class TestAWSS3SinkRuntime:
         assert len(result.diversions) == 1
         assert client.bodies == [b"id\r\n1\r\n"]
         assert sink._buffered_rows == [{"id": 1}]
+
+    @pytest.mark.parametrize("format", ["json", "jsonl"])
+    def test_displayed_json_key_record_limit_diverts_before_cumulative_serialization(self, format: str) -> None:
+        sink, client = _runtime_sink(
+            format=format,
+            headers={"id": "x" * 100},
+            max_record_chars=50,
+        )
+        result = sink.write([{"id": 1}], _SinkContext())
+        assert len(result.diversions) == 1
+        assert result.diversions[0].reason == "record exceeds configured character limit"
+        assert client.requests == []
+        assert sink._buffered_rows == []
 
     def test_all_diverted_later_batch_preserves_confirmed_remote_artifact(self) -> None:
         sink, client = _runtime_sink(format="csv")

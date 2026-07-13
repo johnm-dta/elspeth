@@ -21,6 +21,7 @@ import jsonschema
 from pydantic import Field, TypeAdapter
 
 from elspeth.plugins.transforms.llm.providers.azure import AzureOpenAIConfig
+from elspeth.plugins.transforms.llm.providers.bedrock import BedrockConfig
 from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig
 from elspeth.plugins.transforms.llm.transform import _PROVIDERS, LLMTransform
 
@@ -67,6 +68,14 @@ class TestLLMConfigSchema:
         openrouter = schema["$defs"]["OpenRouterConfig"]
         assert set(openrouter["required"]) >= {"api_key", "model", "prompt_template"}
 
+    def test_bedrock_variant_publishes_keyless_provider_fields(self) -> None:
+        schema = LLMTransform.get_config_schema()
+        bedrock = schema["$defs"]["BedrockConfig"]
+
+        assert set(bedrock["required"]) >= {"model", "prompt_template", "provider"}
+        assert "region_name" in bedrock["properties"]
+        assert "api_key" not in bedrock["properties"]
+
     def test_matches_typeadapter_fixture(self) -> None:
         """Schema drift detector: compare against an explicit TypeAdapter.
 
@@ -99,10 +108,10 @@ class TestLLMConfigSchema:
         forces the author to update the fixture — a deliberate speed bump
         so the schema surface change is reviewed consciously.
         """
-        expected = TypeAdapter(Annotated[AzureOpenAIConfig | OpenRouterConfig, Field(discriminator="provider")]).json_schema(
-            ref_template="#/$defs/{model}"
-        )
-        for name in ("AzureOpenAIConfig", "OpenRouterConfig"):
+        expected = TypeAdapter(
+            Annotated[AzureOpenAIConfig | OpenRouterConfig | BedrockConfig, Field(discriminator="provider")]
+        ).json_schema(ref_template="#/$defs/{model}")
+        for name in ("AzureOpenAIConfig", "OpenRouterConfig", "BedrockConfig"):
             required = expected["$defs"][name].setdefault("required", [])
             if "provider" not in required:
                 required.append("provider")

@@ -166,6 +166,7 @@ _CONTENT_POLICY_PATTERNS = (
 CONTEXT_LENGTH_PATTERNS = (
     "context_length_exceeded",  # OpenAI / Azure OpenAI canonical code
     "context length",  # OpenAI / Azure verbose wording ("maximum context length is X")
+    "context window",  # LiteLLM Bedrock wrapper ("Context Window Error")
     "maximum context",  # Catches "maximum context length", "exceeds maximum context"
     "prompt is too long",  # Anthropic via OpenRouter ("prompt is too long: N tokens > M maximum")
 )
@@ -184,6 +185,9 @@ def _classify_llm_error(exception: Exception) -> str:
     if re.search(r"\b429\b", error_str) or any(pattern.search(error_str) for pattern in _RATE_LIMIT_PATTERNS):
         return "rate_limit"
 
+    status_code = vars(exception).get("status_code")
+    if type(status_code) is int and status_code in (500, 502, 503, 504, 529):
+        return "server"
     if _SERVER_ERROR_CODE_PATTERN.search(error_str):
         return "server"
     if any(pattern in error_str for pattern in _NETWORK_ERROR_PATTERNS):

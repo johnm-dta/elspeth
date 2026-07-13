@@ -125,6 +125,8 @@ def _make_config(*, provider: str = "azure", **overrides: Any) -> dict[str, Any]
             model="openai/gpt-4o",
             api_key="test-key",
         )
+    elif provider == "bedrock":
+        base.update(model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0")
     base.update(overrides)
     return base
 
@@ -1280,6 +1282,20 @@ class TestLimiterDispatch:
         transform.on_start(ctx)
 
         mock_registry.get_limiter.assert_called_once_with("openrouter")
+
+    def test_bedrock_provider_gets_bedrock_limiter(self) -> None:
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        transform = LLMTransform(_make_config(provider="bedrock"))
+        mock_registry = _RegistryDouble()
+        ctx = _make_ctx()
+        ctx.landscape = object()
+        ctx.rate_limit_registry = mock_registry
+        ctx.telemetry_emit = lambda event: None
+
+        transform.on_start(ctx)
+
+        mock_registry.get_limiter.assert_called_once_with("bedrock")
 
 
 # ---------------------------------------------------------------------------

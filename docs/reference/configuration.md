@@ -470,10 +470,33 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `batch_distribution_profile` | Numeric-only batch distribution statistics; use `batch_top_k` for categorical counts/frequencies |
 | `report_assemble` | Assemble a batch of text rows into one report/text row with pagination metadata |
 | `web_scrape` | HTML content extraction with SSRF prevention |
-| `llm` | Unified LLM transform (azure/openrouter providers, single/multi-query) |
+| `llm` | Unified LLM transform (azure/openrouter/bedrock providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
 | `azure_prompt_shield` | Detect prompt injection via Azure AI |
 | `rag_retrieval` | Enriches rows with retrieval-augmented context from search providers |
+
+### AWS Bedrock LLM
+
+Bedrock uses LiteLLM with the ordinary AWS default credential chain. On ECS,
+grant Bedrock permissions to the task role; do not put access keys in plugin
+configuration.
+
+```yaml
+transforms:
+  - name: classify_with_bedrock
+    plugin: llm
+    input: classify_in
+    on_success: output
+    on_error: discard
+    options:
+      provider: bedrock
+      model: bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0
+      region_name: ap-southeast-2
+      prompt_template: "Classify: {{ row.text }}"
+      required_input_fields: [text]
+      schema:
+        mode: observed
+```
 
 ---
 

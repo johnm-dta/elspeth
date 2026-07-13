@@ -2,7 +2,7 @@
 
 LLMTransform dispatches to SingleQueryStrategy or MultiQueryStrategy
 based on whether queries are configured. Provider dispatch (Azure,
-OpenRouter) is handled via _PROVIDERS registry.
+OpenRouter, Bedrock) is handled via _PROVIDERS registry.
 
 Architecture:
     LLMTransform (BatchTransformMixin)
@@ -65,6 +65,7 @@ from elspeth.plugins.transforms.llm.provider import (
     UnrecognizedFinishReason,
 )
 from elspeth.plugins.transforms.llm.providers.azure import AzureLLMProvider, AzureOpenAIConfig, _configure_azure_monitor
+from elspeth.plugins.transforms.llm.providers.bedrock import BedrockConfig, BedrockLLMProvider
 from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig, OpenRouterLLMProvider
 from elspeth.plugins.transforms.llm.templates import PromptTemplate
 from elspeth.plugins.transforms.llm.tracing import AzureAITracingConfig, TracingConfig, parse_tracing_config
@@ -245,12 +246,13 @@ def _finish_reason_error(
 
 # NOTE: type[LLMProvider] won't work here — mypy doesn't support type[Protocol]
 # for structural subtyping. The concrete classes (AzureLLMProvider,
-# OpenRouterLLMProvider) are verified against LLMProvider by mypy at their
+# OpenRouterLLMProvider, BedrockLLMProvider) are verified against LLMProvider by mypy at their
 # definition sites. The provider class is stored here for documentation only —
 # actual construction uses isinstance narrowing in _create_provider().
 _PROVIDERS: dict[str, tuple[type[LLMConfig], type]] = {
     "azure": (AzureOpenAIConfig, AzureLLMProvider),
     "openrouter": (OpenRouterConfig, OpenRouterLLMProvider),
+    "bedrock": (BedrockConfig, BedrockLLMProvider),
 }
 
 
@@ -1136,6 +1138,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     Provider dispatch:
         "azure"      → AzureOpenAIConfig + AzureLLMProvider
         "openrouter" → OpenRouterConfig  + OpenRouterLLMProvider
+        "bedrock"    → BedrockConfig     + BedrockLLMProvider
 
     Strategy selection:
         queries is not None → MultiQueryStrategy
@@ -1145,7 +1148,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3fc088bae7b9cbd0"
+    source_file_hash: str | None = "sha256:f9c12f2ca3ff6888"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1317,10 +1320,10 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         config_cls, _ = _PROVIDERS[provider_name]
 
         # Parse config with provider-specific model.
-        # config_cls is AzureOpenAIConfig or OpenRouterConfig at runtime;
+        # config_cls is one of the registered provider config classes at runtime;
         # from_dict() returns Self on the subclass, but mypy sees type[LLMConfig].
         self._config = cast(
-            "AzureOpenAIConfig | OpenRouterConfig",
+            "AzureOpenAIConfig | OpenRouterConfig | BedrockConfig",
             config_cls.from_dict(config, plugin_name=self.name),
         )
         self._initialize_declared_input_fields(self._config)
@@ -1363,8 +1366,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         # uses unprefixed fields.
 
         # Tracer — factory returns frozen ActiveLangfuseTracer or NoOpLangfuseTracer.
-        # tracing lives on provider-specific configs (AzureOpenAIConfig, OpenRouterConfig),
-        # both of which define tracing: dict[str, Any] | None.
+        # Tracing lives on every provider-specific config, each of which
+        # defines tracing: dict[str, Any] | None.
         tracing_config = parse_tracing_config(self._config.tracing) if self._config.tracing else None
         self._tracing_config: TracingConfig | None = tracing_config
 
@@ -1479,7 +1482,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._batch_initialized = False
 
     @property
-    def provider_config(self) -> AzureOpenAIConfig | OpenRouterConfig:
+    def provider_config(self) -> AzureOpenAIConfig | OpenRouterConfig | BedrockConfig:
         """Read-only accessor for the typed provider config.
 
         Exposes the post-validation ``LLMConfig`` subclass so cross-cutting
@@ -1559,7 +1562,13 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._run_id = ctx.run_id
         self._telemetry_emit = ctx.telemetry_emit
         self._shutdown_event = ctx.shutdown_event
-        limiter_name = "azure_openai" if isinstance(self._config, AzureOpenAIConfig) else "openrouter"
+        limiter_name = (
+            "azure_openai"
+            if isinstance(self._config, AzureOpenAIConfig)
+            else "bedrock"
+            if isinstance(self._config, BedrockConfig)
+            else "openrouter"
+        )
         self._limiter = ctx.rate_limit_registry.get_limiter(limiter_name) if ctx.rate_limit_registry is not None else None
 
         # Create provider now that recorder/telemetry are available
@@ -1617,6 +1626,15 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 api_key=self._config.api_key,
                 base_url=self._config.base_url,
                 timeout_seconds=self._config.timeout_seconds,
+                recorder=self._recorder,
+                run_id=self._run_id,
+                telemetry_emit=self._telemetry_emit,
+                limiter=self._limiter,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
+            )
+        elif isinstance(self._config, BedrockConfig):
+            return BedrockLLMProvider(
+                region_name=self._config.region_name,
                 recorder=self._recorder,
                 run_id=self._run_id,
                 telemetry_emit=self._telemetry_emit,
@@ -1687,7 +1705,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             return PluginAssistance(
                 plugin_name="llm",
                 issue_code=None,
-                summary="Call an LLM provider (Azure OpenAI or OpenRouter) on each row and write the response into a field. Tracks model identity, token usage, and finish reason in the audit trail.",
+                summary="Call an LLM provider (Azure OpenAI, OpenRouter, or AWS Bedrock) on each row and write the response into a field. Tracks model identity, token usage, and finish reason in the audit trail.",
                 examples=(
                     PluginAssistanceExample(
                         # A minimal before/after option diff (the established example
@@ -1780,7 +1798,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
 
 # Register opt-in for value-source compliance: the typed Pydantic config
-# (OpenRouterConfig | AzureOpenAIConfig) is exposed via the public
+# (OpenRouterConfig | AzureOpenAIConfig | BedrockConfig) is exposed via the public
 # ``provider_config`` property. The walker (engine/orchestrator/preflight.py)
 # uses this registration to find the typed config without resorting to
 # duck-typing or getattr.

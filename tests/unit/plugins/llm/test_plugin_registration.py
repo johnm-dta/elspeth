@@ -32,6 +32,12 @@ class TestLLMPluginConfigDispatch:
         config_model = get_transform_config_model("llm", {"provider": "openrouter"})
         assert config_model is OpenRouterConfig
 
+    def test_llm_plugin_dispatches_to_bedrock_config(self) -> None:
+        from elspeth.plugins.transforms.llm.providers.bedrock import BedrockConfig
+
+        config_model = get_transform_config_model("llm", {"provider": "bedrock"})
+        assert config_model is BedrockConfig
+
     def test_llm_plugin_missing_provider_falls_back_to_base(self) -> None:
         """verify missing provider key returns LLMConfig (Pydantic catches the Literal validation)."""
         from elspeth.plugins.transforms.llm.base import LLMConfig

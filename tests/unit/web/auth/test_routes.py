@@ -44,6 +44,19 @@ class _NoopAuthAuditRecorder:
         return None
 
 
+class _AuditWriteFailure(OSError):
+    pass
+
+
+class _RaisingAuthAuditRecorder(_NoopAuthAuditRecorder):
+    def __init__(self) -> None:
+        self.failures: list[dict[str, object]] = []
+
+    def record_auth_failure(self, *args, **kwargs) -> None:
+        self.failures.append(kwargs)
+        raise _AuditWriteFailure("audit persistence unavailable")
+
+
 @dataclass
 class _FakeAuthProvider:
     authenticate_result: UserIdentity = field(default_factory=lambda: UserIdentity(user_id="alice", username="alice"))
@@ -1102,6 +1115,23 @@ class TestMeErrorPath:
             )
         assert response.status_code == 401
         assert response.json()["detail"] == "Profile lookup failed"
+
+    async def test_me_profile_failure_propagates_audit_write_failure(self) -> None:
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Profile lookup failed"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        recorder = _RaisingAuthAuditRecorder()
+        app.state.auth_audit_recorder = recorder
+
+        async with _client_for(app) as client:
+            with pytest.raises(_AuditWriteFailure):
+                await client.get(
+                    "/api/auth/me",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["provider"] == "oidc"
+        assert recorder.failures[0]["failure_stage"] == "profile_lookup"
 
     async def test_me_get_user_info_failure_records_profile_lookup_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"

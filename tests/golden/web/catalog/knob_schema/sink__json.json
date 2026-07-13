@@ -19,15 +19,6 @@
       },
       {
         "default": null,
-        "description": "Header output mode: 'normalized', 'original', or {field: header} mapping",
-        "kind": "json-value",
-        "label": "Headers",
-        "name": "headers",
-        "nullable": false,
-        "required": false
-      },
-      {
-        "default": null,
         "description": "Optional local output collision policy. 'fail_if_exists' refuses an existing write target; 'auto_increment' picks a free sibling path; 'append_or_create' is valid with append mode.",
         "enum": [
           "fail_if_exists",
@@ -38,6 +29,15 @@
         "label": "Collision Policy",
         "name": "collision_policy",
         "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Header output mode: 'normalized', 'original', or {field: header} mapping",
+        "kind": "json-value",
+        "label": "Headers",
+        "name": "headers",
+        "nullable": false,
         "required": false
       },
       {

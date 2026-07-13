@@ -359,11 +359,11 @@ sinks:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `database`, `azure_blob`, `dataverse`, `chroma_sink` |
+| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `text`, `database`, `azure_blob`, `dataverse`, `chroma_sink` |
 | `on_write_failure` | string | **Yes** | Per-row write failure handling: `discard` to drop with audit record, or a sink name to divert to a failsink |
 | `options` | object | No | Plugin-specific configuration |
 
-For local file sinks (`csv`, `json`), `options.collision_policy` can make output-path collisions explicit:
+For local file sinks (`csv`, `json`, `text`), `options.collision_policy` can make output-path collisions explicit:
 
 | Policy | Use with | Behavior |
 |--------|----------|----------|
@@ -377,10 +377,26 @@ For local file sinks (`csv`, `json`), `options.collision_policy` can make output
 |--------|---------|
 | `csv` | Write to CSV file |
 | `json` | Write to JSON file |
+| `text` | Write one configured string field per row as canonical LF-delimited text |
 | `database` | Write to SQL database |
 | `azure_blob` | Write to Azure Blob Storage |
 | `dataverse` | Write to Microsoft Dataverse via OData v4 REST API |
 | `chroma_sink` | Write to a ChromaDB vector database |
+
+### Text sink contract
+
+The `text` sink requires `path`, `schema`, and `field`. The named field must be
+present on every accepted row and its value must already be a string; the sink
+does not coerce other values. Embedded CR or LF characters are rejected so each
+row remains exactly one record, and every written record ends with canonical LF.
+Supported encodings are `utf-8`, `ascii`, `latin-1`, and `cp1252`.
+
+Use `mode: append` with `collision_policy: append_or_create` for append or
+resume. Before appending, ELSPETH verifies that existing bytes decode in the
+configured encoding, contain no CR separators, and end on an LF record
+boundary. The text sink is not eligible as a generic failure sink because it
+writes only one selected field and therefore cannot preserve an arbitrary
+rejected row losslessly.
 
 ---
 

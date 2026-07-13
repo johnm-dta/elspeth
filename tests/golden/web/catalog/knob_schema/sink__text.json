@@ -32,27 +32,22 @@
         "required": false
       },
       {
-        "default": null,
-        "description": "Header output mode: 'normalized', 'original', or {field: header} mapping",
-        "kind": "json-value",
-        "label": "Headers",
-        "name": "headers",
-        "nullable": false,
-        "required": false
-      },
-      {
-        "default": ",",
-        "description": "Single-character delimiter used when writing CSV fields.",
+        "description": "String field written as one line per row.",
         "kind": "text",
-        "label": "Delimiter",
-        "name": "delimiter",
+        "label": "Field",
+        "name": "field",
         "nullable": false,
-        "required": false
+        "required": true
       },
       {
         "default": "utf-8",
-        "description": "Text encoding used when writing the CSV file.",
-        "kind": "text",
+        "enum": [
+          "utf-8",
+          "ascii",
+          "latin-1",
+          "cp1252"
+        ],
+        "kind": "enum",
         "label": "Encoding",
         "name": "encoding",
         "nullable": false,
@@ -60,7 +55,6 @@
       },
       {
         "default": "write",
-        "description": "Whether to create/replace the CSV file or append rows.",
         "enum": [
           "write",
           "append"
@@ -74,5 +68,5 @@
     ]
   },
   "plugin_kind": "sink",
-  "plugin_name": "csv"
+  "plugin_name": "text"
 }

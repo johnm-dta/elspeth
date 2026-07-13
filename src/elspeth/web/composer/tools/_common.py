@@ -1658,6 +1658,27 @@ def _missing_output_options_repair_error(
     validation_error: str | None,
 ) -> str:
     """Return an exact output-object repair hint for omitted sink options."""
+    if plugin_name == "text":
+        path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
+        repair_output = {
+            "sink_name": sink_name,
+            "plugin": plugin_name,
+            "options": {
+                "path": f"outputs/{path_fragment}.txt",
+                "schema": {"mode": "observed"},
+                "field": "line_text",
+                "mode": "write",
+                "collision_policy": "auto_increment",
+            },
+            "on_write_failure": on_write_failure,
+        }
+        detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+        return (
+            f"Output '{sink_name}' is missing options. For the text file sink, include path, schema, field, mode, "
+            f"and collision_policy. Use this runnable output object and replace line_text with the actual selected "
+            f"string field: {json.dumps(repair_output)}.{detail}"
+        )
+
     if plugin_name in FILE_SINK_REPAIR_EXTENSIONS:
         path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
         extension = FILE_SINK_REPAIR_EXTENSIONS[plugin_name]

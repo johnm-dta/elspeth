@@ -225,6 +225,7 @@ class TestDiscoverAllPlugins:
         sink_names = [cls.name for cls in discovered["sinks"]]  # type: ignore[attr-defined]
         assert "csv" in sink_names
         assert "json" in sink_names
+        assert "text" in sink_names
         assert "database" in sink_names
 
     def test_no_duplicate_names_within_type(self) -> None:
@@ -253,7 +254,7 @@ class TestDiscoverAllPlugins:
         EXPECTED_TRANSFORM_COUNT = (
             29  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval + blob_fetch + blob_csv_expand
         )
-        EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
+        EXPECTED_SINK_COUNT = 7  # csv, json, text, database, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()
 

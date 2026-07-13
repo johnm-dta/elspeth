@@ -7712,6 +7712,19 @@ class TestSetPipeline:
         ]
         return catalog
 
+    def _catalog_with_text_sink(self) -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_sinks.return_value = [
+            *catalog.list_sinks.return_value,
+            PluginSummary(
+                name="text",
+                description="Line-oriented text file sink",
+                plugin_type="sink",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
     def test_set_pipeline_creates_valid_state(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -7799,6 +7812,24 @@ class TestSetPipeline:
         assert '"schema": {"mode": "observed"}' in error
         assert '"collision_policy": "auto_increment"' in error
         assert '"on_write_failure": "discard"' in error
+
+    def test_set_pipeline_missing_text_output_options_returns_runnable_repair_hint(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_text_sink()
+        args = _valid_pipeline_args()
+        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        del args["outputs"][0]["options"]
+        args["outputs"][0]["plugin"] = "text"
+
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+
+        assert result.success is False
+        error = result.data["error"]
+        assert '"plugin": "text"' in error
+        assert '"path": "outputs/main.txt"' in error
+        assert '"field": "line_text"' in error
+        assert '"mode": "write"' in error
+        assert '"collision_policy": "auto_increment"' in error
 
     def test_set_pipeline_failure_leads_validation_with_rejection_reason(self) -> None:
         """Regression for composer session 58d7ede3 round 6.

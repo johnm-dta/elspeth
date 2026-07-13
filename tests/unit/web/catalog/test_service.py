@@ -135,6 +135,11 @@ class TestListSinks:
         names = [s.name for s in sinks]
         assert "csv" in names
 
+    def test_text_sink_present(self, catalog: CatalogServiceImpl) -> None:
+        sinks = catalog.list_sinks()
+        names = [s.name for s in sinks]
+        assert "text" in names
+
     def test_all_entries_have_sink_type(self, catalog: CatalogServiceImpl) -> None:
         sinks = catalog.list_sinks()
         for s in sinks:
@@ -206,6 +211,22 @@ class TestGetSchema:
         assert info.name == "csv"
         assert info.plugin_type == "sink"
         assert isinstance(info.json_schema, dict)
+
+    def test_text_sink_schema_matches_model_json_schema(self, catalog: CatalogServiceImpl) -> None:
+        from elspeth.plugins.sinks.text_sink import TextSinkConfig
+
+        info = catalog.get_schema("sink", "text")
+        assert info.name == "text"
+        assert info.plugin_type == "sink"
+        assert info.json_schema == TextSinkConfig.model_json_schema()
+        assert {field["name"] for field in info.knob_schema["fields"]} >= {
+            "path",
+            "schema",
+            "field",
+            "encoding",
+            "mode",
+            "collision_policy",
+        }
 
     def test_null_source_returns_empty_schema(self, catalog: CatalogServiceImpl) -> None:
         info = catalog.get_schema("source", "null")

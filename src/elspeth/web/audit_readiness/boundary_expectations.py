@@ -137,6 +137,7 @@ EXPECTED_SINK_DETERMINISMS: dict[str, Determinism] = {
     "database": Determinism.IO_WRITE,
     "dataverse": Determinism.EXTERNAL_CALL,
     "json": Determinism.IO_WRITE,
+    "text": Determinism.IO_WRITE,
 }
 
 EXPECTED_TRANSFORM_DETERMINISMS: dict[str, Determinism] = {

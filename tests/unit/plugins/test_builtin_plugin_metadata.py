@@ -66,6 +66,11 @@ class TestBuiltinSinkMetadata:
         assert isinstance(JSONSink.plugin_version, str)
         assert JSONSink.plugin_version != "0.0.0", "JSONSink has placeholder version"
 
+    def test_text_sink_has_exact_initial_plugin_version(self) -> None:
+        from elspeth.plugins.sinks.text_sink import TextSink
+
+        assert TextSink.plugin_version == "1.0.0"
+
     def test_database_sink_has_plugin_version(self) -> None:
         """DatabaseSink must have non-default plugin_version."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink

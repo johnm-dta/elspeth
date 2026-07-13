@@ -16,6 +16,7 @@ from pydantic import Field, field_validator, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink import OutputValidationResult
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import LocalFileSinkConfig, OutputCollisionPolicy
@@ -64,7 +65,7 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fc7aa725b76d34e0"
+    source_file_hash: str | None = "sha256:485dfdac600b33e0"
     config_model = TextSinkConfig
     supports_resume = True
 
@@ -179,8 +180,7 @@ class TextSink(BaseSink):
             with os.fdopen(temp_fd, "wb") as stream:
                 stream.write(base)
                 stream.write(staged)
-                stream.flush()
-                os.fsync(stream.fileno())
+                self._sync_stream(stream)
 
             candidate_hasher = self._hash_path(temp_path)
             candidate_stat = self._artifact_stat(temp_path)
@@ -209,12 +209,10 @@ class TextSink(BaseSink):
             raise RuntimeError("TextSink append handle was not initialized")
         handle.flush()
         offset = os.fstat(handle.fileno()).st_size
-        candidate_hasher = self._hasher.copy()
         try:
             handle.write(staged)
-            handle.flush()
-            os.fsync(handle.fileno())
-            candidate_hasher.update(staged)
+            self._sync_stream(handle)
+            candidate_hasher = self._extend_hasher(staged)
             candidate_stat = self._artifact_stat(self._path)
         except BaseException:
             try:
@@ -304,6 +302,17 @@ class TextSink(BaseSink):
                 hasher.update(chunk)
         return hasher
 
+    def _extend_hasher(self, staged: bytes) -> hashlib._Hash:
+        if self._hasher is None:
+            raise RuntimeError("TextSink hasher was not initialized")
+        candidate = self._hasher.copy()
+        candidate.update(staged)
+        return candidate
+
+    def _sync_stream(self, stream: IO[bytes]) -> None:
+        stream.flush()
+        os.fsync(stream.fileno())
+
     def _artifact_stat(self, path: Path) -> os.stat_result:
         return path.stat()
 
@@ -317,11 +326,27 @@ class TextSink(BaseSink):
     def flush(self) -> None:
         """Flush and fsync the persistent append handle, when open."""
         if self._file is not None:
-            self._file.flush()
-            os.fsync(self._file.fileno())
+            self._sync_stream(self._file)
 
     def close(self) -> None:
         """Close the persistent append handle; repeated calls are safe."""
         if self._file is not None:
             self._file.close()
             self._file = None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Write one configured string field per row as canonical LF-delimited text.",
+                composer_hints=(
+                    "Set field to the configured field whose value should become each output line; every accepted value must be a string.",
+                    "Text values containing CR or LF are rejected rather than escaped, so one input row always maps to exactly one output record.",
+                    "Choose only utf-8, ascii, latin-1, or cp1252; values not representable in the configured encoding are diverted without leaking their content.",
+                    "Use mode: append with collision_policy: append_or_create for append/resume; existing bytes must decode cleanly and end with canonical LF.",
+                    "Text is not a generic failure sink because it deliberately writes only one configured field and cannot preserve a rejected row losslessly.",
+                ),
+            )
+        return None

@@ -303,6 +303,30 @@ def test_append_failure_rolls_back_to_original_bytes(tmp_path: Path) -> None:
     assert path.read_bytes() == b"existing\n"
 
 
+def test_append_flush_failure_rolls_back_to_original_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "out.txt"
+    path.write_bytes(b"existing\n")
+    sink = inject_write_failure(TextSink(_config(path, mode="append", collision_policy="append_or_create")))
+
+    sink._sync_stream = lambda _handle: (_ for _ in ()).throw(OSError("flush failed"))
+    with pytest.raises(OSError, match="flush failed"):
+        sink.write([{"line_text": "new"}], _sink_context())
+
+    assert path.read_bytes() == b"existing\n"
+
+
+def test_append_hash_failure_rolls_back_to_original_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "out.txt"
+    path.write_bytes(b"existing\n")
+    sink = inject_write_failure(TextSink(_config(path, mode="append", collision_policy="append_or_create")))
+
+    sink._extend_hasher = lambda _staged: (_ for _ in ()).throw(OSError("hash failed"))
+    with pytest.raises(OSError, match="hash failed"):
+        sink.write([{"line_text": "new"}], _sink_context())
+
+    assert path.read_bytes() == b"existing\n"
+
+
 def test_failed_append_can_retry_without_replaying_failed_batch(tmp_path: Path) -> None:
     path = tmp_path / "out.txt"
     path.write_bytes(b"existing\n")
@@ -333,6 +357,29 @@ def test_write_mode_precommit_failure_preserves_preexisting_target(tmp_path: Pat
     with pytest.raises(OSError, match="stat failed"):
         sink.write([{"line_text": "new"}], _sink_context())
     assert path.read_bytes() == b"existing\n"
+
+
+def test_second_write_precommit_failure_preserves_first_committed_batch(tmp_path: Path) -> None:
+    path = tmp_path / "out.txt"
+    sink = inject_write_failure(TextSink(_config(path)))
+    sink.write([{"line_text": "first"}], _sink_context())
+
+    sink._artifact_stat = lambda _: (_ for _ in ()).throw(OSError("stat failed"))
+    with pytest.raises(OSError, match="stat failed"):
+        sink.write([{"line_text": "second"}], _sink_context())
+
+    assert path.read_bytes() == b"first\n"
+
+
+def test_exclusive_reservation_is_removed_after_precommit_failure(tmp_path: Path) -> None:
+    path = tmp_path / "out.txt"
+    sink = inject_write_failure(TextSink(_config(path, collision_policy="fail_if_exists")))
+    sink._artifact_stat = lambda _: (_ for _ in ()).throw(OSError("stat failed"))
+
+    with pytest.raises(OSError, match="stat failed"):
+        sink.write([{"line_text": "new"}], _sink_context())
+
+    assert not path.exists()
 
 
 def test_write_mode_post_replace_failure_keeps_committed_new_target(tmp_path: Path) -> None:
@@ -376,3 +423,15 @@ def test_close_is_idempotent_after_append(tmp_path: Path) -> None:
 
     sink.close()
     sink.close()
+
+
+def test_text_sink_assistance_pins_strict_line_and_resume_contract() -> None:
+    assistance = TextSink.get_agent_assistance(issue_code=None)
+
+    assert assistance is not None
+    hints = " ".join(assistance.composer_hints)
+    assert "configured field" in hints
+    assert "string" in hints
+    assert "CR or LF" in hints
+    assert "append" in hints
+    assert "resume" in hints

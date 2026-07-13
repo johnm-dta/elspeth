@@ -367,7 +367,7 @@ If this test fails for any output that ELSPETH produced, the contract is broken.
 | Provider | Use case | Validation surface |
 |----------|----------|--------------------|
 | Local username/password | Development; air-gapped deployments | Per-deployment user database; bcrypt-hashed credentials |
-| OpenID Connect | Federated identity against a generic OIDC IdP | Issuer URL validation; JWKS verification; ID-token signature, audience, expiry, nonce |
+| OpenID Connect | Federated identity against a generic OIDC IdP or Cognito user pool | Exact issuer and JWKS verification; bearer access-token signature and required expiry; configured `aud` or Cognito `client_id`/`token_use=access` binding; authorization-code S256 PKCE and single-use state callback |
 | Microsoft Entra ID | Enterprise federation against Azure AD / Entra | All OIDC checks plus tenant ID validation; optional group-claim assertion |
 
 ### 11.2 Principal Recording

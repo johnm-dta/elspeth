@@ -3305,6 +3305,7 @@ def web(
         port=port,
         reload=reload,
         factory=True,
+        access_log=False,
     )
 
 

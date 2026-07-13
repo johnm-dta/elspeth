@@ -131,6 +131,7 @@ class AuthConfigResponse(_StrictResponse):
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
 
 
 def _mark_token_response_uncacheable(response: Response) -> None:
@@ -446,6 +447,7 @@ def create_auth_router() -> APIRouter:
             oidc_issuer=settings.oidc_issuer,
             oidc_client_id=settings.oidc_client_id,
             authorization_endpoint=request.app.state.oidc_authorization_endpoint,
+            token_endpoint=request.app.state.oidc_token_endpoint,
         )
 
     @router.get("/me", response_model=UserProfileResponse)

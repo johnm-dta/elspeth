@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from pydantic import SecretBytes, ValidationError
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
@@ -30,6 +31,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
     _BodySizeLimitMiddleware,
+    _BrowserDocumentHeadersMiddleware,
     _periodic_orphan_cleanup,
     _settings_from_env,
     create_app,
@@ -370,6 +372,42 @@ class TestCORSMiddleware:
         assert "access-control-allow-origin" not in response.headers
 
 
+class TestBrowserDocumentHeaders:
+    """The SPA response carries callback secrecy and exact runtime CSP."""
+
+    @staticmethod
+    def _app(token_endpoint: str | None) -> FastAPI:
+        app = FastAPI()
+        app.state.oidc_token_endpoint = token_endpoint
+        app.add_middleware(_BrowserDocumentHeadersMiddleware)
+
+        @app.get("/")
+        def index() -> StarletteResponse:
+            return StarletteResponse("<html></html>", media_type="text/html")
+
+        return app
+
+    def test_callback_document_is_no_referrer_and_non_cacheable(self) -> None:
+        with TestClient(self._app(None)) as client:
+            response = client.get("/?code=secret&state=state")
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Content-Security-Policy"].endswith("connect-src 'self' ws://localhost:* wss://localhost:*")
+
+    def test_csp_adds_only_exact_validated_cross_origin_token_origin(self) -> None:
+        endpoint = "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/token"
+        with TestClient(self._app(endpoint)) as client:
+            response = client.get("/")
+        csp = response.headers["Content-Security-Policy"]
+        assert csp.endswith("connect-src 'self' ws://localhost:* wss://localhost:* https://example.auth.ap-southeast-2.amazoncognito.com")
+        assert "https:" not in csp.replace("https://example.auth.ap-southeast-2.amazoncognito.com", "")
+        assert "*" not in csp.replace("ws://localhost:*", "").replace("wss://localhost:*", "")
+
+    def test_source_index_has_no_static_csp_meta(self) -> None:
+        index = (Path(__file__).parents[3] / "src/elspeth/web/frontend/index.html").read_text(encoding="utf-8")
+        assert 'http-equiv="Content-Security-Policy"' not in index
+
+
 class TestBodySizeLimitMiddleware:
     """Tests that the 10 MB body-size guard rejects oversized requests.
 
@@ -705,16 +743,60 @@ class TestOidcDiscoveryStartup:
             secret_key="dev-secret",
         )
 
+    def test_create_app_threads_client_id_mode_only_to_oidc(self, tmp_path) -> None:
+        oidc_app = create_app(
+            _settings(
+                tmp_path / "oidc",
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="client",
+                oidc_client_id="client",
+                oidc_audience_claim="client_id",
+                secret_key="dev-secret",
+            )
+        )
+        assert oidc_app.state.auth_provider._validator._audience_claim == "client_id"
+
+        entra_app = create_app(
+            _settings(
+                tmp_path / "entra",
+                auth_provider="entra",
+                oidc_audience="client",
+                oidc_client_id="client",
+                entra_tenant_id="tenant",
+                secret_key="dev-secret",
+            )
+        )
+        assert entra_app.state.auth_provider._validator._audience_claim == "aud"
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "payload",
         [
             [],
-            {"authorization_endpoint": 123},
-            {"authorization_endpoint": "   "},
-            {"authorization_endpoint": "javascript:alert(1)"},
-            {"authorization_endpoint": "http://issuer.example.com/oauth2/authorize"},
-            {"authorization_endpoint": "https://evil.example.com/oauth2/authorize"},
+            {"issuer": "https://issuer.example.com", "authorization_endpoint": 123, "token_endpoint": "https://issuer.example.com/token"},
+            {"issuer": "https://issuer.example.com", "authorization_endpoint": "   ", "token_endpoint": "https://issuer.example.com/token"},
+            {
+                "issuer": "https://issuer.example.com",
+                "authorization_endpoint": "javascript:alert(1)",
+                "token_endpoint": "https://issuer.example.com/token",
+            },
+            {
+                "issuer": "https://issuer.example.com",
+                "authorization_endpoint": "http://issuer.example.com/oauth2/authorize",
+                "token_endpoint": "https://issuer.example.com/token",
+            },
+            {
+                "issuer": "https://issuer.example.com",
+                "authorization_endpoint": "https://evil.example.com/oauth2/authorize",
+                "token_endpoint": "https://evil.example.com/token",
+            },
+            {
+                "issuer": "https://wrong.example.com",
+                "authorization_endpoint": "https://issuer.example.com/oauth2/authorize",
+                "token_endpoint": "https://issuer.example.com/token",
+            },
+            {"issuer": "https://issuer.example.com", "authorization_endpoint": "https://issuer.example.com/oauth2/authorize"},
         ],
     )
     async def test_lifespan_rejects_invalid_discovery_authorization_endpoint(self, tmp_path, payload) -> None:
@@ -733,10 +815,33 @@ class TestOidcDiscoveryStartup:
         """Discovery authorization endpoints are stored only after issuer-origin validation."""
         app = create_app(self._oidc_settings(tmp_path))
 
-        payload = {"authorization_endpoint": "https://issuer.example.com/oauth2/authorize"}
+        payload = {
+            "issuer": "https://issuer.example.com",
+            "authorization_endpoint": "https://issuer.example.com/oauth2/authorize",
+            "token_endpoint": "https://issuer.example.com/oauth2/token",
+        }
         with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([_StaticJsonResponse(payload)])):
             async with lifespan(app):
                 assert app.state.oidc_authorization_endpoint == "https://issuer.example.com/oauth2/authorize"
+                assert app.state.oidc_token_endpoint == "https://issuer.example.com/oauth2/token"
+
+    @pytest.mark.asyncio
+    async def test_lifespan_accepts_exact_allowlisted_cognito_discovery_pair(self, tmp_path) -> None:
+        settings = self._oidc_settings(tmp_path).model_copy(
+            update={
+                "oidc_issuer": "https://cognito-idp.ap-southeast-2.amazonaws.com/pool-id",
+                "oidc_authorization_allowed_origins": ("https://example.auth.ap-southeast-2.amazoncognito.com",),
+            }
+        )
+        app = create_app(settings)
+        payload = {
+            "issuer": "https://cognito-idp.ap-southeast-2.amazonaws.com/pool-id",
+            "authorization_endpoint": "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/authorize",
+            "token_endpoint": "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/token",
+        }
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([_StaticJsonResponse(payload)])):
+            async with lifespan(app):
+                assert app.state.oidc_token_endpoint == payload["token_endpoint"]
 
 
 class TestLifespanShutdown:
@@ -1061,6 +1166,27 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__SERVER_SECRET_ALLOWLIST", '["MY_KEY"]')
         settings = _settings_from_env()
         assert settings.server_secret_allowlist == ("MY_KEY",)
+
+    def test_oidc_authorization_allowed_origins_from_json(self, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "ELSPETH_WEB__OIDC_AUTHORIZATION_ALLOWED_ORIGINS",
+            '["https://Login.Example.com:443/"]',
+        )
+        monkeypatch.setenv("ELSPETH_WEB__AUTH_PROVIDER", "oidc")
+        monkeypatch.setenv("ELSPETH_WEB__OIDC_ISSUER", "https://issuer.example.com")
+        monkeypatch.setenv("ELSPETH_WEB__OIDC_AUDIENCE", "audience")
+        monkeypatch.setenv("ELSPETH_WEB__OIDC_CLIENT_ID", "client")
+        settings = _settings_from_env()
+        assert settings.oidc_authorization_allowed_origins == ("https://login.example.com",)
+
+    @pytest.mark.parametrize("raw", ["not-json", "null", "{}", '"string"', "[1]", '["https://a.example", null]'])
+    def test_oidc_authorization_allowed_origins_rejects_bad_json_without_echo(self, monkeypatch, raw: str) -> None:
+        monkeypatch.setenv("ELSPETH_WEB__OIDC_AUTHORIZATION_ALLOWED_ORIGINS", raw)
+        with pytest.raises((RuntimeError, ValidationError)) as raised:
+            _settings_from_env()
+        rendered = str(raised.value)
+        assert "oidc_authorization_allowed_origins" in rendered.lower()
+        assert raw not in rendered
 
     @pytest.mark.parametrize(
         ("raw_allowlist", "match"),

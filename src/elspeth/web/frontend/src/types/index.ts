@@ -24,6 +24,7 @@ export interface AuthConfig {
   oidc_issuer: string | null;
   oidc_client_id: string | null;
   authorization_endpoint: string | null;
+  token_endpoint?: string | null;
 }
 
 /**

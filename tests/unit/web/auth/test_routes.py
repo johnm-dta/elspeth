@@ -94,6 +94,7 @@ def _create_test_app(provider, auth_provider_type: str = "local", **settings_ove
         **settings_overrides,
     )
     app.state.oidc_authorization_endpoint = None
+    app.state.oidc_token_endpoint = None
     app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
     # Auth rate limiter — generous limit for tests that aren't testing rate limiting
     app.state.auth_rate_limiter = ComposerRateLimiter(limit=100)
@@ -931,6 +932,8 @@ class TestAuthConfigEndpoint:
             oidc_audience="test-audience",
             oidc_client_id="my-client-id",
         )
+        app.state.oidc_authorization_endpoint = "https://login.example.com/oauth2/authorize"
+        app.state.oidc_token_endpoint = "https://login.example.com/oauth2/token"
 
         async with _client_for(app) as client:
             response = await client.get("/api/auth/config")
@@ -939,6 +942,18 @@ class TestAuthConfigEndpoint:
         assert body["provider"] == "oidc"
         assert body["oidc_issuer"] == "https://login.example.com"
         assert body["oidc_client_id"] == "my-client-id"
+        assert body["authorization_endpoint"] == "https://login.example.com/oauth2/authorize"
+        assert body["token_endpoint"] == "https://login.example.com/oauth2/token"
+        assert set(body) == {
+            "provider",
+            "registration_mode",
+            "oidc_issuer",
+            "oidc_client_id",
+            "authorization_endpoint",
+            "token_endpoint",
+        }
+        assert "oidc_authorization_allowed_origins" not in body
+        assert "oidc_audience_claim" not in body
 
     async def test_config_endpoint_is_unauthenticated(self) -> None:
         """GET /api/auth/config must not require a Bearer token."""

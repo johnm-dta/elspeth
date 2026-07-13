@@ -25,7 +25,7 @@ from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.util.types import AttributeValue
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -52,7 +52,11 @@ from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
-from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
+from elspeth.web.auth.urls import (
+    oidc_browser_endpoint_origin,
+    validate_oidc_browser_endpoints,
+    validate_oidc_issuer,
+)
 from elspeth.web.aws_ecs_startup import (
     _CONNECT_TIMEOUT_SECONDS,
     AwsEcsSchemaNotReadyError,
@@ -136,26 +140,41 @@ def _dispose_session_engine(engine: Engine) -> None:
     engine.dispose()
 
 
-class _AuthorizationEndpointDiscoveryDocument(BaseModel):
-    """Minimal OIDC discovery shape required by the web app."""
+class _BrowserEndpointDiscoveryDocument(BaseModel):
+    """Minimal OIDC discovery shape required by the browser login flow."""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+    issuer: str
     authorization_endpoint: str
+    token_endpoint: str
 
-    @field_validator("authorization_endpoint")
+    @field_validator("issuer", "authorization_endpoint", "token_endpoint")
     @classmethod
-    def _validate_authorization_endpoint(cls, value: str) -> str:
+    def _validate_nonblank(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("authorization_endpoint must not be blank")
+            raise ValueError("discovery browser endpoint field must not be blank")
         return value
 
 
-def _validate_authorization_endpoint_discovery_document(discovery: object, *, issuer: str) -> str:
-    """Validate the discovery document shape and return authorization_endpoint."""
+def _validate_browser_endpoint_discovery_document(
+    discovery: object,
+    *,
+    issuer: str,
+    allowed_origins: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Validate discovery issuer and return its exact browser endpoint pair."""
     try:
-        document = _AuthorizationEndpointDiscoveryDocument.model_validate(discovery)
+        document = _BrowserEndpointDiscoveryDocument.model_validate(discovery)
     except ValidationError as exc:
-        raise ValueError("OIDC discovery document must provide a non-empty string 'authorization_endpoint'") from exc
-    return validate_oidc_authorization_endpoint(document.authorization_endpoint, issuer=issuer)
+        raise ValueError("OIDC discovery document failed required browser endpoint shape check") from exc
+    if document.issuer != issuer:
+        raise ValueError("OIDC discovery document failed exact issuer check")
+    return validate_oidc_browser_endpoints(
+        document.authorization_endpoint,
+        document.token_endpoint,
+        issuer=issuer,
+        allowed_origins=allowed_origins,
+    )
 
 
 def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
@@ -323,7 +342,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             attributes={"source": "startup", "excluded_live_runs": 0},
         )
 
-    # Resolve OIDC authorization_endpoint from discovery or explicit config
+    # Resolve the paired browser endpoints from discovery or explicit config.
     if settings.auth_provider in ("oidc", "entra"):
         if settings.oidc_issuer:
             issuer = validate_oidc_issuer(settings.oidc_issuer)
@@ -332,26 +351,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
 
-        if settings.oidc_authorization_endpoint:
-            app.state.oidc_authorization_endpoint = validate_oidc_authorization_endpoint(
+        if settings.oidc_authorization_endpoint and settings.oidc_token_endpoint:
+            authorization_endpoint, token_endpoint = validate_oidc_browser_endpoints(
                 settings.oidc_authorization_endpoint,
+                settings.oidc_token_endpoint,
                 issuer=issuer,
+                allowed_origins=settings.oidc_authorization_allowed_origins,
             )
+            app.state.oidc_authorization_endpoint = authorization_endpoint
+            app.state.oidc_token_endpoint = token_endpoint
         else:
             discovery_url = f"{issuer}/.well-known/openid-configuration"
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                     resp = await client.get(discovery_url)
                     resp.raise_for_status()
-                    app.state.oidc_authorization_endpoint = _validate_authorization_endpoint_discovery_document(
+                    authorization_endpoint, token_endpoint = _validate_browser_endpoint_discovery_document(
                         resp.json(),
                         issuer=issuer,
+                        allowed_origins=settings.oidc_authorization_allowed_origins,
                     )
+                    app.state.oidc_authorization_endpoint = authorization_endpoint
+                    app.state.oidc_token_endpoint = token_endpoint
             except (httpx.HTTPError, ValueError) as exc:
                 raise SystemExit(
-                    f"FATAL: OIDC discovery failed for issuer {issuer!r}: {exc}. "
-                    f"Either fix the issuer URL or set oidc_authorization_endpoint explicitly."
-                ) from exc
+                    f"FATAL: OIDC discovery failed browser endpoint check ({type(exc).__name__}). "
+                    "Configure a valid explicit authorization_endpoint/token_endpoint pair or fix discovery."
+                ) from None
 
     # Sub-5: Construct ProgressBroadcaster and ExecutionServiceImpl
     # These require a running event loop, which is only available here.
@@ -567,7 +593,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # Fields that accept JSON-encoded collection values from environment variables.
 # Add any new tuple-typed WebSettings fields here so _settings_from_env()
 # JSON-decodes them.  Scalar fields (str, int, float, Path) are handled by Pydantic.
-_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset({"cors_origins", "server_secret_allowlist"})
+_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset({"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins"})
 
 
 def _settings_from_env() -> WebSettings:
@@ -602,10 +628,10 @@ def _settings_from_env() -> WebSettings:
                 # message that names the offending variable.
                 try:
                     parsed = json.loads(value)
-                except (json.JSONDecodeError, ValueError) as exc:
+                except (json.JSONDecodeError, ValueError):
                     raise RuntimeError(
-                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON (a JSON array for collection-typed settings), got {value!r}."
-                    ) from exc
+                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON array for collection-typed settings."
+                    ) from None
                 kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
             elif value == "null":
                 kwargs[field_name] = None
@@ -678,6 +704,41 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
                 media_type="application/json",
             )
         return await call_next(request)
+
+
+_SPA_CSP_PREFIX = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "font-src 'self'; img-src 'self' data:; "
+    "connect-src 'self' ws://localhost:* wss://localhost:*"
+)
+
+
+class _BrowserDocumentHeadersMiddleware(BaseHTTPMiddleware):
+    """Apply callback secrecy headers and the runtime OIDC connect policy."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        if not content_type.lower().startswith("text/html"):
+            return response
+
+        connect_origin: str | None = None
+        token_endpoint = getattr(request.app.state, "oidc_token_endpoint", None)
+        if isinstance(token_endpoint, str):
+            token_origin = oidc_browser_endpoint_origin(token_endpoint)
+            request_port = request.url.port
+            default_port = 443 if request.url.scheme == "https" else 80
+            request_host = request.url.hostname or ""
+            request_origin = f"{request.url.scheme}://{request_host.lower()}"
+            if request_port not in (None, default_port):
+                request_origin += f":{request_port}"
+            if token_origin != request_origin:
+                connect_origin = token_origin
+
+        response.headers["Content-Security-Policy"] = _SPA_CSP_PREFIX if connect_origin is None else f"{_SPA_CSP_PREFIX} {connect_origin}"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 def create_app(settings: WebSettings | None = None) -> FastAPI:
@@ -834,6 +895,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # is acceptable: the response carries the standard 413 semantics and
     # a body-too-large rejection has no useful pairing to a slog event.
     app.add_middleware(_BodySizeLimitMiddleware)
+    app.add_middleware(_BrowserDocumentHeadersMiddleware)
 
     app.state.settings = settings
 
@@ -892,6 +954,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             audience=settings.oidc_audience,
             jwks_cache_ttl_seconds=settings.jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
+            audience_claim=settings.oidc_audience_claim,
         )
     elif settings.auth_provider == "entra":
         from elspeth.web.auth.entra import EntraAuthProvider
@@ -908,7 +971,8 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         raise RuntimeError(f"Unsupported auth provider: {settings.auth_provider}")
     app.state.auth_provider = auth_provider
     app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(settings)
-    app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra
+    app.state.oidc_authorization_endpoint = settings.oidc_authorization_endpoint
+    app.state.oidc_token_endpoint = settings.oidc_token_endpoint
 
     # W16/S3: Secret key production guard -- hard crash
     if settings.secret_key == "change-me-in-production" and not _allow_insecure_test_keys(settings.host):

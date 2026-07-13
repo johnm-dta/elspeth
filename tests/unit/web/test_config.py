@@ -811,11 +811,13 @@ class TestOIDCIssuerValidation:
             oidc_audience="my-audience",
             oidc_client_id="my-client-id",
             oidc_authorization_endpoint="https://issuer.example.com/oauth2/authorize",
+            oidc_token_endpoint="https://issuer.example.com/oauth2/token",
             **self._COMPOSER_DEFAULTS,
         )
 
         assert settings.oidc_issuer == "https://issuer.example.com/tenant/v2.0"
         assert settings.oidc_authorization_endpoint == "https://issuer.example.com/oauth2/authorize"
+        assert settings.oidc_token_endpoint == "https://issuer.example.com/oauth2/token"
 
 
 class TestOIDCBlankStringRejection:
@@ -901,35 +903,150 @@ class TestOIDCBlankStringRejection:
             )
 
     def test_oidc_http_authorization_endpoint_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="must be an HTTPS URL"):
+        with pytest.raises(ValidationError, match="HTTPS"):
             WebSettings(
                 auth_provider="oidc",
                 oidc_issuer="https://issuer.example.com",
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 oidc_authorization_endpoint="http://issuer.example.com/oauth2/authorize",
+                oidc_token_endpoint="https://issuer.example.com/oauth2/token",
                 **self._COMPOSER_DEFAULTS,
             )
 
     def test_oidc_cross_origin_authorization_endpoint_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="same origin as issuer"):
+        with pytest.raises(ValidationError, match="not allowed"):
             WebSettings(
                 auth_provider="oidc",
                 oidc_issuer="https://issuer.example.com",
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                oidc_token_endpoint="https://evil.example.com/oauth2/token",
                 **self._COMPOSER_DEFAULTS,
             )
 
     def test_entra_cross_origin_authorization_endpoint_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="same origin as issuer"):
+        with pytest.raises(ValidationError, match="not allowed"):
             WebSettings(
                 auth_provider="entra",
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 entra_tenant_id="test-tenant-id",
                 oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                oidc_token_endpoint="https://evil.example.com/oauth2/token",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_browser_fields_have_closed_defaults(self) -> None:
+        settings = WebSettings(**self._COMPOSER_DEFAULTS)
+        assert settings.oidc_authorization_allowed_origins == ()
+        assert settings.oidc_token_endpoint is None
+        assert settings.oidc_audience_claim == "aud"
+
+    def test_client_id_audience_claim_is_oidc_only(self) -> None:
+        settings = WebSettings(
+            auth_provider="oidc",
+            oidc_issuer="https://issuer.example.com",
+            oidc_audience="client",
+            oidc_client_id="client",
+            oidc_audience_claim="client_id",
+            **self._COMPOSER_DEFAULTS,
+        )
+        assert settings.oidc_audience_claim == "client_id"
+        for provider, fields in (
+            ("local", {}),
+            (
+                "entra",
+                {
+                    "oidc_audience": "client",
+                    "oidc_client_id": "client",
+                    "entra_tenant_id": "tenant",
+                },
+            ),
+        ):
+            with pytest.raises(ValidationError, match="audience claim"):
+                WebSettings(
+                    auth_provider=provider,  # type: ignore[arg-type]
+                    oidc_audience_claim="client_id",
+                    **fields,
+                    **self._COMPOSER_DEFAULTS,
+                )
+
+    def test_invalid_audience_claim_mode_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match=r"aud|client_id"):
+            WebSettings(
+                oidc_audience_claim="fallback",  # type: ignore[arg-type]
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    @pytest.mark.parametrize(
+        ("authorization_endpoint", "token_endpoint"),
+        [
+            ("https://issuer.example.com/oauth2/authorize", None),
+            (None, "https://issuer.example.com/oauth2/token"),
+        ],
+    )
+    def test_oidc_explicit_browser_endpoints_are_both_or_neither(
+        self,
+        authorization_endpoint: str | None,
+        token_endpoint: str | None,
+    ) -> None:
+        with pytest.raises(ValidationError, match="both or neither"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com/pool",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                oidc_authorization_endpoint=authorization_endpoint,
+                oidc_token_endpoint=token_endpoint,
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_cognito_cross_origin_pair_requires_exact_allowlist(self) -> None:
+        values = {
+            "auth_provider": "oidc",
+            "oidc_issuer": "https://cognito-idp.ap-southeast-2.amazonaws.com/pool-id",
+            "oidc_audience": "client-id",
+            "oidc_client_id": "client-id",
+            "oidc_authorization_endpoint": "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/authorize",
+            "oidc_token_endpoint": "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/token",
+            **self._COMPOSER_DEFAULTS,
+        }
+        with pytest.raises(ValidationError, match="not allowed"):
+            WebSettings(**values)
+        settings = WebSettings(
+            **values,
+            oidc_authorization_allowed_origins=("https://example.auth.ap-southeast-2.amazoncognito.com",),
+        )
+        assert settings.oidc_authorization_endpoint is not None
+        assert settings.oidc_token_endpoint is not None
+
+    @pytest.mark.parametrize("provider", ["local", "entra"])
+    def test_allowlist_is_oidc_only(self, provider: str) -> None:
+        provider_fields: dict[str, object] = {}
+        if provider == "entra":
+            provider_fields = {
+                "oidc_audience": "audience",
+                "oidc_client_id": "client",
+                "entra_tenant_id": "tenant",
+            }
+        with pytest.raises(ValidationError, match="allowlist"):
+            WebSettings(
+                auth_provider=provider,  # type: ignore[arg-type]
+                oidc_authorization_allowed_origins=("https://login.example.com",),
+                **provider_fields,
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_allowlist_is_validated_without_explicit_endpoints(self) -> None:
+        with pytest.raises(ValidationError, match="bare-origin"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="audience",
+                oidc_client_id="client",
+                oidc_authorization_allowed_origins=("https://host.example.com/not-an-origin",),
                 **self._COMPOSER_DEFAULTS,
             )
 

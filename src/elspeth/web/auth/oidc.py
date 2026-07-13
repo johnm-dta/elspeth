@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 import jwt
@@ -22,6 +22,23 @@ from elspeth.web.auth.urls import validate_oidc_issuer
 from elspeth.web.validation import has_visible_content
 
 slog = structlog.get_logger()
+
+
+@trust_boundary(
+    tier=3,
+    source="verified Cognito access-token claims",
+    source_param="payload",
+    suppresses=("R1", "R5"),
+    invariant="raises AuthenticationError unless client_id is the exact configured string and token_use is exactly access; never falls back to aud",
+)
+def _validate_cognito_access_claims(payload: dict[str, Any], *, audience: str) -> None:
+    """Bind a verified Cognito access token to its exact public app client."""
+    client_id = payload["client_id"] if "client_id" in payload else None
+    token_use = payload["token_use"] if "token_use" in payload else None
+    if not isinstance(client_id, str) or not client_id or client_id != audience:
+        raise AuthenticationError("Invalid token: client_id claim check failed")
+    if not isinstance(token_use, str) or token_use != "access":
+        raise AuthenticationError("Invalid token: token_use claim check failed")
 
 
 def optional_profile_claim(payload: dict[str, Any], claim_name: str) -> str | None:
@@ -47,9 +64,14 @@ class JWKSTokenValidator:
         audience: str,
         jwks_cache_ttl_seconds: int = 3600,
         jwks_failure_retry_seconds: int = 300,
+        *,
+        audience_claim: Literal["aud", "client_id"] = "aud",
     ) -> None:
         self._issuer = validate_oidc_issuer(issuer)
         self._audience = audience
+        if audience_claim not in ("aud", "client_id"):
+            raise ValueError("audience_claim must be aud or client_id")
+        self._audience_claim = audience_claim
         self._jwks_cache_ttl_seconds = jwks_cache_ttl_seconds
         # 300s default (5 min): JWKS keys rotate on the order of hours
         # to days, so serving stale keys for up to 5 minutes is safer
@@ -85,6 +107,9 @@ class JWKSTokenValidator:
         """
         if not isinstance(discovery, dict):
             raise AuthenticationError(f"OIDC discovery document is not a JSON object (got {type(discovery).__name__})")
+        discovery_issuer = discovery.get("issuer")
+        if not isinstance(discovery_issuer, str) or discovery_issuer != self._issuer:
+            raise AuthenticationError("OIDC discovery document failed exact issuer check")
         jwks_uri = discovery.get("jwks_uri")
         if not isinstance(jwks_uri, str) or not jwks_uri.strip():
             raise AuthenticationError("OIDC discovery document missing non-empty string 'jwks_uri'")
@@ -180,7 +205,7 @@ class JWKSTokenValidator:
             if alg is None:
                 return None
             if not isinstance(alg, str) or not alg.strip():
-                raise AuthenticationError(f"JWKS key for kid={kid!r} has invalid non-empty string 'alg' value")
+                raise AuthenticationError("JWKS key has invalid non-empty string 'alg' value")
             return alg
         return None
 
@@ -399,17 +424,33 @@ class JWKSTokenValidator:
                     matched_jwk = key
                     break
             if matched_jwk is None:
-                raise AuthenticationError(f"No matching key found in JWKS for kid={kid!r}")
+                raise AuthenticationError("Invalid token: signing key check failed")
             jwk_alg = self._get_jwk_algorithm(jwks, kid=kid)
             if jwk_alg is not None and jwk_alg != token_alg:
-                raise AuthenticationError(f"Token header alg {token_alg!r} does not match JWKS alg {jwk_alg!r} for kid={kid!r}")
-            payload: dict[str, Any] = jwt.decode(
-                token,
-                matched_jwk.key,
-                algorithms=[token_alg],
-                audience=self._audience,
-                issuer=self._issuer,
-            )
+                raise AuthenticationError("Invalid token: algorithm check failed")
+            if self._audience_claim == "client_id":
+                if token_alg != "RS256":
+                    raise AuthenticationError("Invalid token: Cognito algorithm check failed")
+                payload = jwt.decode(
+                    token,
+                    matched_jwk.key,
+                    algorithms=["RS256"],
+                    issuer=self._issuer,
+                    options={
+                        "verify_aud": False,
+                        "require": ["exp", "iat", "iss", "sub", "client_id", "token_use"],
+                    },
+                )
+                _validate_cognito_access_claims(payload, audience=self._audience)
+            else:
+                payload = jwt.decode(
+                    token,
+                    matched_jwk.key,
+                    algorithms=[token_alg],
+                    audience=self._audience,
+                    issuer=self._issuer,
+                    options={"require": ["exp"]},
+                )
         except PyJWTError as exc:
             # Class name only. PyJWT exception messages may echo claim
             # values (e.g. "Audience doesn't match. Expected: ... Got: ...")
@@ -428,12 +469,15 @@ class OIDCAuthProvider:
         audience: str,
         jwks_cache_ttl_seconds: int = 3600,
         jwks_failure_retry_seconds: int = 300,
+        *,
+        audience_claim: Literal["aud", "client_id"] = "aud",
     ) -> None:
         self._validator = JWKSTokenValidator(
             issuer,
             audience,
             jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds,
+            audience_claim=audience_claim,
         )
 
     async def authenticate(self, token: str) -> UserIdentity:
@@ -464,7 +508,7 @@ class OIDCAuthProvider:
 
     @trust_boundary(
         tier=3,
-        source="OIDC ID token from a remote IdP; decoded payload carries optional profile claims including 'groups'",
+        source="OIDC bearer access token from a remote IdP; decoded payload carries optional profile claims including 'groups'",
         source_param="token",
         suppresses=("R1",),
         invariant="raises AuthenticationError on malformed non-list 'groups'; treats absent 'groups' as no groups; never coerces scalar groups silently",

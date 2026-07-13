@@ -14,7 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationInfo, 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
-from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
+from elspeth.web.auth.urls import (
+    validate_oidc_browser_endpoints,
+    validate_oidc_browser_origins,
+    validate_oidc_issuer,
+)
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -88,7 +92,7 @@ class WebSettings(BaseModel):
     settings are constructed once and shared via app.state.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     host: str = "127.0.0.1"
     port: int = Field(default=8451, ge=1, le=65535)
@@ -242,6 +246,9 @@ class WebSettings(BaseModel):
     oidc_audience: str | None = None
     oidc_client_id: str | None = None
     oidc_authorization_endpoint: str | None = None
+    oidc_token_endpoint: str | None = None
+    oidc_authorization_allowed_origins: tuple[str, ...] = ()
+    oidc_audience_claim: Literal["aud", "client_id"] = "aud"
     entra_tenant_id: str | None = None
 
     # JWKS cache tuning (OIDC / Entra). Defaults match the provider
@@ -336,6 +343,7 @@ class WebSettings(BaseModel):
         "oidc_audience",
         "oidc_client_id",
         "oidc_authorization_endpoint",
+        "oidc_token_endpoint",
         "entra_tenant_id",
     )
     @classmethod
@@ -345,6 +353,11 @@ class WebSettings(BaseModel):
         if not v.strip():
             raise ValueError("must not be blank (omit the field or set to a non-empty value)")
         return v
+
+    @field_validator("oidc_authorization_allowed_origins")
+    @classmethod
+    def _validate_oidc_authorization_allowed_origins(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        return validate_oidc_browser_origins(v)
 
     @field_validator("landscape_url", "session_db_url")
     @classmethod
@@ -509,6 +522,10 @@ class WebSettings(BaseModel):
                 raise ValueError("public_base_url for a non-local email_verified host must be publicly reachable")
 
         if self.auth_provider == "local":
+            if self.oidc_audience_claim != "aud":
+                raise ValueError("Local auth does not permit the OIDC client_id audience claim mode")
+            if self.oidc_authorization_allowed_origins:
+                raise ValueError("Local auth does not permit the OIDC browser origin allowlist")
             configured = [
                 name
                 for name, val in (
@@ -516,6 +533,11 @@ class WebSettings(BaseModel):
                     ("oidc_audience", self.oidc_audience),
                     ("oidc_client_id", self.oidc_client_id),
                     ("oidc_authorization_endpoint", self.oidc_authorization_endpoint),
+                    ("oidc_token_endpoint", self.oidc_token_endpoint),
+                    (
+                        "oidc_authorization_allowed_origins",
+                        self.oidc_authorization_allowed_origins or None,
+                    ),
                     ("entra_tenant_id", self.entra_tenant_id),
                 )
                 if val is not None
@@ -536,15 +558,17 @@ class WebSettings(BaseModel):
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
             assert self.oidc_issuer is not None
             object.__setattr__(self, "oidc_issuer", validate_oidc_issuer(self.oidc_issuer))
-            if self.oidc_authorization_endpoint is not None:
-                object.__setattr__(
-                    self,
-                    "oidc_authorization_endpoint",
-                    validate_oidc_authorization_endpoint(
-                        self.oidc_authorization_endpoint,
-                        issuer=self.oidc_issuer,
-                    ),
+            if (self.oidc_authorization_endpoint is None) != (self.oidc_token_endpoint is None):
+                raise ValueError("OIDC authorization_endpoint and token_endpoint must be configured both or neither")
+            if self.oidc_authorization_endpoint is not None and self.oidc_token_endpoint is not None:
+                authorization_endpoint, token_endpoint = validate_oidc_browser_endpoints(
+                    self.oidc_authorization_endpoint,
+                    self.oidc_token_endpoint,
+                    issuer=self.oidc_issuer,
+                    allowed_origins=self.oidc_authorization_allowed_origins,
                 )
+                object.__setattr__(self, "oidc_authorization_endpoint", authorization_endpoint)
+                object.__setattr__(self, "oidc_token_endpoint", token_endpoint)
         elif self.auth_provider == "entra":
             # oidc_issuer is NOT required — EntraAuthProvider derives it
             # from entra_tenant_id (login.microsoftonline.com/{tid}/v2.0).
@@ -559,16 +583,21 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"Entra auth requires: {', '.join(missing)}")
-            if self.oidc_authorization_endpoint is not None:
+            if self.oidc_authorization_allowed_origins:
+                raise ValueError("Entra auth does not permit the OIDC browser origin allowlist")
+            if self.oidc_audience_claim != "aud":
+                raise ValueError("Entra auth does not permit the OIDC client_id audience claim mode")
+            if (self.oidc_authorization_endpoint is None) != (self.oidc_token_endpoint is None):
+                raise ValueError("Entra authorization_endpoint and token_endpoint must be configured both or neither")
+            if self.oidc_authorization_endpoint is not None and self.oidc_token_endpoint is not None:
                 assert self.entra_tenant_id is not None
-                object.__setattr__(
-                    self,
-                    "oidc_authorization_endpoint",
-                    validate_oidc_authorization_endpoint(
-                        self.oidc_authorization_endpoint,
-                        issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
-                    ),
+                authorization_endpoint, token_endpoint = validate_oidc_browser_endpoints(
+                    self.oidc_authorization_endpoint,
+                    self.oidc_token_endpoint,
+                    issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
                 )
+                object.__setattr__(self, "oidc_authorization_endpoint", authorization_endpoint)
+                object.__setattr__(self, "oidc_token_endpoint", token_endpoint)
         return self
 
     @model_validator(mode="after")

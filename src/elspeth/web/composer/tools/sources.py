@@ -70,6 +70,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolKind,
 )
 from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, SourceAuthoringMetadata
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.sessions.models import blobs_table
 
 _INSPECT_SOURCE_MAX_BYTES = 8 * 1024
@@ -464,6 +465,10 @@ def _execute_set_source(
     source_name = validated.source_name
     _validate_source_name_argument(source_name)
 
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(plugin, options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
+
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
     if plugin_error is not None:
@@ -563,6 +568,10 @@ def _execute_set_source_from_blob(
     source_name = validated.source_name
     _validate_source_name_argument(source_name)
 
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(validated.plugin, validated.options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
+
     # Caller options merge into the bound source's options, so a forged
     # "resolved" INVENTED_SOURCE requirement here would bypass human review even
     # though the blob path also re-stamps a pending requirement — guard at the
@@ -585,6 +594,10 @@ def _execute_set_source_from_blob(
     )
     if isinstance(resolved, ToolResult):
         return resolved
+
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(resolved.plugin, resolved.options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
 
     source = SourceSpec(
         plugin=resolved.plugin,
@@ -896,6 +909,9 @@ def _execute_patch_source_options(
             )
 
     new_options = _apply_merge_patch(current_source.options, patch)
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(current_source.plugin, new_options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=_source_component_id(source_name),

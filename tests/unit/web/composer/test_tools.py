@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -53,6 +53,7 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
 )
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -116,6 +117,58 @@ def _empty_state() -> CompositionState:
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+_AWS_S3_ENDPOINT_SENTINEL = "https://composer-canary.attacker.invalid/private"
+
+
+def _aws_s3_source_state() -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="aws_s3",
+            on_success="main",
+            options={},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=7,
+    )
+
+
+def _aws_s3_output_state() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="main",
+                plugin="aws_s3",
+                options={},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=7,
+    )
+
+
+def _assert_aws_s3_endpoint_url_rejected(
+    result: ToolResult,
+    original_state: CompositionState,
+    *,
+    forbidden_value: str = _AWS_S3_ENDPOINT_SENTINEL,
+) -> None:
+    assert result.success is False
+    assert result.updated_state is original_state
+    assert result.updated_state.version == original_state.version
+    assert result.data is not None
+    assert result.data["error"] == AWS_S3_ENDPOINT_URL_POLICY_ERROR
+    assert forbidden_value not in repr(result.data)
+    assert forbidden_value not in repr(result.validation)
 
 
 def _default_source(state: CompositionState) -> SourceSpec | None:
@@ -450,6 +503,204 @@ class TestPreviewPipelineSemanticContracts:
         assert len(result.data["semantic_contracts"]) == 1
         assert result.data["semantic_contracts"][0]["outcome"] == "conflict"
         assert result.data["semantic_contracts"][0]["consumer_plugin"] == "line_explode"
+
+
+class TestAwsS3EndpointUrlComposerPolicy:
+    def test_aws_s3_set_source_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "aws_s3",
+                "on_success": "main",
+                "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                "on_validation_failure": "discard",
+            },
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_patch_source_options_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _aws_s3_source_state()
+
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}},
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_output_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "aws_s3",
+                "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                "on_write_failure": "discard",
+            },
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_patch_output_options_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _aws_s3_output_state()
+
+        result = execute_tool(
+            "patch_output_options",
+            {"sink_name": "main", "patch": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}},
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_pipeline_named_source_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args.pop("source")
+        args["sources"] = {
+            "archive": {
+                "plugin": "aws_s3",
+                "on_success": "main",
+                "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                "on_validation_failure": "discard",
+            }
+        }
+        args["nodes"] = []
+        args["edges"] = []
+
+        result = execute_tool("set_pipeline", args, state, _mock_catalog())
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_pipeline_legacy_source_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args["source"]["plugin"] = "aws_s3"
+        args["source"]["options"] = {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}
+
+        result = execute_tool("set_pipeline", args, state, _mock_catalog())
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_pipeline_output_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args["outputs"][0]["plugin"] = "aws_s3"
+        args["outputs"][0]["options"] = {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}
+
+        result = execute_tool("set_pipeline", args, state, _mock_catalog())
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_apply_pipeline_recipe_delegation_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args["source"]["plugin"] = "aws_s3"
+        args["source"]["options"] = {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}
+
+        with patch("elspeth.web.composer.tools.sessions.apply_recipe", return_value=args):
+            result = execute_tool(
+                "apply_pipeline_recipe",
+                {"recipe_name": "aws_s3_policy_fixture", "slots": {}},
+                state,
+                _mock_catalog(),
+            )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_source_from_blob_rejects_raw_endpoint_url_before_lookup(self) -> None:
+        state = _empty_state()
+
+        with patch("elspeth.web.composer.tools.sources._resolve_source_blob") as mock_resolve:
+            mock_resolve.side_effect = AssertionError("blob lookup must not run")
+            result = execute_tool(
+                "set_source_from_blob",
+                {
+                    "blob_id": str(uuid4()),
+                    "plugin": "aws_s3",
+                    "on_success": "main",
+                    "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                },
+                state,
+                _mock_catalog(),
+            )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+        mock_resolve.assert_not_called()
+
+    def test_aws_s3_set_source_from_blob_rejects_resolved_endpoint_url_without_mutating_state(self) -> None:
+        from elspeth.web.composer.tools._common import ToolContext
+        from elspeth.web.composer.tools.sources import _execute_set_source_from_blob, _ResolvedSourceBlob
+
+        state = _empty_state()
+        resolved = _ResolvedSourceBlob(
+            plugin="aws_s3",
+            options={"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+            payload={
+                "blob_id": str(uuid4()),
+                "filename": "input.jsonl",
+                "mime_type": "application/jsonl",
+                "size_bytes": 1,
+                "content_hash": _STUB_SHA256,
+            },
+            creation_modality=CreationModality.VERBATIM,
+        )
+
+        with patch("elspeth.web.composer.tools.sources._resolve_source_blob", return_value=resolved):
+            result = _execute_set_source_from_blob(
+                {"blob_id": str(uuid4()), "on_success": "main", "options": {}},
+                state,
+                ToolContext(catalog=_mock_catalog()),
+            )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    @pytest.mark.parametrize(
+        ("target", "target_id", "state_factory"),
+        [
+            ("source", None, _aws_s3_source_state),
+            ("output", "main", _aws_s3_output_state),
+        ],
+    )
+    def test_aws_s3_wire_secret_ref_rejects_endpoint_url_without_mutating_state(
+        self,
+        target: str,
+        target_id: str | None,
+        state_factory: Callable[[], CompositionState],
+    ) -> None:
+        state = state_factory()
+        secret_name = "ENDPOINT_URL_SECRET_CANARY"
+        secret_service = _SecretServiceDouble()
+        secret_service.has_ref.return_value = True
+        arguments: dict[str, Any] = {
+            "name": secret_name,
+            "target": target,
+            "option_key": "endpoint_url",
+        }
+        if target_id is not None:
+            arguments["target_id"] = target_id
+
+        result = execute_tool(
+            "wire_secret_ref",
+            arguments,
+            state,
+            _mock_catalog(),
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state, forbidden_value=secret_name)
 
 
 class TestSetSource:

@@ -35,6 +35,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 
 
 class _SetOutputArgumentsModel(BaseModel):
@@ -132,13 +133,16 @@ def _execute_set_output(
     """Add or replace a pipeline output (sink)."""
     validated = cast(_SetOutputArgumentsModel, _validate_mutation_arguments(_SetOutputArgumentsModel, args, "set_output arguments"))
     plugin = validated.plugin
+    sink_options = validated.options
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(plugin, sink_options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(context.catalog, "sink", plugin)
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
 
     # S2: Validate sink path allowlist (mirrors source path check)
-    sink_options = validated.options
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=validated.sink_name,
@@ -222,6 +226,9 @@ def _execute_patch_output_options(
     if current is None:
         return _failure_result(state, f"Output '{sink_name}' not found.")
     new_options = _apply_merge_patch(current.options, patch)
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(current.plugin, new_options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=sink_name,

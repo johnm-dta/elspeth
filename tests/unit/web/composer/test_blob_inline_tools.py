@@ -22,6 +22,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools import ToolResult, execute_tool, get_tool_definitions
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -98,6 +99,29 @@ def _named_sources_state() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+def _aws_s3_endpoint_state() -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="aws_s3",
+            on_success="main",
+            options={},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="main",
+                plugin="aws_s3",
+                options={},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=5,
     )
 
 
@@ -246,6 +270,34 @@ class TestListComposerBlobs:
 
 
 class TestWireBlobInlineRef:
+    @pytest.mark.parametrize("field_path", ["source.options.endpoint_url", "output:main.options.endpoint_url"])
+    def test_aws_s3_endpoint_url_field_is_rejected_without_mutating_state(
+        self,
+        blob_env: dict[str, Any],
+        field_path: str,
+    ) -> None:
+        blob = _create_blob(blob_env, content="inline endpoint canary")
+        state = _aws_s3_endpoint_state()
+
+        result = execute_tool(
+            "wire_blob_inline_ref",
+            {
+                "field_path": field_path,
+                "blob_id": blob.data["blob_id"],
+            },
+            state,
+            _catalog(),
+            data_dir=blob_env["data_dir"],
+            session_engine=blob_env["engine"],
+            session_id=blob_env["session_id"],
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.updated_state.version == 5
+        assert result.data["error"] == AWS_S3_ENDPOINT_URL_POLICY_ERROR
+        assert blob.data["blob_id"] not in result.data["error"]
+
     def test_authors_marker_with_authoritative_pinned_hash(self, blob_env: dict[str, Any]) -> None:
         blob = _create_blob(blob_env, content="Pinned prompt")
         state = _inline_ref_state()

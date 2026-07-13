@@ -111,6 +111,7 @@ from elspeth.web.interpretation_state import (
     vague_term_wiring_count,
     validate_pipeline_decision_node_semantics,
 )
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.validation import (
     _reject_credential_shaped_content,
     _validate_accepted_value_content,
@@ -280,10 +281,13 @@ def _execute_set_pipeline(
                     "Bind blob-backed sources with set_source_from_blob, or use source for a single blob-backed pipeline.",
                 )
             src_plugin = source_model.plugin
+            src_options = dict(source_model.options)
+            endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, src_options)
+            if endpoint_policy_error is not None:
+                return _failure_result(state, endpoint_policy_error)
             plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
             if plugin_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {plugin_error}")
-            src_options = dict(source_model.options)
             manual_blob_ref_error = _reject_manual_source_blob_ref(src_options, tool_name="set_pipeline")
             if manual_blob_ref_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_blob_ref_error}")
@@ -321,6 +325,10 @@ def _execute_set_pipeline(
         if legacy_source_model is None:
             raise AssertionError("validated.source unexpectedly None after source/sources gate")
         src_plugin = legacy_source_model.plugin
+        legacy_src_options: Mapping[str, Any] = dict(legacy_source_model.options)
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, legacy_src_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
         plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
         if plugin_error is not None:
             return _failure_result(state, plugin_error)
@@ -330,7 +338,6 @@ def _execute_set_pipeline(
         # authoritative exactly as if create_blob + set_source_from_blob had been
         # called, but the LLM gets one audited tool decision instead of a serial
         # blob-then-source-then-pipeline conversation.
-        legacy_src_options: Mapping[str, Any] = dict(legacy_source_model.options)
         manual_blob_ref_error = _reject_manual_source_blob_ref(
             legacy_src_options,
             tool_name="set_pipeline",
@@ -437,6 +444,10 @@ def _execute_set_pipeline(
             }
             legacy_src_options = _options_with_inline_blob_source_review(legacy_src_options, prepared_inline_blob)
 
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, legacy_src_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
+
         path_error = _validate_source_path(legacy_src_options, data_dir)
         if path_error is not None:
             return _failure_result(state, path_error)
@@ -534,10 +545,13 @@ def _execute_set_pipeline(
     for index, output in enumerate(validated.outputs):
         out_name = output.sink_name
         out_plugin = output.plugin
+        out_options = output.options
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(out_plugin, out_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
         plugin_error = _validate_plugin_name(catalog, "sink", out_plugin)
         if plugin_error is not None:
             return _failure_result(state, f"Output '{out_name}': {plugin_error}")
-        out_options = output.options
         raw_out_args: Mapping[str, Any] = {}
         if isinstance(raw_outputs, list) and 0 <= index < len(raw_outputs):
             raw_entry = raw_outputs[index]

@@ -57,8 +57,47 @@ app = typer.Typer(
 )
 composer_app = typer.Typer(help="Composer web UI commands.")
 composer_users_app = typer.Typer(help="Local composer user management commands.")
+doctor_app = typer.Typer(help="Deployment readiness checks.")
 app.add_typer(composer_app, name="composer")
 composer_app.add_typer(composer_users_app, name="users")
+app.add_typer(doctor_app, name="doctor")
+
+
+@doctor_app.command("aws-ecs")
+def doctor_aws_ecs(
+    init_schema: bool = typer.Option(
+        False,
+        "--init-schema",
+        help="Initialize only eligible missing or repairable PostgreSQL schemas.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit a bare ordered JSON check list."),
+) -> None:
+    """Check whether this environment satisfies the AWS ECS contract."""
+    from dataclasses import asdict
+
+    from elspeth.web.app import _settings_from_env
+    from elspeth.web.deployment_contract import ContractCheck
+    from elspeth.web.doctor import collect_checks, sanitize_error
+
+    try:
+        settings = _settings_from_env()
+    except Exception as exc:
+        checks = [ContractCheck("settings_load", False, sanitize_error("web settings could not be loaded", exc))]
+    else:
+        try:
+            checks = collect_checks(settings, init_schema=init_schema)
+        except Exception as exc:
+            checks = [ContractCheck("doctor_internal_error", False, sanitize_error("doctor collection failed", exc))]
+
+    if json_output:
+        typer.echo(json.dumps([asdict(check) for check in checks]))
+    else:
+        for check in checks:
+            status = "OK" if check.ok else "FAIL"
+            typer.echo(f"{status} {check.name}: {check.detail}")
+
+    if not all(check.ok for check in checks):
+        raise typer.Exit(1)
 
 
 def version_callback(value: bool) -> None:

@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    false,
     or_,
     select,
     text,
@@ -189,7 +190,7 @@ runs_table = Table(
     # above; source_data_hash and plugin_versions remain on rows/nodes and
     # are aggregated by the read side instead of denormalized here.
     Column("llm_call_count", Integer, nullable=True),
-    Column("seeded_from_cache", Boolean, nullable=False, default=False, server_default=text("0")),
+    Column("seeded_from_cache", Boolean, nullable=False, default=False, server_default=false()),
     Column("cache_key", String(64), nullable=True),
     # OpenRouter model catalog snapshot anchor (audit-completeness):
     # records which catalog blessed the run's model decisions.  The sha

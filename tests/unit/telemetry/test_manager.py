@@ -160,6 +160,9 @@ class TestInitialization:
         manager = TelemetryManager(config, exporters=[])
         try:
             metrics = manager.health_metrics
+            assert metrics["events_attempted"] == 0
+            assert metrics["events_delivered"] == 0
+            assert metrics["events_failed"] == 0
             assert metrics["events_emitted"] == 0
             assert metrics["events_dropped"] == 0
             assert metrics["consecutive_total_failures"] == 0
@@ -938,6 +941,9 @@ class TestHealthMetrics:
         try:
             metrics = manager.health_metrics
             expected_keys = {
+                "events_attempted",
+                "events_delivered",
+                "events_failed",
                 "events_emitted",
                 "events_dropped",
                 "exporter_failures",
@@ -945,6 +951,7 @@ class TestHealthMetrics:
                 "queue_depth",
                 "queue_maxsize",
                 "circuit_breakers",
+                "exporter_delivery",
             }
             assert set(metrics.keys()) == expected_keys
         finally:
@@ -959,6 +966,9 @@ class TestHealthMetrics:
                 manager.handle_event(_lifecycle_event())
             _wait_for_processing(manager)
             assert manager.health_metrics["events_emitted"] == 5
+            assert manager.health_metrics["events_attempted"] == 5
+            assert manager.health_metrics["events_delivered"] == 5
+            assert manager.health_metrics["events_failed"] == 0
         finally:
             manager.close()
 

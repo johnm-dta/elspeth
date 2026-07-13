@@ -460,6 +460,20 @@ class TestUnknownExporter:
 
 
 class TestExporterDiscoveryRegistry:
+    def test_registry_is_exactly_vendor_neutral_builtins(self):
+        registry = _discover_exporter_registry()
+        assert set(registry) == {"console", "otlp", "azure_monitor", "datadog"}
+
+    def test_otlp_exporter_has_no_aws_service_sdk_dependency(self):
+        import inspect
+
+        import elspeth.telemetry.exporters.otlp as otlp_module
+
+        source = inspect.getsource(otlp_module)
+        assert "boto3" not in source
+        assert "botocore" not in source
+        assert "cloudwatch" not in source.lower()
+
     def test_registry_contains_console(self):
         registry = _discover_exporter_registry()
         assert "console" in registry

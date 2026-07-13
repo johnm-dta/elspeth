@@ -132,6 +132,10 @@ telemetry:
         headers:
           Authorization: "Bearer ${OTEL_TOKEN}"
         batch_size: 100  # Events per batch (default: 100)
+        service_name: elspeth
+        service_version: "0.7.1"  # optional
+        deployment_environment: production  # optional
+        cloud_provider: aws  # optional, explicit; the generic exporter is vendor-neutral
 ```
 
 **Required dependency:**
@@ -142,8 +146,47 @@ uv pip install opentelemetry-exporter-otlp-proto-grpc
 **Span mapping:**
 - `span.name` = Event class name (e.g., "TransformCompleted")
 - `span.trace_id` = Derived from `run_id` (consistent within run)
-- `span.attributes` = All event fields
+- `span.attributes` = A bounded allowlist of non-content event fields. Request/
+  response payloads, provider endpoints, exception text, credentials, URLs,
+  local paths, and raw AWS identifiers are never exported.
 - `span.start_time` = Event timestamp (instant spans - events are points in time)
+
+The delivery health snapshot distinguishes attempted, delivered, failed,
+dropped, and still-pending events. Buffering is not delivery. OTLP transport,
+flush, and shutdown failures are operational telemetry failures and never
+become evidence that a pipeline action did or did not occur.
+
+#### AWS ECS operator profile
+
+The AWS ECS web service uses the same vendor-neutral OTLP exporter and sends to
+the task-local collector. ELSPETH does not call CloudWatch APIs, perform SigV4,
+or accept AWS credentials for telemetry; the CloudWatch Agent sidecar owns
+those responsibilities through the ECS task role.
+
+```yaml
+telemetry:
+  enabled: true
+  granularity: lifecycle
+  fail_on_total_exporter_failure: false
+  exporters:
+    - name: otlp
+      options:
+        endpoint: http://127.0.0.1:4317
+        headers: {}
+        service_name: elspeth-web
+        service_version: "0.7.1"
+        deployment_environment: production
+        cloud_provider: aws
+        batch_size: 100
+```
+
+Landscape remains permanent, authoritative, and must-fire. Telemetry is
+ephemeral, operational, and best-effort; a collector receipt is never audit or
+lineage evidence. CLI and batch authors retain the generic endpoint/header
+contract and may opt into `lifecycle`, `rows`, or `full` volume. In AWS ECS web
+execution, the operator-owned overlay is mandatory, ignores uploaded telemetry
+routing, and permits only `lifecycle` or `rows`; `full` can carry request and
+response content and is rejected for production AWS operation.
 
 ### Azure Monitor Exporter
 

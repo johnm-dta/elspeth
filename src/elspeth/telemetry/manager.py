@@ -49,6 +49,9 @@ class HealthMetrics(TypedDict):
     This is Tier 1 (our data) — not external input.
     """
 
+    events_attempted: int
+    events_delivered: int
+    events_failed: int
     events_emitted: int
     events_dropped: int
     exporter_failures: dict[str, int]
@@ -56,6 +59,7 @@ class HealthMetrics(TypedDict):
     queue_depth: int
     queue_maxsize: int
     circuit_breakers: dict[str, dict[str, int | str]]
+    exporter_delivery: dict[str, dict[str, int | None]]
 
 
 class TelemetryManager:
@@ -127,6 +131,10 @@ class TelemetryManager:
 
         # Health metrics
         self._events_emitted = 0
+        self._events_attempted = 0
+        self._events_delivered = 0
+        self._events_failed = 0
+        self._pending_deferred_events = 0
         self._events_dropped = 0
         self._exporter_failures: defaultdict[str, int] = defaultdict(int)
         self._last_logged_drop_count: int = 0
@@ -180,11 +188,11 @@ class TelemetryManager:
                 self._dispatch_to_exporters(event)
             except TelemetryExporterError as e:
                 # Store for re-raise on flush() when fail_on_total=True
-                logger.error("Export loop failed unexpectedly", error=str(e))
+                logger.error("Export loop failed unexpectedly", error_type=type(e).__name__)
                 self._stored_exception = e
             except TELEMETRY_TRANSPORT_ERRORS as e:
                 # Transport failure — log but don't crash
-                logger.error("Export loop failed unexpectedly", error=str(e))
+                logger.error("Export loop failed unexpectedly", error_type=type(e).__name__)
             except Exception as e:
                 # Programming error — store for re-raise on flush()/close().
                 # Background thread can't raise to main thread directly.
@@ -212,6 +220,10 @@ class TelemetryManager:
         failures = 0
         skipped = 0  # Exporters skipped due to open circuit breaker
         successes = 0
+        immediate_success = False
+        delivered_counts: list[int] = []
+        failed_counts: list[int] = []
+        deferred = 0
 
         for exporter in self._exporters:
             breaker = self._circuit_breakers[id(exporter)]
@@ -227,11 +239,17 @@ class TelemetryManager:
                 continue
 
             try:
+                before = _exporter_delivery_metrics(exporter)
                 result = exporter.export(event)
+                after = _exporter_delivery_metrics(exporter)
+                delivered_delta = _metric_delta(before, after, "delivered")
+                failed_delta = _metric_delta(before, after, "failed")
                 if result is False:
                     breaker.record_failure()
                     failures += 1
                     self._exporter_failures[exporter.name] += 1
+                    if failed_delta:
+                        failed_counts.append(failed_delta)
                     logger.warning(
                         "Telemetry exporter reported handled failure",
                         exporter=exporter.name,
@@ -239,9 +257,17 @@ class TelemetryManager:
                         circuit_state=breaker.state.name,
                     )
                     continue
-
-                breaker.record_success()
-                successes += 1
+                if after is not None:
+                    if delivered_delta:
+                        breaker.record_success()
+                        successes += 1
+                        delivered_counts.append(delivered_delta)
+                    else:
+                        deferred += 1
+                else:
+                    breaker.record_success()
+                    successes += 1
+                    immediate_success = True
             except TELEMETRY_TRANSPORT_ERRORS as e:
                 # Transport/IO failure — isolate this exporter, don't crash.
                 # Any other exception is a programming error and propagates.
@@ -252,7 +278,7 @@ class TelemetryManager:
                     "Telemetry exporter failed",
                     exporter=exporter.name,
                     event_type=type(event).__name__,
-                    error=str(e),
+                    error_type=type(e).__name__,
                     circuit_state=breaker.state.name,
                 )
 
@@ -262,7 +288,12 @@ class TelemetryManager:
 
         if successes > 0:
             # At least one exporter succeeded
-            self._events_emitted += 1
+            delivered = 1 if immediate_success else max(delivered_counts, default=1)
+            if not immediate_success:
+                delivered = min(delivered, self._pending_deferred_events + 1)
+                self._pending_deferred_events = max(0, self._pending_deferred_events - max(0, delivered - 1))
+            self._events_emitted += delivered
+            self._events_delivered += delivered
             self._consecutive_total_failures = 0
         elif available_exporters == 0:
             # All exporters have open circuit breakers — event is dropped.
@@ -281,13 +312,17 @@ class TelemetryManager:
                         dropped_total=self._events_dropped,
                     )
                     self._last_logged_drop_count = self._events_dropped
-        elif failures == available_exporters:
+        elif failures == available_exporters and deferred == 0:
             # ALL available exporters failed this event
             self._consecutive_total_failures += 1
             # Lock required - pipeline thread also writes in DROP mode.
             # Log check MUST be inside lock to prevent race on _last_logged_drop_count
             with self._dropped_lock:
-                self._events_dropped += 1
+                failed = max(failed_counts, default=1)
+                failed = min(failed, self._pending_deferred_events + 1)
+                self._pending_deferred_events = max(0, self._pending_deferred_events - max(0, failed - 1))
+                self._events_failed += failed
+                self._events_dropped += failed
                 if self._events_dropped - self._last_logged_drop_count >= self._LOG_INTERVAL:
                     logger.error(
                         "ALL telemetry exporters failing - events dropped",
@@ -311,6 +346,10 @@ class TelemetryManager:
                         events_dropped=self._events_dropped,
                     )
                     self._disabled = True
+        elif deferred:
+            # A buffered exporter accepted the event, but no destination has
+            # acknowledged delivery yet.  Flush/batch completion resolves it.
+            self._pending_deferred_events += 1
 
     def handle_event(self, event: TelemetryEvent) -> None:
         """Queue event for async export.
@@ -342,6 +381,8 @@ class TelemetryManager:
         # Filter by granularity
         if not should_emit(event, self._config.granularity):
             return
+
+        self._events_attempted += 1
 
         # Check thread readiness and liveness
         if not self._export_thread_ready.is_set():
@@ -489,6 +530,9 @@ class TelemetryManager:
         with self._dropped_lock:
             events_dropped = self._events_dropped
         return {
+            "events_attempted": self._events_attempted,
+            "events_delivered": self._events_delivered,
+            "events_failed": self._events_failed,
             "events_emitted": self._events_emitted,
             "events_dropped": events_dropped,
             "exporter_failures": dict(self._exporter_failures),
@@ -499,6 +543,11 @@ class TelemetryManager:
             # The internal _circuit_breakers is keyed by id(exporter) which isn't serializable,
             # so we use sequential indexing with the name for human readability.
             "circuit_breakers": {f"{breaker.name}_{i}": breaker.metrics for i, breaker in enumerate(self._circuit_breakers.values())},
+            "exporter_delivery": {
+                f"{exporter.name}_{i}": metrics
+                for i, exporter in enumerate(self._exporters)
+                if (metrics := _exporter_delivery_metrics(exporter)) is not None
+            },
         }
 
     def flush(self) -> None:
@@ -527,7 +576,22 @@ class TelemetryManager:
 
         for exporter in self._exporters:
             try:
+                before = _exporter_delivery_metrics(exporter)
                 result = exporter.flush()
+                after = _exporter_delivery_metrics(exporter)
+                delivered_delta = _metric_delta(before, after, "delivered")
+                failed_delta = _metric_delta(before, after, "failed")
+                if delivered_delta:
+                    delivered = min(delivered_delta, self._pending_deferred_events)
+                    self._events_delivered += delivered
+                    self._events_emitted += delivered
+                    self._pending_deferred_events -= delivered
+                if failed_delta:
+                    failed = min(failed_delta, self._pending_deferred_events)
+                    self._events_failed += failed
+                    with self._dropped_lock:
+                        self._events_dropped += failed
+                    self._pending_deferred_events -= failed
                 if result is False:
                     breaker = self._circuit_breakers[id(exporter)]
                     breaker.record_failure()
@@ -543,7 +607,7 @@ class TelemetryManager:
                 logger.warning(
                     "Exporter flush failed",
                     exporter=exporter.name,
-                    error=str(e),
+                    error_type=type(e).__name__,
                 )
 
     def close(self) -> None:
@@ -602,16 +666,45 @@ class TelemetryManager:
         if self._export_thread.is_alive():
             logger.error("Export thread did not exit cleanly within timeout")
 
-        # 4. Close exporters
-        logger.info("Telemetry manager closing", **self.health_metrics)
+        # 4. Close exporters. Successful infrastructure lifecycle is not
+        # duplicated into logs; only telemetry-system failures below are logged.
         for exporter in self._exporters:
             try:
+                before = _exporter_delivery_metrics(exporter)
                 exporter.close()
+                after = _exporter_delivery_metrics(exporter)
+                lifecycle_failures = _metric_delta(before, after, "lifecycle_failures")
+                if lifecycle_failures:
+                    breaker = self._circuit_breakers[id(exporter)]
+                    breaker.record_failure()
+                    self._exporter_failures[exporter.name] += lifecycle_failures
             except TELEMETRY_TRANSPORT_ERRORS as e:
                 # Transport/IO failure — log, don't crash. Other exceptions
                 # are programming errors and propagate.
                 logger.warning(
                     "Exporter close failed",
                     exporter=exporter.name,
-                    error=str(e),
+                    error_type=type(e).__name__,
                 )
+
+
+def _exporter_delivery_metrics(exporter: ExporterProtocol) -> dict[str, int | None] | None:
+    """Read optional exporter-native delivery facts without widening protocol."""
+    metrics = getattr(exporter, "delivery_metrics", None)
+    if not isinstance(metrics, dict):
+        return None
+    return {str(key): value for key, value in metrics.items() if isinstance(value, int) or value is None}
+
+
+def _metric_delta(
+    before: dict[str, int | None] | None,
+    after: dict[str, int | None] | None,
+    key: str,
+) -> int:
+    if before is None or after is None:
+        return 0
+    old = before.get(key)
+    new = after.get(key)
+    if not isinstance(old, int) or not isinstance(new, int):
+        return 0
+    return max(0, new - old)

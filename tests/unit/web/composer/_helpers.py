@@ -169,6 +169,9 @@ def _mock_catalog() -> MagicMock:
             plugin_type="source",
             config_fields=[],
         ),
+        PluginSummary(name="text", description="Text source", plugin_type="source", config_fields=[]),
+        PluginSummary(name="json", description="JSON source", plugin_type="source", config_fields=[]),
+        PluginSummary(name="aws_s3", description="S3 source", plugin_type="source", config_fields=[]),
     ]
     catalog.list_transforms.return_value = [
         PluginSummary(
@@ -177,6 +180,14 @@ def _mock_catalog() -> MagicMock:
             plugin_type="transform",
             config_fields=[],
         ),
+        PluginSummary(name="field_mapper", description="Field mapper", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="llm", description="LLM", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="web_scrape", description="Web scrape", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="value_transform", description="Value transform", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="truncate", description="Truncate", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="type_coerce", description="Type coerce", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="batch_stats", description="Batch stats", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="batch_replicate", description="Batch replicate", plugin_type="transform", config_fields=[]),
     ]
     catalog.list_sinks.return_value = [
         PluginSummary(
@@ -185,6 +196,10 @@ def _mock_catalog() -> MagicMock:
             plugin_type="sink",
             config_fields=[],
         ),
+        PluginSummary(name="json", description="JSON sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="text", description="Text sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="aws_s3", description="S3 sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="database", description="Database sink", plugin_type="sink", config_fields=[]),
     ]
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",

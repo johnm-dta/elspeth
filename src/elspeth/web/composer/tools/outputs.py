@@ -25,6 +25,7 @@ from elspeth.web.composer.tools._common import (
     _credential_wiring_contract_failure,
     _failure_result,
     _mutation_result,
+    _plugin_policy_failure,
     _prevalidate_sink,
     _validate_mutation_arguments,
     _validate_plugin_name,
@@ -138,9 +139,9 @@ def _execute_set_output(
     if endpoint_policy_error is not None:
         return _failure_result(state, endpoint_policy_error)
     # Validate plugin exists in catalog
-    plugin_error = _validate_plugin_name(context.catalog, "sink", plugin)
+    plugin_error = _validate_plugin_name(context, "sink", plugin)
     if plugin_error is not None:
-        return _failure_result(state, plugin_error)
+        return _plugin_policy_failure(state, plugin_error)
 
     # S2: Validate sink path allowlist (mirrors source path check)
     credential_error = _credential_wiring_contract_failure(

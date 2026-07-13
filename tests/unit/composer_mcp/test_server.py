@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from elspeth.composer_mcp.server import _build_tool_defs, _dispatch_tool
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSummary
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
@@ -146,9 +147,16 @@ def _connection_valid_field_mapper_state_without_edges() -> CompositionState:
 
 def _mock_catalog() -> CatalogService:
     catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = []
-    catalog.list_transforms.return_value = []
-    catalog.list_sinks.return_value = []
+    catalog.list_sources.return_value = [
+        PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="value_transform", description="Value transform", plugin_type="transform", config_fields=[]),
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="json", description="JSON sink", plugin_type="sink", config_fields=[]),
+    ]
     return catalog
 
 
@@ -207,6 +215,27 @@ class TestBuildToolDefs:
 
 
 class TestDispatchTool:
+    def test_dispatch_constructs_explicit_trained_operator_policy(self, scratch_dir: Path) -> None:
+        from elspeth.web.catalog.policy_view import PolicyCatalogView
+        from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+
+        catalog = _mock_catalog()
+        real_snapshot_builder = PluginAvailabilitySnapshot.for_trained_operator
+        real_view_builder = PolicyCatalogView.for_trained_operator
+        with (
+            patch.object(
+                PluginAvailabilitySnapshot,
+                "for_trained_operator",
+                side_effect=real_snapshot_builder,
+            ) as snapshot_builder,
+            patch.object(PolicyCatalogView, "for_trained_operator", side_effect=real_view_builder) as view_builder,
+        ):
+            result = _dispatch_tool("list_sources", {}, _empty_state(), catalog, scratch_dir)
+
+        assert result["success"] is True
+        snapshot_builder.assert_called_once_with(catalog)
+        view_builder.assert_called_once()
+
     """Tests for _dispatch_tool() dispatch logic."""
 
     @pytest.fixture()

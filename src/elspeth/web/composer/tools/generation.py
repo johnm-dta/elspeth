@@ -43,13 +43,14 @@ from elspeth.web.composer.state import (
     _source_options_have_schema,
     _validate_gate_expression,
 )
-from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     _DATA_ERROR_KEY,
     ToolContext,
     ToolResult,
     _discovery_result,
     _failure_result,
+    _plugin_policy_failure,
+    _validate_plugin_name,
     diff_states,
 )
 from elspeth.web.composer.tools.blobs import (
@@ -234,11 +235,13 @@ def _handle_get_plugin_schema(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
+    plugin_type = arguments["plugin_type"]
+    name = arguments["name"]
+    policy_error = _validate_plugin_name(context, plugin_type, name)
+    if policy_error is not None:
+        return _plugin_policy_failure(state, policy_error)
     try:
-        schema = context.catalog.get_schema(arguments["plugin_type"], arguments["name"])
-        unavailable = schema_secret_unavailable_message(schema, context)
-        if unavailable is not None:
-            return _failure_result(state, unavailable)
+        schema = context.catalog.get_schema(plugin_type, name)
         return _discovery_result(state, schema)
     except (ValueError, KeyError) as exc:
         # ValueError: catalog contract for "unknown plugin/type"
@@ -553,13 +556,13 @@ def _execute_get_plugin_assistance(
         )
     plugin_type: PluginKind = plugin_type_raw
 
+    policy_error = _validate_plugin_name(context, plugin_type, plugin_name)
+    if policy_error is not None:
+        return _plugin_policy_failure(state, policy_error)
     try:
-        schema = context.catalog.get_schema(plugin_type, plugin_name)
+        context.catalog.get_schema(plugin_type, plugin_name)
     except (ValueError, KeyError) as exc:
         return _failure_result(state, str(exc))
-    unavailable = schema_secret_unavailable_message(schema, context)
-    if unavailable is not None:
-        return _failure_result(state, unavailable)
 
     manager = get_shared_plugin_manager()
     try:

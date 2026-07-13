@@ -1149,6 +1149,8 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         session_engine=session_engine,
         secret_service=app.state.scoped_secret_resolver,
         runtime_preflight_coordinator=runtime_preflight_coordinator,
+        plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
+        operator_profile_registry=app.state.operator_profile_registry,
     )
     app.state.composer_availability = app.state.composer_service.get_availability()
     app.state.composer_progress_registry = ComposerProgressRegistry()

@@ -24,6 +24,7 @@ from uuid import UUID
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer._compose_loop_carriers import (
     _CallModelOutcome,
     _DispatchOutcome,
@@ -94,6 +95,7 @@ from elspeth.web.composer.tools import (
     is_session_aware_tool,
 )
 from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 if TYPE_CHECKING:
     from elspeth.web.composer.service import ComposerServiceImpl
@@ -137,6 +139,8 @@ class ToolBatchContext:
     turn_session_uuid: UUID | None
     turn_preferences: ComposerSessionPreferencesRecord | None
     cancellation_requested: asyncio.Event
+    plugin_snapshot: PluginAvailabilitySnapshot
+    policy_catalog: PolicyCatalogView
 
 
 @dataclass(slots=True)
@@ -1118,7 +1122,8 @@ async def run_tool_batch(
                 _tool_name,
                 _arguments,
                 _state,
-                ctx.service._catalog,
+                ctx.policy_catalog,
+                plugin_snapshot=ctx.plugin_snapshot,
                 data_dir=ctx.service._data_dir,
                 session_engine=ctx.service._session_engine,
                 session_id=session_id,

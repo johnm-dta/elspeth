@@ -7,9 +7,12 @@ import json
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService
 
 PluginKind = Literal["source", "transform", "sink"]
 _PLUGIN_ID = re.compile(r"(source|transform|sink):([a-z][a-z0-9_]*)\Z")
@@ -110,8 +113,39 @@ class PluginAvailabilitySnapshot:
     selected: tuple[tuple[PluginCapability, PluginId | None], ...]
     usable_profile_aliases: tuple[tuple[PluginId, tuple[str, ...]], ...]
     selected_profile_aliases: tuple[tuple[PluginId, str | None], ...]
+    control_modes: tuple[tuple[PluginCapability, ControlMode], ...]
     binding_generation_fingerprint: str
     snapshot_hash: str
+
+    @classmethod
+    def for_trained_operator(cls, full_catalog: CatalogService) -> PluginAvailabilitySnapshot:
+        """Build the explicit unrestricted snapshot used by the local MCP.
+
+        Web requests must never reach this constructor.  Its deliberately
+        named call site makes the local trained-operator trust boundary
+        visible instead of overloading ``None`` as an implicit allow-all.
+        """
+        items = tuple(
+            [(PluginId("source", item.name), item) for item in full_catalog.list_sources()]
+            + [(PluginId("transform", item.name), item) for item in full_catalog.list_transforms()]
+            + [(PluginId("sink", item.name), item) for item in full_catalog.list_sinks()]
+        )
+        available = frozenset(plugin_id for plugin_id, _summary in items)
+        declared: dict[PluginCapability, list[PluginId]] = {capability: [] for capability in PluginCapability}
+        for plugin_id, summary in items:
+            for declaration in summary.policy_capabilities:
+                declared[declaration.capability].append(plugin_id)
+        selected = tuple((capability, min(plugin_ids) if plugin_ids else None) for capability, plugin_ids in declared.items())
+        return cls.create(
+            policy_hash="trained-operator",
+            principal_scope="local:trained-operator",
+            available=available,
+            unavailable=(),
+            selected=selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="trained-operator",
+        )
 
     @classmethod
     def create(
@@ -125,6 +159,7 @@ class PluginAvailabilitySnapshot:
         usable_profile_aliases: tuple[tuple[PluginId, tuple[str, ...]], ...],
         selected_profile_aliases: tuple[tuple[PluginId, str | None], ...],
         binding_generation_fingerprint: str,
+        control_modes: tuple[tuple[PluginCapability, ControlMode], ...] = (),
     ) -> PluginAvailabilitySnapshot:
         canonical = {
             "policy_hash": policy_hash,
@@ -134,6 +169,7 @@ class PluginAvailabilitySnapshot:
             "selected": [(capability.value, None if plugin_id is None else str(plugin_id)) for capability, plugin_id in selected],
             "usable_profile_aliases": [(str(plugin_id), list(aliases)) for plugin_id, aliases in usable_profile_aliases],
             "selected_profile_aliases": [(str(plugin_id), alias) for plugin_id, alias in selected_profile_aliases],
+            "control_modes": [(capability.value, mode.value) for capability, mode in control_modes],
             "binding_generation_fingerprint": binding_generation_fingerprint,
         }
         return cls(
@@ -144,6 +180,7 @@ class PluginAvailabilitySnapshot:
             selected=selected,
             usable_profile_aliases=usable_profile_aliases,
             selected_profile_aliases=selected_profile_aliases,
+            control_modes=control_modes,
             binding_generation_fingerprint=binding_generation_fingerprint,
             snapshot_hash=_canonical_hash(canonical),
         )

@@ -36,7 +36,6 @@ from elspeth.web.composer.state import (
     SourceSpec,
     validate_composer_source_name,
 )
-from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
@@ -50,6 +49,7 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _options_with_pending_requirement,
     _pending_interpretation_requirement,
+    _plugin_policy_failure,
     _prevalidate_source,
     _resolver_owned_interpretation_requirement_error,
     _validate_plugin_name,
@@ -89,7 +89,7 @@ def _handle_list_sources(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_sources(), context))
+    return _discovery_result(state, context.catalog.list_sources())
 
 
 _LIST_SOURCES_DECLARATION = ToolDeclaration(
@@ -470,9 +470,9 @@ def _execute_set_source(
         return _failure_result(state, endpoint_policy_error)
 
     # Validate plugin exists in catalog
-    plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
+    plugin_error = _validate_plugin_name(context, "source", plugin)
     if plugin_error is not None:
-        return _failure_result(state, plugin_error)
+        return _plugin_policy_failure(state, plugin_error)
 
     # Reject manual blob_ref injection.  The canonical write path for a
     # blob-backed source is set_source_from_blob, which forces the path to

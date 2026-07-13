@@ -19,7 +19,7 @@ import json
 import re
 import sys
 import time
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
@@ -50,6 +50,7 @@ from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.templates import extract_jinja2_fields
 from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import no_tool_policy as _no_tool_policy
 from elspeth.web.composer import tool_error_payloads as _tool_error_payloads
@@ -151,6 +152,8 @@ from elspeth.web.interpretation_state import (
     interpretation_sites,
     vague_term_wiring_count,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.validation import _redact_sensitive_content
@@ -831,6 +834,8 @@ class ComposerServiceImpl:
         session_engine: Engine | None = None,
         secret_service: WebSecretResolver | None = None,
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
+        operator_profile_registry: OperatorProfileRegistry | None = None,
     ) -> None:
         self._catalog = catalog
         self._sessions_service = sessions_service
@@ -841,6 +846,8 @@ class ComposerServiceImpl:
         self._data_dir: str = str(settings.data_dir)
         self._session_engine = session_engine
         self._secret_service = secret_service
+        self._plugin_snapshot_factory = plugin_snapshot_factory
+        self._operator_profile_registry = operator_profile_registry
         self._settings = settings
         self._runtime_preflight_timeout_seconds = settings.composer_runtime_preflight_timeout_seconds
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
@@ -898,6 +905,21 @@ class ComposerServiceImpl:
         # compose() call at a time; a plain dict is sufficient.
         self._schemas_loaded_by_session: dict[str, set[tuple[str, str]]] = {}
 
+    def _plugin_policy_context(
+        self,
+        user_id: str | None,
+    ) -> tuple[PluginAvailabilitySnapshot, PolicyCatalogView]:
+        """Build one immutable policy context for a complete compose call."""
+        if self._plugin_snapshot_factory is None:
+            snapshot = PluginAvailabilitySnapshot.for_trained_operator(self._catalog)
+            return snapshot, PolicyCatalogView.for_trained_operator(self._catalog, snapshot)
+        if user_id is None:
+            raise ComposerServiceError("Authenticated plugin policy context is required.")
+        if self._operator_profile_registry is None:
+            raise RuntimeError("operator_profile_registry not wired")
+        snapshot = self._plugin_snapshot_factory(user_id)
+        return snapshot, PolicyCatalogView(self._catalog, snapshot, self._operator_profile_registry)
+
     async def _run_one_turn_for_test(
         self,
         *,
@@ -938,6 +960,7 @@ class ComposerServiceImpl:
             return await llm(messages, tools)
 
         self._call_llm = _call_fake_llm  # type: ignore[method-assign]
+        plugin_snapshot, policy_catalog = self._plugin_policy_context(None)
         try:
             result = await self._compose_loop(
                 message,
@@ -946,6 +969,8 @@ class ComposerServiceImpl:
                 session_id=resolved_session_id,
                 initial_current_state_id=current_state_id,
                 deadline=asyncio.get_event_loop().time() + self._timeout_seconds,
+                plugin_snapshot=plugin_snapshot,
+                policy_catalog=policy_catalog,
             )
         finally:
             self._call_llm = original_call_llm  # type: ignore[method-assign]
@@ -1851,6 +1876,7 @@ class ComposerServiceImpl:
         # that is ultimately returned comes from ``_compose_loop``, not the
         # fast path.
         recorder = BufferingRecorder()
+        plugin_snapshot, policy_catalog = self._plugin_policy_context(user_id)
         try:
             routed_result = await self._try_apply_freeform_recipe_intent(
                 message=message,
@@ -1860,6 +1886,8 @@ class ComposerServiceImpl:
                 progress=progress,
                 user_message_id=user_message_id,
                 recorder=recorder,
+                plugin_snapshot=plugin_snapshot,
+                policy_catalog=policy_catalog,
             )
             if routed_result is not None:
                 return routed_result
@@ -1875,6 +1903,8 @@ class ComposerServiceImpl:
                 guided_terminal,
                 user_message_id,
                 recorder=recorder,
+                plugin_snapshot=plugin_snapshot,
+                policy_catalog=policy_catalog,
             )
         except ComposerConvergenceError as exc:
             await emit_progress(
@@ -1976,6 +2006,8 @@ class ComposerServiceImpl:
         progress: ComposerProgressSink | None,
         user_message_id: str | None,
         recorder: BufferingRecorder,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        policy_catalog: PolicyCatalogView,
     ) -> ComposerResult | None:
         """Apply a deterministic registered recipe before invoking the cheap model.
 
@@ -2022,7 +2054,8 @@ class ComposerServiceImpl:
             "create_blob",
             create_args,
             state,
-            self._catalog,
+            policy_catalog,
+            plugin_snapshot=plugin_snapshot,
             data_dir=self._data_dir,
             session_engine=self._session_engine,
             session_id=session_id,
@@ -2072,6 +2105,8 @@ class ComposerServiceImpl:
                 reason="create_blob_audit_unrecordable",
                 actor=actor,
                 recorder=recorder,
+                plugin_snapshot=plugin_snapshot,
+                policy_catalog=policy_catalog,
             )
             raise AuditIntegrityError(
                 "Recipe fast path executed create_blob successfully but could not canonicalize "
@@ -2095,7 +2130,8 @@ class ComposerServiceImpl:
             "apply_pipeline_recipe",
             recipe_args,
             state,
-            self._catalog,
+            policy_catalog,
+            plugin_snapshot=plugin_snapshot,
             data_dir=self._data_dir,
             session_engine=self._session_engine,
             session_id=session_id,
@@ -2115,6 +2151,8 @@ class ComposerServiceImpl:
                 reason="apply_pipeline_recipe_failed",
                 actor=actor,
                 recorder=recorder,
+                plugin_snapshot=plugin_snapshot,
+                policy_catalog=policy_catalog,
             )
             return None
 
@@ -2137,6 +2175,8 @@ class ComposerServiceImpl:
                 reason="apply_pipeline_recipe_audit_unrecordable",
                 actor=actor,
                 recorder=recorder,
+                plugin_snapshot=plugin_snapshot,
+                policy_catalog=policy_catalog,
             )
             raise AuditIntegrityError(
                 "Recipe fast path applied recipe "
@@ -2171,6 +2211,8 @@ class ComposerServiceImpl:
         reason: str,
         actor: str,
         recorder: BufferingRecorder,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        policy_catalog: PolicyCatalogView,
     ) -> None:
         """Best-effort deletion of a blob created by the recipe fast path.
 
@@ -2214,7 +2256,8 @@ class ComposerServiceImpl:
                     "delete_blob",
                     delete_args,
                     state,
-                    self._catalog,
+                    policy_catalog,
+                    plugin_snapshot=plugin_snapshot,
                     data_dir=self._data_dir,
                     session_engine=self._session_engine,
                     session_id=session_id,
@@ -2365,6 +2408,8 @@ class ComposerServiceImpl:
         session_scope: str,
         advisor_calls_used: int,
         cancellation_requested: asyncio.Event,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        policy_catalog: PolicyCatalogView,
     ) -> tuple[_DispatchOutcome, int]:
         """Phase P3 of the compose loop — delegates to :func:`tool_batch.run_tool_batch`."""
         from elspeth.web.composer.tool_batch import (
@@ -2400,6 +2445,8 @@ class ComposerServiceImpl:
             turn_session_uuid=turn_session_uuid,
             turn_preferences=turn_preferences,
             cancellation_requested=cancellation_requested,
+            plugin_snapshot=plugin_snapshot,
+            policy_catalog=policy_catalog,
         )
         acc = BatchAccumulator(
             state=state,
@@ -3175,6 +3222,9 @@ class ComposerServiceImpl:
         guided_terminal: TerminalState | None = None,
         user_message_id: str | None = None,
         recorder: BufferingRecorder | None = None,
+        *,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        policy_catalog: PolicyCatalogView,
     ) -> ComposerResult:
         """Inner composition loop with dual-counter budget tracking.
 
@@ -3227,7 +3277,16 @@ class ComposerServiceImpl:
         # still gate behind a per-instance flag so steady-state compose()
         # calls don't churn the connection pool.
         await self._maybe_upsert_skill_markdown_history()
-        llm_messages = self._build_messages(messages, state, message, guided_terminal, session_id=session_id, user_id=user_id)
+        llm_messages = self._build_messages(
+            messages,
+            state,
+            message,
+            guided_terminal,
+            session_id=session_id,
+            user_id=user_id,
+            plugin_snapshot=plugin_snapshot,
+            policy_catalog=policy_catalog,
+        )
         tools = self._get_litellm_tools()
         # Per-call audit recorder. Surfaced on ComposerResult and on
         # the three partial-state-carrier exceptions so the route handler
@@ -3403,6 +3462,8 @@ class ComposerServiceImpl:
                     session_scope=session_scope,
                     advisor_calls_used=_advisor_calls_used,
                     cancellation_requested=_cancellation_requested,
+                    plugin_snapshot=plugin_snapshot,
+                    policy_catalog=policy_catalog,
                 )
                 # Preserve the existing test/debug seam before P4: callers
                 # inspecting an audit-persist failure must still see the P3
@@ -3603,6 +3664,8 @@ class ComposerServiceImpl:
         guided_terminal: TerminalState | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
+        plugin_snapshot: PluginAvailabilitySnapshot | None = None,
+        policy_catalog: PolicyCatalogView | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list. Returns a NEW list on every call.
 
@@ -3630,17 +3693,18 @@ class ComposerServiceImpl:
             guided_terminal: When set, forward to ``build_messages`` so the
                 layered mode-transition prompt is used for this turn.
         """
+        if plugin_snapshot is None or policy_catalog is None:
+            plugin_snapshot, policy_catalog = self._plugin_policy_context(user_id)
         try:
             return build_messages(
                 chat_history=chat_history,
                 state=state,
                 user_message=user_message,
-                catalog=self._catalog,
+                catalog=policy_catalog,
                 data_dir=self._data_dir,
+                plugin_snapshot=plugin_snapshot,
                 guided_terminal=guided_terminal,
                 schemas_loaded=self._schemas_loaded_for_session(session_id),
-                secret_service=self._secret_service,
-                user_id=user_id,
             )
         except OSError as exc:
             raise ComposerServiceError(f"Failed to load deployment skill ({type(exc).__name__})") from exc

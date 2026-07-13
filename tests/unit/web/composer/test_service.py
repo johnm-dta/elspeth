@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.hashing import stable_hash
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
@@ -44,7 +45,7 @@ from elspeth.web.composer.state import (
     ValidationSummary,
 )
 from elspeth.web.composer.tools import ToolResult
-from elspeth.web.composer.tools import execute_tool as _execute_tool
+from elspeth.web.composer.tools import execute_tool as _strict_execute_tool
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.schemas import (
     ValidationCheck,
@@ -56,6 +57,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult as ValidationResultModel,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -73,6 +75,24 @@ from tests.unit.web.composer._helpers import (
     _mock_catalog,
     _stub_advisor_end_gate_clean,  # noqa: F401  (autouse end-gate CLEAN stub)
 )
+
+
+def _execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: Any,
+    **kwargs: Any,
+) -> ToolResult:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _strict_execute_tool(
+        tool_name,
+        arguments,
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _execution_ready() -> ValidationReadiness:
@@ -2287,6 +2307,57 @@ class TestDiscoveryCache:
     """Tests for the discovery cache (F1)."""
 
     @pytest.mark.asyncio
+    async def test_one_compose_call_threads_one_snapshot_object(self) -> None:
+        """Prompt and every tool dispatch share one principal snapshot."""
+        from unittest.mock import MagicMock
+
+        from elspeth.web.composer import service as service_module
+        from elspeth.web.composer import tool_batch as tool_batch_module
+        from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+        from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+
+        catalog = _mock_catalog()
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        factory_calls: list[str] = []
+        prompt_snapshots: list[PluginAvailabilitySnapshot] = []
+        tool_snapshots: list[PluginAvailabilitySnapshot] = []
+
+        def snapshot_factory(user_id: str) -> PluginAvailabilitySnapshot:
+            factory_calls.append(user_id)
+            return snapshot
+
+        service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=_make_settings(),
+            plugin_snapshot_factory=snapshot_factory,
+            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+        )
+        real_build_messages = service_module.build_messages
+        real_execute_tool = tool_batch_module.execute_tool
+
+        def capture_prompt(*args: Any, **kwargs: Any) -> Any:
+            prompt_snapshots.append(kwargs["plugin_snapshot"])
+            return real_build_messages(*args, **kwargs)
+
+        def capture_tool(*args: Any, **kwargs: Any) -> Any:
+            tool_snapshots.append(kwargs["plugin_snapshot"])
+            return real_execute_tool(*args, **kwargs)
+
+        discovery = _make_llm_response(tool_calls=[{"id": "c1", "name": "list_sources", "arguments": {}}])
+        final = _make_llm_response(content="Done.")
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock, side_effect=[discovery, final]),
+            patch.object(service_module, "build_messages", side_effect=capture_prompt),
+            patch.object(tool_batch_module, "execute_tool", side_effect=capture_tool),
+        ):
+            await service.compose("List sources", [], _empty_state(), user_id="user-1")
+
+        assert factory_calls == ["user-1"]
+        assert prompt_snapshots == [snapshot]
+        assert tool_snapshots == [snapshot]
+        assert prompt_snapshots[0] is tool_snapshots[0]
+
+    @pytest.mark.asyncio
     async def test_cacheable_tool_returns_cached_result(self) -> None:
         """Repeated cacheable discovery calls return cached results
         without incrementing any budget counter."""
@@ -2312,11 +2383,12 @@ class TestDiscoveryCache:
 
         # Should NOT have raised — second list_sources was a cache hit
         assert result.message == "Found sources."
-        # Catalog list_sources is called once by build_messages (prompt
-        # context) and once by execute_tool (first discovery call).
+        # Catalog list_sources is called once by snapshot construction,
+        # twice by build_messages (visible list + capability grouping),
+        # and once by execute_tool (first discovery call).
         # The second discovery call is a cache hit — no catalog call.
-        # Total: 2, not 3.
-        assert catalog.list_sources.call_count == 2
+        # Total: 4, not 5.
+        assert catalog.list_sources.call_count == 4
 
     @pytest.mark.asyncio
     async def test_cache_hit_rebuilds_result_envelope_from_current_state(self) -> None:
@@ -2367,7 +2439,7 @@ class TestDiscoveryCache:
             affected_nodes=(),
         ).to_dict()["validation"]
         assert cached_payload["validation"] == expected_validation
-        assert catalog.list_sources.call_count == 2
+        assert catalog.list_sources.call_count == 4
 
     @pytest.mark.asyncio
     async def test_cache_key_includes_arguments(self) -> None:
@@ -2402,7 +2474,7 @@ class TestDiscoveryCache:
             await service.compose("Get schemas", [], state)
 
         # Both calls should have executed (different arguments)
-        assert catalog.get_schema.call_count == 2
+        assert catalog.get_schema.call_count == 4
 
     @pytest.mark.asyncio
     async def test_mutation_tools_never_cached(self) -> None:
@@ -4435,8 +4507,6 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         boundary now fires earlier and that message no longer reaches
         the LLM.
         """
-        from elspeth.web.composer.tools import execute_tool
-
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
         service = ComposerServiceImpl(
@@ -4447,7 +4517,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         )
         state = _empty_state()
 
-        create_result = execute_tool(
+        create_result = _execute_tool(
             "create_blob",
             {"filename": "seed.txt", "mime_type": "text/plain", "content": "hello"},
             state,
@@ -6053,12 +6123,10 @@ class TestAttemptProofRepair:
 
     def _state_with_blocking_csv(self):
         """Build a state whose preview emits csv_fixed_schema_omits_observed_columns."""
-        from elspeth.web.composer.tools import execute_tool as exec_tool
-
         state = _empty_state()
         catalog = _mock_catalog()
         # Wire the source via set_source_from_blob (canonical path).
-        result = exec_tool(
+        result = _execute_tool(
             "set_source_from_blob",
             {
                 "blob_id": self.blob_id,
@@ -6074,7 +6142,7 @@ class TestAttemptProofRepair:
         assert result.success, result.data
         state = result.updated_state
 
-        result = exec_tool(
+        result = _execute_tool(
             "set_output",
             {
                 "sink_name": "out",
@@ -6095,11 +6163,9 @@ class TestAttemptProofRepair:
 
     def _state_without_blob(self):
         """A path-based source has nothing for proof_diagnostics to inspect."""
-        from elspeth.web.composer.tools import execute_tool as exec_tool
-
         state = _empty_state()
         catalog = _mock_catalog()
-        result = exec_tool(
+        result = _execute_tool(
             "set_pipeline",
             {
                 "sources": {

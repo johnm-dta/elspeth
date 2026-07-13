@@ -59,6 +59,7 @@ from elspeth.web.composer.tools._common import (
     _missing_output_options_repair_error,
     _mutation_result,
     _options_with_default_llm_reviews,
+    _plugin_policy_failure,
     _prevalidate_sink,
     _prevalidate_source,
     _prevalidate_transform,
@@ -285,9 +286,9 @@ def _execute_set_pipeline(
             endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, src_options)
             if endpoint_policy_error is not None:
                 return _failure_result(state, endpoint_policy_error)
-            plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
+            plugin_error = _validate_plugin_name(context, "source", src_plugin)
             if plugin_error is not None:
-                return _failure_result(state, f"Source '{source_name}': {plugin_error}")
+                return _plugin_policy_failure(state, plugin_error, component=f"Source '{source_name}'")
             manual_blob_ref_error = _reject_manual_source_blob_ref(src_options, tool_name="set_pipeline")
             if manual_blob_ref_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_blob_ref_error}")
@@ -329,9 +330,9 @@ def _execute_set_pipeline(
         endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, legacy_src_options)
         if endpoint_policy_error is not None:
             return _failure_result(state, endpoint_policy_error)
-        plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
+        plugin_error = _validate_plugin_name(context, "source", src_plugin)
         if plugin_error is not None:
-            return _failure_result(state, plugin_error)
+            return _plugin_policy_failure(state, plugin_error)
 
         # Inline user-provided source data can be materialised as a blob inside
         # this same atomic pipeline mutation. The generated path/blob_ref are
@@ -486,9 +487,9 @@ def _execute_set_pipeline(
         if credential_error is not None:
             return credential_error
         if node_type in ("transform", "aggregation") and node_plugin is not None:
-            plugin_error = _validate_plugin_name(catalog, "transform", node_plugin)
+            plugin_error = _validate_plugin_name(context, "transform", node_plugin)
             if plugin_error is not None:
-                return _failure_result(state, f"Node '{node_id}': {plugin_error}")
+                return _plugin_policy_failure(state, plugin_error, component=f"Node '{node_id}'")
             batch_placement_error = _batch_aware_placement_error(node_id, node_type, node_plugin, node.output_mode)
             if batch_placement_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {batch_placement_error}")
@@ -549,9 +550,9 @@ def _execute_set_pipeline(
         endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(out_plugin, out_options)
         if endpoint_policy_error is not None:
             return _failure_result(state, endpoint_policy_error)
-        plugin_error = _validate_plugin_name(catalog, "sink", out_plugin)
+        plugin_error = _validate_plugin_name(context, "sink", out_plugin)
         if plugin_error is not None:
-            return _failure_result(state, f"Output '{out_name}': {plugin_error}")
+            return _plugin_policy_failure(state, plugin_error, component=f"Output '{out_name}'")
         raw_out_args: Mapping[str, Any] = {}
         if isinstance(raw_outputs, list) and 0 <= index < len(raw_outputs):
             raw_entry = raw_outputs[index]

@@ -139,6 +139,7 @@ def build_plugin_snapshot(
         usable_profile_aliases=alias_tuple,
         selected_profile_aliases=tuple(selected_profile_aliases),
         binding_generation_fingerprint=fingerprint,
+        control_modes=policy.control_modes,
     )
 
 
@@ -193,14 +194,18 @@ class RequestPluginSnapshotFactory:
         self._generation_key = generation_key
 
     def __call__(self, user: UserIdentity) -> PluginAvailabilitySnapshot:
-        principal_scope = f"{self._auth_provider}:{user.user_id}"
+        return self.for_user_id(user.user_id)
+
+    def for_user_id(self, user_id: str) -> PluginAvailabilitySnapshot:
+        """Build a snapshot for an already-authenticated web principal ID."""
+        principal_scope = f"{self._auth_provider}:{user_id}"
         return build_plugin_snapshot(
             policy=self._policy,
             catalog=self._catalog,
             profiles=self._profiles,
             principal_scope=principal_scope,
             secret_inventory=_BoundSecretInventory(
-                user_id=user.user_id,
+                user_id=user_id,
                 auth_provider=self._auth_provider,
                 service=self._secret_service,
                 server_store=self._server_store,

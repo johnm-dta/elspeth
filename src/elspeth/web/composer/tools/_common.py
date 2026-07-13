@@ -50,6 +50,7 @@ from elspeth.plugins.infrastructure.validation import (
     get_source_config_model,
     get_transform_config_model,
 )
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -80,6 +81,7 @@ from elspeth.web.paths import (
     allowed_source_directories,
     resolve_data_path,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import (
     allowed_secret_ref_fields,
@@ -868,6 +870,8 @@ def _discovery_result(state: CompositionState, data: Any) -> ToolResult:
 def _failure_result(
     state: CompositionState,
     error_msg: str,
+    *,
+    error_code: str | None = None,
 ) -> ToolResult:
     """Build a ToolResult for a failed mutation.
 
@@ -884,12 +888,15 @@ def _failure_result(
     error.
     """
     validation = _prepend_rejection_entry(state.validate(), error_msg)
+    data = {_DATA_ERROR_KEY: error_msg}
+    if error_code is not None:
+        data["error_code"] = error_code
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
-        data={_DATA_ERROR_KEY: error_msg},
+        data=data,
     )
 
 
@@ -1235,17 +1242,43 @@ def _credential_wiring_contract_failure(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PluginPolicyViolation:
+    error_code: PluginUnavailableReason
+    message: str
+
+
 def _validate_plugin_name(
-    catalog: CatalogService,
+    context: ToolContext,
     plugin_type: PluginKind,
     name: str,
-) -> str | None:
-    """Return an error message if the plugin name is not in the catalog, or None if valid."""
+) -> PluginPolicyViolation | None:
+    """Validate a new plugin selection against one request policy view."""
+    plugin_id = PluginId(plugin_type, name)
+    reason = context.catalog.unavailable_reason(plugin_id)
+    if reason is not None:
+        return PluginPolicyViolation(
+            error_code=reason,
+            message=f"{plugin_type} plugin selection is unavailable ({reason.value})",
+        )
     try:
-        catalog.get_schema(plugin_type, name)
-    except (ValueError, KeyError) as exc:
-        return f"Unknown {plugin_type} plugin '{name}': {exc}"
+        context.catalog.get_schema(plugin_type, name)
+    except (ValueError, KeyError):
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING,
+            message=f"{plugin_type} plugin selection is unavailable ({PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING.value})",
+        )
     return None
+
+
+def _plugin_policy_failure(
+    state: CompositionState,
+    violation: PluginPolicyViolation,
+    *,
+    component: str | None = None,
+) -> ToolResult:
+    message = violation.message if component is None else f"{component}: {violation.message}"
+    return _failure_result(state, message, error_code=violation.error_code.value)
 
 
 def _validate_aggregation_trigger(trigger: Any) -> str | None:
@@ -1858,7 +1891,8 @@ class ToolContext:
             arguments that produced an LLM-authored blob.
     """
 
-    catalog: CatalogService
+    catalog: PolicyCatalogView
+    plugin_snapshot: PluginAvailabilitySnapshot
     data_dir: str | None = None
     require_data_dir_for_paths: bool = False
     session_engine: Engine | None = None

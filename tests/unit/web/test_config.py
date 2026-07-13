@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.web.config import WebSettings
+from elspeth.web.deployment_contract import validate_aws_ecs_settings
 
 
 def test_playwright_local_backend_secret_key_satisfies_non_pytest_guard() -> None:
@@ -278,6 +279,8 @@ class TestDeploymentTarget:
     def test_accepts_aws_ecs(self) -> None:
         settings = WebSettings(
             deployment_target="aws-ecs",
+            operator_telemetry="aws-otlp",
+            operator_telemetry_environment="production",
             composer_max_composition_turns=15,
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
@@ -286,6 +289,109 @@ class TestDeploymentTarget:
         )
 
         assert settings.deployment_target == "aws-ecs"
+
+
+class TestOperatorTelemetrySettings:
+    def test_local_defaults_remain_prometheus_only(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.operator_telemetry == "prometheus"
+        assert settings.operator_telemetry_service_name == "elspeth-web"
+        assert settings.operator_telemetry_environment is None
+        assert settings.operator_telemetry_export_interval_seconds == 60
+        assert settings.operator_pipeline_telemetry_granularity == "lifecycle"
+
+    @pytest.mark.parametrize(
+        ("overrides", "field"),
+        [
+            ({"operator_telemetry": "prometheus", "operator_telemetry_environment": "production"}, "operator_telemetry"),
+            ({"operator_telemetry": "aws-otlp"}, "operator_telemetry_environment"),
+            (
+                {
+                    "operator_telemetry": "aws-otlp",
+                    "operator_telemetry_environment": "production",
+                    "operator_telemetry_export_interval_seconds": 0,
+                },
+                "operator_telemetry_export_interval_seconds",
+            ),
+            (
+                {
+                    "operator_telemetry": "aws-otlp",
+                    "operator_telemetry_environment": "production",
+                    "operator_telemetry_export_interval_seconds": 3601,
+                },
+                "operator_telemetry_export_interval_seconds",
+            ),
+            (
+                {"operator_telemetry": "aws-otlp", "operator_telemetry_environment": "production", "operator_telemetry_service_name": " "},
+                "operator_telemetry_service_name",
+            ),
+            (
+                {"operator_telemetry": "aws-otlp", "operator_telemetry_environment": "production\nsecret"},
+                "operator_telemetry_environment",
+            ),
+            (
+                {"operator_telemetry": "aws-otlp", "operator_telemetry_environment": "p" * 129},
+                "operator_telemetry_environment",
+            ),
+        ],
+    )
+    def test_aws_ecs_rejects_invalid_operator_telemetry(self, overrides: dict[str, object], field: str) -> None:
+        contract_only = field == "operator_telemetry" or (field == "operator_telemetry_environment" and field not in overrides)
+        if contract_only:
+            settings = WebSettings(
+                deployment_target="aws-ecs",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **overrides,
+            )
+            checks = {check.name: check for check in validate_aws_ecs_settings(settings)}
+            assert checks[field].ok is False
+            return
+        with pytest.raises(ValidationError, match=field) as caught:
+            WebSettings(
+                deployment_target="aws-ecs",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **overrides,
+            )
+
+        assert "production\nsecret" not in str(caught.value)
+        assert "p" * 129 not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "operator_telemetry_endpoint",
+            "operator_telemetry_headers",
+            "operator_telemetry_credentials",
+            "operator_telemetry_aws_access_key_id",
+        ],
+    )
+    def test_operator_telemetry_has_no_egress_or_credential_settings(self, field: str) -> None:
+        with pytest.raises(ValidationError, match="extra") as caught:
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **{field: "secret-remote-value"},
+            )
+
+        assert "secret-remote-value" not in str(caught.value)
 
     def test_rejects_unknown_value(self) -> None:
         with pytest.raises(ValidationError, match="'default' or 'aws-ecs'"):

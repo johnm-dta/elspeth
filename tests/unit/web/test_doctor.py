@@ -36,6 +36,8 @@ def _settings(tmp_path: Path, **overrides: Any) -> WebSettings:
     payload_dir.mkdir(mode=0o700, exist_ok=True)
     values: dict[str, Any] = {
         "deployment_target": "aws-ecs",
+        "operator_telemetry": "aws-otlp",
+        "operator_telemetry_environment": "test",
         "host": "0.0.0.0",
         "session_db_url": "postgresql+psycopg://doctor:secret@db/session",
         "landscape_url": "postgresql+psycopg://doctor:secret@db/landscape",
@@ -369,6 +371,8 @@ def test_task1_check_names_are_exact_ordered_and_unique(tmp_path: Path) -> None:
         "landscape_url",
         "data_dir",
         "payload_store_path",
+        "operator_telemetry",
+        "operator_telemetry_environment",
         "host",
         "secret_key",
         "shareable_link_signing_key",
@@ -871,6 +875,8 @@ def test_task2_order_remains_exact_and_unique_after_database_inspection(tmp_path
         "landscape_url",
         "data_dir",
         "payload_store_path",
+        "operator_telemetry",
+        "operator_telemetry_environment",
         "host",
         "secret_key",
         "shareable_link_signing_key",

@@ -31,6 +31,8 @@ def _settings(tmp_path: Path, **overrides: Any) -> WebSettings:
         directory.chmod(0o700)
     values: dict[str, Any] = {
         "deployment_target": "aws-ecs",
+        "operator_telemetry": "aws-otlp",
+        "operator_telemetry_environment": "test",
         "host": "0.0.0.0",
         "data_dir": data_dir,
         "payload_store_path": payload_dir,

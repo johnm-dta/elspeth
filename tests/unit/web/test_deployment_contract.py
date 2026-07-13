@@ -116,6 +116,8 @@ def test_check_names_are_exact_ordered_and_unique() -> None:
         "landscape_url",
         "data_dir",
         "payload_store_path",
+        "operator_telemetry",
+        "operator_telemetry_environment",
         "host",
         "secret_key",
         "shareable_link_signing_key",
@@ -129,6 +131,8 @@ def test_all_checks_pass_for_fully_valid_ecs_settings(tmp_path: Path) -> None:
             _base_kwargs()
             | {
                 "deployment_target": "aws-ecs",
+                "operator_telemetry": "aws-otlp",
+                "operator_telemetry_environment": "test",
                 "host": "0.0.0.0",
                 "session_db_url": "postgresql://u:p@host/session",
                 "landscape_url": "postgresql://u:p@host/landscape",

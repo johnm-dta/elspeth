@@ -1258,6 +1258,17 @@ class ExecutionServiceImpl:
                 settings = load_settings_from_yaml_string(pipeline_yaml, expand_env_vars=False)
             else:
                 settings = load_settings_from_config_dict(resolved_dict, expand_env_vars=False)
+
+            # AWS ECS web execution is governed by operator-owned telemetry
+            # routing. Apply the fixed task-local policy before graph/config
+            # assembly: PipelineConfig.config therefore contains the sanitized
+            # effective policy, Landscape.begin_run persists it and its hash,
+            # and only then may RunStarted telemetry fire. The original YAML in
+            # the sessions database remains the authored-policy comparison
+            # surface; no authored endpoint/header/credential enters Landscape.
+            from elspeth.web.operator_telemetry import apply_operator_pipeline_telemetry
+
+            settings = apply_operator_pipeline_telemetry(settings, self._settings)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph

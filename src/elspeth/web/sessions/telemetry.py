@@ -13,6 +13,11 @@ The fake counter records every ``add`` call as ``(amount,
 attributes, context)`` tuples. Tests inspect via the ``observed_value(counter)``
 helper (cumulative sum) or directly through the ``calls`` attribute
 after type-narrowing with ``isinstance(counter, _FakeCounter)``.
+
+The authenticated Prometheus reader retains these existing point attributes.
+In AWS ECS mode, ``web.operator_telemetry`` independently sanitizes the OTLP
+copy against a closed attribute-key allowlist, so run/session/row identities
+never become CloudWatch dimensions while local exposition stays compatible.
 ``observed_value`` is intentionally NOT on the ``_Counter`` Protocol
 — production OTel counters do not expose observation, and adding it
 would force a structural lie.

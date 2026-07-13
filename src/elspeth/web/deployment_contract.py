@@ -86,6 +86,24 @@ def validate_aws_ecs_settings(settings: WebSettings) -> list[ContractCheck]:
             settings.payload_store_path,
             explicitly_set="payload_store_path" in settings.model_fields_set,
         ),
+        ContractCheck(
+            "operator_telemetry",
+            settings.operator_telemetry == "aws-otlp",
+            (
+                "operator telemetry uses the task-local OTLP collector"
+                if settings.operator_telemetry == "aws-otlp"
+                else "ELSPETH_WEB__OPERATOR_TELEMETRY must be aws-otlp in aws-ecs deployment mode"
+            ),
+        ),
+        ContractCheck(
+            "operator_telemetry_environment",
+            settings.operator_telemetry_environment is not None,
+            (
+                "operator telemetry environment is set"
+                if settings.operator_telemetry_environment is not None
+                else "ELSPETH_WEB__OPERATOR_TELEMETRY_ENVIRONMENT is required in aws-ecs deployment mode"
+            ),
+        ),
     ]
     host_ok = settings.host == _CONTAINER_SERVING_HOST
     checks.append(

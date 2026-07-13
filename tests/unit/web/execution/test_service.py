@@ -1270,6 +1270,94 @@ sinks:
         assert attribution_row.auth_provider_type == "local"
         assert output_path.exists()
 
+    def test_aws_web_run_persists_effective_operator_telemetry_before_events(
+        self,
+        service: ExecutionServiceImpl,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        source_path = tmp_path / "input.txt"
+        source_path.write_text("alpha\n", encoding="utf-8")
+        output_path = tmp_path / "out.jsonl"
+        run_id = str(uuid4())
+        mock_settings.deployment_target = "aws-ecs"
+        mock_settings.operator_telemetry_service_name = "elspeth-web-test"
+        mock_settings.operator_telemetry_environment = "test"
+        mock_settings.operator_pipeline_telemetry_granularity = "lifecycle"
+        mock_settings.landscape_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_settings.payload_store_path = tmp_path / "payloads"
+        initialized_db = LandscapeDB.from_url(mock_settings.landscape_url)
+        initialized_db.close()
+        pipeline_yaml = f"""
+sources:
+  primary:
+    plugin: text
+    on_success: output
+    options:
+      path: {source_path}
+      column: value
+      on_validation_failure: discard
+      schema:
+        mode: fixed
+        fields:
+        - "value: str"
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: {output_path}
+      format: jsonl
+      mode: write
+      schema:
+        mode: observed
+telemetry:
+  enabled: true
+  granularity: full
+  fail_on_total_exporter_failure: true
+  exporters:
+  - name: otlp
+    options:
+      endpoint: https://authored.invalid:4317
+      headers:
+        authorization: authored-secret
+"""
+
+        # This integration test exercises Landscape persistence and ordering;
+        # transport delivery itself is covered by test_operator_telemetry.py.
+        with patch("elspeth.telemetry.create_telemetry_manager", return_value=None):
+            service._run_pipeline(run_id, pipeline_yaml, threading.Event())
+
+        db = LandscapeDB.from_url(mock_settings.landscape_url, create_tables=False)
+        try:
+            with db.read_only_connection() as conn:
+                row = conn.execute(select(runs_table.c.settings_json, runs_table.c.config_hash).where(runs_table.c.run_id == run_id)).one()
+        finally:
+            db.close()
+
+        persisted = json.loads(row.settings_json)
+        telemetry = persisted["telemetry"]
+        assert telemetry["enabled"] is True
+        assert telemetry["granularity"] == "lifecycle"
+        assert telemetry["fail_on_total_exporter_failure"] is False
+        assert telemetry["exporters"] == [
+            {
+                "name": "otlp",
+                "options": {
+                    "batch_size": 100,
+                    "cloud_provider": "aws",
+                    "deployment_environment": "test",
+                    "endpoint": "http://127.0.0.1:4317",
+                    "headers": {},
+                    "service_name": "elspeth-web-test",
+                    "service_version": pytest.importorskip("elspeth").__version__,
+                },
+            }
+        ]
+        assert row.config_hash == stable_hash(persisted)
+        assert "authored.invalid" not in row.settings_json
+        assert "authored-secret" not in row.settings_json
+
     def test_web_scrape_pipeline_receives_rate_limit_registry(
         self,
         service: ExecutionServiceImpl,

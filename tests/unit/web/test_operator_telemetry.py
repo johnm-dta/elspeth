@@ -1,0 +1,264 @@
+"""AWS ECS operator telemetry policy and process bootstrap tests."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+from opentelemetry.sdk.metrics.export import MetricExportResult
+
+from elspeth.core.config import TelemetrySettings
+from elspeth.web.config import WebSettings
+from elspeth.web.operator_telemetry import (
+    AWS_OTLP_ENDPOINT,
+    SAFE_CLOUDWATCH_METRIC_ATTRIBUTES,
+    OperatorTelemetryFactories,
+    apply_operator_pipeline_telemetry,
+    bootstrap_operator_telemetry,
+    reset_operator_telemetry_for_tests,
+)
+
+
+def _web_settings(**overrides: object) -> WebSettings:
+    values: dict[str, object] = {
+        "composer_max_composition_turns": 15,
+        "composer_max_discovery_turns": 10,
+        "composer_timeout_seconds": 85.0,
+        "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
+    }
+    values.update(overrides)
+    return WebSettings(**values)  # type: ignore[arg-type]
+
+
+def _pipeline_settings(telemetry: TelemetrySettings) -> Any:
+    @dataclass(frozen=True)
+    class _Settings:
+        telemetry: TelemetrySettings
+
+        def model_copy(self, *, update: dict[str, object]) -> _Settings:
+            return _Settings(telemetry=update["telemetry"])  # type: ignore[arg-type]
+
+    return _Settings(telemetry=telemetry)
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime() -> None:
+    reset_operator_telemetry_for_tests()
+    yield
+    reset_operator_telemetry_for_tests()
+
+
+def test_local_pipeline_telemetry_is_unchanged() -> None:
+    authored = TelemetrySettings(
+        enabled=True,
+        granularity="full",
+        fail_on_total_exporter_failure=True,
+        exporters=[{"name": "datadog", "options": {"api_key": "authored-secret"}}],
+    )
+    pipeline = _pipeline_settings(authored)
+
+    effective = apply_operator_pipeline_telemetry(pipeline, _web_settings())
+
+    assert effective is pipeline
+    assert effective.telemetry is authored
+
+
+def test_cloudwatch_metric_dimensions_exclude_unbounded_identity_and_content() -> None:
+    forbidden = {
+        "account_id",
+        "aws_account_id",
+        "content",
+        "exception_message",
+        "prompt",
+        "request_id",
+        "row_id",
+        "run_id",
+        "session_id",
+        "task_arn",
+        "token_id",
+        "url",
+        "user_id",
+    }
+
+    assert SAFE_CLOUDWATCH_METRIC_ATTRIBUTES.isdisjoint(forbidden)
+    assert {"reason", "operation", "status"} <= SAFE_CLOUDWATCH_METRIC_ATTRIBUTES
+
+
+@pytest.mark.parametrize(
+    "authored",
+    [
+        TelemetrySettings(enabled=False),
+        TelemetrySettings(enabled=True, granularity="full", exporters=[{"name": "console"}]),
+        TelemetrySettings(enabled=True, exporters=[{"name": "azure_monitor", "options": {"connection_string": "secret"}}]),
+        TelemetrySettings(enabled=True, exporters=[{"name": "datadog", "options": {"api_key": "secret"}}]),
+        TelemetrySettings(
+            enabled=True,
+            fail_on_total_exporter_failure=True,
+            exporters=[{"name": "otlp", "options": {"endpoint": "https://remote.invalid:4317", "headers": {"authorization": "secret"}}}],
+        ),
+    ],
+)
+def test_aws_pipeline_telemetry_is_replaced_by_operator_policy(authored: TelemetrySettings) -> None:
+    web = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_service_name="elspeth-web-prod",
+        operator_telemetry_environment="production",
+        operator_pipeline_telemetry_granularity="rows",
+    )
+
+    effective = apply_operator_pipeline_telemetry(_pipeline_settings(authored), web)
+
+    assert effective.telemetry.enabled is True
+    assert effective.telemetry.granularity == "rows"
+    assert effective.telemetry.fail_on_total_exporter_failure is False
+    assert len(effective.telemetry.exporters) == 1
+    exporter = effective.telemetry.exporters[0]
+    assert exporter.name == "otlp"
+    assert exporter.options == {
+        "endpoint": AWS_OTLP_ENDPOINT,
+        "headers": {},
+        "service_name": "elspeth-web-prod",
+        "service_version": pytest.importorskip("elspeth").__version__,
+        "deployment_environment": "production",
+        "cloud_provider": "aws",
+        "batch_size": 100,
+    }
+    rendered = repr(effective.telemetry.model_dump())
+    assert "remote.invalid" not in rendered
+    assert "authorization" not in rendered
+    assert "secret" not in rendered
+
+
+@dataclass
+class _FakeReader:
+    kind: str
+    exporter: object | None = None
+    interval_ms: int | None = None
+
+
+@dataclass
+class _FakeExporter:
+    endpoint: str
+    insecure: bool
+    headers: dict[str, str]
+    results: list[MetricExportResult] = field(default_factory=list)
+
+    def export(self, _data: object, timeout_millis: float = 10_000, **_kwargs: object) -> MetricExportResult:
+        del timeout_millis
+        return self.results.pop(0) if self.results else MetricExportResult.SUCCESS
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        del timeout_millis
+        return True
+
+    def shutdown(self, timeout_millis: float = 30_000, **_kwargs: object) -> None:
+        del timeout_millis
+
+
+@dataclass
+class _FakeProvider:
+    readers: list[object]
+    resource: object
+    views: tuple[object, ...]
+    force_flush_calls: list[float] = field(default_factory=list)
+    shutdown_calls: list[float] = field(default_factory=list)
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        self.force_flush_calls.append(timeout_millis)
+        return True
+
+    def shutdown(self, timeout_millis: float = 30_000) -> None:
+        self.shutdown_calls.append(timeout_millis)
+
+
+def _factories(record: dict[str, object]) -> OperatorTelemetryFactories:
+    def prometheus_reader() -> _FakeReader:
+        reader = _FakeReader("prometheus")
+        record.setdefault("prometheus", []).append(reader)  # type: ignore[union-attr]
+        return reader
+
+    def otlp_exporter(**kwargs: object) -> _FakeExporter:
+        exporter = _FakeExporter(**kwargs)  # type: ignore[arg-type]
+        record.setdefault("exporters", []).append(exporter)  # type: ignore[union-attr]
+        return exporter
+
+    def periodic_reader(exporter: object, *, export_interval_millis: int, export_timeout_millis: int) -> _FakeReader:
+        assert export_timeout_millis > 0
+        reader = _FakeReader("periodic", exporter, export_interval_millis)
+        record.setdefault("periodic", []).append(reader)  # type: ignore[union-attr]
+        return reader
+
+    def provider(readers: list[object], *, resource: object, views: tuple[object, ...]) -> _FakeProvider:
+        value = _FakeProvider(readers, resource, views)
+        record.setdefault("providers", []).append(value)  # type: ignore[union-attr]
+        return value
+
+    def set_provider(provider: object) -> None:
+        record.setdefault("set_provider", []).append(provider)  # type: ignore[union-attr]
+
+    return OperatorTelemetryFactories(
+        prometheus_reader=prometheus_reader,
+        otlp_exporter=otlp_exporter,
+        periodic_reader=periodic_reader,
+        meter_provider=provider,
+        set_meter_provider=set_provider,
+    )
+
+
+def test_process_bootstrap_local_is_idempotent_prometheus_only() -> None:
+    record: dict[str, object] = {}
+    factories = _factories(record)
+
+    first = bootstrap_operator_telemetry(_web_settings(), factories=factories)
+    second = bootstrap_operator_telemetry(_web_settings(), factories=factories)
+
+    assert first is second
+    assert len(record["providers"]) == 1  # type: ignore[arg-type]
+    assert len(record["set_provider"]) == 1  # type: ignore[arg-type]
+    assert [reader.kind for reader in first.readers] == ["prometheus"]
+
+
+def test_process_bootstrap_aws_adds_one_fixed_otlp_reader_and_safe_resource() -> None:
+    record: dict[str, object] = {}
+    settings = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="production",
+        operator_telemetry_export_interval_seconds=17,
+    )
+
+    runtime = bootstrap_operator_telemetry(settings, factories=_factories(record))
+
+    assert [reader.kind for reader in runtime.readers] == ["prometheus", "periodic"]
+    exporter = record["exporters"][0]  # type: ignore[index]
+    assert exporter.endpoint == AWS_OTLP_ENDPOINT
+    assert exporter.insecure is True
+    assert exporter.headers == {}
+    assert runtime.readers[1].interval_ms == 17_000
+    assert runtime.resource.attributes == {
+        "service.name": "elspeth-web",
+        "service.version": pytest.importorskip("elspeth").__version__,
+        "deployment.environment": "production",
+        "cloud.provider": "aws",
+    }
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_bounded_and_once_only() -> None:
+    record: dict[str, object] = {}
+    settings = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_environment="production",
+    )
+    runtime = bootstrap_operator_telemetry(settings, factories=_factories(record))
+
+    await runtime.shutdown()
+    await runtime.shutdown()
+
+    provider = record["providers"][0]  # type: ignore[index]
+    assert provider.force_flush_calls == [5_000]
+    assert provider.shutdown_calls == [5_000]

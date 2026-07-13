@@ -78,6 +78,8 @@ def _aws_settings(tmp_path: Path, **overrides: object) -> WebSettings:
         directory.chmod(0o700)
     values: dict[str, object] = {
         "deployment_target": "aws-ecs",
+        "operator_telemetry": "aws-otlp",
+        "operator_telemetry_environment": "test",
         "host": "0.0.0.0",
         "payload_store_path": payload_dir,
         "session_db_url": "postgresql+psycopg://runtime@db/session",
@@ -181,6 +183,14 @@ class _RecordingExecutionService:
         self.shutdown_calls += 1
 
 
+class _RecordingOperatorTelemetry:
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
 _CancelOrphanedRuns = Callable[..., Awaitable[int]]
 
 
@@ -226,6 +236,23 @@ class TestCreateApp:
         app = create_app(settings)
         assert app.state.settings is settings
         assert app.state.settings.port == 9999
+
+    def test_repeated_create_app_reuses_process_telemetry_provider(self, tmp_path) -> None:
+        first = create_app(_settings(tmp_path / "first"))
+        second = create_app(_settings(tmp_path / "second"))
+
+        assert first.state.operator_telemetry is second.state.operator_telemetry
+
+    def test_invalid_aws_operator_policy_fails_before_provider_bootstrap(self, tmp_path) -> None:
+        settings = _aws_settings(tmp_path, operator_telemetry="prometheus")
+
+        with (
+            patch("elspeth.web.app.bootstrap_operator_telemetry") as bootstrap,
+            pytest.raises(AwsEcsStartupContractError, match="operator_telemetry"),
+        ):
+            create_app(settings)
+
+        bootstrap.assert_not_called()
 
     def test_loopback_default_secret_key_rejected_without_pytest_module(self, tmp_path, monkeypatch) -> None:
         """Loopback bind is not proof the service is unreachable behind a proxy."""
@@ -1347,12 +1374,15 @@ class TestLifespanShutdown:
     async def test_lifespan_awaits_execution_service_shutdown(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path, composer_boot_probe_enabled=False))
         fake_execution_service = _RecordingExecutionService()
+        fake_operator_telemetry = _RecordingOperatorTelemetry()
+        app.state.operator_telemetry = fake_operator_telemetry
 
         with patch("elspeth.web.app.ExecutionServiceImpl", return_value=fake_execution_service):
             async with lifespan(app):
                 pass
 
         assert fake_execution_service.shutdown_calls == 1
+        assert fake_operator_telemetry.shutdown_calls == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("deployment_target", "expected_create_tables"), [("default", True), ("aws-ecs", False)])
@@ -1447,6 +1477,8 @@ class TestSettingsFromEnv:
         data_dir = tmp_path / "data"
         payload_store_path = tmp_path / "payloads"
         monkeypatch.setenv("ELSPETH_WEB__DEPLOYMENT_TARGET", "aws-ecs")
+        monkeypatch.setenv("ELSPETH_WEB__OPERATOR_TELEMETRY", "aws-otlp")
+        monkeypatch.setenv("ELSPETH_WEB__OPERATOR_TELEMETRY_ENVIRONMENT", "test")
         monkeypatch.setenv("ELSPETH_WEB__DATA_DIR", str(data_dir))
         monkeypatch.setenv("ELSPETH_WEB__PAYLOAD_STORE_PATH", str(payload_store_path))
 

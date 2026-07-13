@@ -23,8 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from opentelemetry import metrics
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.metrics import Counter, Histogram
 from opentelemetry.util.types import AttributeValue
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
@@ -84,6 +83,7 @@ from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
+from elspeth.web.operator_telemetry import bootstrap_operator_telemetry
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
 from elspeth.web.readiness import (
@@ -114,30 +114,11 @@ from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
 from elspeth.web.shareable_reviews.service import ShareableReviewService
 from elspeth.web.shareable_reviews.signer import ShareTokenSigner
 
-# B1-r3: Wire a real MeterProvider at module-import time (process-global per
-# OTel design — NOT inside create_app, which may be called multiple times in
-# tests). Without this, get_meter() returns OTel's NoOpMeter and every
-# counter.add() call is silently discarded. The PrometheusMetricReader backs
-# the /metrics exposition endpoint mounted in create_app() below.
-#
-# Side effect on existing counters: after this commit,
-# composer.preferences.patch_total, composer.redaction.*, composer.service.*,
-# composer.tools.*, and blobs.* all start emitting real data. These counters
-# were always correctly instrumented — they were just exporting to /dev/null
-# because no provider was set. The first production deploy after this commit
-# will surface metrics that were previously invisible. This is observability
-# landing, not a regression.
-_PROMETHEUS_READER = PrometheusMetricReader()
-metrics.set_meter_provider(MeterProvider(metric_readers=[_PROMETHEUS_READER]))
-_COMPOSER_BOOT_CONFIG_COUNTER = metrics.get_meter(__name__).create_counter(
-    "composer.boot_config",
-    description="Composer effective sampling config recorded at boot",
-)
-_COMPOSER_BOOT_CONFIG_PROBE_LATENCY = metrics.get_meter(__name__).create_histogram(
-    "composer.boot_config.probe_latency_ms",
-    description="Composer boot config probe latency in milliseconds",
-    unit="ms",
-)
+# Assigned by create_app only after the idempotent process MeterProvider
+# bootstrap. Keeping these names module-level preserves the existing lifespan
+# test seams without creating instruments as an import side effect.
+_COMPOSER_BOOT_CONFIG_COUNTER: Counter
+_COMPOSER_BOOT_CONFIG_PROBE_LATENCY: Histogram
 _COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS = 5.0
 # Reserve bounded headroom inside the public five-second readiness contract
 # for timeout finalization, redacted logging, JSON serialization, and ASGI
@@ -639,6 +620,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Shutdown execution service thread pool without blocking the loop:
         # worker cleanup still schedules terminal-state writes back onto it.
         await execution_service.shutdown()
+        # Tier-2 operator telemetry stops only after all audited execution work
+        # has drained. Expected collector outages are bounded/redacted inside
+        # the runtime and can never rewrite a committed Landscape record.
+        await app.state.operator_telemetry.shutdown()
         # Tear down the process-wide run_sync_in_worker pool before disposing
         # the engine, so no worker thread races a query against a disposed pool.
         from elspeth.web.async_workers import shutdown_async_workers
@@ -811,7 +796,27 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     if settings is None:
         settings = _settings_from_env()
 
+    # Reject an incomplete AWS deployment policy before installing the
+    # process-global provider. A failed first create_app() must not strand a
+    # later corrected AWS boot on a Prometheus-only provider.
+    if settings.deployment_target == DEPLOYMENT_TARGET_AWS_ECS:
+        enforce_aws_ecs_contract(settings)
+
+    operator_runtime = bootstrap_operator_telemetry(settings)
+    operator_meter = metrics.get_meter(__name__)
+    global _COMPOSER_BOOT_CONFIG_COUNTER, _COMPOSER_BOOT_CONFIG_PROBE_LATENCY
+    _COMPOSER_BOOT_CONFIG_COUNTER = operator_meter.create_counter(
+        "composer.boot_config",
+        description="Composer effective sampling config recorded at boot",
+    )
+    _COMPOSER_BOOT_CONFIG_PROBE_LATENCY = operator_meter.create_histogram(
+        "composer.boot_config.probe_latency_ms",
+        description="Composer boot config probe latency in milliseconds",
+        unit="ms",
+    )
+
     app = FastAPI(title="ELSPETH Web", version="0.1.0", lifespan=lifespan)
+    app.state.operator_telemetry = operator_runtime
 
     @app.exception_handler(AuditIntegrityError)
     async def _audit_integrity_error_handler(_request: Request, exc: AuditIntegrityError) -> JSONResponse:
@@ -958,7 +963,6 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     aws_session_engine: Engine | None = None
     if settings.deployment_target == DEPLOYMENT_TARGET_AWS_ECS:
-        enforce_aws_ecs_contract(settings)
         require_runtime_directories_mounted(settings)
         raw_session_url = settings.session_db_url
         assert raw_session_url is not None
@@ -1379,9 +1383,9 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # the non-slash variant, returning 404 because no `metrics` file exists
     # in dist/. Route handlers match before mounts in Starlette, so this
     # also wins precedence over the SPA catch-all regardless of order.
-    # Backed by the process-level _PROMETHEUS_READER wired at module import;
-    # all OTel counters/histograms registered via metrics.get_meter() feed
-    # into this endpoint automatically via the global REGISTRY.
+    # Backed by the retained process-level Prometheus reader; all OTel
+    # counters/histograms registered via metrics.get_meter() feed into this
+    # endpoint automatically via the global REGISTRY.
     @app.get("/metrics", include_in_schema=False, dependencies=[Depends(get_current_user)])
     def _prometheus_metrics() -> Response:
         # ``generate_latest()`` walks the global REGISTRY; a corrupted

@@ -100,6 +100,15 @@ class WebSettings(BaseModel):
     # ``default`` preserves current behavior; ``aws-ecs`` is strictly validated by
     # web/deployment_contract.py::validate_aws_ecs_settings.
     deployment_target: Literal["default", "aws-ecs"] = "default"
+    # Operator telemetry is deployment policy, not pipeline-authored routing.
+    # The AWS destination and headers are intentionally absent from this model:
+    # web/operator_telemetry.py fixes them to the task-local collector and the
+    # ECS task role owns AWS authentication.
+    operator_telemetry: Literal["prometheus", "aws-otlp"] = "prometheus"
+    operator_telemetry_service_name: str = "elspeth-web"
+    operator_telemetry_environment: str | None = None
+    operator_telemetry_export_interval_seconds: int = Field(default=60, strict=True, ge=1, le=3600)
+    operator_pipeline_telemetry_granularity: Literal["lifecycle", "rows"] = "lifecycle"
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
@@ -511,6 +520,36 @@ class WebSettings(BaseModel):
         if reserved:
             raise ValueError(f"server_secret_allowlist entries must not start with {SERVER_SECRET_RESERVED_PREFIX}: {sorted(reserved)}")
         return validated
+
+    @field_validator("operator_telemetry_service_name")
+    @classmethod
+    def _validate_operator_telemetry_service_name(cls, value: str) -> str:
+        return cls._validate_operator_resource_identity("operator_telemetry_service_name", value)
+
+    @field_validator("operator_telemetry_environment")
+    @classmethod
+    def _validate_operator_telemetry_environment(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return cls._validate_operator_resource_identity("operator_telemetry_environment", value)
+
+    @field_validator("operator_telemetry_export_interval_seconds", mode="before")
+    @classmethod
+    def _parse_operator_export_interval_from_env(cls, value: object) -> object:
+        # Environment variables arrive as strings; direct Python booleans must
+        # not pass through int coercion as 0/1.
+        if isinstance(value, str):
+            try:
+                return int(value, 10)
+            except ValueError:
+                raise ValueError("operator_telemetry_export_interval_seconds must be an integer") from None
+        return value
+
+    @staticmethod
+    def _validate_operator_resource_identity(field_name: str, value: str) -> str:
+        if not value.strip() or value != value.strip() or len(value) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"{field_name} must be a non-blank bounded string without control characters")
+        return value
 
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> WebSettings:

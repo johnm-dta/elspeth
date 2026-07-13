@@ -1,6 +1,6 @@
 # Composer Guided/Freeform Capability Parity
 
-**Status:** Proposed for written-spec review
+**Status:** Approved design; implementation pending
 **Date:** 2026-07-13
 **Priority:** High
 **Scope:** Composer authoring architecture, freeform and guided skill packs, guided session replacement, validation feedback, and cross-surface evaluation

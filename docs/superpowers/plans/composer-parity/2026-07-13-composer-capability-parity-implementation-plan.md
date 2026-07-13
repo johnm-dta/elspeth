@@ -16,7 +16,8 @@ path.
 
 ## Source of truth
 
-- Design: `docs/superpowers/specs/2026-07-13-composer-guided-freeform-capability-parity-design.md`
+- Implementation handoff: `docs/superpowers/plans/composer-parity/00-implementation-prompt.md`
+- Design: `docs/superpowers/plans/composer-parity/2026-07-13-composer-guided-freeform-capability-parity-design.md`
 - Live example design: `docs/superpowers/specs/2026-07-13-two-llm-colour-hybrid-pipeline-design.md`
 - Live example run sheet: `docs/superpowers/plans/2026-07-13-two-llm-colour-hybrid-demo-run-sheet.md`
 - Controlling Filigree issue: `elspeth-7e2dd67275`; its old instruction to

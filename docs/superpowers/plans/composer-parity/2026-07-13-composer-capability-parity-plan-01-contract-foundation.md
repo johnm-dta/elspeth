@@ -470,6 +470,6 @@ Expected: all commands exit 0.
 Update only the Plan 01 row with the commit hashes and `PASS`; then commit:
 
 ```bash
-git add docs/superpowers/plans/2026-07-13-composer-capability-parity-implementation-plan.md
+git add docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-implementation-plan.md
 git commit -m "docs: record composer parity contract foundation"
 ```

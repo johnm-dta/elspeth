@@ -1,7 +1,7 @@
 {
   "verdict": "APPROVED",
   "summary": "0 blocking issues, 0 warnings after three correction rounds",
-  "plan_file": "docs/superpowers/plans/2026-07-13-composer-capability-parity-implementation-plan.md",
+  "plan_file": "docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-implementation-plan.md",
   "reviewed_at": "2026-07-13T05:25:48Z",
   "blocking_issues": [],
   "warnings": [],

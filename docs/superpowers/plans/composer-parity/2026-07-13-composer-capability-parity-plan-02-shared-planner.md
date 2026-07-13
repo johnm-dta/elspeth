@@ -792,6 +792,6 @@ Expected: all exit 0.
 - [ ] **Step 3: Record Plan 02 evidence and commit the ledger update**
 
 ```bash
-git add docs/superpowers/plans/2026-07-13-composer-capability-parity-implementation-plan.md
+git add docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-implementation-plan.md
 git commit -m "docs: record shared composer planner evidence"
 ```

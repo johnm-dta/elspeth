@@ -137,14 +137,14 @@ class PluginAvailabilitySnapshot:
                 declared[declaration.capability].append(plugin_id)
         selected = tuple((capability, min(plugin_ids) if plugin_ids else None) for capability, plugin_ids in declared.items())
         return cls.create(
-            policy_hash="trained-operator",
+            policy_hash=_canonical_hash({"policy": "trained-operator"}),
             principal_scope="local:trained-operator",
             available=available,
             unavailable=(),
             selected=selected,
             usable_profile_aliases=(),
             selected_profile_aliases=(),
-            binding_generation_fingerprint="trained-operator",
+            binding_generation_fingerprint=_canonical_hash({"binding_generation": "trained-operator"}),
         )
 
     @classmethod

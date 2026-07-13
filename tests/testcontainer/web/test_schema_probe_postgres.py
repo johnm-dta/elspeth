@@ -124,6 +124,65 @@ def test_missing_core_landscape_table_is_stale_and_not_repaired(postgres_engine:
     assert "validation_errors" not in inspect(postgres_engine).get_table_names()
 
 
+def test_populated_pre_epoch_23_landscape_missing_policy_table_is_stale_without_catalog_mutation(
+    postgres_engine: Engine,
+) -> None:
+    init_landscape_schema(postgres_engine)
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO runs (
+                    run_id, started_at, config_hash, settings_json,
+                    canonical_version, status, openrouter_catalog_sha256,
+                    openrouter_catalog_source
+                ) VALUES (
+                    'pre-epoch-23', CURRENT_TIMESTAMP, :config_hash, '{}',
+                    'v1', 'completed', :catalog_hash, 'bundled'
+                )
+                """
+            ),
+            {"config_hash": "a" * 64, "catalog_hash": "b" * 64},
+        )
+        conn.exec_driver_sql("DROP TABLE run_web_plugin_policy")
+    before_tables = inspect(postgres_engine).get_table_names()
+
+    assert probe_landscape_schema(postgres_engine) is SchemaState.STALE
+    with pytest.raises(SchemaCompatibilityError):
+        init_landscape_schema(postgres_engine)
+
+    assert inspect(postgres_engine).get_table_names() == before_tables
+    with postgres_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM runs WHERE run_id='pre-epoch-23'")).scalar_one() == 1
+
+
+def test_landscape_runtime_role_has_dml_but_no_ddl(postgres_engine: Engine) -> None:
+    init_landscape_schema(postgres_engine)
+    role = f"elspeth_runtime_{uuid.uuid4().hex}"
+    password = f"runtime-{uuid.uuid4().hex}"
+    database_name = postgres_engine.url.database
+    assert database_name is not None and re.fullmatch(r"[a-z0-9_]+", database_name)
+    assert re.fullmatch(r"[a-z0-9_]+", role)
+    with postgres_engine.begin() as conn:
+        conn.exec_driver_sql(f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}'")
+        conn.exec_driver_sql(f'GRANT CONNECT ON DATABASE "{database_name}" TO "{role}"')
+        conn.exec_driver_sql(f'GRANT USAGE ON SCHEMA public TO "{role}"')
+        conn.exec_driver_sql(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{role}"')
+        conn.exec_driver_sql(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "{role}"')
+
+    runtime = create_engine(postgres_engine.url.set(username=role, password=password))
+    try:
+        with runtime.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM runs")).scalar_one() == 0
+        with pytest.raises(SQLAlchemyError), runtime.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE runtime_must_not_create (id integer primary key)")
+    finally:
+        runtime.dispose()
+        with postgres_engine.begin() as conn:
+            conn.exec_driver_sql(f'DROP OWNED BY "{role}"')
+            conn.exec_driver_sql(f'DROP ROLE "{role}"')
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

@@ -35,6 +35,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from elspeth.contracts.enums import CreationModality, RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.run_result import RunResult
 from elspeth.core.config import (
     CheckpointSettings,
@@ -1757,6 +1758,10 @@ class TestB2ShutdownEvent:
         assert orch_run_call[1].get("run_id") == str(run_id), (
             "Run diagnostics require the web run UUID to be the Landscape run_id while the run is still active."
         )
+        evidence = orch_run_call[1].get("web_plugin_policy_evidence")
+        assert isinstance(evidence, WebPluginPolicyEvidence)
+        assert evidence.snapshot_hash
+        assert evidence.decision_codes == ("policy_allowed",)
 
         running_calls = [call for call in mock_session_service.update_run_status.await_args_list if call.kwargs.get("status") == "running"]
         assert running_calls

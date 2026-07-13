@@ -37,6 +37,22 @@ class SecretResolutionExportRecord(TypedDict):
     resolution_latency_ms: float | None
 
 
+class WebPluginPolicyExportRecord(TypedDict):
+    record_type: Literal["web_plugin_policy"]
+    run_id: str
+    schema_version: int
+    policy_hash: str
+    snapshot_hash: str
+    authorized_plugin_ids: list[str]
+    available_plugin_ids: list[str]
+    control_modes: list[list[str]]
+    selected_implementations: list[list[str | None]]
+    selected_profile_aliases: list[list[str | None]]
+    plugin_code_identities: list[list[str]]
+    binding_generation_fingerprint: str
+    decision_codes: list[str]
+
+
 class NodeExportRecord(TypedDict):
     record_type: Literal["node"]
     run_id: str
@@ -305,6 +321,7 @@ class ArtifactExportRecord(TypedDict):
 
 ExportRecord = (
     RunExportRecord
+    | WebPluginPolicyExportRecord
     | SecretResolutionExportRecord
     | NodeExportRecord
     | EdgeExportRecord

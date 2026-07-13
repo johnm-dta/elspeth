@@ -876,6 +876,25 @@ landscape:
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
+### Landscape schema epoch 23
+
+Landscape epoch 23 adds `run_web_plugin_policy`, an optional one-to-one audit
+row for each web-initiated run. The row records the immutable policy and
+request-snapshot hashes, authorized and available kind-qualified plugin IDs,
+control modes, selected implementations, safe profile aliases, plugin code
+identities, the binding-generation fingerprint, and bounded decision codes.
+It never records a principal ID, secret or secret-reference value, private
+profile binding, or remote response payload. CLI runs correctly have no row.
+
+Epoch 23 is a deliberate pre-1.0 one-way compatibility boundary for SQLite
+and PostgreSQL. ELSPETH does not add this table to an existing pre-23
+Landscape database. A database owner must obtain archive/export approval where
+retention applies, stop writers, drop/recreate the Landscape schema, and run
+the fresh schema-owner initialization path. Runtime/DML roles must not receive
+DDL. Rolling code back to epoch-22 code after an epoch-23 recreation is unsafe;
+deployment and rollback decisions must cite an approved release/schema
+compatibility record rather than relying on a structural probe alone.
+
 ### Export Settings
 
 | Field | Type | Default | Description |

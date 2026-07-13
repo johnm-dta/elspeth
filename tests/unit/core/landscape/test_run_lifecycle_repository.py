@@ -27,6 +27,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.preflight import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
@@ -37,7 +38,7 @@ from elspeth.core.landscape.run_lifecycle_repository import (
     RunLifecycleRepository,
     is_valid_sha256_hex,
 )
-from elspeth.core.landscape.schema import run_attributions_table, runs_table
+from elspeth.core.landscape.schema import run_attributions_table, run_web_plugin_policy_table, runs_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 
@@ -54,6 +55,26 @@ def _corrupt_column(db: LandscapeDB, run_id: str, **values: object) -> None:
     """Directly update a column in the runs table to simulate corruption."""
     with db.connection() as conn:
         conn.execute(update(runs_table).where(runs_table.c.run_id == run_id).values(**values))
+
+
+def _web_policy_evidence() -> WebPluginPolicyEvidence:
+    return WebPluginPolicyEvidence(
+        schema_version=1,
+        policy_hash="a" * 64,
+        snapshot_hash="b" * 64,
+        authorized_plugin_ids=("sink:json", "source:csv", "transform:llm"),
+        available_plugin_ids=("sink:json", "source:csv", "transform:llm"),
+        control_modes=(("content_safety", "recommend"), ("llm", "required")),
+        selected_implementations=(("content_safety", None), ("llm", "transform:llm")),
+        selected_profile_aliases=(("transform:llm", "tutorial"),),
+        plugin_code_identities=(
+            ("sink:json", "1.0.0", "sha256:1111111111111111"),
+            ("source:csv", "1.0.0", "sha256:2222222222222222"),
+            ("transform:llm", "1.0.0", "sha256:3333333333333333"),
+        ),
+        binding_generation_fingerprint="c" * 64,
+        decision_codes=("policy_allowed",),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +251,109 @@ class TestBeginRunDirect:
         assert attributed.config_hash == unattributed.config_hash
         assert row.initiated_by_user_id == "alice"
         assert row.auth_provider_type == "local"
+
+    def test_begin_run_records_optional_web_plugin_policy_evidence(self) -> None:
+        db = make_landscape_db()
+        repo = RunLifecycleRepository(db, DatabaseOps(db), RunLoader())
+
+        repo.begin_run(
+            config={"pipeline": "test"},
+            canonical_version="v1",
+            run_id="web-policy-run",
+            web_plugin_policy_evidence=_web_policy_evidence(),
+        )
+
+        with db.read_only_connection() as conn:
+            row = conn.execute(select(run_web_plugin_policy_table).where(run_web_plugin_policy_table.c.run_id == "web-policy-run")).one()
+        assert row.policy_hash == "a" * 64
+        assert row.authorized_plugin_ids_json == '["sink:json","source:csv","transform:llm"]'
+        assert row.selected_profile_aliases_json == '[["transform:llm","tutorial"]]'
+
+    def test_begin_run_cli_path_does_not_fabricate_web_policy_evidence(self) -> None:
+        db = make_landscape_db()
+        repo = RunLifecycleRepository(db, DatabaseOps(db), RunLoader())
+        repo.begin_run(config={}, canonical_version="v1", run_id="cli-run")
+
+        with db.read_only_connection() as conn:
+            rows = conn.execute(select(run_web_plugin_policy_table)).all()
+        assert rows == []
+
+    def test_web_policy_insert_rolls_back_run_attribution_and_leader_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        from elspeth.core.landscape.schema import run_coordination_table
+
+        db = make_landscape_db()
+        repo = RunLifecycleRepository(db, DatabaseOps(db), RunLoader())
+
+        def reject_policy_insert(*_args: object, **_kwargs: object) -> None:
+            raise IntegrityError("INSERT", {}, RuntimeError("policy audit unavailable"))
+
+        monkeypatch.setattr(repo, "_insert_web_plugin_policy_evidence", reject_policy_insert)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            repo.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id="rolled-back-web-run",
+                initiated_by_user_id="alice",
+                auth_provider_type="local",
+                web_plugin_policy_evidence=_web_policy_evidence(),
+            )
+
+        with db.read_only_connection() as conn:
+            assert conn.execute(select(runs_table).where(runs_table.c.run_id == "rolled-back-web-run")).first() is None
+            assert (
+                conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == "rolled-back-web-run")).first() is None
+            )
+            assert (
+                conn.execute(select(run_coordination_table).where(run_coordination_table.c.run_id == "rolled-back-web-run")).first() is None
+            )
+            assert (
+                conn.execute(
+                    select(run_web_plugin_policy_table).where(run_web_plugin_policy_table.c.run_id == "rolled-back-web-run")
+                ).first()
+                is None
+            )
+
+    def test_web_policy_evidence_foreign_key_rejects_orphan_run(self) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        db = make_landscape_db()
+        repo = RunLifecycleRepository(db, DatabaseOps(db), RunLoader())
+
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
+            repo._insert_web_plugin_policy_evidence(conn, run_id="missing-run", evidence=_web_policy_evidence())
+
+    @pytest.mark.parametrize(
+        ("corrupt_values", "message"),
+        [
+            ({"policy_hash": "A" * 64}, "corrupt"),
+            ({"authorized_plugin_ids_json": '["source:csv","sink:json","transform:llm"]'}, "corrupt"),
+        ],
+    )
+    def test_get_web_policy_evidence_rejects_hash_or_canonical_json_corruption(
+        self,
+        corrupt_values: dict[str, object],
+        message: str,
+    ) -> None:
+        db = make_landscape_db()
+        repo = RunLifecycleRepository(db, DatabaseOps(db), RunLoader())
+        repo.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="corrupt-policy-run",
+            web_plugin_policy_evidence=_web_policy_evidence(),
+        )
+        with db.write_connection() as conn:
+            conn.execute(
+                update(run_web_plugin_policy_table)
+                .where(run_web_plugin_policy_table.c.run_id == "corrupt-policy-run")
+                .values(**corrupt_values)
+            )
+
+        with pytest.raises(AuditIntegrityError, match=message):
+            repo.get_web_plugin_policy_evidence("corrupt-policy-run")
 
     def test_begin_run_rejects_partial_web_attribution(self) -> None:
         db = make_landscape_db()

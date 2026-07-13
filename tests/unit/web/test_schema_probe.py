@@ -234,6 +234,19 @@ def test_landscape_additive_gap_is_partial_and_initializer_repairs_it() -> None:
     assert probe_landscape_schema(engine) is SchemaState.PARTIAL
     init_landscape_schema(engine)
     assert probe_landscape_schema(engine) is SchemaState.CURRENT
+
+
+def test_populated_landscape_missing_epoch_23_policy_table_is_stale_and_not_repaired() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    landscape_metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE run_web_plugin_policy")
+        conn.exec_driver_sql("PRAGMA user_version = 22")
+
+    assert probe_landscape_schema(engine) is SchemaState.STALE
+    with pytest.raises(SchemaCompatibilityError, match=r"stale|foreign"):
+        init_landscape_schema(engine)
+    assert "run_web_plugin_policy" not in inspect(engine).get_table_names()
     engine.dispose()
 
 

@@ -2,7 +2,33 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.0 (two-DB reset)
+## Current Landscape Cutover: epoch 23
+
+The universal web plugin-policy candidate advances `SQLITE_SCHEMA_EPOCH` from
+22 to 23 and adds `run_web_plugin_policy`. This table is optional per run but
+required in the schema: web runs receive one policy-evidence row atomically
+with the run, attribution, and leader records; CLI runs receive none.
+
+This is not an in-place migration. Any existing pre-23 SQLite database or
+non-empty PostgreSQL Landscape missing `run_web_plugin_policy` is stale.
+Validate-only startup and doctor must leave it unchanged. The database
+operator must decide and approve archive/export where retention applies,
+stop all writers, drop/recreate the Landscape database or schema, and perform
+fresh owner initialization. The runtime role remains DML-only. Do not use
+`create_all`, `--init-schema`, or a code rollback as a repair mechanism.
+
+The release/schema compatibility record for every candidate using this shape
+must state: candidate git SHA and immutable image/task-definition identity;
+session and Landscape epochs; presence of `run_web_plugin_policy`; structural
+and semantics-only changes; archive/export decision and approver; destructive
+reset requirement and database-operator approval; previous release identity
+and epochs; forward and backward compatibility decisions; and an explicit
+`rollback_permitted` decision with evidence. Epoch-22 code is not compatible
+with a freshly recreated epoch-23 database, so rollback is `no` unless a later
+approved record proves otherwise. Plans 10 and 12 must cite this epoch-23
+record when binding candidate and rollback decisions.
+
+## Historical Cutover: 0.7.0 (two-DB reset)
 
 0.7.0 advances **both** schema epochs: `SESSION_SCHEMA_EPOCH` is now 26 and
 the Landscape audit DB `SQLITE_SCHEMA_EPOCH` is now 22. This is a

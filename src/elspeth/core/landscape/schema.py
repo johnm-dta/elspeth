@@ -134,7 +134,10 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #   22 → Routing events are run-scoped: routing_events carries run_id and
 #        composite FKs to node_states(state_id, run_id) and edges(edge_id, run_id)
 #        so state/edge route decisions cannot cross audit-run boundaries.
-SQLITE_SCHEMA_EPOCH = 22
+#   23 → Web plugin-policy audit evidence: run_web_plugin_policy stores one
+#        optional, sanitized policy/snapshot decision row per web run. This is
+#        a deliberate pre-1.0 drop/recreate boundary, not an in-place migration.
+SQLITE_SCHEMA_EPOCH = 23
 
 # Column width for node_id across all tables. The cross-layer identifier limit
 # lives in contracts.types; changing this value requires an Alembic migration.
@@ -223,6 +226,24 @@ run_attributions_table = Table(
     CheckConstraint("auth_provider_type IN ('local', 'oidc', 'entra')", name="ck_run_attributions_auth_provider_type"),
 )
 Index("ix_run_attributions_user", run_attributions_table.c.initiated_by_user_id, run_attributions_table.c.auth_provider_type)
+
+run_web_plugin_policy_table = Table(
+    "run_web_plugin_policy",
+    metadata,
+    Column("run_id", String(64), ForeignKey("runs.run_id"), primary_key=True),
+    Column("schema_version", Integer, nullable=False),
+    Column("policy_hash", String(64), nullable=False),
+    Column("snapshot_hash", String(64), nullable=False),
+    Column("authorized_plugin_ids_json", Text, nullable=False),
+    Column("available_plugin_ids_json", Text, nullable=False),
+    Column("control_modes_json", Text, nullable=False),
+    Column("selected_implementations_json", Text, nullable=False),
+    Column("selected_profile_aliases_json", Text, nullable=False),
+    Column("plugin_code_identities_json", Text, nullable=False),
+    Column("binding_generation_fingerprint", String(64), nullable=False),
+    Column("decision_codes_json", Text, nullable=False),
+    CheckConstraint("schema_version >= 1", name="ck_run_web_plugin_policy_schema_version"),
+)
 
 run_sources_table = Table(
     "run_sources",

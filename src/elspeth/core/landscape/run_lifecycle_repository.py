@@ -34,6 +34,7 @@ from elspeth.contracts.coordination import (
 )
 from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError, RunLeadershipLostError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.preflight import PreflightResult
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.scheduler import TokenWorkStatus
@@ -57,6 +58,7 @@ from elspeth.core.landscape.schema import (
     run_attributions_table,
     run_coordination_table,
     run_sources_table,
+    run_web_plugin_policy_table,
     run_workers_table,
     runs_table,
     secret_resolutions_table,
@@ -212,6 +214,7 @@ class RunLifecycleRepository:
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
         leader_worker_id: str | None = None,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> Run:
         """Begin a new pipeline run.
 
@@ -242,6 +245,8 @@ class RunLifecycleRepository:
                 passes the identity it minted so it can construct the
                 epoch-1 :class:`~elspeth.contracts.coordination.CoordinationToken`
                 without a read-back.
+            web_plugin_policy_evidence: Optional sanitized web-policy decision.
+                Web execution supplies one row; CLI execution passes None.
 
         Returns:
             Run model with generated run_id
@@ -266,6 +271,8 @@ class RunLifecycleRepository:
             sha256=openrouter_catalog_sha256,
             source=openrouter_catalog_source,
         )
+        if web_plugin_policy_evidence is not None and not isinstance(web_plugin_policy_evidence, WebPluginPolicyEvidence):
+            raise AuditIntegrityError("web_plugin_policy_evidence must be a WebPluginPolicyEvidence value")
 
         run_id = run_id or generate_id()
         settings_json = canonical_json(config)
@@ -332,6 +339,12 @@ class RunLifecycleRepository:
                             auth_provider_type=auth_provider_type,
                         )
                     )
+                if web_plugin_policy_evidence is not None:
+                    self._insert_web_plugin_policy_evidence(
+                        conn,
+                        run_id=run.run_id,
+                        evidence=web_plugin_policy_evidence,
+                    )
                 # Composes into THIS transaction (connection-accepting form):
                 # the runs row above satisfies the run_coordination FK.
                 coordination.register_run_leader_on(
@@ -349,6 +362,54 @@ class RunLifecycleRepository:
             raise LandscapeRecordError(f"begin_run — database rejected audit write: {type(exc).__name__}: {exc}") from exc
 
         return run
+
+    def _insert_web_plugin_policy_evidence(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        evidence: WebPluginPolicyEvidence,
+    ) -> None:
+        """Compose the optional epoch-23 evidence row into begin_run's transaction."""
+        conn.execute(
+            run_web_plugin_policy_table.insert().values(
+                run_id=run_id,
+                schema_version=evidence.schema_version,
+                policy_hash=evidence.policy_hash,
+                snapshot_hash=evidence.snapshot_hash,
+                authorized_plugin_ids_json=canonical_json(evidence.authorized_plugin_ids),
+                available_plugin_ids_json=canonical_json(evidence.available_plugin_ids),
+                control_modes_json=canonical_json(evidence.control_modes),
+                selected_implementations_json=canonical_json(evidence.selected_implementations),
+                selected_profile_aliases_json=canonical_json(evidence.selected_profile_aliases),
+                plugin_code_identities_json=canonical_json(evidence.plugin_code_identities),
+                binding_generation_fingerprint=evidence.binding_generation_fingerprint,
+                decision_codes_json=canonical_json(evidence.decision_codes),
+            )
+        )
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> WebPluginPolicyEvidence | None:
+        """Return the optional web-policy evidence row, failing on corrupt JSON."""
+        with self._db.read_only_connection() as conn:
+            row = conn.execute(select(run_web_plugin_policy_table).where(run_web_plugin_policy_table.c.run_id == run_id)).one_or_none()
+        if row is None:
+            return None
+        try:
+            return WebPluginPolicyEvidence(
+                schema_version=row.schema_version,
+                policy_hash=row.policy_hash,
+                snapshot_hash=row.snapshot_hash,
+                authorized_plugin_ids=tuple(json.loads(row.authorized_plugin_ids_json)),
+                available_plugin_ids=tuple(json.loads(row.available_plugin_ids_json)),
+                control_modes=tuple(tuple(item) for item in json.loads(row.control_modes_json)),
+                selected_implementations=tuple(tuple(item) for item in json.loads(row.selected_implementations_json)),
+                selected_profile_aliases=tuple(tuple(item) for item in json.loads(row.selected_profile_aliases_json)),
+                plugin_code_identities=tuple(tuple(item) for item in json.loads(row.plugin_code_identities_json)),
+                binding_generation_fingerprint=row.binding_generation_fingerprint,
+                decision_codes=tuple(json.loads(row.decision_codes_json)),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise AuditIntegrityError(f"Web plugin-policy evidence is corrupt for run {run_id}") from exc
 
     def complete_run(
         self,

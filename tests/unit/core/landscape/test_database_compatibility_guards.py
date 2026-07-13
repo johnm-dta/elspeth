@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from sqlalchemy.schema import CreateIndex
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, token_work_items_table
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, runs_table, token_work_items_table
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -159,6 +160,49 @@ class TestExplicitEngineKwargs:
 
 
 class TestSyncSchemaEpochDirectionalGuard:
+    def test_populated_epoch_22_is_refused_before_create_all_and_left_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path = tmp_path / "epoch_22_populated.db"
+        url = f"sqlite:///{db_path}"
+        engine = create_engine(url)
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE run_web_plugin_policy")
+            conn.execute(
+                runs_table.insert().values(
+                    run_id="legacy-run",
+                    started_at=datetime(2026, 7, 14, tzinfo=UTC),
+                    config_hash="a" * 64,
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="completed",
+                    seeded_from_cache=False,
+                    openrouter_catalog_sha256="b" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            conn.exec_driver_sql("PRAGMA user_version = 22")
+        engine.dispose()
+
+        def unexpected_create_all(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("metadata.create_all must not mutate a populated epoch-22 database")
+
+        monkeypatch.setattr(metadata, "create_all", unexpected_create_all)
+        with pytest.raises(SchemaCompatibilityError, match=r"epoch|outdated"):
+            LandscapeDB(url)
+
+        check = create_engine(url)
+        try:
+            assert "run_web_plugin_policy" not in inspect(check).get_table_names()
+            with check.connect() as conn:
+                assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 22
+                assert conn.execute(text("SELECT count(*) FROM runs")).scalar_one() == 1
+        finally:
+            check.dispose()
+
     def test_sync_upgrades_epoch_zero(self, tmp_path: Path) -> None:
         """_sync_sqlite_schema_epoch upgrades unstamped databases (epoch 0)."""
         db_path = tmp_path / "unstamped.db"

@@ -34,6 +34,7 @@ from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
@@ -105,7 +106,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
 from elspeth.web.landscape_access import open_landscape_db
-from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, WebPluginPolicy
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
@@ -134,6 +135,38 @@ _BLOB_INLINE_AUDIT_ROW_TIER1_VIOLATION_TOTAL = _meter.create_counter(
     name="composer.blob_inline.audit_row_tier1_violation_total",
     description="resolved inline blob ref produced no audit row; SLO threshold = 0",
 )
+
+
+def _build_web_plugin_policy_evidence(
+    *,
+    snapshot: PluginAvailabilitySnapshot,
+    policy: WebPluginPolicy | None,
+) -> WebPluginPolicyEvidence:
+    """Project the immutable request snapshot into the sanitized L0 audit DTO."""
+    if policy is None:
+        authorized = snapshot.available | frozenset(item.plugin_id for item in snapshot.unavailable)
+        identities: tuple[tuple[str, str, str], ...] = ()
+    else:
+        if snapshot.policy_hash != policy.policy_hash:
+            raise RuntimeError("plugin snapshot policy hash does not match the boot-time policy")
+        authorized = policy.authorized
+        identities = tuple((str(plugin_id), version, source_hash) for plugin_id, version, source_hash in policy.plugin_code_identities)
+    return WebPluginPolicyEvidence(
+        schema_version=policy.schema_version if policy is not None else 1,
+        policy_hash=snapshot.policy_hash,
+        snapshot_hash=snapshot.snapshot_hash,
+        authorized_plugin_ids=tuple(sorted(map(str, authorized))),
+        available_plugin_ids=tuple(sorted(map(str, snapshot.available))),
+        control_modes=tuple(sorted((capability.value, mode.value) for capability, mode in snapshot.control_modes)),
+        selected_implementations=tuple(
+            sorted((capability.value, None if plugin_id is None else str(plugin_id)) for capability, plugin_id in snapshot.selected)
+        ),
+        selected_profile_aliases=tuple(sorted((str(plugin_id), alias) for plugin_id, alias in snapshot.selected_profile_aliases)),
+        plugin_code_identities=tuple(sorted(identities)),
+        binding_generation_fingerprint=snapshot.binding_generation_fingerprint,
+        decision_codes=("policy_allowed",),
+    )
+
 
 T = TypeVar("T")
 
@@ -305,6 +338,7 @@ class ExecutionServiceImpl:
         secret_service: WebSecretResolver | None = None,
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
         operator_profile_registry: OperatorProfileRegistry | None = None,
+        web_plugin_policy: WebPluginPolicy | None = None,
     ) -> None:
         self._loop = loop
         self._broadcaster = broadcaster
@@ -316,6 +350,7 @@ class ExecutionServiceImpl:
         self._secret_service = secret_service
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
+        self._web_plugin_policy = web_plugin_policy
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
         # via create_run(), update_run_status(), get_active_run(), get_run().
         # R6 expanded params: landscape_run_id, pipeline_yaml, rows_processed,
@@ -1460,6 +1495,10 @@ class ExecutionServiceImpl:
                 auth_provider_type=auth_provider_type,
                 openrouter_catalog_sha256=catalog_sha,
                 openrouter_catalog_source=catalog_source,
+                web_plugin_policy_evidence=_build_web_plugin_policy_evidence(
+                    snapshot=plugin_snapshot,
+                    policy=self._web_plugin_policy,
+                ),
             )
 
             # Orchestrator.run() returns normally ONLY on completion.

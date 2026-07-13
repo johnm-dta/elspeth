@@ -257,6 +257,19 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("run_attributions", "recorded_at"),
     ("run_attributions", "initiated_by_user_id"),
     ("run_attributions", "auth_provider_type"),
+    # Epoch 23: one optional, sanitized plugin-policy evidence row per web run.
+    ("run_web_plugin_policy", "run_id"),
+    ("run_web_plugin_policy", "schema_version"),
+    ("run_web_plugin_policy", "policy_hash"),
+    ("run_web_plugin_policy", "snapshot_hash"),
+    ("run_web_plugin_policy", "authorized_plugin_ids_json"),
+    ("run_web_plugin_policy", "available_plugin_ids_json"),
+    ("run_web_plugin_policy", "control_modes_json"),
+    ("run_web_plugin_policy", "selected_implementations_json"),
+    ("run_web_plugin_policy", "selected_profile_aliases_json"),
+    ("run_web_plugin_policy", "plugin_code_identities_json"),
+    ("run_web_plugin_policy", "binding_generation_fingerprint"),
+    ("run_web_plugin_policy", "decision_codes_json"),
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
@@ -426,6 +439,7 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
 # Use this only for exact single-column contracts. Run-scoped contracts belong in
 # _REQUIRED_COMPOSITE_FOREIGN_KEYS so stale single-column FKs cannot satisfy them.
 _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("run_web_plugin_policy", "run_id", "runs"),
     ("validation_errors", "row_id", "rows"),
     ("preflight_results", "run_id", "runs"),
     ("scheduler_events", "run_id", "runs"),
@@ -483,6 +497,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_outcome"),
     ("auth_events", "ck_auth_events_provider"),
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
+    ("run_web_plugin_policy", "ck_run_web_plugin_policy_schema_version"),
     ("run_sources", "ck_run_sources_lifecycle_state"),
     ("token_work_items", "ck_token_work_items_lease_owner_required_when_leased"),
     ("scheduler_events", "ck_scheduler_events_event_type"),
@@ -700,6 +715,10 @@ class LandscapeDB:
             )
         self._setup_engine(**engine_kwargs)
         self._validate_schema()  # Check BEFORE create_tables
+        # Stamp only a structurally validated unstamped schema. A non-zero
+        # pre-23 Landscape is a deliberate drop/recreate boundary and is
+        # rejected here before create_all can add epoch-23 objects.
+        self._sync_sqlite_schema_epoch()
         self._create_tables()
         self._create_additive_indexes()
         self._sync_sqlite_schema_epoch()
@@ -1020,14 +1039,15 @@ class LandscapeDB:
         """Stamp compatible SQLite databases with the current schema epoch.
 
         New databases get the epoch immediately after create_all(). Existing
-        compatible databases without an epoch are upgraded in place to the
-        current stamp, which preserves a future migration path without requiring
-        a full migration framework today. Call this only from schema-managing
-        paths; read-only/inspection opens must not mutate the database.
+        compatible databases without an epoch are stamped in place. Populated
+        databases carrying an older non-zero epoch are rejected at this one-way
+        schema boundary rather than migrated implicitly. Call this only from
+        schema-managing paths; read-only/inspection opens must not mutate the
+        database.
 
         Raises:
-            SchemaCompatibilityError: If the database has a newer epoch than
-                this code version expects (prevents silent downgrades).
+            SchemaCompatibilityError: If the database has a non-zero epoch
+                different from this code version's epoch.
         """
         if not self.connection_string.startswith("sqlite"):
             return
@@ -1043,6 +1063,31 @@ class LandscapeDB:
                 "Upgrade ELSPETH to open this database.\n\n"
                 f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
+        if 0 < current_epoch < SQLITE_SCHEMA_EPOCH:
+            from sqlalchemy import inspect
+
+            present_landscape_tables = set(inspect(self.engine).get_table_names()) & set(metadata.tables)
+            if present_landscape_tables:
+                raise SchemaCompatibilityError(
+                    "Cannot sync schema epoch: this existing Landscape database predates "
+                    "the current one-way schema boundary. ELSPETH does not migrate it in place.\n\n"
+                    f"Database epoch: {current_epoch}\n"
+                    f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
+                    "Obtain archive/export approval where retention applies, then have the "
+                    "database operator drop/recreate the Landscape database and initialize "
+                    "a fresh schema. Rolling code back over the recreated database is unsafe.\n\n"
+                    f"Database: {_safe_database_descriptor(self.connection_string)}"
+                )
+
+        if current_epoch == 0:
+            from sqlalchemy import inspect
+
+            # A genuinely fresh file is stamped only after create_all has
+            # installed the complete current shape. Existing unstamped schemas
+            # reach this point only after _validate_schema proved compatibility.
+            if not (set(inspect(self.engine).get_table_names()) & set(metadata.tables)):
+                return
+
         if current_epoch < SQLITE_SCHEMA_EPOCH:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
 
@@ -1503,6 +1548,7 @@ class LandscapeDB:
         instance._validate_schema()
 
         if create_tables:
+            instance._sync_sqlite_schema_epoch()
             metadata.create_all(engine)
             instance._create_additive_indexes()
             instance._sync_sqlite_schema_epoch()

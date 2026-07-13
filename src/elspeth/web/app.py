@@ -432,6 +432,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         secret_service=app.state.scoped_secret_resolver,
         plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
         operator_profile_registry=app.state.operator_profile_registry,
+        web_plugin_policy=app.state.web_plugin_policy,
     )
     app.state.execution_service = execution_service
 

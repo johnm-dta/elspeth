@@ -57,6 +57,7 @@ from elspeth.contracts.enums import (
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter, RecorderFactoryExportReadModel
@@ -408,6 +409,7 @@ class _RunLifecycleRecorder:
     run: Run | None
     run_attribution: tuple[str, str] | None
     secret_resolutions: list[Any]
+    web_plugin_policy_evidence: WebPluginPolicyEvidence | None
 
     def get_run(self, run_id: str) -> Run | None:
         return self.run
@@ -417,6 +419,9 @@ class _RunLifecycleRecorder:
 
     def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
         return self.secret_resolutions
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> WebPluginPolicyEvidence | None:
+        return self.web_plugin_policy_evidence
 
 
 @dataclass(slots=True)
@@ -527,6 +532,9 @@ class _ExportReadModelRecorder:
     def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
         return self._run_lifecycle.get_run_attribution(run_id)
 
+    def get_web_plugin_policy_evidence(self, run_id: str) -> WebPluginPolicyEvidence | None:
+        return self._run_lifecycle.get_web_plugin_policy_evidence(run_id)
+
     def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
         return self._run_lifecycle.get_secret_resolutions_for_run(run_id)
 
@@ -588,6 +596,7 @@ def _make_exporter(
     run: Run | None | object = _DEFAULT_RUN,
     run_attribution: tuple[str, str] | None = None,
     secret_resolutions: list[Any] | None = None,
+    web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     nodes: list[Any] | None = None,
     edges: list[Any] | None = None,
     validation_errors: list[Any] | None = None,
@@ -618,6 +627,7 @@ def _make_exporter(
             run=run,
             run_attribution=run_attribution,
             secret_resolutions=secret_resolutions,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
             nodes=nodes,
             edges=edges,
             validation_errors=validation_errors,
@@ -644,6 +654,7 @@ def _make_export_read_model(
     run: Run | None | object = _DEFAULT_RUN,
     run_attribution: tuple[str, str] | None = None,
     secret_resolutions: list[Any] | None = None,
+    web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     nodes: list[Any] | None = None,
     edges: list[Any] | None = None,
     validation_errors: list[Any] | None = None,
@@ -668,6 +679,7 @@ def _make_export_read_model(
             run=resolved_run,
             run_attribution=run_attribution,
             secret_resolutions=secret_resolutions or [],
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
         ),
         _data_flow=_DataFlowRecorder(
             nodes=nodes or [],
@@ -830,6 +842,47 @@ class TestExportRunUnsigned:
         records = list(exporter.export_run("run-1"))
         assert records[0]["initiated_by_user_id"] is None
         assert records[0]["auth_provider_type"] is None
+
+    def test_web_plugin_policy_evidence_is_exported_after_run_metadata(self) -> None:
+        evidence = WebPluginPolicyEvidence(
+            schema_version=1,
+            policy_hash="a" * 64,
+            snapshot_hash="b" * 64,
+            authorized_plugin_ids=("sink:json", "source:csv"),
+            available_plugin_ids=("sink:json", "source:csv"),
+            control_modes=(("llm", "recommend"),),
+            selected_implementations=(("llm", None),),
+            selected_profile_aliases=(),
+            plugin_code_identities=(
+                ("sink:json", "1.0.0", "sha256:1111111111111111"),
+                ("source:csv", "1.0.0", "sha256:2222222222222222"),
+            ),
+            binding_generation_fingerprint="c" * 64,
+            decision_codes=("policy_allowed",),
+        )
+        exporter = _make_exporter(web_plugin_policy_evidence=evidence)
+
+        records = list(exporter.export_run("run-1"))
+
+        assert [record["record_type"] for record in records[:2]] == ["run", "web_plugin_policy"]
+        assert records[1] == {
+            "record_type": "web_plugin_policy",
+            "run_id": "run-1",
+            "schema_version": 1,
+            "policy_hash": "a" * 64,
+            "snapshot_hash": "b" * 64,
+            "authorized_plugin_ids": ["sink:json", "source:csv"],
+            "available_plugin_ids": ["sink:json", "source:csv"],
+            "control_modes": [["llm", "recommend"]],
+            "selected_implementations": [["llm", None]],
+            "selected_profile_aliases": [],
+            "plugin_code_identities": [
+                ["sink:json", "1.0.0", "sha256:1111111111111111"],
+                ["source:csv", "1.0.0", "sha256:2222222222222222"],
+            ],
+            "binding_generation_fingerprint": "c" * 64,
+            "decision_codes": ["policy_allowed"],
+        }
 
     def test_run_record_has_timestamps(self) -> None:
         exporter = _make_exporter()

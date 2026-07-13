@@ -1,0 +1,108 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "S3 bucket name or access-point identifier",
+        "kind": "text",
+        "label": "Bucket",
+        "name": "bucket",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "S3 object key template rendered once per run",
+        "kind": "text",
+        "label": "Key",
+        "name": "key",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "csv",
+        "description": "S3 object data format",
+        "enum": [
+          "csv",
+          "json",
+          "jsonl"
+        ],
+        "kind": "enum",
+        "label": "Format",
+        "name": "format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Allow replacement of an existing S3 object",
+        "kind": "checkbox",
+        "label": "Overwrite",
+        "name": "overwrite",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "CSV writing options",
+        "kind": "json-object",
+        "label": "CSV Options",
+        "name": "csv_options",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Normalized, original, or custom output headers",
+        "kind": "json-value",
+        "label": "Headers",
+        "name": "headers",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "AWS signing region override",
+        "kind": "text",
+        "label": "Region Name",
+        "name": "region_name",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "CLI/batch-only S3-compatible HTTP endpoint",
+        "kind": "text",
+        "label": "Endpoint URL",
+        "name": "endpoint_url",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": 268435456,
+        "description": "Maximum serialized S3 object bytes",
+        "kind": "number-int",
+        "label": "Max Object Bytes",
+        "name": "max_object_bytes",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 1000000,
+        "description": "Maximum characters in one serialized output record",
+        "kind": "number-int",
+        "label": "Max Record Chars",
+        "name": "max_record_chars",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "aws_s3"
+}

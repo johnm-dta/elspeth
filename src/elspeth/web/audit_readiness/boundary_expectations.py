@@ -132,6 +132,7 @@ EXPECTED_SOURCE_DETERMINISMS: dict[str, Determinism] = {
 }
 
 EXPECTED_SINK_DETERMINISMS: dict[str, Determinism] = {
+    "aws_s3": Determinism.IO_WRITE,
     "azure_blob": Determinism.IO_WRITE,
     "chroma_sink": Determinism.IO_WRITE,
     "csv": Determinism.IO_WRITE,

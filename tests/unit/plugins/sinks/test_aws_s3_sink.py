@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -25,10 +26,10 @@ def _base_config(**overrides: Any) -> dict[str, Any]:
 
 
 class TestAWSS3SinkConfig:
-    def test_task_one_module_is_not_registered(self) -> None:
-        import elspeth.plugins.sinks.aws_s3_sink as module
+    def test_complete_sink_is_registered_in_task_two(self) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
 
-        assert not hasattr(module, "AWSS3Sink")
+        assert AWSS3Sink.name == "aws_s3"
 
     def test_all_registered_fields_have_descriptions(self) -> None:
         from elspeth.plugins.sinks.aws_s3_sink import AWSS3SinkConfig, CSVWriteOptions
@@ -317,3 +318,341 @@ class TestSerialization:
     def test_json_output_is_valid_without_whole_document_formatting(self) -> None:
         with _serialize([{"id": 1, "name": "Ada"}], format="json") as serialized:
             assert json.load(serialized.body) == [{"id": 1, "name": "Ada"}]
+
+
+@dataclass
+class _SinkContext:
+    run_id: str = "run-123"
+    contract: Any = None
+    landscape: Any = None
+    operation_id: str = "operation-123"
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    recorder_error: BaseException | None = None
+
+    def record_call(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if self.recorder_error is not None:
+            raise self.recorder_error
+
+
+class _S3Client:
+    def __init__(self, responses: list[Any] | None = None) -> None:
+        self.responses = list(responses or [{"ETag": '"etag-1"'}])
+        self.requests: list[dict[str, Any]] = []
+        self.bodies: list[bytes] = []
+        self.closed = 0
+        self.close_error: BaseException | None = None
+
+    def put_object(self, **kwargs: Any) -> Any:
+        self.requests.append(kwargs)
+        body = kwargs["Body"]
+        body.seek(0)
+        self.bodies.append(body.read())
+        body.seek(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    def close(self) -> None:
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _runtime_sink(*, client: _S3Client | None = None, **overrides: Any) -> tuple[Any, _S3Client]:
+    from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
+    from tests.fixtures.base_classes import inject_write_failure
+
+    sink = inject_write_failure(AWSS3Sink(_base_config(**overrides)))
+    actual_client = client or _S3Client()
+    sink._s3_client = actual_client
+    return sink, actual_client
+
+
+class _ProviderFailure(Exception):
+    pass
+
+
+class _ConditionalFailure(Exception):
+    def __init__(self, code: str, status: int) -> None:
+        super().__init__("raw provider sentinel must not escape")
+        self.response = {"Error": {"Code": code, "Message": "raw provider sentinel"}, "ResponseMetadata": {"HTTPStatusCode": status}}
+
+
+class TestAWSS3SinkRuntime:
+    def test_protocol_metadata_and_assistance(self) -> None:
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
+
+        assert AWSS3Sink.name == "aws_s3"
+        assert AWSS3Sink.determinism is Determinism.IO_WRITE
+        assert AWSS3Sink.plugin_version == "1.0.0"
+        assert AWSS3Sink.supports_resume is False
+        assistance = AWSS3Sink.get_agent_assistance()
+        assert assistance is not None and assistance.summary
+        assert assistance.composer_hints
+        assert all(len(hint) <= 280 for hint in assistance.composer_hints)
+
+    def test_configure_for_resume_uses_direct_not_supported_error(self) -> None:
+        sink, _ = _runtime_sink()
+        with pytest.raises(NotImplementedError, match="does not support resume") as captured:
+            sink.configure_for_resume()
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
+
+    @pytest.mark.parametrize("format", ["csv", "json", "jsonl"])
+    def test_unconditional_upload_has_integrity_metadata_and_audit(self, format: str) -> None:
+        sink, client = _runtime_sink(format=format, key=f"output.{format}")
+        context = _SinkContext()
+
+        result = sink.write([{"id": 1, "name": "Ada"}], context)
+
+        request = client.requests[0]
+        assert request["Bucket"] == "example-bucket"
+        assert request["Key"] == f"output.{format}"
+        assert request["ContentLength"] == len(client.bodies[0])
+        assert request["ChecksumSHA256"] == base64.b64encode(hashlib.sha256(client.bodies[0]).digest()).decode("ascii")
+        assert "IfNoneMatch" not in request and "IfMatch" not in request
+        assert result.artifact.content_hash == hashlib.sha256(client.bodies[0]).hexdigest()
+        assert result.artifact.path_or_uri == f"s3://example-bucket/output.{format}"
+        call = context.calls[0]
+        assert call["status"].value == "success"
+        assert call["provider"] == "aws_s3"
+        assert call["request_data"] == {
+            "operation": "put_object",
+            "bucket": "example-bucket",
+            "key": f"output.{format}",
+            "overwrite": True,
+            "condition": "none",
+        }
+        assert call["response_data"] == {"size_bytes": len(client.bodies[0]), "content_hash": result.artifact.content_hash}
+
+    def test_if_none_match_then_confirmed_etag_if_match_for_cumulative_rewrite(self) -> None:
+        client = _S3Client([{"ETag": '"etag-1"'}, {"ETag": '"etag-2"'}])
+        sink, _ = _runtime_sink(client=client, overwrite=False, format="json")
+        context = _SinkContext()
+
+        first = sink.write([{"id": 1, "name": "Ada"}], context)
+        second = sink.write([{"id": 2, "name": "Grace"}], context)
+
+        assert client.requests[0]["IfNoneMatch"] == "*"
+        assert "IfMatch" not in client.requests[0]
+        assert client.requests[1]["IfMatch"] == '"etag-1"'
+        assert "IfNoneMatch" not in client.requests[1]
+        assert json.loads(client.bodies[0]) == [{"id": 1, "name": "Ada"}]
+        assert json.loads(client.bodies[1]) == [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}]
+        assert first.artifact.content_hash != second.artifact.content_hash
+        assert sink._remote_etag == '"etag-2"'
+
+    @pytest.mark.parametrize("response", [{}, {"ETag": ""}, {"ETag": "bad\nvalue"}, {"ETag": "x" * 1025}, []])
+    def test_missing_or_malformed_success_etag_poison_sink(self, response: Any) -> None:
+        sink, _ = _runtime_sink(client=_S3Client([response]), overwrite=False)
+        context = _SinkContext()
+
+        with pytest.raises(Exception, match="outcome is unknown") as captured:
+            sink.write([{"id": 1, "name": "Ada"}], context)
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
+        assert sink._poisoned is True
+        assert sink._buffered_rows == []
+        with pytest.raises(Exception, match="poisoned"):
+            sink.write([{"id": 2, "name": "Grace"}], context)
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            _ConditionalFailure("PreconditionFailed", 412),
+            _ConditionalFailure("ConditionalRequestConflict", 409),
+        ],
+    )
+    def test_conditional_failure_is_static_and_never_falls_back(self, failure: BaseException) -> None:
+        sink, client = _runtime_sink(client=_S3Client([failure]), overwrite=False)
+        context = _SinkContext()
+
+        with pytest.raises(Exception, match="conditional write was rejected") as captured:
+            sink.write([{"id": 1, "name": "provider-value-sentinel"}], context)
+
+        assert len(client.requests) == 1
+        assert client.requests[0]["IfNoneMatch"] == "*"
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
+        assert "provider-value-sentinel" not in str(captured.value)
+        assert context.calls[0]["error"] == {"type": "_ConditionalFailure"}
+        assert sink._poisoned is False
+
+    @pytest.mark.parametrize("code", ["AccessDenied", "NoSuchBucket", "InvalidRequest"])
+    def test_definite_request_rejection_is_static_without_poison(self, code: str) -> None:
+        sink, _ = _runtime_sink(client=_S3Client([_ConditionalFailure(code, 400)]))
+        with pytest.raises(Exception, match="S3 object write was rejected") as captured:
+            sink.write([{"id": 1, "name": "Ada"}], _SinkContext())
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
+        assert sink._poisoned is False
+
+    def test_ambiguous_provider_failure_is_audited_then_poisoned(self) -> None:
+        sink, client = _runtime_sink(client=_S3Client([_ProviderFailure("endpoint and credential sentinel")]))
+        context = _SinkContext()
+        with pytest.raises(Exception, match="outcome is unknown") as captured:
+            sink.write([{"id": 1, "name": "row sentinel"}], context)
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
+        assert "sentinel" not in str(captured.value)
+        assert sink._poisoned is True
+        assert sink._buffered_rows == []
+        assert len(client.requests) == 1
+        assert context.calls[0]["error"] == {"type": "_ProviderFailure"}
+
+    @pytest.mark.parametrize("status", ["success", "failure"])
+    def test_audit_failure_is_static_poison_and_never_commits_buffer(self, status: str) -> None:
+        responses: list[Any] = [{"ETag": '"etag-1"'}] if status == "success" else [_ConditionalFailure("AccessDenied", 403)]
+        sink, _ = _runtime_sink(client=_S3Client(responses), overwrite=False)
+        context = _SinkContext(recorder_error=RuntimeError("recorder sentinel"))
+        with pytest.raises(Exception, match="audit trail") as captured:
+            sink.write([{"id": 1, "name": "row sentinel"}], context)
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
+        assert "sentinel" not in str(captured.value)
+        assert sink._poisoned is True
+        assert sink._buffered_rows == []
+
+    @pytest.mark.parametrize(
+        ("format", "value", "reason"),
+        [
+            ("json", float("nan"), "JSON record could not be serialized safely"),
+            ("jsonl", object(), "JSON record could not be serialized safely"),
+            ("csv", "snowman ☃", "CSV record could not be encoded safely"),
+            ("json", "x" * 101, "record exceeds configured character limit"),
+        ],
+    )
+    def test_bad_incoming_row_diverts_with_static_reason(self, format: str, value: object, reason: str) -> None:
+        overrides: dict[str, Any] = {"format": format, "max_record_chars": 100}
+        if format == "csv":
+            overrides["csv_options"] = {"encoding": "ascii"}
+        sink, client = _runtime_sink(**overrides)
+        result = sink.write([{"id": 1, "name": value}, {"id": 2, "name": "Grace"}], _SinkContext())
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 0
+        assert result.diversions[0].reason == reason
+        assert "snowman" not in reason and "object" not in reason
+        assert len(client.requests) == 1
+
+    def test_cumulative_object_cap_aborts_without_upload_or_state_change(self) -> None:
+        sink, client = _runtime_sink(format="json", max_object_bytes=30)
+        with pytest.raises(Exception, match="byte limit"):
+            sink.write([{"id": 1, "name": "x" * 100}], _SinkContext())
+        assert client.requests == []
+        assert sink._buffered_rows == []
+
+    def test_close_detaches_clears_and_closes_exactly_once(self) -> None:
+        sink, client = _runtime_sink(overwrite=False)
+        sink._buffered_rows = [{"id": 1}]
+        sink._resolved_key = "output.csv"
+        sink._remote_etag = '"etag"'
+        sink._poisoned = True
+        sink.close()
+        sink.close()
+        assert client.closed == 1
+        assert sink._s3_client is None
+        assert sink._buffered_rows == []
+        assert sink._resolved_key is None
+        assert sink._remote_etag is None
+        assert sink._poisoned is False
+        assert sink._closed is True
+
+    def test_close_failure_is_static_after_cleanup(self) -> None:
+        sink, client = _runtime_sink()
+        client.close_error = RuntimeError("close endpoint credential sentinel")
+        with pytest.raises(Exception, match="Failed to close S3 client") as captured:
+            sink.close()
+        assert captured.value.__cause__ is None and captured.value.__context__ is None
+        assert "sentinel" not in str(captured.value)
+        assert sink._s3_client is None and sink._closed is True
+        sink.close()
+        assert client.closed == 1
+
+    def test_write_after_close_is_rejected(self) -> None:
+        sink, client = _runtime_sink()
+        sink.close()
+        with pytest.raises(Exception, match="closed"):
+            sink.write([{"id": 1, "name": "Ada"}], _SinkContext())
+        assert client.requests == []
+
+    def test_phase_error_does_not_expose_provider_sentinels(self) -> None:
+        from elspeth.contracts import PhaseError, PipelinePhase
+
+        sink, _ = _runtime_sink(client=_S3Client([_ProviderFailure("credential endpoint body sentinel")]))
+        with pytest.raises(Exception) as captured:
+            sink.write([{"id": 1, "name": "row sentinel"}], _SinkContext())
+        public = PhaseError.from_exception(phase=PipelinePhase.EXPORT, error=captured.value, target="aws_s3")
+        assert "sentinel" not in repr(public)
+
+    def test_aws_s3_endpoint_url_is_not_a_secret_ref_field(self) -> None:
+        from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
+
+        assert "endpoint_url" not in allowed_secret_ref_fields("sink", "aws_s3")
+
+    @pytest.mark.parametrize(("endpoint", "expected_passed"), [("http://localhost:4566", False), (None, True)])
+    def test_registered_sink_uses_load_bearing_web_endpoint_gate(
+        self,
+        tmp_path: Any,
+        endpoint: str | None,
+        expected_passed: bool,
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from pydantic import SecretBytes
+
+        from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
+        from elspeth.web.config import WebSettings
+        from elspeth.web.execution.protocol import YamlGenerator
+        from elspeth.web.execution.validation import validate_pipeline
+
+        source_path = tmp_path / "blobs" / "input.csv"
+        source_path.parent.mkdir()
+        source_path.write_text("id,name\n1,Ada\n", encoding="utf-8")
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="archive",
+                options={"path": str(source_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="archive",
+                    plugin="aws_s3",
+                    options={
+                        "bucket": "example-bucket",
+                        "key": "output.csv",
+                        "endpoint_url": endpoint,
+                        "schema": {"mode": "observed"},
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = WebSettings(
+            data_dir=tmp_path,
+            composer_max_composition_turns=10,
+            composer_max_discovery_turns=5,
+            composer_timeout_seconds=30.0,
+            composer_rate_limit_per_minute=60,
+            shareable_link_signing_key=SecretBytes(b"\x00" * 32),
+        )
+        yaml_generator = MagicMock(spec=YamlGenerator)
+        yaml_generator.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", side_effect=ValueError("stop")) as load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as instantiate,
+        ):
+            result = validate_pipeline(state, settings, yaml_generator)
+        check = next(check for check in result.checks if check.name == "aws_s3_endpoint_url_policy")
+        assert check.passed is expected_passed
+        if expected_passed:
+            assert all(error.error_code != "aws_s3_endpoint_url_not_allowed" for error in result.errors)
+            load.assert_called_once()
+        else:
+            assert result.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
+            load.assert_not_called()
+        instantiate.assert_not_called()

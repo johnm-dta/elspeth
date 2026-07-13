@@ -7,6 +7,7 @@ import contextlib
 import gc
 import sys
 import threading
+import time
 import weakref
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -382,11 +383,41 @@ class TestReadinessEndpoint:
 
         monkeypatch.setattr(app_module.asyncio, "timeout", timeout)
         response = TestClient(app).get("/api/ready")
-        assert seen == [5.0]
+        assert seen == [app_module._READINESS_ROUTE_COMPUTE_TIMEOUT_SECONDS]
         assert response.status_code == 503
         payload = response.json()
         assert [check["name"] for check in payload["checks"]] == list(READINESS_CHECK_NAMES)
         assert all(check["detail"] == "readiness request timed out" for check in payload["checks"])
+
+    @pytest.mark.asyncio
+    async def test_never_finishing_compute_returns_fallback_within_hard_five_second_ceiling(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        app = create_app(_settings(tmp_path))
+        started = asyncio.Event()
+
+        async def never_finishes(*_args: object, **_kwargs: object) -> ReadinessReport:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(app_module, "readiness_report", never_finishes)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            before = time.monotonic()
+            response = await client.get("/api/ready")
+            elapsed = time.monotonic() - before
+
+        assert started.is_set()
+        assert response.status_code == 503
+        assert elapsed < 5.0
+        assert [check["name"] for check in response.json()["checks"]] == list(READINESS_CHECK_NAMES)
+        shared_task = app.state.readiness_cache._task
+        assert shared_task is not None
+        shared_task.cancel()
+        await asyncio.gather(shared_task, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_cancelled_leading_request_keeps_one_shared_batch_for_follower(self, tmp_path, monkeypatch) -> None:

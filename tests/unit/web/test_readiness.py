@@ -131,8 +131,9 @@ class TestReadinessProbeRunner:
             assert closed == (ReadinessCheck("blob_dir", False, "probe runner closed"),)
         finally:
             release.set()
-            await task
-            runner.close()
+        results = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        runner.close()
 
     @pytest.mark.asyncio
     async def test_real_loop_deadline_expires_at_two_seconds_while_heartbeat_runs(self) -> None:
@@ -273,6 +274,75 @@ class TestReadinessProbeRunner:
             )
             assert "secret" not in repr(result)
         finally:
+            runner.close()
+
+    @pytest.mark.asyncio
+    async def test_close_promptly_cancels_running_wrapper_but_keeps_source_registered_and_drained(self) -> None:
+        runner = ReadinessProbeRunner()
+        entered = threading.Event()
+        release = threading.Event()
+        observed: list[dict[str, object]] = []
+        loop = asyncio.get_running_loop()
+        prior_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: observed.append(context))
+
+        def blocked_failure() -> tuple[ReadinessCheck, ...]:
+            entered.set()
+            release.wait()
+            raise RuntimeError("LATE_CLOSE_SENTINEL /private/close-path")
+
+        task = asyncio.create_task(runner.run("session", ("session_db", "session_schema"), blocked_failure))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1.0)
+            runner.close()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
+            assert "session" in runner._futures
+
+            release.set()
+            for _ in range(50):
+                if "session" not in runner._futures:
+                    break
+                await asyncio.sleep(0.01)
+            gc.collect()
+            await asyncio.sleep(0)
+            assert "session" not in runner._futures
+            assert observed == []
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            runner.close()
+            loop.set_exception_handler(prior_handler)
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_queued_source_and_wrapper_without_executing_probe(self) -> None:
+        runner = ReadinessProbeRunner()
+        release_workers = threading.Event()
+        blockers = [runner._executor.submit(release_workers.wait) for _ in range(5)]
+        executed = False
+
+        def queued_probe() -> tuple[ReadinessCheck, ...]:
+            nonlocal executed
+            executed = True
+            return _ok("data_dir")
+
+        task = asyncio.create_task(runner.run("data_dir", ("data_dir",), queued_probe))
+        try:
+            for _ in range(50):
+                if "data_dir" in runner._futures:
+                    break
+                await asyncio.sleep(0.01)
+            assert "data_dir" in runner._futures
+            runner.close()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
+            assert "data_dir" not in runner._futures
+            assert executed is False
+        finally:
+            release_workers.set()
+            await asyncio.gather(task, return_exceptions=True)
+            for blocker in blockers:
+                blocker.result(timeout=1.0)
             runner.close()
 
 

@@ -139,6 +139,10 @@ _COMPOSER_BOOT_CONFIG_PROBE_LATENCY = metrics.get_meter(__name__).create_histogr
     unit="ms",
 )
 _COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS = 5.0
+# Reserve bounded headroom inside the public five-second readiness contract
+# for timeout finalization, redacted logging, JSON serialization, and ASGI
+# response dispatch. The shared cache task remains shielded from this waiter.
+_READINESS_ROUTE_COMPUTE_TIMEOUT_SECONDS = 4.5
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -1342,7 +1346,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             )
 
         try:
-            async with asyncio.timeout(5.0):
+            async with asyncio.timeout(_READINESS_ROUTE_COMPUTE_TIMEOUT_SECONDS):
                 report = await request.app.state.readiness_cache.get(compute)
         except TimeoutError:
             report = overall_timeout_report()

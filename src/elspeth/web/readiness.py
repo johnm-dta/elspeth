@@ -58,6 +58,7 @@ class ReadinessReport:
 
 _ProbeResult = tuple[ReadinessCheck, ...]
 _SourceFuture = concurrent.futures.Future[_ProbeResult]
+_WrappedRegistration = tuple[_SourceFuture, asyncio.Future[_ProbeResult], asyncio.AbstractEventLoop]
 
 
 def _static_failures(check_names: tuple[str, ...], detail: str) -> _ProbeResult:
@@ -98,6 +99,22 @@ def _drain_wrapped(future: asyncio.Future[_ProbeResult]) -> None:
         return
     with contextlib.suppress(BaseException):
         future.exception()
+
+
+def _cancel_wrapped_on_loop(
+    wrapped: asyncio.Future[_ProbeResult],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Thread-safely cancel and drain a loop-owned wrapper."""
+
+    def cancel_and_drain() -> None:
+        wrapped.cancel()
+        _drain_wrapped(wrapped)
+
+    if loop.is_closed():
+        return
+    with contextlib.suppress(RuntimeError):
+        loop.call_soon_threadsafe(cancel_and_drain)
 
 
 def _schema_checks(kind: Literal["session", "landscape"], state: SchemaState) -> _ProbeResult:
@@ -341,6 +358,7 @@ class ReadinessProbeRunner:
         )
         self._lock = threading.Lock()
         self._futures: dict[ReadinessProbeLabel, _SourceFuture] = {}
+        self._wrappers: dict[ReadinessProbeLabel, _WrappedRegistration] = {}
         self._closed = False
 
     async def run(
@@ -350,6 +368,7 @@ class ReadinessProbeRunner:
         fn: Callable[..., _ProbeResult],
         *args: object,
     ) -> _ProbeResult:
+        loop = asyncio.get_running_loop()
         with self._lock:
             if self._closed:
                 return _static_failures(check_names, "probe runner closed")
@@ -357,7 +376,9 @@ class ReadinessProbeRunner:
             if existing is not None and not existing.done():
                 return _static_failures(check_names, "probe already in flight")
             source = self._executor.submit(fn, *args)
+            wrapped = asyncio.wrap_future(source, loop=loop)
             self._futures[label] = source
+            self._wrappers[label] = (source, wrapped, loop)
 
         def source_done(completed: _SourceFuture) -> None:
             with self._lock:
@@ -365,13 +386,17 @@ class ReadinessProbeRunner:
                     del self._futures[label]
             _drain_source(completed)
 
+        def wrapped_done(completed: asyncio.Future[_ProbeResult]) -> None:
+            with self._lock:
+                registration = self._wrappers.get(label)
+                if registration is not None and registration[0] is source and registration[1] is completed:
+                    del self._wrappers[label]
+            _drain_wrapped(completed)
+
         # A Future that completed synchronously calls this callback inline.
         # Registration therefore must remain outside the registry lock.
         source.add_done_callback(source_done)
-
-        loop = asyncio.get_running_loop()
-        wrapped = asyncio.wrap_future(source, loop=loop)
-        wrapped.add_done_callback(_drain_wrapped)
+        wrapped.add_done_callback(wrapped_done)
         deadline = loop.time() + 2.0
         try:
             while not wrapped.done():
@@ -400,6 +425,9 @@ class ReadinessProbeRunner:
                 return
             self._closed = True
             futures = tuple(self._futures.values())
+            wrappers = tuple(self._wrappers.values())
+        for _source, wrapped, loop in wrappers:
+            _cancel_wrapped_on_loop(wrapped, loop)
         for future in futures:
             future.cancel()
         self._executor.shutdown(wait=False, cancel_futures=True)

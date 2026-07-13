@@ -49,6 +49,10 @@ class SchemaInitBusyError(RuntimeError):
     """Raised when another initializer holds the PostgreSQL schema lock."""
 
 
+class SchemaInitError(RuntimeError):
+    """Raised when schema initialization cannot safely begin."""
+
+
 class SchemaLockCleanupError(RuntimeError):
     """Raised when advisory-lock cleanup cannot be proven."""
 
@@ -159,12 +163,35 @@ def _sqlstate(exc: OperationalError) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _invalidate(conn: Connection) -> None:
+def _invalidate_uncertain(conn: Connection, *, original: BaseException) -> None:
+    """Invalidate without allowing secondary cleanup errors to replace the original."""
     try:
-        if conn.in_transaction():
-            conn.rollback()
-    finally:
         conn.invalidate()
+    except BaseException as invalidation_error:
+        _slog.error(
+            "schema_connection_invalidation_failed",
+            original_exc_class=type(original).__name__,
+            invalidation_exc_class=type(invalidation_error).__name__,
+        )
+
+
+def _finish_lock_cleanup(
+    conn: Connection,
+    *,
+    cleanup_error: BaseException,
+    earlier: BaseException | None,
+) -> None:
+    _invalidate_uncertain(conn, original=cleanup_error)
+    if earlier is not None:
+        _slog.error(
+            "schema_lock_cleanup_unverified",
+            original_exc_class=type(earlier).__name__,
+            cleanup_exc_class=type(cleanup_error).__name__,
+        )
+        return
+    raise SchemaLockCleanupError(
+        "Schema initialization may have completed but lock cleanup was not verified; investigate and rerun."
+    ) from cleanup_error
 
 
 def _run_locked(
@@ -192,12 +219,14 @@ def _run_locked(
                     )
                     acquired = True
                 except OperationalError as exc:
-                    _invalidate(conn)
+                    _invalidate_uncertain(conn, original=exc)
                     if _sqlstate(exc) == "55P03":
                         raise SchemaInitBusyError("Another schema initialization is in progress; retry shortly.") from exc
-                    raise
-                except BaseException:
-                    _invalidate(conn)
+                    raise SchemaInitError(
+                        "Schema initialization lock could not be acquired; investigate database connectivity and retry."
+                    ) from exc
+                except BaseException as exc:
+                    _invalidate_uncertain(conn, original=exc)
                     raise
 
             body(conn)
@@ -208,33 +237,36 @@ def _run_locked(
             earlier = exc
             raise
         finally:
-            if conn.in_transaction():
-                conn.rollback()
             if postgres and acquired:
                 cleanup_error: BaseException | None = None
                 try:
-                    unlocked = conn.execute(
-                        text("SELECT pg_advisory_unlock(:classid, hashtext(:target))"),
-                        {"classid": ELSPETH_SCHEMA_INIT_LOCK_CLASSID, "target": target},
-                    ).scalar_one()
-                    if unlocked is not True:
-                        cleanup_error = RuntimeError("unlock was not confirmed")
-                except BaseException as exc:
-                    cleanup_error = exc
-                finally:
                     if conn.in_transaction():
                         conn.rollback()
+                except BaseException as exc:
+                    cleanup_error = exc
+
+                if cleanup_error is None:
+                    try:
+                        unlocked = conn.execute(
+                            text("SELECT pg_advisory_unlock(:classid, hashtext(:target))"),
+                            {"classid": ELSPETH_SCHEMA_INIT_LOCK_CLASSID, "target": target},
+                        ).scalar_one()
+                        if unlocked is not True:
+                            cleanup_error = RuntimeError("unlock was not confirmed")
+                    except BaseException as exc:
+                        cleanup_error = exc
+
+                try:
+                    if conn.in_transaction():
+                        conn.rollback()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+
                 if cleanup_error is not None:
-                    _invalidate(conn)
-                    if earlier is None:
-                        raise SchemaLockCleanupError(
-                            "Schema initialization may have completed but lock cleanup was not verified; investigate and rerun."
-                        ) from cleanup_error
-                    _slog.error(
-                        "schema_lock_cleanup_unverified",
-                        original_exc_class=type(earlier).__name__,
-                        cleanup_exc_class=type(cleanup_error).__name__,
-                    )
+                    _finish_lock_cleanup(conn, cleanup_error=cleanup_error, earlier=earlier)
+            elif not postgres and conn.in_transaction():
+                conn.rollback()
 
 
 def init_session_schema(engine: Engine) -> None:

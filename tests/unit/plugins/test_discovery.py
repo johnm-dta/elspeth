@@ -186,7 +186,7 @@ class TestDiscoverAllPlugins:
     """Test discovery across all plugin directories."""
 
     def test_discover_all_sources(self) -> None:
-        """Verify all sources are discovered including azure."""
+        """Verify all sources are discovered including AWS and Azure."""
         from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 
         discovered = discover_all_plugins()
@@ -195,6 +195,7 @@ class TestDiscoverAllPlugins:
         assert "csv" in source_names
         assert "json" in source_names
         assert "null" in source_names
+        assert "aws_s3" in source_names
         # Azure blob source lives in plugins/azure/
         assert "azure_blob" in source_names
         assert "web_source" not in source_names
@@ -250,7 +251,7 @@ class TestDiscoverAllPlugins:
         from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 
         # Expected counts verified during migration from hookimpl files
-        EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
+        EXPECTED_SOURCE_COUNT = 7  # csv, json, null, aws_s3, azure_blob, dataverse, text
         EXPECTED_TRANSFORM_COUNT = (
             29  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval + blob_fetch + blob_csv_expand
         )

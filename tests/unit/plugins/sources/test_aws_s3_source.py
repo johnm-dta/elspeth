@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -361,3 +362,450 @@ class TestDownloadS3Object:
         with _download_s3_object(client, bucket="bucket", key="key", max_object_bytes=len(data)) as downloaded:
             assert downloaded.handle._rolled is True  # type: ignore[attr-defined]
             assert downloaded.content_hash == hashlib.sha256(data).hexdigest()
+
+
+@dataclass
+class _SourceContext:
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    validation_errors: list[dict[str, Any]] = field(default_factory=list)
+    call_error: BaseException | None = None
+
+    def record_call(self, **kwargs: Any) -> None:
+        if self.call_error is not None:
+            raise self.call_error
+        self.calls.append(kwargs)
+
+    def record_validation_error(self, **kwargs: Any) -> None:
+        self.validation_errors.append(kwargs)
+
+
+@dataclass
+class _RuntimeClient:
+    data: bytes
+    chunk_size: int = 64 * 1024
+    close_error: BaseException | None = None
+    closed: int = 0
+    bodies: list[_Body] = field(default_factory=list)
+
+    def head_object(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"ContentLength": len(self.data), "ETag": '"runtime-etag"'}
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["IfMatch"] == '"runtime-etag"'
+        body = _Body([self.data[index : index + self.chunk_size] for index in range(0, len(self.data), self.chunk_size)])
+        self.bodies.append(body)
+        return {"ContentLength": len(self.data), "Body": body}
+
+    def close(self) -> None:
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _source_for(data: bytes, **config_overrides: Any) -> tuple[Any, _RuntimeClient, _SourceContext]:
+    from elspeth.plugins.sources.aws_s3_source import AWSS3Source
+
+    source = AWSS3Source(_config(**config_overrides))
+    client = _RuntimeClient(data)
+    source._s3_client = client
+    return source, client, _SourceContext()
+
+
+class TestAWSS3SourceRegistrationAndParsing:
+    def test_protocol_metadata_and_assistance(self) -> None:
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.sources.aws_s3_source import AWSS3Source
+
+        assert AWSS3Source.name == "aws_s3"
+        assert AWSS3Source.determinism is Determinism.IO_READ
+        assert AWSS3Source.plugin_version == "1.0.0"
+        assert AWSS3Source.source_file_hash.startswith("sha256:")
+        assistance = AWSS3Source.get_agent_assistance()
+        assert assistance is not None and assistance.summary
+        assert assistance.composer_hints
+        assert all(len(hint) <= 280 for hint in assistance.composer_hints)
+
+    def test_aws_s3_endpoint_url_is_not_a_secret_ref_field(self) -> None:
+        from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
+
+        assert "endpoint_url" not in allowed_secret_ref_fields("source", "aws_s3")
+
+    def test_registered_aws_s3_source_is_endpoint_url_gated(self) -> None:
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+
+        from pydantic import SecretBytes
+
+        from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
+        from elspeth.web.config import WebSettings
+        from elspeth.web.execution.protocol import YamlGenerator
+        from elspeth.web.execution.validation import validate_pipeline
+
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="aws_s3",
+                on_success="results",
+                options={"endpoint_url": "https://credential-canary.attacker.invalid/private"},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="results", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = WebSettings(
+            data_dir=Path("/tmp/test_data"),
+            composer_max_composition_turns=10,
+            composer_max_discovery_turns=5,
+            composer_timeout_seconds=30.0,
+            composer_rate_limit_per_minute=60,
+            shareable_link_signing_key=SecretBytes(b"\x00" * 32),
+        )
+        yaml_generator = MagicMock(spec=YamlGenerator)
+        yaml_generator.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as load_settings,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as instantiate,
+        ):
+            result = validate_pipeline(state, settings, yaml_generator)
+        check = next(check for check in result.checks if check.name == "aws_s3_endpoint_url_policy")
+        assert check.passed is False
+        assert result.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
+        yaml_generator.generate_yaml.assert_called_once_with(state)
+        load_settings.assert_not_called()
+        instantiate.assert_not_called()
+
+    def test_registered_aws_s3_source_accepts_explicit_null_endpoint(self) -> None:
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+
+        from pydantic import SecretBytes
+
+        from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
+        from elspeth.web.config import WebSettings
+        from elspeth.web.execution.protocol import YamlGenerator
+        from elspeth.web.execution.validation import validate_pipeline
+
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="aws_s3",
+                on_success="results",
+                options={"endpoint_url": None},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="results", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = WebSettings(
+            data_dir=Path("/tmp/test_data"),
+            composer_max_composition_turns=10,
+            composer_max_discovery_turns=5,
+            composer_timeout_seconds=30.0,
+            composer_rate_limit_per_minute=60,
+            shareable_link_signing_key=SecretBytes(b"\x00" * 32),
+        )
+        yaml_generator = MagicMock(spec=YamlGenerator)
+        yaml_generator.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string", side_effect=ValueError("stop")):
+            result = validate_pipeline(state, settings, yaml_generator)
+        check = next(check for check in result.checks if check.name == "aws_s3_endpoint_url_policy")
+        assert check.passed is True
+
+    def test_csv_parity_headers_normalization_and_schema_coercion(self) -> None:
+        source, _, ctx = _source_for(b"ID,Full Name,score\n1,Ada,2.5\n")
+
+        rows = list(source.load(ctx))
+
+        assert [row.row for row in rows] == [{"id": "1", "full_name": "Ada", "score": "2.5"}]
+        assert rows[0].is_quarantined is False
+        resolution = source.get_field_resolution()
+        assert resolution is not None and resolution[0] == {"ID": "id", "Full Name": "full_name", "score": "score"}
+
+    def test_headerless_csv_columns_and_custom_delimiter(self) -> None:
+        source, _, ctx = _source_for(
+            b"1|Ada\n2|Grace\n",
+            csv_options={"delimiter": "|", "has_header": False},
+            columns=["id", "name"],
+        )
+        assert [row.row for row in source.load(ctx)] == [{"id": "1", "name": "Ada"}, {"id": "2", "name": "Grace"}]
+
+    @pytest.mark.parametrize(
+        "source_format,data,expected",
+        [
+            (
+                "json",
+                b'[{"ID":1,"name":"Ada"},{"ID":2,"email":"g@example.test"}]',
+                [{"id": 1, "name": "Ada"}, {"id": 2, "email": "g@example.test"}],
+            ),
+            (
+                "jsonl",
+                b'{"ID":1,"name":"Ada"}\n\n{"ID":2,"email":"g@example.test"}\n',
+                [{"id": 1, "name": "Ada"}, {"id": 2, "email": "g@example.test"}],
+            ),
+        ],
+    )
+    def test_json_formats_normalize_sparse_field_union(self, source_format: str, data: bytes, expected: list[dict[str, Any]]) -> None:
+        source, _, ctx = _source_for(data, format=source_format)
+        assert [row.row for row in source.load(ctx)] == expected
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        assert set(resolution[0].values()) == {"id", "name", "email"}
+
+    def test_json_exact_literal_data_key_with_dot(self) -> None:
+        source, _, ctx = _source_for(
+            b'{"rows.v1":[{"id":1}],"rows":{"v1":[{"id":2}]}}', format="json", json_options={"data_key": "rows.v1"}
+        )
+        assert [row.row for row in source.load(ctx)] == [{"id": 1}]
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "utf-32"])
+    def test_json_streams_registered_unicode_encodings(self, encoding: str) -> None:
+        data = json.dumps([{"name": "café", "value": 1.25}], ensure_ascii=False).encode(encoding)
+        source, _, ctx = _source_for(data, format="json", json_options={"encoding": encoding})
+        assert [row.row for row in source.load(ctx)] == [{"name": "café", "value": 1.25}]
+
+    def test_json_number_parity_preserves_large_integer_and_converts_decimal(self) -> None:
+        source, _, ctx = _source_for(b'[{"integer":123456789012345678901234567890,"decimal":1.25,"scientific":1e2}]', format="json")
+        row = next(iter(source.load(ctx))).row
+        assert row["integer"] == 123456789012345678901234567890
+        assert row["decimal"] == 1.25
+        assert row["scientific"] == 100.0
+
+    @pytest.mark.parametrize("source_format,data", [("csv", b""), ("json", b"")])
+    def test_empty_structural_formats_quarantine(self, source_format: str, data: bytes) -> None:
+        source, _, ctx = _source_for(data, format=source_format)
+        rows = list(source.load(ctx))
+        assert len(rows) == 1 and rows[0].is_quarantined
+        assert ctx.calls[0]["response_data"]["content_hash"] == hashlib.sha256(b"").hexdigest()
+
+    def test_empty_jsonl_yields_no_rows_and_still_audits(self) -> None:
+        source, _, ctx = _source_for(b"", format="jsonl")
+        assert list(source.load(ctx)) == []
+        assert len(ctx.calls) == 1
+
+    @pytest.mark.parametrize(
+        "source_format,data",
+        [
+            ("csv", b"value\n123456\n"),
+            ("jsonl", b'{"value":"123456"}\n'),
+            ("json", b'[{"value":"123456"}]'),
+            ("json", b'{"ignored":"123456","rows":[{"id":1}]}'),
+        ],
+    )
+    def test_record_caps_reject_selected_and_ignored_oversized_tokens(self, source_format: str, data: bytes) -> None:
+        options: dict[str, Any] = {"format": source_format, "max_record_chars": 5}
+        if source_format == "json" and data.startswith(b"{"):
+            options["json_options"] = {"data_key": "rows"}
+        source, _, ctx = _source_for(data, **options)
+        rows = list(source.load(ctx))
+        assert rows and rows[0].is_quarantined
+
+    def test_json_aggregate_cap_rejects_many_small_fields(self) -> None:
+        payload = json.dumps([{f"k{i}": "x" for i in range(20)}]).encode()
+        source, _, ctx = _source_for(payload, format="json", max_record_chars=40)
+        rows = list(source.load(ctx))
+        assert len(rows) == 1 and rows[0].is_quarantined
+
+    def test_json_nonfinite_after_decimal_conversion_quarantines(self) -> None:
+        source, _, ctx = _source_for(b'[{"value":1e9999}]', format="json")
+        rows = list(source.load(ctx))
+        assert len(rows) == 1 and rows[0].is_quarantined
+
+    @pytest.mark.parametrize("max_chars,quarantined", [(7, True), (8, False), (9, False)])
+    def test_json_final_aggregate_cap_exact_boundary(self, max_chars: int, quarantined: bool) -> None:
+        source, _, ctx = _source_for(b'[{"x":""}]', format="json", max_record_chars=max_chars)
+        rows = list(source.load(ctx))
+        assert bool(rows and rows[0].is_quarantined) is quarantined
+
+    @pytest.mark.parametrize("max_chars,quarantined", [(2, True), (3, False), (4, False)])
+    def test_ignored_json_scalar_token_cap_exact_boundary(self, max_chars: int, quarantined: bool) -> None:
+        source, _, ctx = _source_for(
+            b'{"x":"abc","r":[]}',
+            format="json",
+            json_options={"data_key": "r"},
+            max_record_chars=max_chars,
+        )
+        rows = list(source.load(ctx))
+        assert bool(rows and rows[0].is_quarantined) is quarantined
+
+    def test_ignored_json_excessive_depth_is_rejected(self) -> None:
+        nested = "[" * 65 + "0" + "]" * 65
+        source, _, ctx = _source_for(
+            f'{{"x":{nested},"r":[]}}'.encode(),
+            format="json",
+            json_options={"data_key": "r"},
+        )
+        rows = list(source.load(ctx))
+        assert len(rows) == 1 and rows[0].is_quarantined
+
+    def test_json_array_non_object_quarantines_and_continues(self) -> None:
+        source, _, ctx = _source_for(b'[1,{"id":2}]', format="json")
+        rows = list(source.load(ctx))
+        assert rows[0].is_quarantined
+        assert rows[1].row == {"id": 2}
+
+    def test_jsonl_bad_line_quarantines_and_next_line_survives(self) -> None:
+        source, _, ctx = _source_for(b'{bad}\n{"id":2}\n', format="jsonl")
+        rows = list(source.load(ctx))
+        assert rows[0].is_quarantined
+        assert rows[1].row == {"id": 2}
+
+    def test_csv_wrong_width_quarantines_and_next_row_survives(self) -> None:
+        source, _, ctx = _source_for(b"id,name\n1\n2,Grace\n")
+        rows = list(source.load(ctx))
+        assert rows[0].is_quarantined
+        assert rows[1].row == {"id": "2", "name": "Grace"}
+
+    def test_sparse_field_mapping_applies_when_field_first_appears_later(self) -> None:
+        source, _, ctx = _source_for(
+            b'[{"id":1},{"id":2,"Full Name":"Grace"}]',
+            format="json",
+            field_mapping={"full_name": "display_name"},
+        )
+        assert [row.row for row in source.load(ctx)] == [{"id": 1}, {"id": 2, "display_name": "Grace"}]
+
+    def test_fixed_schema_quarantines_invalid_row_without_echoing_value(self) -> None:
+        sentinel = "credential-body-SENTINEL"
+        source, _, ctx = _source_for(
+            json.dumps([{"id": sentinel}]).encode(),
+            format="json",
+            schema={"mode": "fixed", "fields": ["id: int"]},
+        )
+        rows = list(source.load(ctx))
+        assert len(rows) == 1 and rows[0].is_quarantined
+        assert sentinel not in rows[0].quarantine_error
+
+    def test_lazy_missing_ijson_is_actionable_and_download_closes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import builtins
+
+        source, client, ctx = _source_for(b"[]", format="json")
+        real_import = builtins.__import__
+
+        def missing(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "ijson":
+                raise ImportError("provider detail SENTINEL")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", missing)
+        with pytest.raises(ImportError, match="aws"):
+            list(source.load(ctx))
+        assert client.bodies[0].closed
+
+    def test_source_parses_a_spool_that_rolls_to_disk(self) -> None:
+        data_rows = [b"x" * 1024 + b"\n"] * 8193
+        data = b"value\n" + b"".join(data_rows)
+        source, _, ctx = _source_for(data, max_record_chars=2048)
+        rows = list(source.load(ctx))
+        assert len(rows) == 8193
+        assert rows[0].row == {"value": "x" * 1024}
+
+
+class TestAWSS3SourceAuditAndLifecycle:
+    def test_success_audit_is_exact_and_redacted(self) -> None:
+        data = b"id,name\n1,Ada\n"
+        source, _, ctx = _source_for(data)
+        list(source.load(ctx))
+        assert len(ctx.calls) == 1
+        call = ctx.calls[0]
+        assert call["request_data"] == {"operation": "read_object", "bucket": "input-bucket", "key": "incoming/data.csv"}
+        assert call["response_data"] == {"size_bytes": len(data), "content_hash": hashlib.sha256(data).hexdigest()}
+        assert call["provider"] == "aws_s3"
+        assert "endpoint" not in repr(call).lower()
+
+    def test_transport_failure_audits_only_safe_fields(self) -> None:
+        from elspeth.plugins.sources.aws_s3_source import S3SourceReadError
+
+        source, _, ctx = _source_for(b"x")
+        source._s3_client = _Client(
+            {"ContentLength": 1, "ETag": '"etag"'},
+            {"ContentLength": 1, "Body": _Body([], read_error=RuntimeError("credential endpoint body SENTINEL"))},
+        )
+        with pytest.raises(S3SourceReadError):
+            list(source.load(ctx))
+        assert len(ctx.calls) == 1
+        assert set(ctx.calls[0]["error"]) <= {"type", "bytes_read", "max_object_bytes", "cleanup_error_type"}
+        assert "SENTINEL" not in repr(ctx.calls)
+
+    def test_audit_write_failure_is_static_unchained_integrity_error(self) -> None:
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        source, _, ctx = _source_for(b"id\n1\n")
+        ctx.call_error = RuntimeError("credential endpoint body SENTINEL")
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            list(source.load(ctx))
+        assert "SENTINEL" not in f"{exc_info.value!s} {exc_info.value!r}"
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    def test_failure_path_audit_write_failure_is_static_integrity_error(self) -> None:
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        source, _, ctx = _source_for(b"x")
+        source._s3_client = _Client(
+            {"ContentLength": 1, "ETag": '"etag"'},
+            {"ContentLength": 1, "Body": _Body([], read_error=RuntimeError("provider SENTINEL"))},
+        )
+        ctx.call_error = RuntimeError("recorder SENTINEL")
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            list(source.load(ctx))
+        surface = f"{exc_info.value!s} {exc_info.value!r} {exc_info.value.__cause__!r} {exc_info.value.__context__!r}"
+        assert "SENTINEL" not in surface
+
+    def test_public_provider_failure_is_safe_in_phase_error(self) -> None:
+        from structlog.testing import capture_logs
+
+        from elspeth.contracts.events import PhaseError, PipelinePhase
+        from elspeth.plugins.sources.aws_s3_source import S3SourceReadError
+
+        source, _, ctx = _source_for(b"x")
+        source._s3_client = _Client(
+            {"ContentLength": 1, "ETag": '"etag"'},
+            {"ContentLength": 1, "Body": _Body([], read_error=RuntimeError("credential endpoint body SENTINEL"))},
+        )
+        with capture_logs() as logs, pytest.raises(S3SourceReadError) as exc_info:
+            list(source.load(ctx))
+        event = PhaseError.from_exception(phase=PipelinePhase.SOURCE, error=exc_info.value)
+        assert "SENTINEL" not in repr(event)
+        assert "SENTINEL" not in repr(logs)
+
+    def test_generator_close_releases_download(self) -> None:
+        source, client, ctx = _source_for(b"id\n1\n2\n")
+        iterator = source.load(ctx)
+        assert next(iterator).row == {"id": "1"}
+        iterator.close()
+        assert client.bodies[0].closed
+        assert source._active_download is None
+
+    def test_concurrent_load_rejected_and_reuse_after_close_rejected(self) -> None:
+        source, _, ctx = _source_for(b"id\n1\n2\n")
+        iterator = source.load(ctx)
+        next(iterator)
+        with pytest.raises(RuntimeError, match="already active"):
+            next(source.load(ctx))
+        iterator.close()
+        source.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            next(source.load(ctx))
+
+    def test_close_while_suspended_detaches_resources_and_resume_stops_cleanly(self) -> None:
+        source, client, ctx = _source_for(b"id\n1\n2\n")
+        iterator = source.load(ctx)
+        assert next(iterator).row == {"id": "1"}
+        source.close()
+        assert client.closed == 1 and client.bodies[0].closed
+        with pytest.raises(StopIteration):
+            next(iterator)
+        source.close()
+        assert client.closed == 1
+
+    def test_client_close_failure_is_redacted_and_not_retried(self) -> None:
+        source, client, _ = _source_for(b"")
+        client.close_error = RuntimeError("credential endpoint SENTINEL")
+        with pytest.raises(RuntimeError) as exc_info:
+            source.close()
+        assert "SENTINEL" not in str(exc_info.value)
+        source.close()
+        assert client.closed == 1

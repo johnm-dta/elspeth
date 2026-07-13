@@ -44,13 +44,6 @@ class AuthAuditWriter(Protocol):
         username: str,
     ) -> None: ...
 
-
-class AuthAuditOperation(StrEnum):
-    LOGIN_SUCCESS = "login_success"
-    TOKEN_ISSUED = "token_issued"
-    AUTH_FAILURE = "auth_failure"
-    LOGIN_FAILURE = "login_failure"
-
     def record_login_failure(
         self,
         request: Request,
@@ -82,6 +75,13 @@ class AuthAuditOperation(StrEnum):
         username: str | None,
         exception_class: str | None,
     ) -> None: ...
+
+
+class AuthAuditOperation(StrEnum):
+    LOGIN_SUCCESS = "login_success"
+    TOKEN_ISSUED = "token_issued"
+    AUTH_FAILURE = "auth_failure"
+    LOGIN_FAILURE = "login_failure"
 
 
 def _bounded_text(value: str | None, *, max_length: int = MAX_AUTH_AUDIT_TEXT_LENGTH) -> str | None:

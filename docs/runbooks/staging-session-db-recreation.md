@@ -2,7 +2,24 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.0 (two-DB reset)
+## Current Cutover: 0.7.1 (session-DB reset from 0.7.0)
+
+0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
+`user_preferences.freeform_intro_dismissed_at` can persist the account-wide
+freeform-primer preference. `SQLITE_SCHEMA_EPOCH` remains 22.
+
+When upgrading directly from 0.7.0, archive and recreate the session database
+and its sidecars under the service-stop procedure below. Do **not** delete the
+Landscape audit database: its epoch did not change. The stale-database guard
+fails closed with an error like `Session DB schema version 26 does not match
+SESSION_SCHEMA_EPOCH=27` until the session database is recreated. `auth.db` is
+a separate file and is not reset.
+
+Deployments crossing the 0.7.0 boundary from an older release must also follow
+the historical two-database reset below, because that boundary advanced the
+Landscape epoch from 21 to 22.
+
+## Historical Cutover: 0.7.0 (two-DB reset)
 
 0.7.0 advances **both** schema epochs: `SESSION_SCHEMA_EPOCH` is now 26 and
 the Landscape audit DB `SQLITE_SCHEMA_EPOCH` is now 22. This is a

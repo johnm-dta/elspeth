@@ -23,7 +23,7 @@ This guide covers running ELSPETH in Docker containers for development and produ
 ELSPETH containers follow a **CLI-first design** - arguments are passed directly to the `elspeth` CLI:
 
 ```bash
-IMAGE_TAG=v0.7.0
+IMAGE_TAG=v0.7.1
 
 # Show help
 docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} --help
@@ -35,7 +35,7 @@ docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} --version
 docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} plugins list
 ```
 
-Replace `v0.7.0` with the exact release or immutable `sha-<commit>` tag that
+Replace `v0.7.1` with the exact release or immutable `sha-<commit>` tag that
 matches the deployment you are operating.
 
 ---
@@ -250,10 +250,10 @@ docker run --rm ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} health --json
 ```json
 {
   "status": "healthy",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "commit": "abc123f",
   "checks": {
-    "version": {"status": "ok", "value": "0.7.0"},
+    "version": {"status": "ok", "value": "0.7.1"},
     "python": {"status": "ok", "value": "3.13.1"},
     "database": {"status": "ok", "value": "connected"},
     "plugins": {"status": "ok", "value": "4 sources, 11 transforms, 4 sinks"}
@@ -278,7 +278,7 @@ livenessProbe:
 | Tag Pattern | Example | Use Case |
 |-------------|---------|----------|
 | `sha-<commit>` | `sha-abc123f` | CI/CD deployments (immutable, recommended) |
-| `v<version>` | `v0.7.0` | Release versions |
+| `v<version>` | `v0.7.1` | Release versions |
 
 Use `sha-<commit>` tags for immutable deployments. The build workflow does not
 publish `latest`.

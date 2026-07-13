@@ -67,12 +67,13 @@ accept this trade-off.
 
 ## First-deploy operator action
 
-For 0.7.0, shareable-review state is part of the broader web session database
-contract. The release expects `SESSION_SCHEMA_EPOCH=26` and
-`SQLITE_SCHEMA_EPOCH=22`. Before first start on 0.7.0, stop the web service,
-archive and remove both the configured session DB and the configured Landscape
-audit DB, then restart so fresh databases are created with the current schema
-sentinels.
+For 0.7.1, shareable-review state is part of the broader web session database
+contract. The release expects `SESSION_SCHEMA_EPOCH=27` and
+`SQLITE_SCHEMA_EPOCH=22`. When upgrading from 0.7.0, stop the web service,
+archive and remove the configured session DB and its sidecars, then restart so
+a fresh session database is created with the current sentinel. Keep the
+Landscape audit DB: its epoch remains 22. Deployments crossing from an older
+release must follow the runbook's historical 0.7.0 two-database reset as well.
 
 Use [the staging session DB recreation runbook](../runbooks/staging-session-db-recreation.md)
 as the operational source of truth. It covers the matched SQLite sidecars,
@@ -226,8 +227,9 @@ with `openssl rand -base64 32` and replace.
 
 ### Service refuses to start with a `SESSION_SCHEMA_EPOCH` mismatch
 
-The sessions DB predates the running code. For 0.7.0, follow the two-database
-reset procedure above rather than deleting only `sessions.db`.
+The sessions DB predates the running code. For a direct 0.7.0→0.7.1 upgrade,
+recreate `sessions.db` and keep the epoch-22 Landscape DB. For older starting
+versions, follow the runbook's historical two-database reset boundary too.
 
 ### `POST /mark-ready-for-review` returns 409 with "composition validation failed"
 

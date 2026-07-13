@@ -1,6 +1,6 @@
 # `docs/release/` — Release Histories and Snapshots
 
-**Last reviewed:** 2026-07-08 (0.7.0)
+**Last reviewed:** 2026-07-14 (0.7.1)
 **Audience:** Anyone navigating to release-level documentation
 **Register:** Lightly technical / directory-index
 
@@ -8,8 +8,8 @@ This directory holds release-level documentation: cumulative progress reports,
 velocity records, public-sector evaluation material, and the long-lived
 assurance narrative.
 
-The directory is intentionally small. **Current** documents reflect the latest
-release (0.7.0). Superseded point-in-time release docs and frozen historical
+The directory is intentionally small. **Current** documents reflect the release
+currently being prepared (0.7.1). Superseded point-in-time release docs and frozen historical
 snapshots are no longer part of the active public docs tree; use git history or
 maintainer-local archives when historical provenance is needed. New readers
 should start with the current tier below.
@@ -40,7 +40,7 @@ Before diving into the documents below, know which sources they aggregate. **If 
 
 ---
 
-## Current documents (0.7.0, July 2026)
+## Current documents (0.7.1, July 2026)
 
 | Document | What it answers | Intended reader |
 |----------|-----------------|-----------------|
@@ -57,15 +57,15 @@ implementation context.
 
 | Document | What it answers | Status |
 |----------|-----------------|--------|
-| [`guarantees.md`](guarantees.md) | Audit, lineage, and trust-model guarantees ELSPETH makes. | **Layered assurance appendix.** §1–§10 preserve the original RC-3 contract language; §11–§14 add RC-5.2 authentication, secret-reference, multi-user-session, and composer-authoring guarantees; §15 adds durable token scheduling guarantees. The 0.7.0 refresh keeps this as the current assurance baseline. |
+| [`guarantees.md`](guarantees.md) | Audit, lineage, and trust-model guarantees ELSPETH makes. | **Layered assurance appendix.** §1–§10 preserve the original RC-3 contract language; §11–§14 add RC-5.2 authentication, secret-reference, multi-user-session, and composer-authoring guarantees; §15 adds durable token scheduling guarantees. The 0.7.1 refresh keeps this as the current assurance baseline. |
 
 ## Release PDF pack
 
 The [`pdf/`](pdf/) pipeline contains the legacy RC-5.2 PDF/UA-1 release pack
 sources. It remains useful as a build/reference pipeline, but it has not been
-rebuilt as a 0.7.0 public release pack. Treat the Markdown documents in this
+rebuilt as a 0.7.1 public release pack. Treat the Markdown documents in this
 directory, the root changelog, and root architecture overview as the current
-0.7.0 release sources until a new PDF pack is generated.
+0.7.1 release sources until a new PDF pack is generated.
 
 ## Archived snapshots
 

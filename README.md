@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: 0.7.0](https://img.shields.io/badge/status-0.7.0-green.svg)
+![Status: 0.7.1](https://img.shields.io/badge/status-0.7.1-green.svg)
 
 Elspeth is a pipeline engine for building, validating, running, and auditing
 workflows where outputs need to be reviewed, explained, and reproduced. It
@@ -528,7 +528,7 @@ Elspeth is a dual-surface authoring and execution platform: a CLI-first
 auditable pipeline engine plus a Web Composer for guided authoring, over one
 shared execution and audit core.
 
-Current 0.7.0 behaviour:
+Current 0.7.1 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,
@@ -880,12 +880,12 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.7.0` with the tag
+Elspeth can run from a published Docker image. Replace `v0.7.1` with the tag
 published for the release you are deploying; use the exact tag for an older
 release line when deploying an earlier version.
 
 ```bash
-IMAGE_TAG=v0.7.0
+IMAGE_TAG=v0.7.1
 
 # Run a pipeline
 docker run --rm \

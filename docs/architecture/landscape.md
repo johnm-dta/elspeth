@@ -1,6 +1,6 @@
 # Landscape System Architecture
 
-Current as of 2026-07-08 for the 0.7.0 release line.
+Current as of 2026-07-14 for the 0.7.1 release line.
 
 Landscape is ELSPETH's audit database and lineage read model. It records run
 configuration, source rows, DAG nodes and edges, token lineage, node execution

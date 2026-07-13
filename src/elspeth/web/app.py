@@ -53,6 +53,12 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
 from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
+from elspeth.web.aws_ecs_startup import (
+    _CONNECT_TIMEOUT_SECONDS,
+    enforce_aws_ecs_contract,
+    require_runtime_directories_mounted,
+    validate_only_schema_or_raise,
+)
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.catalog.routes import catalog_router
@@ -63,6 +69,7 @@ from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
 from elspeth.web.config import WebSettings, _allow_insecure_test_keys
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.deployment_contract import DEPLOYMENT_TARGET_AWS_ECS
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.routes import create_execution_router
 from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
@@ -813,11 +820,29 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     app.state.settings = settings
 
-    # Ensure data directory and subdirectories exist before any DB access.
-    # get_landscape_url() defaults to data_dir/runs/audit.db — SQLite does
-    # not create parent directories, so we must ensure runs/ exists too.
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    (settings.data_dir / "runs").mkdir(exist_ok=True)
+    aws_session_engine: Engine | None = None
+    if settings.deployment_target == DEPLOYMENT_TARGET_AWS_ECS:
+        enforce_aws_ecs_contract(settings)
+        require_runtime_directories_mounted(settings)
+        raw_session_url = settings.session_db_url
+        assert raw_session_url is not None
+        aws_session_engine = create_session_engine(
+            raw_session_url,
+            connect_args={"connect_timeout": _CONNECT_TIMEOUT_SECONDS},
+            **postgres_engine_kwargs(raw_session_url),
+        )
+        try:
+            validate_only_schema_or_raise(settings, aws_session_engine)
+        except BaseException:
+            aws_session_engine.dispose()
+            raise
+        weakref.finalize(app, _dispose_session_engine, aws_session_engine)
+    else:
+        # Ensure data directory and subdirectories exist before any DB access.
+        # get_landscape_url() defaults to data_dir/runs/audit.db — SQLite does
+        # not create parent directories, so we must ensure runs/ exists too.
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "runs").mkdir(exist_ok=True)
 
     # --- Catalog ---
     app.state.catalog_service = create_catalog_service()
@@ -872,13 +897,16 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         )
 
     # --- Session database setup ---
-    session_db_url = settings.get_session_db_url()
-    session_engine = create_session_engine(session_db_url, **postgres_engine_kwargs(session_db_url))
-    initialize_session_schema(session_engine)
-    session_db_path = session_engine.url.database
-    if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):
-        session_engine.dispose()
-    weakref.finalize(app, _dispose_session_engine, session_engine)
+    if aws_session_engine is not None:
+        session_engine = aws_session_engine
+    else:
+        session_db_url = settings.get_session_db_url()
+        session_engine = create_session_engine(session_db_url, **postgres_engine_kwargs(session_db_url))
+        initialize_session_schema(session_engine)
+        session_db_path = session_engine.url.database
+        if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):
+            session_engine.dispose()
+        weakref.finalize(app, _dispose_session_engine, session_engine)
 
     # Build the sessions-telemetry container ONCE per process and share it
     # across every consumer (SessionServiceImpl, ExecutionServiceImpl, and

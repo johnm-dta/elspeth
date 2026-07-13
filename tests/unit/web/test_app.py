@@ -16,6 +16,8 @@ from uuid import uuid4
 import httpx
 import pytest
 from pydantic import SecretBytes, ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import CompileError, OperationalError
 from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
@@ -23,7 +25,7 @@ from structlog.testing import capture_logs
 
 import elspeth.web.app as app_module
 from elspeth.contracts import RunStatus
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
@@ -34,6 +36,7 @@ from elspeth.web.app import (
     lifespan,
 )
 from elspeth.web.auth.audit import AuthAuditRecorder
+from elspeth.web.aws_ecs_startup import AwsEcsSchemaNotReadyError, AwsEcsStartupContractError
 from elspeth.web.composer.boot_probe import ComposerBootConfigError
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
@@ -54,6 +57,25 @@ def _settings(tmp_path: Path, **overrides) -> WebSettings:
     }
     defaults.update(overrides)
     return WebSettings(**defaults)  # type: ignore[arg-type]
+
+
+def _aws_settings(tmp_path: Path, **overrides: object) -> WebSettings:
+    data_dir = tmp_path / "data"
+    payload_dir = tmp_path / "payload"
+    for directory in (data_dir, data_dir / "blobs", payload_dir):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+    values: dict[str, object] = {
+        "deployment_target": "aws-ecs",
+        "host": "0.0.0.0",
+        "payload_store_path": payload_dir,
+        "session_db_url": "postgresql+psycopg://runtime@db/session",
+        "landscape_url": "postgresql+psycopg://runtime@db/landscape",
+        "secret_key": "s" * 40,
+        "shareable_link_signing_key": SecretBytes(bytes(range(32))),
+    }
+    values.update(overrides)
+    return _settings(data_dir, **values)
 
 
 class _StaticJsonResponse:
@@ -1716,3 +1738,312 @@ class TestSecretsExceptionHandlers:
             assert validate.json()["available"] is True
 
         _prop()
+
+
+class TestAwsEcsValidateOnlyStartup:
+    """AWS startup must validate completely before persistent mutation."""
+
+    @pytest.mark.parametrize("failure", ["plan01", "plan02"])
+    def test_contract_or_target_failure_precedes_engine_and_probe(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+    ) -> None:
+        overrides: dict[str, object]
+        if failure == "plan01":
+            overrides = {"host": "127.0.0.1"}
+        else:
+            overrides = {
+                "session_db_url": "postgresql+psycopg://runtime@db/shared",
+                "landscape_url": "postgresql+psycopg://runtime@db/shared",
+            }
+        settings = _aws_settings(tmp_path, **overrides)
+        engine_calls = 0
+        probe_calls = 0
+
+        def build_engine(*_args: object, **_kwargs: object) -> Engine:
+            nonlocal engine_calls
+            engine_calls += 1
+            pytest.fail("session engine constructed before contract gate")
+
+        def probe(*_args: object, **_kwargs: object) -> None:
+            nonlocal probe_calls
+            probe_calls += 1
+
+        monkeypatch.setattr(app_module, "create_session_engine", build_engine)
+        monkeypatch.setattr(app_module, "validate_only_schema_or_raise", probe, raising=False)
+
+        with pytest.raises(AwsEcsStartupContractError):
+            create_app(settings)
+
+        assert engine_calls == 0
+        assert probe_calls == 0
+
+    @pytest.mark.parametrize("missing", ["data", "payload", "blob"])
+    def test_missing_mounted_directory_precedes_engine_and_auth(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        missing: str,
+    ) -> None:
+        settings = _aws_settings(tmp_path)
+        assert settings.payload_store_path is not None
+        if missing == "data":
+            (settings.data_dir / "blobs").rmdir()
+            settings.data_dir.rmdir()
+        elif missing == "payload":
+            settings.payload_store_path.rmdir()
+        else:
+            (settings.data_dir / "blobs").rmdir()
+        auth_db = settings.data_dir / "auth.db"
+        engine_calls = 0
+
+        def build_engine(*_args: object, **_kwargs: object) -> Engine:
+            nonlocal engine_calls
+            engine_calls += 1
+            pytest.fail("session engine constructed before directory gate")
+
+        monkeypatch.setattr(app_module, "create_session_engine", build_engine)
+
+        with pytest.raises(AwsEcsStartupContractError) as exc_info:
+            create_app(settings)
+
+        expected_label = "payload_store" if missing == "payload" else missing
+        assert expected_label in str(exc_info.value)
+        assert str(settings.data_dir) not in str(exc_info.value)
+        assert str(settings.payload_store_path) not in str(exc_info.value)
+        assert engine_calls == 0
+        assert auth_db.exists() is False
+
+    @pytest.mark.parametrize("unsafe", ["symlink", "mode"])
+    def test_unsafe_payload_directory_precedes_engine_and_auth(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        unsafe: str,
+    ) -> None:
+        settings = _aws_settings(tmp_path)
+        assert settings.payload_store_path is not None
+        if unsafe == "symlink":
+            target = tmp_path / "payload-target"
+            settings.payload_store_path.rmdir()
+            target.mkdir(mode=0o700)
+            settings.payload_store_path.symlink_to(target, target_is_directory=True)
+        else:
+            settings.payload_store_path.chmod(0o720)
+        engine_calls = 0
+
+        def build_engine(*_args: object, **_kwargs: object) -> Engine:
+            nonlocal engine_calls
+            engine_calls += 1
+            pytest.fail("session engine constructed before directory gate")
+
+        monkeypatch.setattr(app_module, "create_session_engine", build_engine)
+
+        with pytest.raises(AwsEcsStartupContractError) as exc_info:
+            create_app(settings)
+
+        assert "payload_store" in str(exc_info.value)
+        assert str(settings.payload_store_path) not in str(exc_info.value)
+        assert engine_calls == 0
+        assert (settings.data_dir / "auth.db").exists() is False
+
+    @pytest.mark.parametrize("label", ["session_schema", "landscape_schema"])
+    @pytest.mark.parametrize("state", ["MISSING", "PARTIAL", "STALE"])
+    def test_noncurrent_schema_precedes_initializer_and_local_auth(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        label: str,
+        state: str,
+    ) -> None:
+        settings = _aws_settings(tmp_path)
+        engine = create_engine("sqlite:///:memory:")
+        initialize_calls = 0
+
+        def reject(*_args: object, **_kwargs: object) -> None:
+            raise AwsEcsSchemaNotReadyError(f"AWS ECS {label} is {state.lower()}. Run 'elspeth doctor aws-ecs' for full diagnostics.")
+
+        def initialize(*_args: object, **_kwargs: object) -> None:
+            nonlocal initialize_calls
+            initialize_calls += 1
+            pytest.fail("AWS startup must not initialize schema")
+
+        monkeypatch.setattr(app_module, "create_session_engine", lambda *_args, **_kwargs: engine)
+        monkeypatch.setattr(app_module, "validate_only_schema_or_raise", reject, raising=False)
+        monkeypatch.setattr(app_module, "initialize_session_schema", initialize)
+
+        with pytest.raises(AwsEcsSchemaNotReadyError, match=label):
+            create_app(settings)
+
+        assert initialize_calls == 0
+        assert (settings.data_dir / "auth.db").exists() is False
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            AwsEcsSchemaNotReadyError("connectivity exhausted"),
+            SchemaCompatibilityError("opaque schema detail"),
+            RuntimeError("unexpected probe bug"),
+            KeyboardInterrupt(),
+        ],
+    )
+    def test_session_engine_disposed_once_on_every_validation_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error: BaseException,
+    ) -> None:
+        settings = _aws_settings(tmp_path)
+        engine = create_engine("sqlite:///:memory:")
+        original_dispose = engine.dispose
+        dispose_calls = 0
+
+        def dispose(*args: object, **kwargs: object) -> None:
+            nonlocal dispose_calls
+            dispose_calls += 1
+            original_dispose(*args, **kwargs)
+
+        def reject(*_args: object, **_kwargs: object) -> None:
+            raise error
+
+        monkeypatch.setattr(engine, "dispose", dispose)
+        monkeypatch.setattr(app_module, "create_session_engine", lambda *_args, **_kwargs: engine)
+        monkeypatch.setattr(app_module, "validate_only_schema_or_raise", reject, raising=False)
+        monkeypatch.setattr(
+            app_module,
+            "initialize_session_schema",
+            lambda *_args, **_kwargs: pytest.fail("AWS startup must not initialize schema"),
+        )
+
+        with pytest.raises(type(error)):
+            create_app(settings)
+
+        assert dispose_calls == 1
+
+    def test_schema_failure_precedes_local_auth_mutation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        settings = _aws_settings(tmp_path, auth_provider="local")
+        engine = create_engine("sqlite:///:memory:")
+        monkeypatch.setattr(app_module, "create_session_engine", lambda *_args, **_kwargs: engine)
+        monkeypatch.setattr(
+            app_module,
+            "validate_only_schema_or_raise",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AwsEcsSchemaNotReadyError("session_schema; run doctor")),
+            raising=False,
+        )
+
+        with pytest.raises(AwsEcsSchemaNotReadyError, match="doctor"):
+            create_app(settings)
+
+        assert (settings.data_dir / "auth.db").exists() is False
+
+    def test_success_reuses_prevalidated_engine_and_installs_one_finalizer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        settings = _aws_settings(tmp_path)
+        engine = create_engine("sqlite:///:memory:")
+        order: list[str] = []
+        engine_calls: list[tuple[str, dict[str, object]]] = []
+        finalizers: list[tuple[object, Callable[..., object], tuple[object, ...]]] = []
+        mkdir_calls: list[Path] = []
+        original_catalog = app_module.create_catalog_service
+        original_mkdir = Path.mkdir
+
+        def enforce(_settings: WebSettings) -> None:
+            order.append("contract")
+
+        def directories(_settings: WebSettings) -> None:
+            order.append("directories")
+
+        def build_engine(url: str, **kwargs: object) -> Engine:
+            order.append("session_engine")
+            engine_calls.append((url, kwargs))
+            return engine
+
+        def validate(_settings: WebSettings, passed_engine: Engine) -> None:
+            order.append("schema")
+            assert passed_engine is engine
+
+        def catalog() -> object:
+            order.append("catalog")
+            return original_catalog()
+
+        def finalize(owner: object, callback: Callable[..., object], *args: object, **_kwargs: object) -> object:
+            finalizers.append((owner, callback, args))
+            return object()
+
+        def mkdir(path: Path, *args: object, **kwargs: object) -> None:
+            mkdir_calls.append(path)
+            original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(app_module, "enforce_aws_ecs_contract", enforce, raising=False)
+        monkeypatch.setattr(app_module, "require_runtime_directories_mounted", directories, raising=False)
+        monkeypatch.setattr(app_module, "create_session_engine", build_engine)
+        monkeypatch.setattr(app_module, "validate_only_schema_or_raise", validate, raising=False)
+        monkeypatch.setattr(app_module, "create_catalog_service", catalog)
+        monkeypatch.setattr(app_module, "initialize_session_schema", lambda *_args: pytest.fail("initializer called"))
+        monkeypatch.setattr(app_module.weakref, "finalize", finalize)
+        monkeypatch.setattr(Path, "mkdir", mkdir)
+
+        app = create_app(settings)
+
+        assert order[:5] == ["contract", "directories", "session_engine", "schema", "catalog"]
+        assert engine_calls == [
+            (
+                settings.session_db_url,
+                {"connect_args": {"connect_timeout": 10}, "pool_size": 5, "max_overflow": 5, "pool_pre_ping": True},
+            )
+        ]
+        assert app.state.session_engine is engine
+        assert len(finalizers) == 1
+        assert finalizers[0][0] is app
+        assert finalizers[0][1] is app_module._dispose_session_engine
+        assert finalizers[0][2] == (engine,)
+        assert settings.data_dir not in mkdir_calls
+        assert settings.data_dir / "runs" not in mkdir_calls
+        engine.dispose()
+
+    def test_default_mode_keeps_creation_and_initializer_and_skips_aws_helpers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        data_dir = tmp_path / "default-data"
+        settings = _settings(data_dir)
+        original_initialize = app_module.initialize_session_schema
+        initialize_calls = 0
+
+        def initialize(engine: Engine) -> None:
+            nonlocal initialize_calls
+            initialize_calls += 1
+            original_initialize(engine)
+
+        monkeypatch.setattr(
+            app_module,
+            "enforce_aws_ecs_contract",
+            lambda *_args: pytest.fail("AWS contract helper called in default mode"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            app_module,
+            "require_runtime_directories_mounted",
+            lambda *_args: pytest.fail("AWS directory helper called in default mode"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            app_module,
+            "validate_only_schema_or_raise",
+            lambda *_args: pytest.fail("AWS schema helper called in default mode"),
+            raising=False,
+        )
+        monkeypatch.setattr(app_module, "initialize_session_schema", initialize)
+
+        app = create_app(settings)
+
+        assert data_dir.is_dir()
+        assert (data_dir / "runs").is_dir()
+        assert initialize_calls == 1
+        app.state.session_engine.dispose()

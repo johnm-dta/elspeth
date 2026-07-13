@@ -100,6 +100,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
+from elspeth.web.schema_probe import postgres_engine_kwargs
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -1097,9 +1098,11 @@ class ExecutionServiceImpl:
             # with max_workers=1 (no concurrent access) but wasteful — each run
             # creates a new SQLAlchemy engine. Acceptable for MVP; consider
             # sharing a single instance if profiling shows connection overhead.
+            landscape_url = self._settings.get_landscape_url()
             landscape_db = LandscapeDB(
-                connection_string=self._settings.get_landscape_url(),
+                connection_string=landscape_url,
                 passphrase=self._settings.landscape_passphrase,
+                **postgres_engine_kwargs(landscape_url),
             )
             payload_store = FilesystemPayloadStore(base_path=self._settings.get_payload_store_path())
 

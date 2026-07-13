@@ -664,6 +664,7 @@ class LandscapeDB:
         dump_to_jsonl_fail_on_error: bool = False,
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
+        **engine_kwargs: Any,
     ) -> None:
         """Initialize database connection.
 
@@ -697,21 +698,24 @@ class LandscapeDB:
                 include_payloads=dump_to_jsonl_include_payloads,
                 payload_base_path=dump_to_jsonl_payload_base_path,
             )
-        self._setup_engine()
+        self._setup_engine(**engine_kwargs)
         self._validate_schema()  # Check BEFORE create_tables
         self._create_tables()
         self._create_additive_indexes()
         self._sync_sqlite_schema_epoch()
 
-    def _setup_engine(self) -> None:
+    def _setup_engine(self, **engine_kwargs: Any) -> None:
         """Create and configure the database engine."""
         if self._passphrase is not None:
+            if engine_kwargs:
+                raise ValueError("SQLCipher construction does not accept SQLAlchemy engine kwargs")
             self._engine = self._create_sqlcipher_engine(self.connection_string, self._passphrase)
             LandscapeDB._configure_sqlite(self._engine)
         else:
             self._engine = create_engine(
                 self.connection_string,
                 echo=False,  # Set True for SQL debugging
+                **engine_kwargs,
             )
             # SQLite-specific configuration
             if self.connection_string.startswith("sqlite"):
@@ -1416,6 +1420,7 @@ class LandscapeDB:
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
         dump_to_jsonl_worker_suffix: str | None = None,
+        **engine_kwargs: Any,
     ) -> Self:
         """Create database from connection URL.
 
@@ -1453,6 +1458,8 @@ class LandscapeDB:
             raise ValueError("read_only=True cannot enable dump_to_jsonl")
 
         if passphrase is not None:
+            if engine_kwargs:
+                raise ValueError("SQLCipher construction does not accept SQLAlchemy engine kwargs")
             engine = cls._create_sqlcipher_engine(url, passphrase, read_only=read_only)
             cls._configure_sqlite(engine, read_only=read_only)
             if not read_only:
@@ -1460,7 +1467,7 @@ class LandscapeDB:
                 cls._verify_sqlite_pragmas(engine, url)
         else:
             engine_url = cls._sqlite_read_only_url(url) if read_only and url.startswith("sqlite") else url
-            engine = create_engine(engine_url, echo=False)
+            engine = create_engine(engine_url, echo=False, **engine_kwargs)
             # SQLite-specific configuration
             if url.startswith("sqlite"):
                 cls._configure_sqlite(engine, read_only=read_only)

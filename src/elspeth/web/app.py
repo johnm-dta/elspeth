@@ -72,6 +72,7 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
+from elspeth.web.schema_probe import postgres_engine_kwargs
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
@@ -872,7 +873,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     # --- Session database setup ---
     session_db_url = settings.get_session_db_url()
-    session_engine = create_session_engine(session_db_url)
+    session_engine = create_session_engine(session_db_url, **postgres_engine_kwargs(session_db_url))
     initialize_session_schema(session_engine)
     session_db_path = session_engine.url.database
     if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):

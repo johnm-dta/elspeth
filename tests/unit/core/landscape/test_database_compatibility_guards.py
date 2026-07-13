@@ -77,7 +77,7 @@ class _CreateEngineFake:
         assert self.calls == [(args, kwargs)]
 
 
-class TestSyncSchemaEpochDirectionalGuard:
+class TestSyncSchemaEpochFutureGuard:
     """Coverage for _sync_sqlite_schema_epoch directional guard."""
 
     def test_sync_rejects_future_epoch(self, tmp_path: Path) -> None:
@@ -105,6 +105,60 @@ class TestSyncSchemaEpochDirectionalGuard:
         assert epoch == SQLITE_SCHEMA_EPOCH + 1
         instance.close()
 
+
+class TestExplicitEngineKwargs:
+    """Both Landscape construction paths must preserve explicit pool sizing."""
+
+    def test_raw_constructor_forwards_engine_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", fake)
+        monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_create_tables", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_create_additive_indexes", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_sync_sqlite_schema_epoch", lambda self: None)
+
+        LandscapeDB(
+            "postgresql+psycopg://db.example/audit",
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+        fake.assert_called_once_with(
+            "postgresql+psycopg://db.example/audit",
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+    def test_from_url_forwards_engine_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", fake)
+        monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
+
+        LandscapeDB.from_url(
+            "postgresql+psycopg://db.example/audit",
+            create_tables=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+        fake.assert_called_once_with(
+            "postgresql+psycopg://db.example/audit",
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+    def test_sqlcipher_rejects_engine_kwargs(self) -> None:
+        with pytest.raises(ValueError, match="engine kwargs"):
+            LandscapeDB("sqlite:///audit.db", passphrase="fake", pool_size=3)
+
+
+class TestSyncSchemaEpochDirectionalGuard:
     def test_sync_upgrades_epoch_zero(self, tmp_path: Path) -> None:
         """_sync_sqlite_schema_epoch upgrades unstamped databases (epoch 0)."""
         db_path = tmp_path / "unstamped.db"

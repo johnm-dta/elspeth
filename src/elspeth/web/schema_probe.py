@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
+from typing import TypedDict
 
 import structlog
 from sqlalchemy import Connection, Engine, inspect, text
@@ -67,11 +68,17 @@ class PostgresLogicalTarget:
 AWS_ECS_POOL_KWARGS: Mapping[str, object] = MappingProxyType({"pool_size": 5, "max_overflow": 5, "pool_pre_ping": True})
 
 
-def postgres_engine_kwargs(url: str | URL) -> dict[str, object]:
+class PostgresEngineKwargs(TypedDict, total=False):
+    pool_size: int
+    max_overflow: int
+    pool_pre_ping: bool
+
+
+def postgres_engine_kwargs(url: str | URL) -> PostgresEngineKwargs:
     parsed = make_url(url)
     if parsed.drivername.split("+", 1)[0] != "postgresql":
         return {}
-    return dict(AWS_ECS_POOL_KWARGS)
+    return {"pool_size": 5, "max_overflow": 5, "pool_pre_ping": True}
 
 
 def _target_error() -> DatabaseTargetConflictError:
